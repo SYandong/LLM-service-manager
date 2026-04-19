@@ -60,12 +60,18 @@ def _status():
     print(f"  log:    {launcher.LOG_FILE}")
 
 
+def _restart():
+    _stop()
+    _start()
+
+
 def main():
     parser = argparse.ArgumentParser(prog="vllm_service")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("start")
     sub.add_parser("stop")
     sub.add_parser("status")
+    sub.add_parser("restart")
     args = parser.parse_args()
     if args.command == "start":
         _start()
@@ -73,6 +79,8 @@ def main():
         _stop()
     elif args.command == "status":
         _status()
+    elif args.command == "restart":
+        _restart()
     else:
         parser.print_help()
         sys.exit(1)
