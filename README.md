@@ -48,12 +48,12 @@ python -m vllm_service status
 
 ## Connecting to the service
 
-The service exposes an OpenAI-compatible API at `http://<host-ip>:8000/v1`.
+The service exposes an OpenAI-compatible API at `http://10.86.229.182:8000/v1`.
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(base_url="http://<host-ip>:8000/v1", api_key="unused")
+client = OpenAI(base_url="http://10.86.229.182:8000/v1", api_key="unused")
 
 response = client.chat.completions.create(
     model="google/gemma-4-31B-it",
