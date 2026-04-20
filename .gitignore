@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 docs/
 AGENTS.md
+related_papers/
