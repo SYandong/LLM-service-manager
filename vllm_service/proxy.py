@@ -141,5 +141,5 @@ def make_handler(config: ServerConfig):
 
 def serve(config: ServerConfig) -> None:
     server = ThreadingHTTPServer((config.host, config.port), make_handler(config))
-    print(f"Proxy ready at http://{config.host}:{config.port}/v1")
+    print(f"Proxy ready at http://{config.host}:{config.port}/v1", flush=True)
     server.serve_forever()

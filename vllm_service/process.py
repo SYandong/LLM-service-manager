@@ -22,22 +22,28 @@ def _get_start_time(pid: int) -> Optional[int]:
         return None
 
 
-def is_running() -> tuple[bool, Optional[int]]:
-    if not PID_FILE.exists():
+def _pid_file(pid_file: Path | None = None) -> Path:
+    return PID_FILE if pid_file is None else pid_file
+
+
+def is_running(pid_file: Path | None = None) -> tuple[bool, Optional[int]]:
+    pid_file = _pid_file(pid_file)
+    if not pid_file.exists():
         return False, None
-    data = json.loads(PID_FILE.read_text())
+    data = json.loads(pid_file.read_text())
     pid = data["pid"]
     actual_start = _get_start_time(pid)
     if actual_start != data["start_time"]:
-        PID_FILE.unlink(missing_ok=True)
+        pid_file.unlink(missing_ok=True)
         return False, None
     return True, pid
 
 
-def read_metadata() -> dict:
-    if not PID_FILE.exists():
+def read_metadata(pid_file: Path | None = None) -> dict:
+    pid_file = _pid_file(pid_file)
+    if not pid_file.exists():
         return {}
-    return json.loads(PID_FILE.read_text())
+    return json.loads(pid_file.read_text())
 
 
 def _tee_stderr(proc, log_file: Path):
@@ -49,27 +55,37 @@ def _tee_stderr(proc, log_file: Path):
             log.flush()
 
 
-def start(cmd: list[str], log_file: Path, model: str | None = None) -> int:
+def start(
+    cmd: list[str],
+    log_file: Path,
+    model: str | None = None,
+    pid_file: Path | None = None,
+    tee_stderr: bool = True,
+) -> int:
+    pid_file = _pid_file(pid_file)
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
     log = open(log_file, "a")
-    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.PIPE)
-    threading.Thread(target=_tee_stderr, args=(proc, log_file), daemon=True).start()
+    stderr = subprocess.PIPE if tee_stderr else log
+    proc = subprocess.Popen(cmd, stdout=log, stderr=stderr, start_new_session=True)
+    if tee_stderr:
+        threading.Thread(target=_tee_stderr, args=(proc, log_file), daemon=True).start()
     metadata = {"pid": proc.pid, "start_time": _get_start_time(proc.pid)}
     if model is not None:
         metadata["model"] = model
-    PID_FILE.write_text(json.dumps(metadata))
+    pid_file.write_text(json.dumps(metadata))
     return proc.pid
 
 
-def stop() -> bool:
-    running, pid = is_running()
+def stop(pid_file: Path | None = None) -> bool:
+    pid_file = _pid_file(pid_file)
+    running, pid = is_running(pid_file)
     if not running:
         return False
     os.kill(pid, signal.SIGTERM)
     for _ in range(30):
         time.sleep(1)
         if _get_start_time(pid) is None:
-            PID_FILE.unlink(missing_ok=True)
+            pid_file.unlink(missing_ok=True)
             return True
     return False

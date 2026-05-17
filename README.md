@@ -48,23 +48,20 @@ conda activate vllm
 cd <project-directory>
 
 python -m vllm_service start
-python -m vllm_service start --model Qwen/Qwen3-4B-Instruct-2507
 python -m vllm_service stop
 python -m vllm_service status
-python -m vllm_service restart --model google/gemma-4-31B-it
+python -m vllm_service restart --model <model-id-or-service-visible-path>
 ```
 
-To let user requests choose the model automatically, run the proxy on the
-user-facing port:
-
-```bash
-python -m vllm_service proxy
-```
-
-The proxy reads the OpenAI request body's `model` field. If that model is not
+`start` starts the proxy as a background service on the user-facing port, loads
+the default model, shows the backend vLLM startup output, and returns after the
+model is ready. The proxy reads the OpenAI request body's `model` field. If that model is not
 currently running, it restarts vLLM on `backend_port`, waits for readiness, and
 then forwards the original request. If the request omits `model`, the proxy uses
-the default `model` from `config/server.yaml`.
+the default `model` from `config/server.yaml`. `restart --model ...` restarts
+the background proxy, overrides that default for the current service run, loads
+that model, shows the backend vLLM startup output, and returns after the model
+is ready. It does not start raw vLLM on the user-facing port.
 
 The `model` value may be either:
 
