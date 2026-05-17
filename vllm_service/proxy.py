@@ -1,9 +1,13 @@
 import json
+import os
 import threading
 import urllib.error
 import urllib.request
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+from huggingface_hub import snapshot_download
 
 from . import launcher, process, readiness
 from .config import ServerConfig
@@ -37,11 +41,18 @@ def ensure_model(requested_model: str | None, config: ServerConfig) -> None:
     with _switch_lock:
         if current_model() == model:
             return
+        if not Path(model).exists():
+            try:
+                snapshot_download(model, local_files_only=True)
+            except Exception as error:
+                raise RuntimeError(f"model is not available locally: {model}") from error
         if process.is_running()[0]:
             process.stop()
         backend = backend_config(config, model)
         cmd = launcher.build_command(backend)
-        process.start(cmd, launcher.LOG_FILE, model=model)
+        env = os.environ.copy()
+        env["HF_HUB_OFFLINE"] = "1"
+        process.start(cmd, launcher.LOG_FILE, model=model, env=env)
         alive_fn = lambda: process.is_running()[0]
         if not readiness.wait_until_ready(backend.host, backend.port, alive_fn=alive_fn):
             raise RuntimeError(f"model did not become ready: {model}")

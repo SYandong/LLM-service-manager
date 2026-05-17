@@ -2,6 +2,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from vllm_service.config import ServerConfig
 import vllm_service.proxy as proxy_mod
 
@@ -27,13 +29,15 @@ def test_requested_model_restarts_backend_when_different(monkeypatch):
     monkeypatch.setattr(proxy_mod.process, "is_running", lambda: (True, 123))
     monkeypatch.setattr(proxy_mod.process, "read_metadata", lambda: {"model": "google/gemma-4-31B-it"})
     monkeypatch.setattr(proxy_mod.process, "stop", Mock(return_value=True))
+    monkeypatch.setattr(proxy_mod, "snapshot_download", Mock(return_value="/cached/model"))
     monkeypatch.setattr(proxy_mod.launcher, "LOG_FILE", "vllm.log")
     monkeypatch.setattr(proxy_mod.launcher, "build_command", lambda cfg: ["vllm", "serve", cfg.model, "--port", str(cfg.port)])
     monkeypatch.setattr(proxy_mod.readiness, "wait_until_ready", Mock(return_value=True))
 
-    def fake_start(cmd, log_file, model=None):
+    def fake_start(cmd, log_file, model=None, env=None):
         started["cmd"] = cmd
         started["model"] = model
+        started["env"] = env
         return 456
 
     monkeypatch.setattr(proxy_mod.process, "start", fake_start)
@@ -43,7 +47,24 @@ def test_requested_model_restarts_backend_when_different(monkeypatch):
     proxy_mod.process.stop.assert_called_once()
     assert started["cmd"] == ["vllm", "serve", "Qwen/Qwen3-4B-Instruct-2507", "--port", "8001"]
     assert started["model"] == "Qwen/Qwen3-4B-Instruct-2507"
+    assert started["env"]["HF_HUB_OFFLINE"] == "1"
     proxy_mod.readiness.wait_until_ready.assert_called_once()
+
+
+def test_unavailable_model_does_not_stop_or_start_backend(monkeypatch):
+    config = _config()
+
+    monkeypatch.setattr(proxy_mod.process, "is_running", lambda: (True, 123))
+    monkeypatch.setattr(proxy_mod.process, "read_metadata", lambda: {"model": "google/gemma-4-31B-it"})
+    monkeypatch.setattr(proxy_mod.process, "stop", Mock())
+    monkeypatch.setattr(proxy_mod.process, "start", Mock())
+    monkeypatch.setattr(proxy_mod, "snapshot_download", Mock(side_effect=Exception("not cached")))
+
+    with pytest.raises(RuntimeError, match="model is not available locally"):
+        proxy_mod.ensure_model("unknown-org/unknown-model", config)
+
+    proxy_mod.process.stop.assert_not_called()
+    proxy_mod.process.start.assert_not_called()
 
 
 def test_same_model_does_not_restart(monkeypatch):
@@ -64,14 +85,16 @@ def test_missing_model_uses_default_model(monkeypatch):
     started = {}
 
     monkeypatch.setattr(proxy_mod.process, "is_running", lambda: (False, None))
+    monkeypatch.setattr(proxy_mod, "snapshot_download", Mock(return_value="/cached/model"))
     monkeypatch.setattr(proxy_mod.launcher, "LOG_FILE", "vllm.log")
     monkeypatch.setattr(proxy_mod.launcher, "build_command", lambda cfg: ["vllm", "serve", cfg.model])
     monkeypatch.setattr(proxy_mod.readiness, "wait_until_ready", Mock(return_value=True))
-    monkeypatch.setattr(proxy_mod.process, "start", lambda cmd, log_file, model=None: started.update(model=model) or 123)
+    monkeypatch.setattr(proxy_mod.process, "start", lambda cmd, log_file, model=None, env=None: started.update(model=model, env=env) or 123)
 
     proxy_mod.ensure_model(None, config)
 
     assert started["model"] == "google/gemma-4-31B-it"
+    assert started["env"]["HF_HUB_OFFLINE"] == "1"
 
 
 def test_invalid_model_returns_bad_request():
