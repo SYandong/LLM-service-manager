@@ -9,9 +9,12 @@ def patch_pid_file(tmp_path, monkeypatch):
     monkeypatch.setattr(process_mod, "PID_FILE", tmp_path / "vllm.pid")
 
 
-def _write_pid_file(pid, start_time):
+def _write_pid_file(pid, start_time, model=None):
     process_mod.PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    process_mod.PID_FILE.write_text(json.dumps({"pid": pid, "start_time": start_time}))
+    data = {"pid": pid, "start_time": start_time}
+    if model is not None:
+        data["model"] = model
+    process_mod.PID_FILE.write_text(json.dumps(data))
 
 
 def test_not_running_without_pid_file():
@@ -23,10 +26,11 @@ def test_not_running_without_pid_file():
 def test_running_with_current_process():
     pid = os.getpid()
     start_time = process_mod._get_start_time(pid)
-    _write_pid_file(pid, start_time)
+    _write_pid_file(pid, start_time, model="Qwen/Qwen3-4B-Instruct-2507")
     running, result_pid = process_mod.is_running()
     assert running
     assert result_pid == pid
+    assert process_mod.read_metadata()["model"] == "Qwen/Qwen3-4B-Instruct-2507"
 
 
 def test_stale_pid_wrong_start_time():

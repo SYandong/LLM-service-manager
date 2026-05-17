@@ -23,7 +23,7 @@ echo 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH' > $CONDA_PREFIX
 
 ## Configuration
 
-Edit `config/server.yaml` to change the model or serving parameters:
+`config/server.yaml` defines the default model and serving parameters:
 
 ```yaml
 model: "google/gemma-4-31B-it"
@@ -35,6 +35,11 @@ enable_reasoning: false
 reasoning_parser: "deepseek_r1"
 ```
 
+Supported model IDs:
+
+- `google/gemma-4-31B-it`
+- `Qwen/Qwen3-4B-Instruct-2507`
+
 ## Usage
 
 ```bash
@@ -42,8 +47,10 @@ conda activate vllm
 cd <project-directory>
 
 python -m vllm_service start
+python -m vllm_service start --model Qwen/Qwen3-4B-Instruct-2507
 python -m vllm_service stop
 python -m vllm_service status
+python -m vllm_service restart --model google/gemma-4-31B-it
 ```
 
 ## Connecting to the service
@@ -56,7 +63,7 @@ from openai import OpenAI
 client = OpenAI(base_url="http://10.86.229.182:8000/v1", api_key="unused")
 
 response = client.chat.completions.create(
-    model="google/gemma-4-31B-it",
+    model=client.models.list().data[0].id,
     messages=[{"role": "user", "content": "Hello!"}],
 )
 print(response.choices[0].message.content)

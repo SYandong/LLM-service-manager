@@ -34,6 +34,12 @@ def is_running() -> tuple[bool, Optional[int]]:
     return True, pid
 
 
+def read_metadata() -> dict:
+    if not PID_FILE.exists():
+        return {}
+    return json.loads(PID_FILE.read_text())
+
+
 def _tee_stderr(proc, log_file: Path):
     with open(log_file, "a") as log:
         for line in proc.stderr:
@@ -43,13 +49,16 @@ def _tee_stderr(proc, log_file: Path):
             log.flush()
 
 
-def start(cmd: list[str], log_file: Path) -> int:
+def start(cmd: list[str], log_file: Path, model: str | None = None) -> int:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     log = open(log_file, "a")
     proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.PIPE)
     threading.Thread(target=_tee_stderr, args=(proc, log_file), daemon=True).start()
-    PID_FILE.write_text(json.dumps({"pid": proc.pid, "start_time": _get_start_time(proc.pid)}))
+    metadata = {"pid": proc.pid, "start_time": _get_start_time(proc.pid)}
+    if model is not None:
+        metadata["model"] = model
+    PID_FILE.write_text(json.dumps(metadata))
     return proc.pid
 
 
