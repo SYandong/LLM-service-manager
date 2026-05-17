@@ -13,6 +13,7 @@ class ServerConfig:
     max_model_len: int
     enable_reasoning: bool
     reasoning_parser: str
+    backend_port: int = 8001
 
 
 def load_config(path: Path) -> ServerConfig:

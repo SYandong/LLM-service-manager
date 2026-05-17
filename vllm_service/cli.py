@@ -4,7 +4,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import launcher, process, readiness
+from . import launcher, process, proxy, readiness
 from .config import load_config
 
 _CONFIG_FILE = Path(__file__).parent.parent / "config" / "server.yaml"
@@ -72,6 +72,11 @@ def _restart(model: str | None = None):
     _start(model)
 
 
+def _proxy():
+    config = load_config(_CONFIG_FILE)
+    proxy.serve(config)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="vllm_service")
     sub = parser.add_subparsers(dest="command")
@@ -81,6 +86,7 @@ def main():
     sub.add_parser("status")
     restart_parser = sub.add_parser("restart")
     restart_parser.add_argument("--model", choices=SUPPORTED_MODELS, help="Hugging Face model ID to serve")
+    sub.add_parser("proxy")
     args = parser.parse_args()
     if args.command == "start":
         _start(args.model)
@@ -90,6 +96,8 @@ def main():
         _status()
     elif args.command == "restart":
         _restart(args.model)
+    elif args.command == "proxy":
+        _proxy()
     else:
         parser.print_help()
         sys.exit(1)

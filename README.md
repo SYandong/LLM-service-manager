@@ -29,6 +29,7 @@ echo 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH' > $CONDA_PREFIX
 model: "google/gemma-4-31B-it"
 host: "0.0.0.0"
 port: 8000
+backend_port: 8001
 gpu_memory_utilization: 0.9
 max_model_len: 32768
 enable_reasoning: false
@@ -53,6 +54,27 @@ python -m vllm_service status
 python -m vllm_service restart --model google/gemma-4-31B-it
 ```
 
+To let user requests choose the model automatically, run the proxy on the
+user-facing port:
+
+```bash
+python -m vllm_service proxy
+```
+
+The proxy reads the OpenAI request body's `model` field. If that model is not
+currently running, it restarts vLLM on `backend_port`, waits for readiness, and
+then forwards the original request. If the request omits `model`, the proxy uses
+the default `model` from `config/server.yaml`.
+
+The `model` value may be either:
+
+- a Hugging Face model ID, such as `Qwen/Qwen3-4B-Instruct-2507`
+- a model path that is readable from the service host, such as a path in shared
+  storage mounted on the service host
+
+For fine-tuned local models, use the path as it exists on the service host. Do
+not use a path that only exists on the user's laptop or workstation.
+
 ## Connecting to the service
 
 The service exposes an OpenAI-compatible API at `http://10.86.229.182:8000/v1`.
@@ -63,8 +85,15 @@ from openai import OpenAI
 client = OpenAI(base_url="http://10.86.229.182:8000/v1", api_key="unused")
 
 response = client.chat.completions.create(
-    model=client.models.list().data[0].id,
+    model="Qwen/Qwen3-4B-Instruct-2507",
     messages=[{"role": "user", "content": "Hello!"}],
+)
+print(response.choices[0].message.content)
+
+# Fine-tuned/local model: replace this with the path visible to the service host.
+response = client.chat.completions.create(
+    model="<path-visible-to-vllm-service>",
+    messages=[{"role": "user", "content": "Hello from my fine-tuned model!"}],
 )
 print(response.choices[0].message.content)
 ```

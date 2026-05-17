@@ -8,6 +8,7 @@ def test_load_config(tmp_path):
 model: "Qwen/Qwen3-32B"
 host: "127.0.0.1"
 port: 8000
+backend_port: 8001
 gpu_memory_utilization: 0.9
 max_model_len: 32768
 enable_reasoning: true
@@ -20,6 +21,7 @@ reasoning_parser: "deepseek_r1"
     assert config.model == "Qwen/Qwen3-32B"
     assert config.host == "127.0.0.1"
     assert config.port == 8000
+    assert config.backend_port == 8001
     assert config.gpu_memory_utilization == 0.9
     assert config.max_model_len == 32768
     assert config.enable_reasoning is True

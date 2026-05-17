@@ -1,6 +1,7 @@
 model: "google/gemma-4-31B-it"
 host: "0.0.0.0"
 port: 8000
+backend_port: 8001
 gpu_memory_utilization: 0.9
 max_model_len: 32768
 enable_reasoning: false
