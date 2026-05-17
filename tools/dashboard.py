@@ -35,16 +35,16 @@ def _get_start_time(pid: int):
 
 def service_state():
     if not PID_FILE.exists():
-        return False, None
+        return False, None, None
     try:
         data = json.loads(PID_FILE.read_text())
         pid = data["pid"]
         actual_start = _get_start_time(pid)
         if actual_start != data.get("start_time"):
-            return False, None
-        return True, pid
+            return False, None, None
+        return True, pid, data.get("model")
     except (OSError, ValueError, KeyError, TypeError):
-        return False, None
+        return False, None, None
 
 
 def load_config():
@@ -445,7 +445,7 @@ def build_snapshot(range_key="day"):
     config = BACKEND.load_config()
     display_ip = BACKEND.get_display_ip()
     port = config.get("port", 8000)
-    is_running, pid = BACKEND.service_state()
+    is_running, pid, running_model = BACKEND.service_state()
     reference = BACKEND.datetime.now() + BACKEND.UTC_OFFSET
     lines = tail_log_for(reference, range_config["window"])
     req_counts, succ_counts, fail_counts, tok_counts, error_counts, last_stats = parse_log_for(
@@ -467,7 +467,7 @@ def build_snapshot(range_key="day"):
     return {
         "range_label": range_config["label"],
         "cards": build_summary_cards(
-            model=config.get("model", "—"),
+            model=running_model,
             pid=pid,
             url=f"http://{display_ip}:{port}/v1",
             is_running=is_running,
