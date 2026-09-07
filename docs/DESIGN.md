@@ -61,7 +61,7 @@
 
 1. 改配置请求进入队列，scheduler 先 `llama-swap -validate` 新配置，失败即回报。
 2. 订阅 `/api/events` 的 inflight 计数，等待在途请求为 0 且**连续 5 秒**保持为 0。
-3. **reload 前过保护规则**（§4）：reload 会让所有 awake 模型 sleep，所以只要有 pin 住的模型处于 awake，就不能 reload；请求继续排队并回报 `blocked_by: [{model, reason: pinned_until}]`，等 pin 到期或被 unpin 后再进行。默认模型 awake 不阻塞（它允许 sleep）。
+3. **reload 前过保护规则与内存准入**（§4、§4.3）：reload 会让所有 awake 模型 sleep，所以 (a) 只要有 pin 住的模型处于 awake，就不能 reload；(b) 对将要一起 sleep 的**整批** awake 模型做 §4.3 的内存准入，即它们的权重总和加上现有 sleeping 总量不超过预算、宿主可用内存减去这批权重仍高于下限。任一不满足则请求继续排队并回报 `blocked_by`（`pinned_until` 或 `memory_budget`），不会用"先 stop 谁"来腾内存，因为这批里可能有默认模型。默认模型 awake 本身不阻塞（它允许 sleep）。
 4. 落盘并立刻发 `SIGHUP`，检查到 reload 之间的窗口在百毫秒级。
 5. 落在这个窗口里的请求会被 llama-swap 中断，客户端收到 5xx；这是**接受的残余风险**，用户指南要求客户端对 5xx 做一次重试。
 6. 等待超过 10 分钟仍无安静时刻（或一直被 pin 阻塞）则通知调用方，不强行执行。
@@ -91,6 +91,8 @@ LoRA 路径待 M4 调研（base 开 `--enable-lora` + 运行时装载，是否�
 | 其他模型 | 按 keep_value | 按 keep_value | 无 |
 
 某个分支需要 stop 却只剩受保护的模型时，该分支**放弃动作并回报阻塞**（`blocked_by: [{model, reason}]`），进入事件流和 status；不会退化为违反保护规则的动作。
+
+**唯一例外是故障清理**（§2 的唤醒失败、unit 崩溃）：保护表保护的是一个还在正常服务的模型，而故障模型已经不在服务，它名下的"在途请求"实际上已经失败。因此故障清理的 stop 不受保护表限制，但必须满足：只在三个失败信号之一成立时触发；pin 记录**保留**，模型重新放置后 pin 继续生效；事件流里标明这是故障清理而不是策略驱逐。
 
 ### 4.1 awake → sleeping
 
