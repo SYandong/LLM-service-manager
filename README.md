@@ -106,3 +106,5 @@ print(response.choices[0].message.content)
 ## Logs
 
 Server logs are written to `var/log/vllm.log`.
+
+<!-- 顶部"项目转型中"说明由 AI 生成。Generated-By: Claude Code / claude-fable-5-1 -->

@@ -1,6 +1,6 @@
 # DESIGN — llama-swap 之上的调度器与终端 UI
 
-状态：v1 草案，2026-09-07。改动本文件前先开 `type:design` issue。
+状态：v1.1 草案，2026-09-07（吸收 PR #29 第一轮 review：唯一写者与 TTL、放置租约、安静时刻协议、keep_value 统一、sleep 内存准入、TP=2 移出本版、dry_run、TUI 降级）。改动本文件前先开 `type:design` issue。
 
 ## 1. 背景与目标
 
@@ -41,8 +41,9 @@
 边界：
 
 - **llama-swap 是数据面**，不改它的代码，运行期不改它的配置（reload 会让全部醒着的模型 sleep 并中断在途请求）。
-- **scheduler 是唯一写者**：所有 sleep / stop / 放置 / 改配置都经它，一把全局锁串行化。
-- **vllm-launch 退化为薄客户端**：冷启动时 `POST /v1/place`，拿到 GPU 号后 `systemd-run`。腾位由 scheduler 完成后再返回。
+- **scheduler 是唯一写者**：所有 sleep / stop / 放置 / 改配置都经它，一把全局锁串行化。为此 llama-swap 的 `globalTTL` 设为 `0`，每模型 `ttl` 也为 `0`：**数据面不再自行触发 sleep**，所有 sleep 由 scheduler 按 §4.1 的规则调用 `POST /api/models/unload/{id}` 执行，pin 等保护规则因此对 TTL 同样生效。
+- **唤醒不经 scheduler**：请求打到 sleeping 模型时由 vllm-wrapper 直接 `/wake_up`，1 到 3 秒。这之所以安全，是因为 sleeping 模型在 scheduler 的记账里**保留全额预算**（§4.2），它所在的卡上永远给它留着醒来的空间；外部进程抢走这部分显存的情况由 §4.3 的"不能唤醒"规则兜底。
+- **冷启动经 scheduler**：vllm-launch 退化为薄客户端，`POST /v1/place` 取得 GPU 号与租约后再 `systemd-run`。腾位由 scheduler 在返回前完成。租约协议见 §5。
 - scheduler 的 HTTP 只监听容器网，不做鉴权，与现有信任模型一致（能访问服务器即能用 LLM）。
 
 ## 3. 模型的三种来源
@@ -53,7 +54,16 @@
 | 临时模型（完整权重 fine-tune） | `llm add <path> --name X --base <常驻模型>` | 继承 base 的配置块与预算 | 7 天无人用自动注销 |
 | LoRA 适配器 | `llm add --lora <path> --base <常驻模型>` | 不额外占显存 | 随 base |
 
-临时模型需要改 llama-swap 配置，scheduler 把落盘排到**安静时刻**（零在途请求），reload 后醒着的模型进入 sleep，下次请求 1 到 3 秒唤醒。LoRA 路径待 M4 调研（base 开 `--enable-lora` + 运行时装载，是否仍需 reload 注册别名）。
+临时模型需要改 llama-swap 配置，而 reload 会重建进程表并让所有醒着的模型 sleep，在途请求会被中断。llama-swap 没有"暂停接收"接口，所以做不到完全原子；scheduler 用下面的**安静时刻协议**把风险压到最小，并把残余风险写明：
+
+1. 改配置请求进入队列，scheduler 先 `llama-swap -validate` 新配置，失败即回报。
+2. 订阅 `/api/events` 的 inflight 计数，等待在途请求为 0 且**连续 5 秒**保持为 0。
+3. 落盘并立刻发 `SIGHUP`，检查到 reload 之间的窗口在百毫秒级。
+4. 落在这个窗口里的请求会被 llama-swap 中断，客户端收到 5xx；这是**接受的残余风险**，用户指南要求客户端对 5xx 做一次重试。
+5. 等待超过 10 分钟仍无安静时刻则通知调用方，不强行执行。
+6. M4 的 #20 验证一项缓解：把 `cmdStop` 换成带 `mode=wait` 的 sleep（vLLM 0.28 支持），让 reload 触发的 sleep 等在途生成完成而不是中止。验证通过则窗口内的请求也不再被中断。
+
+LoRA 路径待 M4 调研（base 开 `--enable-lora` + 运行时装载，是否仍需 reload 注册别名）。
 
 ## 4. 状态机与规则
 
@@ -73,30 +83,43 @@
 
 - **空闲 TTL**：独占卡（GPU0）60 分钟；共享卡 5 分钟。
 - **压力**：共享卡上出现外部进程，或空闲显存低于阈值；有放置请求放不下；用户跑了 `llm free`。
-- 压力下按分数排序逐个睡，直到压力解除：
+- 压力下按 **keep_value**（越高越值得留着）从低到高逐个睡，直到压力解除。全文只用这一个量，§4.2 与 §4.3 都复用它：
 
 ```
-score = idle_seconds * size_gb / (1 + requests_last_hour)
-pinned 或有在途请求 → 不可睡
-默认模型 → score / 10（最后才睡）
+keep_value = (1 + requests_last_hour) * cold_start_seconds / (1 + idle_minutes)
+pinned 或有在途请求 → 不可睡、不可驱逐
+默认模型 → keep_value * 10（最后才睡）
 ```
+
+体积不进 keep_value，只进可行性判断（§4.2）。`cold_start_seconds` 用该模型最近一次实测冷启动时长，没有则用配置里的估计值。回放测试必须包含"同体积、一冷一热"的场景，断言先睡冷的。
 
 ### 4.2 放置（stopped → awake）
 
+记账规则先说清楚，因为它决定了什么算"腾位"：
+
+- **awake 与 sleeping 都按全额预算记账**。sleeping 只是把物理显存还给外部进程用，它的预算仍然留在那张卡上，保证随时能醒（§2）。因此 **sleep 不会为放置新模型腾出预算，只有 stop 会**。
+- **已发出的租约**（§5）也按全额预算记账，即使 unit 还没起来。
+- 可用 = 总量 − 该卡所有 daemon 与租约的预算 − 外部占用（外部占用只算非我方进程的实际显存）。
+
+放置步骤：
+
 1. 候选卡：GPU0 永远在；共享卡仅当其外部占用低于阈值且无 `reserve`。
-2. 逐卡先判**可行性**：可用 = 总量 − 该卡所有 daemon 预算 − 外部占用；放得下直接放。
-3. 都放不下：对每张卡求"最小代价腾位集合"（模型数小，直接穷举），只在代价最低且确定可行的那张卡上驱逐。代价 = 被驱逐模型的分数之和；默认模型、pin、在用的不进集合。
-4. 全部在用且放不下：**等最多 2 分钟**，期间有模型空闲超过 30 秒即睡掉腾位；超时返回错误，错误里写明哪张卡被谁的什么模型占着。
+2. 逐卡先判**可行性**：按上面的可用量，放得下直接放。
+3. 都放不下：对每张卡求"最小代价腾位集合"（模型数小，直接穷举），只在代价最低且确定可行的那张卡上驱逐。**代价 = 被驱逐模型的 keep_value 之和**（§4.1），驱逐 = stop（awake 的先 sleep 再 stop）；默认模型、pin、在用的不进集合。
+4. 全部在用且放不下：**等最多 2 分钟**，期间一旦有模型空闲超过 30 秒，就把它 sleep 再 stop 腾位；超时返回错误，错误里写明哪张卡被谁的什么模型占着。
 5. 全程持锁；`systemd-run` 前确认同名 unit 不存在。
+6. 本版**只做单卡放置**。TP=2 跨卡变体不在本版调度范围内（§8）。
 
 ### 4.3 sleeping → stopped（硬停）
 
 不再按时间。只有三条：
 
-- **常驻内存预算**：llmsvc 所有 sleeping 模型的权重总和不超过预算（初值 200 GB）。超出停分数最高的。
+- **常驻内存预算**：llmsvc 所有 sleeping 模型的权重总和不超过预算（初值 200 GB）。超出停 keep_value 最低的。
 - **宿主可用内存下限**（初值 150 GB）：低于则再停一个。
 - **不能唤醒**：睡着的模型所在卡已经放不下它醒来。近一小时有请求的改为换卡冷启动，否则停。
 - 默认模型永不停。24 小时清扫可选，默认模型除外。
+
+**sleep 前的内存准入**（§4.1 的每一次 sleep 都先过这一关）：sleep 会把权重搬进 pinned 内存，所以执行前检查 `宿主可用内存 − 该模型权重 ≥ 下限` 且 `sleeping 总量 + 该模型权重 ≤ 预算`。不满足时先按 keep_value 从低到高 stop 已经睡着的模型腾出内存；仍不满足则对该模型直接 stop 而不是 sleep（下次请求走冷启动）。这样硬停永远发生在内存被占用**之前**，不会先 OOM 再补救。
 
 ### 4.4 用户意图
 
@@ -116,18 +139,31 @@ pin / reserve 记录设置者（来源 IP → 容器名）与到期时间，stat
 - 执行：`POST /api/models/unload/{id}`（sleep）、`systemctl stop`（stop）、`GET /upstream/{id}/`（wake / 冷启动）、`systemd-run`（由 vllm-launch 执行）。
 - 每个动作有 `dry_run`，写结构化日志到 journal，并进入事件表供 TUI 订阅。
 
+### 放置租约协议
+
+`POST /v1/place` 不是"算完就忘"：
+
+1. scheduler 持锁完成腾位后，**在返回前登记一条租约** `{lease_id, model, gpu, util, expires_at}`，该卡的可用量立即扣减（§4.2）。并发的第二个放置请求看到的就是扣减后的数字，不会重复分配。
+2. vllm-launch 拿到 `{gpu, lease_id}` 后 `systemd-run`，盯 unit 直到 `/health` 通过，然后 `POST /v1/place/{lease_id}/confirm`；租约转为正式的 daemon 记账。
+3. unit 启动失败（vLLM 报错退出、OOM）时 vllm-launch `POST /v1/place/{lease_id}/release`，预算立即归还。
+4. 租约超时（与 vllm-wrapper 的 `--wait-timeout` 一致，15 分钟）仍未 confirm 也未 release：scheduler 检查 `vllm-<id>.service` 是否 active 且健康，是则视为已确认，否则释放。
+5. 租约与 daemon 记账都持久化在 sqlite，scheduler 重启后从 `systemctl` 重建 daemon 记账、按超时规则清理残留租约。
+
 ### HTTP API v1（容器网内，无鉴权）
+
+所有写接口都接受 `?dry_run=1`。dry_run 返回 `{would: [动作列表]}`，**不写配置、不启动 unit、不调 unload、不持久化 pin / reserve / 租约**，只走策略函数。
 
 | 方法 路径 | 说明 |
 |---|---|
-| `GET /v1/state` | 卡、模型、pin、reserve、内存预算的完整快照 |
+| `GET /v1/state` | 卡、模型、pin、reserve、租约、内存预算的完整快照 |
 | `GET /v1/events?since=` | 事件流（SSE） |
-| `POST /v1/place` | vllm-launch 调用：`{model, util}` → `{gpu}` 或 `{error, blockers}` |
-| `POST /v1/free` | `{gpu?, ram?, need_gb?}` → `{freed_gb, slept[], skipped[{model, reason}]}` |
-| `POST /v1/pin` `DELETE /v1/pin/{model}` | |
-| `POST /v1/reserve` `DELETE /v1/reserve/{id}` | |
+| `POST /v1/place` | vllm-launch 调用：`{model, util}` → `{gpu, lease_id}` 或 `{error, blockers:[{gpu, model, user, in_flight}]}` |
+| `POST /v1/place/{lease_id}/confirm` `POST /v1/place/{lease_id}/release` | 租约确认 / 释放 |
+| `POST /v1/free` | `{gpu?, ram?, need_gb?}` → `{freed_gb, slept[], stopped[], skipped[{model, reason}]}` |
+| `POST /v1/pin` `DELETE /v1/pin/{model}` | `{model, until, by}` |
+| `POST /v1/reserve` `DELETE /v1/reserve/{id}` | `{gpu, size_gb, until, by}` |
 | `POST /v1/wake/{model}` | |
-| `POST /v1/models` `DELETE /v1/models/{name}` | 临时模型登记 |
+| `POST /v1/models` `DELETE /v1/models/{name}` | 临时模型登记，走安静时刻协议（§3） |
 | `GET /v1/usage?days=7&by=container` | 按来源汇总 |
 
 ## 6. CLI 与 TUI
@@ -147,7 +183,11 @@ qwen3.8-27b-unofficial     awake     0    73G   1m         12     ctr-b    18:00
 gemma-4-31b-it-bf16        stopped   -    -     9h         0      -        冷启动约 3.5min
 ```
 
-**全屏 TUI**（M5，textual）：`llm` 无参数进入，风格参考 Claude Code。
+**全屏 TUI**（M5，textual）：风格参考 Claude Code。安装与降级边界：
+
+- `cli/llm` 始终是单文件、仅标准库，复制即用；它同时是可 import 的模块（`llm.py`），TUI 复用它的参数解析与 HTTP 客户端。
+- TUI 是可选安装：`pip install llmsvc[tui]`（拉 textual），或从共享目录复制 `tui/` 目录到 `cli/llm` 旁边。
+- `llm` 无参数时：`textual` 可 import **且** stdout 是 TTY → 进入 TUI；否则等价于 `llm status`，并在末尾打印一行安装 TUI 的提示。非 TTY（管道、cron）永远不进 TUI。
 
 - 主面板：上方 GPU 条与内存预算，中间模型表，可上下选中。
 - 右侧或下方：事件流（llama-swap `/api/events` + scheduler 事件），实时滚动。
@@ -168,7 +208,7 @@ gemma-4-31b-it-bf16        stopped   -    -     9h         0      -        冷�
 | 是否 fork llama-swap | 否 | 外部控制面即可，保持可升级 |
 | 是否在 llama-swap 前加代理 | 否 | 路由与排队它已做好，多一跳只加风险 |
 | 2 小时硬停 | 取消，换内存预算 | 硬停与压力无关，代价是冷启动 |
-| TP=2 跨卡 | 仅作为 122B 的显式变体 | NVLink 全互联可行，但占两张卡且共享卡需同时空闲 |
+| TP=2 跨卡 | **本版不做**，放置 API 与可行性判断只针对单卡 | NVLink 全互联技术上可行，但需要多卡预算与原子租约；等单卡策略稳定后另开 `type:design` issue |
 | 自动把 bf16 请求换成 nvfp4 | 否 | 做实验需要固定 baseline，只在 status 里提示 |
 | 鉴权 | 不做 | 能访问服务器即能用；用量按来源容器汇总 |
 
@@ -177,5 +217,7 @@ gemma-4-31b-it-bf16        stopped   -    -     9h         0      -        冷�
 - fine-tune 是 LoRA 还是完整权重，决定 M4 走哪条路。
 - 共享卡"外部占用低于阈值"的阈值取多少，先观察一周外部进程分布再定。
 - 内存预算 200 GB 与宿主下限 150 GB 需要和内存大户确认。
+- `mode=wait` 的 sleep 是否能让 reload 不中断在途请求（§3 第 6 条），M4 验证。
+- TP=2 何时纳入：单卡策略稳定后再议。
 
 <!-- Generated-By: Claude Code / claude-fable-5-1 -->
