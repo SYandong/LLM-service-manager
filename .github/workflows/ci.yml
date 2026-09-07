@@ -1,0 +1,16 @@
+# Generated-By: Claude Code / claude-fable-5-1
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install pytest pyyaml huggingface_hub openai
+      - run: python -m pytest -q tests

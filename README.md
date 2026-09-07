@@ -1,4 +1,12 @@
-# vLLM Service Manager
+# LLM Service Manager
+
+> **项目转型中（2026-09）**：本仓库正在从"单后端 vLLM 代理"改造成 **llama-swap 之上的调度控制面**：多 GPU 放置、按显存/内存压力休眠、保底模型、`llm free / pin / reserve` 用户命令，以及一个终端 UI。
+> 路线图见 [`docs/ROADMAP.md`](docs/ROADMAP.md)，设计见 [`docs/DESIGN.md`](docs/DESIGN.md)，协作规范见 [`AGENTS.md`](AGENTS.md)。
+> 下面的内容描述的是 legacy 代理（`vllm_service/`），已冻结，只修 bug，计划在 M6 下线。
+
+---
+
+# vLLM Service Manager (legacy)
 
 A local tool to start and manage a vLLM model server for a group sharing one machine.
 
@@ -98,3 +106,5 @@ print(response.choices[0].message.content)
 ## Logs
 
 Server logs are written to `var/log/vllm.log`.
+
+<!-- 顶部"项目转型中"说明由 AI 生成。Generated-By: Claude Code / claude-fable-5-1 -->
