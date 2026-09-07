@@ -42,7 +42,10 @@
 
 - **llama-swap 是数据面**，不改它的代码，运行期不改它的配置（reload 会让全部醒着的模型 sleep 并中断在途请求）。
 - **scheduler 是唯一写者**：所有 sleep / stop / 放置 / 改配置都经它，一把全局锁串行化。为此 llama-swap 的 `globalTTL` 设为 `0`，每模型 `ttl` 也为 `0`：**数据面不再自行触发 sleep**，所有 sleep 由 scheduler 按 §4.1 的规则调用 `POST /api/models/unload/{id}` 执行，pin 等保护规则因此对 TTL 同样生效。
-- **唤醒不经 scheduler**：请求打到 sleeping 模型时由 vllm-wrapper 直接 `/wake_up`，1 到 3 秒。这之所以安全，是因为 sleeping 模型在 scheduler 的记账里**保留全额预算**（§4.2），它所在的卡上永远给它留着醒来的空间；外部进程抢走这部分显存的情况由 §4.3 的"不能唤醒"规则兜底。
+- **唤醒不经 scheduler**：请求打到 sleeping 模型时由 vllm-wrapper 直接 `/wake_up`，1 到 3 秒。这之所以安全，是因为 sleeping 模型在 scheduler 的记账里**保留全额预算**（§4.2），我方不会把这部分空间分给别的模型。但记账管不住外部进程：在共享卡上，外部进程可能在两次采样之间占满显存，此时唤醒会 OOM，15 秒一轮的 §4.3 检查来不及阻止。**可用性边界**因此写明：
+  - 独占卡（GPU0）上 sleeping 模型的唤醒是**有保证的**（没有外部进程）。
+  - 共享卡上 sleeping 模型的唤醒是**尽力而为**。唤醒失败的恢复协议：vllm-wrapper 唤醒失败会退出，llama-swap 对该请求返回 5xx；scheduler 从 `/api/events` 与 unit 状态看到唤醒失败事件后，立即 stop 该模型并清除其记账，下一次请求走 `/v1/place` 冷启动到有空间的卡。用户指南要求客户端对 5xx 重试一次。
+  - 不在共享卡上放置默认模型，保证默认模型的唤醒永远走有保证的路径。
 - **冷启动经 scheduler**：vllm-launch 退化为薄客户端，`POST /v1/place` 取得 GPU 号与租约后再 `systemd-run`。腾位由 scheduler 在返回前完成。租约协议见 §5。
 - scheduler 的 HTTP 只监听容器网，不做鉴权，与现有信任模型一致（能访问服务器即能用 LLM）。
 
@@ -77,6 +80,17 @@ LoRA 路径待 M4 调研（base 开 `--enable-lora` + 运行时装载，是否�
 
 每条边由独立规则管，规则只吃三个纯数据结构（GPU 状态、模型状态、活动统计），输出动作列表。
 
+**保护规则**（所有产生 sleep / stop / 驱逐动作的分支都必须先过这一关，包括 §4.1、§4.2 第 3 和第 4 步、§4.3 的三条与内存准入、§4.4 的 free）：
+
+| 对象 | sleep | stop / 驱逐 | 例外 |
+|---|---|---|---|
+| 有在途请求的模型 | 否 | 否 | 无 |
+| pin 住的模型 | 否 | 否 | 无 |
+| 默认模型 | 可以，但排在最后 | **永不** | 无 |
+| 其他模型 | 按 keep_value | 按 keep_value | 无 |
+
+某个分支需要 stop 却只剩受保护的模型时，该分支**放弃动作并回报阻塞**（`blocked_by: [{model, reason}]`），进入事件流和 status；不会退化为违反保护规则的动作。
+
 ### 4.1 awake → sleeping
 
 触发之一即可：
@@ -106,7 +120,7 @@ pinned 或有在途请求 → 不可睡、不可驱逐
 1. 候选卡：GPU0 永远在；共享卡仅当其外部占用低于阈值且无 `reserve`。
 2. 逐卡先判**可行性**：按上面的可用量，放得下直接放。
 3. 都放不下：对每张卡求"最小代价腾位集合"（模型数小，直接穷举），只在代价最低且确定可行的那张卡上驱逐。**代价 = 被驱逐模型的 keep_value 之和**（§4.1），驱逐 = stop（awake 的先 sleep 再 stop）；默认模型、pin、在用的不进集合。
-4. 全部在用且放不下：**等最多 2 分钟**，期间一旦有模型空闲超过 30 秒，就把它 sleep 再 stop 腾位；超时返回错误，错误里写明哪张卡被谁的什么模型占着。
+4. 全部在用且放不下：**等最多 2 分钟**，期间一旦有**非默认、非 pin** 的模型空闲超过 30 秒，就把它 sleep 再 stop 腾位；超时返回错误，错误里写明哪张卡被谁的什么模型占着，以及哪些模型因保护规则不能动。
 5. 全程持锁；`systemd-run` 前确认同名 unit 不存在。
 6. 本版**只做单卡放置**。TP=2 跨卡变体不在本版调度范围内（§8）。
 
@@ -119,7 +133,7 @@ pinned 或有在途请求 → 不可睡、不可驱逐
 - **不能唤醒**：睡着的模型所在卡已经放不下它醒来。近一小时有请求的改为换卡冷启动，否则停。
 - 默认模型永不停。24 小时清扫可选，默认模型除外。
 
-**sleep 前的内存准入**（§4.1 的每一次 sleep 都先过这一关）：sleep 会把权重搬进 pinned 内存，所以执行前检查 `宿主可用内存 − 该模型权重 ≥ 下限` 且 `sleeping 总量 + 该模型权重 ≤ 预算`。不满足时先按 keep_value 从低到高 stop 已经睡着的模型腾出内存；仍不满足则对该模型直接 stop 而不是 sleep（下次请求走冷启动）。这样硬停永远发生在内存被占用**之前**，不会先 OOM 再补救。
+**sleep 前的内存准入**（§4.1 的每一次 sleep 都先过这一关）：sleep 会把权重搬进 pinned 内存，所以执行前检查 `宿主可用内存 − 该模型权重 ≥ 下限` 且 `sleeping 总量 + 该模型权重 ≤ 预算`。不满足时先按 keep_value 从低到高 stop 已经睡着的、不受保护的模型腾出内存；仍不满足则：普通模型直接 stop 而不是 sleep（下次请求走冷启动）；**默认模型或 pin 住的模型保持 awake 并回报阻塞**（保护规则）。这样硬停永远发生在内存被占用**之前**，不会先 OOM 再补救，也不会为了腾内存违反保护规则。
 
 ### 4.4 用户意图
 
@@ -146,8 +160,10 @@ pin / reserve 记录设置者（来源 IP → 容器名）与到期时间，stat
 1. scheduler 持锁完成腾位后，**在返回前登记一条租约** `{lease_id, model, gpu, util, expires_at}`，该卡的可用量立即扣减（§4.2）。并发的第二个放置请求看到的就是扣减后的数字，不会重复分配。
 2. vllm-launch 拿到 `{gpu, lease_id}` 后 `systemd-run`，盯 unit 直到 `/health` 通过，然后 `POST /v1/place/{lease_id}/confirm`；租约转为正式的 daemon 记账。
 3. unit 启动失败（vLLM 报错退出、OOM）时 vllm-launch `POST /v1/place/{lease_id}/release`，预算立即归还。
-4. 租约超时（与 vllm-wrapper 的 `--wait-timeout` 一致，15 分钟）仍未 confirm 也未 release：scheduler 检查 `vllm-<id>.service` 是否 active 且健康，是则视为已确认，否则释放。
-5. 租约与 daemon 记账都持久化在 sqlite，scheduler 重启后从 `systemctl` 重建 daemon 记账、按超时规则清理残留租约。
+4. 租约超时（与 vllm-wrapper 的 `--wait-timeout` 一致，15 分钟）仍未 confirm 也未 release 时，按 unit 状态分三种：active 且健康 → 视为已确认；active 但不健康（还在加载或反复重启）→ 租约转为 `stale`，**预算继续保留**，scheduler 每轮检查直到 unit 退出才释放，并在事件流里报警；unit 不存在 → 释放。**预算只在确认进程不占显存后才归还**。
+5. 失效（已释放或已转正）的租约收到迟到的 confirm 或对应的 unit 迟到启动：confirm 返回 409，vllm-launch 必须 stop 自己刚起的 unit；scheduler 发现没有有效租约也没有记账的 `vllm-*` unit 时同样 stop 它。
+6. 记账的唯一键是**模型名**：同一模型同一时刻只有一份记账，要么是租约，要么是 daemon。confirm 是原子转正，不是新增一条。
+7. 租约与 daemon 记账都持久化在 sqlite。scheduler 重启后先从 `systemctl` 重建 daemon 记账，再逐条处理残留租约：模型已有 daemon 记账 → 租约按第 6 条并入（不重复扣减），健康后转正；没有 unit → 释放；有 unit 但不健康 → 按第 4 条转 `stale`。
 
 ### HTTP API v1（容器网内，无鉴权）
 
@@ -199,7 +215,12 @@ gemma-4-31b-it-bf16        stopped   -    -     9h         0      -        冷�
 
 - 安装到 llmsvc：`deploy/install.sh`，先以 8011 端口和 `--dry-run` 跑一天只观察不动作，再打开动作。
 - 回放测试：把 2026-09-06 / 09-07 的 `vllm-launch` 日志场景做成夹具，断言新算法不再出现无效驱逐与踢默认模型。
-- 回滚：停 scheduler，恢复原 `vllm-launch` / `vllm-reaper`。
+- 回滚顺序（因为 §2 把 llama-swap 的 TTL 设成了 0，只停 scheduler 会让所有醒着的模型永远不睡）：
+  1. 停 scheduler，禁用它的 timer / 服务。
+  2. 恢复原 `vllm-launch` 与 `vllm-reaper` 脚本，重新启用 `vllm-reaper.timer`。
+  3. 把 llama-swap 配置里的 `globalTTL` 改回原值（600），`llama-swap -validate`，然后按 §3 的安静时刻协议手工 reload（等在途请求为 0，醒着的模型会进入 sleep）。
+  4. 核对：`systemctl list-units 'vllm-*'` 与 `/running` 一致，10 分钟后空闲模型进入 sleep。
+  回滚脚本 `deploy/rollback.sh` 按这个顺序执行，每步可单独重跑。
 
 ## 8. 已定决策
 

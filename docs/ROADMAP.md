@@ -47,15 +47,15 @@
 
 - #9 `llm free`
 - #10 `llm wake`
-- #11 pin / unpin 与 reserve（M2 只验收 pin 生效、reserve 记账与挪走睡着的模型；reserve 对放置的影响在 #14 验收，因为 `/v1/place` 到 M3 才接管冷启动）
-- #12 内存预算取代 2 小时硬停；吸收 vllm-reaper
+- #11 pin / unpin 与 reserve。为了让 pin 在 M2 就能验收，本 issue 包含**最小保护接入**：llama-swap 的 `globalTTL` 设 0，scheduler 先实现一个固定 10 分钟的空闲 sleep（与今天行为等价）并对 pin 免疫；旧 `vllm-launch` 加一行"跳过 pin 住的 unit"。reserve 在 M2 验收记账与挪走睡着的模型；reserve 对放置的影响在 #14 验收（`/v1/place` 到 M3 才接管冷启动）
+- #12 内存预算取代 2 小时硬停；吸收 vllm-reaper（停 keep_value 最低的；默认模型与 pin 的准入失败保持 awake 并回报阻塞）
 - #13 调整 concurrencyLimit，消除批处理 429
 
 ### M3 放置与压力调度
 
 - #14 vllm-launch 改为薄客户端：`POST /v1/place` 与租约协议（含 reserve 期间不选该卡的验收）
 - #15 放置算法：先判可行、每卡最小代价腾位集合、保护默认/pin/在用
-- #16 共享卡压力驱动 sleep：外部进程检测与分卡 TTL
+- #16 共享卡压力驱动 sleep：外部进程检测与分卡 TTL（把 #11 的固定 10 分钟 sleep 升级为分卡 TTL 加压力信号）
 - #17 放不下时等待最多 2 分钟，错误说明占用者
 - #18 策略回放测试夹具
 
