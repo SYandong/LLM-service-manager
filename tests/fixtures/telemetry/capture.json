@@ -1,0 +1,27 @@
+{
+  "generated_by": "Codex / gpt-6-astra",
+  "captured_date": "2026-09-08",
+  "source": "authorized read-only llmsvc container probes",
+  "llama_swap_version": "v252 (e31a1ad)",
+  "activity_rows": 31605,
+  "activity_source_column": false,
+  "activity_metadata_keys": [
+    "fifo_priority"
+  ],
+  "activity_totals": {
+    "requests": 31605,
+    "input_tokens": 40480504,
+    "output_tokens": 4847906
+  },
+  "sanitization": [
+    "GPU UUIDs replaced consistently",
+    "modelStatus display names omitted; one real model retained",
+    "all logData omitted",
+    "no request contents or source addresses retained"
+  ],
+  "limits": [
+    "No active vllm model unit at capture time",
+    "No compute apps visible inside container despite GPU1 used memory",
+    "Active-unit and nonempty-inflight cases are explicitly synthetic tests"
+  ]
+}

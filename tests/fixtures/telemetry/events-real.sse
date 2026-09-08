@@ -1,0 +1,5 @@
+event:message
+data:{"type": "modelStatus", "data": "[{\"id\": \"gemma-4-26b-a4b-nvfp4\", \"state\": \"stopped\"}]"}
+
+event:message
+data:{"type": "inflight", "data": "{\"operation\": \"snapshot\"}"}
