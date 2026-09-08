@@ -716,6 +716,189 @@ def _finite_float(value: Any, label: str) -> float:
     return result
 
 
+class _RegistryYamlEditor:
+    """Patch supported block YAML using parser positions, never re-dump the file.
+
+    PyYAML resolves aliases when composing nodes, so a value whose source marks
+    point before its own key is not directly editable. Such layouts, merges,
+    duplicate keys and complex flow layouts are rejected rather than normalized.
+    A final semantic check also rejects dangling anchors or unintended changes.
+    """
+
+    def __init__(self, original: bytes):
+        try:
+            self.text = original.decode("utf-8")
+            self.root = yaml.compose(self.text, Loader=yaml.SafeLoader)
+            self.tokens = list(yaml.scan(self.text, Loader=yaml.SafeLoader))
+            self.original = yaml.safe_load(self.text)
+        except (UnicodeError, yaml.YAMLError) as exc:
+            raise RegistryError("unsupported YAML layout: invalid UTF-8/YAML") from exc
+        if not self.text.endswith("\n"):
+            self._unsupported("a final newline is required")
+        self.newline = "\r\n" if "\r\n" in self.text else "\n"
+        if "\r" in self.text.replace("\r\n", "") or (self.newline == "\r\n" and "\n" in self.text.replace("\r\n", "")):
+            self._unsupported("mixed or unsupported line endings")
+        self.fields = self._mapping(self.root)
+        self.edits: list[tuple[int, int, str]] = []
+
+    @staticmethod
+    def _unsupported(reason: str) -> None:
+        raise RegistryError("unsupported YAML layout: " + reason)
+
+    def _mapping(self, node) -> dict:
+        if not isinstance(node, yaml.MappingNode) or node.flow_style:
+            self._unsupported("edited mappings must use block style")
+        fields = {}
+        for key, value in node.value:
+            if not isinstance(key, yaml.ScalarNode) or key.tag != "tag:yaml.org,2002:str" or key.value in fields:
+                self._unsupported("duplicate, merge or complex mapping keys")
+            fields[key.value] = (key, value)
+        return fields
+
+    def _direct(self, key, value) -> None:
+        if value.start_mark.index < key.end_mark.index:
+            self._unsupported("edited values must not be aliases")
+
+    def _line_start(self, index: int) -> int:
+        return self.text.rfind("\n", 0, index) + 1
+
+    def _line_end(self, index: int) -> int:
+        return self.text.index("\n", index) + 1
+
+    def _entry_span(self, key, value) -> tuple[int, int]:
+        self._direct(key, value)
+        start = self._line_start(key.start_mark.index)
+        if self.text[start:key.start_mark.index].strip():
+            self._unsupported("mapping entries must start on their own line")
+        # BlockEnd tokens are placed after trailing comments; they are not the
+        # end of an entry's actual content. Last scalar/flow/alias tokens are.
+        content = [token for token in self.tokens
+                   if isinstance(token, (yaml.tokens.ScalarToken, yaml.tokens.FlowMappingEndToken,
+                                         yaml.tokens.FlowSequenceEndToken, yaml.tokens.AliasToken))
+                   and key.start_mark.index <= token.start_mark.index
+                   and token.end_mark.index <= value.end_mark.index]
+        if not content:
+            self._unsupported("cannot determine model entry extent")
+        end = self._line_end(max(token.end_mark.index for token in content) - 1)
+        return start, end
+
+    def _block_item_span(self, item) -> tuple[int, int, str]:
+        start = self._line_start(item.start_mark.index)
+        prefix = self.text[start:item.start_mark.index]
+        match = re.fullmatch(r"( *)- +", prefix)
+        if not match or item.start_mark.line != item.end_mark.line:
+            self._unsupported("block members must be single-line scalar entries")
+        return start, self._line_end(item.end_mark.index - 1), match.group(1)
+
+    def _members(self, key, sequence, before: list, after: list, name: str, adding: bool) -> None:
+        self._direct(key, sequence)
+        if not isinstance(sequence, yaml.SequenceNode):
+            self._unsupported("group members must be a sequence")
+        items = sequence.value
+        if any(not isinstance(item, yaml.ScalarNode) or item.tag != "tag:yaml.org,2002:str" for item in items):
+            self._unsupported("group members must be strings")
+        if len(set(before)) != len(before) or [item.value for item in items] != before:
+            self._unsupported("duplicate or indirect group members")
+        if any(item.start_mark.index < sequence.start_mark.index for item in items):
+            self._unsupported("aliased member entries")
+        if any(a.end_mark.index > b.start_mark.index for a, b in zip(items, items[1:])):
+            self._unsupported("aliased member entries")
+        expected = before + [name] if adding else [member for member in before if member != name]
+        if after != expected or (not adding and name not in before):
+            self._unsupported("unexpected membership change")
+        if sequence.flow_style:
+            tokens = [token for token in self.tokens
+                      if sequence.start_mark.index <= token.start_mark.index < sequence.end_mark.index]
+            opening = next(token for token in tokens if isinstance(token, yaml.tokens.FlowSequenceStartToken))
+            closing = next(token for token in reversed(tokens) if isinstance(token, yaml.tokens.FlowSequenceEndToken))
+            if "\n" in self.text[opening.start_mark.index:closing.end_mark.index]:
+                self._unsupported("flow members must stay on one line")
+            if adding:
+                at = items[-1].end_mark.index if items else opening.end_mark.index
+                self.edits.append((at, at, (", " if items else "") + json.dumps(name)))
+            else:
+                index = before.index(name)
+                item = items[index]
+                start, end = item.start_mark.index, item.end_mark.index
+                commas = [token for token in tokens if isinstance(token, yaml.tokens.FlowEntryToken)]
+                if len(items) > 1:
+                    if index == len(items) - 1:
+                        start = commas[index - 1].start_mark.index
+                    else:
+                        end = commas[index].end_mark.index
+                self.edits.append((start, end, ""))
+        elif adding:
+            if not items:
+                self._unsupported("empty block member sequence")
+            _, end, indent = self._block_item_span(items[-1])
+            self.edits.append((end, end, indent + "- " + json.dumps(name) + self.newline))
+        else:
+            item = items[before.index(name)]
+            start, end, indent = self._block_item_span(item)
+            replacement = ""
+            if len(items) == 1:
+                replacement = " " * max(len(indent), key.start_mark.column + 2) + "[]" + self.newline
+            self.edits.append((start, end, replacement))
+
+    def render(self, config: dict) -> bytes:
+        if "models" not in self.fields:
+            self._unsupported("models must be an explicit block mapping")
+        key, models = self.fields["models"]
+        self._direct(key, models)
+        entries = self._mapping(models)
+        before, after = self.original["models"], config["models"]
+        added, removed = set(after) - set(before), set(before) - set(after)
+        if len(added) + len(removed) != 1 or any(before[name] != after[name] for name in set(before) & set(after)):
+            self._unsupported("only one added or removed model entry is supported")
+        adding = bool(added)
+        name = next(iter(added or removed))
+        if adding:
+            header_end = self._line_end(key.end_mark.index)
+            header = self.text[key.end_mark.index:header_end]
+            if not re.fullmatch(r":[ \t]*(?:&[\w-]+[ \t]*)?(?:#[^\r\n]*)?\r?\n", header) or not entries:
+                self._unsupported("models header or indentation is unsupported")
+            columns = {entry_key.start_mark.column for entry_key, _ in entries.values()}
+            if len(columns) != 1 or min(columns) <= key.start_mark.column:
+                self._unsupported("inconsistent model indentation")
+            indent = " " * min(columns)
+            block = yaml.safe_dump({name: after[name]}, sort_keys=False, allow_unicode=True)
+            rendered = "".join(indent + line if line.strip() else line for line in block.splitlines(keepends=True))
+            self.edits.append((header_end, header_end, rendered.replace("\n", self.newline)))
+        else:
+            start, end = self._entry_span(*entries[name])
+            self.edits.append((start, end, ""))
+        old_groups, new_groups = self.original.get("groups", {}), config.get("groups", {})
+        if old_groups != new_groups:
+            group_key, groups = self.fields["groups"]
+            self._direct(group_key, groups)
+            group_entries = self._mapping(groups)
+            if set(old_groups) != set(new_groups):
+                self._unsupported("group declarations cannot change")
+            for group_name, old in old_groups.items():
+                new = new_groups[group_name]
+                if old == new:
+                    continue
+                entry_key, entry = group_entries[group_name]
+                self._direct(entry_key, entry)
+                fields = self._mapping(entry)
+                if "members" not in fields or {k: v for k, v in old.items() if k != "members"} != {k: v for k, v in new.items() if k != "members"}:
+                    self._unsupported("only group membership may change")
+                self._members(*fields["members"], old["members"], new["members"], name, adding)
+        result = self.text
+        boundary = len(result)
+        for start, end, replacement in sorted(self.edits, reverse=True):
+            if not 0 <= start <= end <= boundary:
+                self._unsupported("overlapping edit ranges")
+            result = result[:start] + replacement + result[end:]
+            boundary = start
+        try:
+            if yaml.safe_load(result) != config:
+                self._unsupported("localized edit changed unintended values")
+        except (yaml.YAMLError, RecursionError) as exc:
+            raise RegistryError("unsupported YAML layout: edit would break anchors or values") from exc
+        return result.encode("utf-8")
+
+
 class ModelRegistry:
     """Core-injected POST/DELETE adapter; all writes go through ReloadQueue.
 
@@ -760,14 +943,17 @@ class ModelRegistry:
         return config, records
 
     @staticmethod
-    def _encode(config: dict, records: dict) -> bytes:
+    def _encode(original: bytes, config: dict, records: dict) -> bytes:
         for name, record in records.items():
             block = config["models"][name]
             metadata = block.setdefault("metadata", {})
             if not isinstance(metadata, dict):
                 raise RegistryError("model metadata must be a mapping")
             metadata["llmsvc_registry"] = copy.deepcopy(record)
-        return yaml.safe_dump(config, sort_keys=False, allow_unicode=True).encode("utf-8")
+        try:
+            return _RegistryYamlEditor(original).render(config)
+        except (yaml.YAMLError, RecursionError) as exc:
+            raise RegistryError("unsupported YAML layout: cannot safely render localized edit") from exc
 
     def records(self) -> dict:
         with self.queue.action_lock:
@@ -786,7 +972,7 @@ class ModelRegistry:
             result = add_full_weight_model(config, records, name=name, model_path=path, base_model=base,
                                            shared_roots=self.shared_roots, daemon_port_range=self.daemon_port_range,
                                            reserved_ports=self.reserved_ports(), created_at=created_at)
-            return self._encode(result.config, result.records)
+            return self._encode(data, result.config, result.records)
         return self.queue.enqueue(transform, description={"kind": "add_model", "model": name, "base": base}, dry_run=dry_run)
 
     def remove(self, name: str, *, dry_run: bool = False, require_expired: bool = False) -> dict:
@@ -811,7 +997,7 @@ class ModelRegistry:
             def transform(data: bytes) -> bytes:
                 config, records = self._decode(data)
                 result = remove_temporary_model(config, records, name=name, snapshot=self.queue.snapshot(), now=self.now())
-                return self._encode(result.config, result.records)
+                return self._encode(data, result.config, result.records)
             def cleanup(*, deadline: float) -> None:
                 # The routing entry is gone before cleanup. Core must recheck protection
                 # against late data-plane activity before touching the target unit.
