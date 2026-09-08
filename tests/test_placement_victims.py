@@ -4,7 +4,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import pytest
@@ -23,10 +23,29 @@ def victims(system):
     ready(scheduler, state, lease_id)
     scheduler.sample_once()
     assert scheduler.store.lease(lease_id)[0].status == "confirmed"
-    state.update(calls=[], mode="exit", inflight=0, idle=1000, after_stop=None)
+    state.update(calls=[], mode="exit", inflight=0, idle=1000, after_stop=None, timeline=[])
+    started = time.monotonic()
+    def record(phase, **detail):
+        state["timeline"].append({"ms": round((time.monotonic()-started)*1000, 3), "phase": phase, **detail})
+    state["record"] = record
+    original_emit = scheduler.emit
+    def emit(kind, **kwargs):
+        event = original_emit(kind, **kwargs)
+        if kind in ("state", "lease_released", "placement_action_result", "place"):
+            record("event", kind=kind, detail=event.detail)
+        return event
+    scheduler.emit = emit
+    original_observe = scheduler.placement._observe_victim
+    def observe(action, deadline):
+        record("observation_begin", remaining_ms=round((deadline-time.monotonic())*1000, 3))
+        result = original_observe(action, deadline)
+        record("observation_end", confirmed=result)
+        return result
+    scheduler.placement._observe_victim = observe
     original_collect = scheduler.collect
     def collect():
         snapshot = original_collect()
+        record("collect", sampled_at=snapshot.sampled_at, model_states={m.name: m.state for m in snapshot.models})
         return replace(snapshot, activity=tuple(replace(item, in_flight=state["inflight"],
             last_request_at=time.time()-state["idle"]) if item.model == "a" else item for item in snapshot.activity))
     scheduler.collect = collect
@@ -34,19 +53,32 @@ def victims(system):
         assert argv == ["fake-systemctl", "stop", "vllm-a.service"]
         assert kwargs["timeout"] > 0
         state["calls"].append(argv)
+        record("stop_submit")
         if state["mode"] in ("exit", "exit-error", "uncertain-exit"):
             state["models"]["a"] = replace(state["models"]["a"], state="stopped", unit_active=False)
             state["observations"]["a"] = UnitObservation(False, True) if state["mode"] != "uncertain-exit" else UnitObservation(True, False)
         if state["after_stop"]:
             state["after_stop"]()
-        return SimpleNamespace(returncode=1 if state["mode"] in ("error", "exit-error") else 0)
+        code = 1 if state["mode"] in ("error", "exit-error") else 0
+        record("stop_return", code=code)
+        return SimpleNamespace(returncode=code)
     transport.run = run
+    # Functional results require two asynchronous rounds and durable SQLite
+    # reconciliation, not a 50ms host scheduling/IO performance guarantee.
+    # Dedicated negative tests override their short deadlines explicitly.
     scheduler.config = replace(scheduler.config, model_actions_enabled=True,
-        placement_wait_seconds=0.3, action_observe_seconds=0.05, action_poll_seconds=0.002)
+        placement_wait_seconds=2.0, action_observe_seconds=1.0, action_poll_seconds=0.002)
     scheduler.model_actions = ModelActionController(scheduler, transport)
     scheduler.sample_once()
     scheduler.start()
     yield scheduler, state, transport, lease_id
+
+
+def diagnostic(scheduler, state, response=None):
+    """Keep CI's actual response and last observation/account steps on failure."""
+    return {"response": response, "timeline": state["timeline"][-40:],
+            "leases": [asdict(lease) for lease, _ in scheduler.store.leases(include_released=True)],
+            "action_results": [event.detail for event in scheduler.events_since(0) if event.kind == "placement_action_result"]}
 
 
 def test_http_place_stops_one_confirmed_victim_then_grants_after_observed_exit(victims):
@@ -56,7 +88,7 @@ def test_http_place_stops_one_confirmed_victim_then_grants_after_observed_exit(v
     thread.start()
     try:
         status, result = request(server.server_address, "/v1/place", {"model": "b", "util": 0.6})
-        assert status == 200 and result["gpu"] == 0
+        assert status == 200 and result["gpu"] == 0, diagnostic(scheduler, state, (status, result))
         assert len(state["calls"]) == 1
         assert scheduler.store.lease(lease_id)[0].status == "released"
         assert scheduler.store.lease(result["lease_id"])[0].budget_gb == 60
@@ -98,6 +130,9 @@ def test_no_protected_reserved_or_unleased_victim_actions(victims, protection):
 def test_failed_or_unconfirmed_effect_stops_request_without_budget_estimates(victims, mode, error, released):
     scheduler, state, _, lease_id = victims
     state["mode"] = mode
+    if mode != "exit-error":
+        # Deliberately no exit: retain a short no-progress observation test.
+        scheduler.config = replace(scheduler.config, action_observe_seconds=0.05)
     with pytest.raises(LeaseError, match=error):
         grant(scheduler, "b")
     assert len(state["calls"]) == 1
@@ -106,7 +141,7 @@ def test_failed_or_unconfirmed_effect_stops_request_without_budget_estimates(vic
     assert not scheduler.model_actions.pending
     if mode == "exit-error":
         events = [event for event in scheduler.events_since(0) if event.kind == "placement_action_result"]
-        assert events[-1].detail["confirmed"] is True
+        assert events[-1].detail["confirmed"] is True, diagnostic(scheduler, state)
         assert events[-1].detail["error"] == "transport_rejected"
 
 
@@ -119,7 +154,8 @@ def test_replans_after_exit_and_does_not_grant_through_new_reservation(victims):
         grant(scheduler, "b")
     assert len(state["calls"]) == 1
     assert scheduler.store.lease(lease_id)[0].status == "released"
-    assert "reserved" in [blocker.reason for blocker in caught.value.blockers]
+    assert "reserved" in [blocker.reason for blocker in caught.value.blockers], diagnostic(
+        scheduler, state, {"error": caught.value.error, "blockers": [asdict(b) for b in caught.value.blockers]})
     assert not any(lease.model == "b" for lease, _ in scheduler.store.leases())
 
 
@@ -276,3 +312,102 @@ def test_uncertain_late_submission_keeps_budget_and_reports_timeout_blocker(vict
     assert not scheduler.model_actions.pending
     events = [event for event in scheduler.events_since(0) if event.kind == "placement_action_result"]
     assert events[-1].detail["confirmed"] is False
+
+
+@pytest.mark.parametrize("scenario,pause", [("http", 0.08), ("exit-error", 0.08), ("reservation", 0.35)])
+def test_functional_observation_tolerates_controlled_lock_latency(victims, scenario, pause):
+    """Reproduce #100's three shapes without assuming the historical CI timing.
+
+    Delayed release notification/thread scheduling is not evidence of a failed
+    stop. Functional fixtures must allow two newer rounds; dedicated deadline tests
+    keep explicit short limits. The pause exists only in this mock test hook.
+    """
+    scheduler, state, _, lease_id = victims
+    observation_started = threading.Event()
+    observe = scheduler.placement._observe_victim
+    def observe_started(action, deadline):
+        observation_started.set()
+        return observe(action, deadline)
+    scheduler.placement._observe_victim = observe_started
+    emit = scheduler.emit
+    def delayed_notification(kind, **kwargs):
+        event = emit(kind, **kwargs)
+        if kind == "lease_released":
+            assert observation_started.wait(1)
+            state["record"]("controlled_lock_delay_begin", seconds=pause)
+            time.sleep(pause)
+            state["record"]("controlled_lock_delay_end")
+        return event
+    scheduler.emit = delayed_notification
+    if scenario == "exit-error":
+        state["mode"] = "exit-error"
+    elif scenario == "reservation":
+        state["after_stop"] = lambda: scheduler.store.put_reserve(Reserve("new", 0, 100, time.time()+100, "owner"))
+    server = SchedulerHTTPServer(("127.0.0.1", 0), scheduler)
+    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01))
+    thread.start()
+    try:
+        status, body = request(server.server_address, "/v1/place", {"model": "b", "util": 0.6})
+        proof = diagnostic(scheduler, state, (status, body))
+        assert len(state["calls"]) == 1, proof
+        assert scheduler.store.lease(lease_id)[0].status == "released", proof
+        assert proof["action_results"][-1]["confirmed"] is True, proof
+        if scenario == "http":
+            assert status == 200 and body["gpu"] == 0, proof
+            assert sum(lease.model == "b" for lease, _ in scheduler.store.leases()) == 1, proof
+        else:
+            assert not any(lease.model == "b" for lease, _ in scheduler.store.leases()), proof
+            if scenario == "exit-error":
+                assert status == 503 and body["error"] == "placement_action_failed", proof
+                assert proof["action_results"][-1]["error"] == "transport_rejected", proof
+            else:
+                assert status == 409 and body["error"] == "placement_timeout", proof
+                assert "reserved" in [item["reason"] for item in body["blockers"]], proof
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(2)
+
+
+
+def test_grant_waits_for_exit_proof_and_a_second_published_round(victims):
+    scheduler, state, _, lease_id = victims
+    first_started, second_started = threading.Event(), threading.Event()
+    allow_first, allow_second = threading.Event(), threading.Event()
+    collect = scheduler.collect
+    post_stop_rounds = [0]
+    def gated_collect():
+        snapshot = collect()
+        if state["calls"]:
+            post_stop_rounds[0] += 1
+            if post_stop_rounds[0] == 1:
+                first_started.set()
+                assert allow_first.wait(1), "fixture did not release first observation"
+            elif post_stop_rounds[0] == 2:
+                second_started.set()
+                assert allow_second.wait(1), "fixture did not release second observation"
+        return snapshot
+    scheduler.collect = gated_collect
+    with ThreadPoolExecutor(1) as pool:
+        pending = pool.submit(grant, scheduler, "b")
+        try:
+            assert first_started.wait(1), diagnostic(scheduler, state)
+            assert len(state["calls"]) == 1
+            assert scheduler.store.lease(lease_id)[0].status == "confirmed"
+            assert not pending.done(), diagnostic(scheduler, state)
+            assert not any(lease.model == "b" for lease, _ in scheduler.store.leases())
+            allow_first.set()
+            assert second_started.wait(1), diagnostic(scheduler, state)
+            # First fresh stopped round + positive configured-unit exit proof
+            # releases the old ledger row, but does not yet grant this request.
+            assert scheduler.store.lease(lease_id)[0].status == "released"
+            assert not pending.done(), diagnostic(scheduler, state)
+            assert not any(lease.model == "b" for lease, _ in scheduler.store.leases())
+            allow_second.set()
+            result = pending.result(timeout=2)
+            assert result["gpu"] == 0
+            assert sum(lease.model == "b" for lease, _ in scheduler.store.leases()) == 1
+            assert len(state["calls"]) == 1 and post_stop_rounds[0] >= 2
+        finally:
+            allow_first.set()
+            allow_second.set()
