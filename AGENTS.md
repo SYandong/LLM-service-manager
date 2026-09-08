@@ -16,10 +16,10 @@ LLM-service-manager 正在从"单后端 vLLM 代理"（`vllm_service/`，legacy�
 |---|---|---|
 | `docs/ROADMAP.md` | 唯一的路线图，milestone 与 issue 对应 | 权威 |
 | `docs/DESIGN.md` | 架构、状态机、策略、API、CLI/TUI 设计与已定决策 | 权威 |
-| `llmsvc/` | 新代码：调度器守护进程、策略、HTTP API | 待建（M1 起） |
-| `cli/llm` | 单文件 CLI（仅标准库），用户复制到自己容器里用 | 待建（M1 起） |
-| `tui/` | 全屏 TUI（textual） | 待建（M5） |
-| `deploy/` | systemd unit、安装脚本、llama-swap 配置模板 | 待建（M1） |
+| `llmsvc/` | 新代码：调度器守护进程、策略、HTTP API | 已有实现；按 milestone 继续集成与验收 |
+| `cli/llm` | 单文件 CLI（仅标准库），用户复制到自己容器里用 | 已有实现；命令随对应 API 交付 |
+| `tui/` | 全屏 TUI（textual） | 已有实现；完整 M5 验收以 issue 为准 |
+| `deploy/` | systemd unit、安装脚本、llama-swap 配置模板 | 已有工具；现场启用与观察验收单独记录 |
 | `tests/` | pytest；策略回放夹具放 `tests/fixtures/` | 现有 |
 | `vllm_service/`、`tools/dashboard.py`、`config/server.yaml` | legacy，M6 下线 | 冻结，只修 bug |
 
@@ -27,7 +27,7 @@ LLM-service-manager 正在从"单后端 vLLM 代理"（`vllm_service/`，legacy�
 
 1. **任何改动先有 issue**。发现问题、想改设计、想加功能，都先开 issue（用模板），说明动机与验收标准。做的过程中遇到新问题，另开 issue，不要在当前 PR 里顺手扩 scope。
 2. **从 issue 开分支**：`<type>/<issue号>-<短描述>`，type 取 `feat` / `fix` / `docs` / `ops` / `refactor` / `chore`；`chore` 仅用于发版，需 issue 记录授权。例：`feat/7-llm-status`、`chore/76-release-alpha1`。
-3. **`main` 不直接 push**。所有改动走 PR，PR 描述用模板，正文写 `Closes #N`。
+3. **`main` 不直接 push**。所有改动走 PR，PR 描述用模板；完整验收满足后才使用自动关单语法，部分交付使用 `Refs #N`。不要在否定句中组合自动关单关键字与 issue 引用；平台仍可能建立关单关联。
 4. **至少一位其他成员 review 通过再合并**，用 squash merge。作者不能自己批准自己。
 5. **CI 绿了才能合**：`pytest` 全过。策略类改动必须附带回放测试。
 6. 设计层面的变更（改状态机、改驱逐规则、改 API 形状）先开 `type:design` issue 讨论，达成一致后再改 `docs/DESIGN.md` 与代码，两者在同一个 PR 里。
@@ -75,6 +75,7 @@ Generated-By: <harness> / <model-id>
 - 线上真实数据源：`journalctl -t vllm-launch -t vllm-reaper`、`/var/lib/llama-swap/activity.sqlite`、`systemctl list-units 'vllm-*'`、`nvidia-smi --query-compute-apps`。
 - 不要修改 `vllm_service/` 下的 legacy 代码，除非 issue 明确要求。
 - 完成一个 issue 的标准：验收标准逐条满足、测试通过、`docs/` 与代码一致、PR 描述写明验证方式、水印齐全。
+- 交接或让出回合前，核对实际 PR/commit 状态并更新任务记录；已合并依赖不得继续标为待审核。目录已存在、部分 PR 已合并与完整验收完成分别记录。
 
 <!-- Generated-By: Claude Code / claude-fable-5-1 -->
 <!-- Generated-By: Codex / gpt-6-astra -->
