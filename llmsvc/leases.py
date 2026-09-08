@@ -280,18 +280,23 @@ class PlacementController:
             blockers = exc.blockers or blockers
         raise LeaseError(409, "placement_timeout", blockers)
 
-    def _observe_victim(self, action, deadline):
-        """Observe exit/account release in two newer rounds without blocking I/O.
+    def _observe_victim(self, action, deadline, *, reconcile_exit=False):
+        """Observe exit/account release in two newer rounds within the deadline.
 
-        Request work from the existing sampler; even a stuck collector cannot
-        stretch this resource wait or hold the global lock across readiness.
+        Request sampling outside the lock. Reserve may additionally reconcile
+        its stopped account with one bounded unit probe per published round;
+        readiness waits still release the lock and never wait on collector I/O.
         """
         effect_seen_at = None
+        checked_generation = None
         self.scheduler.request_sample()  # Recollect even after an uncertain late submission.
         try:
             while self.monotonic() < deadline and not self.scheduler.stopping.is_set():
                 self.scheduler.request_sample()
                 with self._locked(deadline):
+                    if reconcile_exit and checked_generation != self.scheduler._sample_published:
+                        checked_generation = self.scheduler._sample_published
+                        self._reconcile_action_exit(action, deadline)
                     snapshot = self.scheduler.snapshot()
                     active_account = any(lease.model == action.model and lease.status != "released" for lease in snapshot.leases)
                     effect = (self._fresh(snapshot) and not active_account
@@ -305,6 +310,25 @@ class PlacementController:
             if exc.error != "placement_timeout":
                 raise
         return False
+
+    def _reconcile_action_exit(self, action, deadline):
+        """Reconcile only an explicitly stopped account, even with place disabled.
+
+        The caller holds action_lock. This never adopts an orphan, confirms a
+        loading model, expires other leases, or enables the placement API.
+        """
+        if self.scheduler.config.read_only or self.scheduler.store is None or self.scheduler.store.read_only:
+            return
+        rows = [(lease, unit) for lease, unit in self.scheduler.store.leases()
+                if lease.model == action.model and lease.status == "confirmed"]
+        if len(rows) != 1:
+            return
+        lease, unit = rows[0]
+        if unit != self.transport.units.get(action.model) or lease.gpu != action.gpu:
+            return
+        observation = self._inspect(action.model, deadline)
+        if self.monotonic() < deadline and self._exited(lease, unit, observation):
+            self._transition(lease, "released")
 
     def _healthy(self, lease, unit, observation):
         snapshot = self.scheduler._snapshot

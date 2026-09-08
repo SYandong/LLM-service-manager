@@ -152,6 +152,45 @@ pinned 或有在途请求 → 不可睡、不可驱逐
 
 pin / reserve 记录设置者（来源 IP → 容器名）与到期时间，status 里可见。
 
+**reserve 的持久化与清退结果**（#107）：预留意图与清退结果分开表示。请求字段仍为
+`{gpu, size_gb, until, by}`；`gpu` 必须有效，`size_gb` 必须为有限正数，`until`
+必须为有限且尚未到达的到期时间。记录中的 `by` 以连接来源 IP 的容器映射为准，
+不信任请求体或转发头中的归属声明。有效意图先持久化，然后尝试清退；生效期间
+整张 GPU 都被放置策略排除，`size_gb` 是请求注记，不是实测释放量或物理容量保证。
+
+持久化成功后，POST 返回 HTTP 200：
+`{id, gpu, size_gb, until, by, evacuation: {status, stopped, skipped, error?}}`。
+客户端必须检查 `evacuation.status`，不能把 HTTP 200 当作清退完成：
+
+- `complete`：已无仍需清退的受管理模型或不确定记账；不承诺外部进程不存在或 GPU
+  物理占用为零。
+- `blocked`：仍有阻塞且没有已确认的 stop；`partial`：已有已确认的 stop，但仍有
+  阻塞或未完成步骤。`skipped` 列出 `{model, reason, ...}`；`error` 可说明终止的
+  传输、观测、超时、删除或到期原因。
+- `stopped` 只列入已有真实退出证明且记账已释放的模型。传输成功、单次 stopped
+  快照或策略估计均不能替代证明；晚到或无法确认的结果保留记账并如实回报。
+
+只清退符合既有保护规则、拥有已确认记账且 unit 身份匹配的 sleeping 模型。
+awake、pin、默认模型、在途或状态不明、无租约或身份不匹配均回报阻塞，不隐式
+sleep awake 模型、不迁移、不收编孤儿 unit，也不强制清理。沿用同一把全局锁和
+一个有界 monotonic deadline，执行一个动作后观测退出、核对记账并重新规划；
+等待期间释放锁，每个下一步重新检查意图仍有效以及当前保护条件。
+
+`read_only: false` 加可写状态库允许显式保存/删除意图，与 pin 的边界一致；实际
+清退还必须启用 `model_actions_enabled`。仅启用意图写入不会开启模型动作。
+清退被阻塞、部分完成或失败时，不回滚已保存的意图；但后续 DELETE 或到期仍会
+终止其效力。POST 的记录字段描述本次保存的意图，不保证返回时它尚未被并发删除
+或到期。请求校验失败返回 400，默认只读返回 405，状态库不可用返回 503；持久化
+成功之后的清退失败仍返回含 ID 的 200 结果，避免隐藏已保存意图和已发生的效果。
+POST 响应丢失时结果不明，不自动重试，以免创建重复意图。
+
+`DELETE /v1/reserve/{id}` 幂等移除指定意图并返回 HTTP 200 `{id, by}`，`by` 表示
+本次删除请求的真实调用来源。删除不唤醒或重启任何模型。删除/到期取消尚未提交的
+后续清退步骤；已提交的动作仍按剩余观测期限核对，无法确认时不得虚报完成或提前
+释放记账。记录跨重启保存，到期由读取过滤失效；启动不自动重跑中断的清退。
+所有 reserve 写接口的 `dry_run=1` 只返回既有 `would` / `blocked_by` 预览，不分配
+ID、不持久化、不追加动作事件、不启动清退传输，也不因预览额外采集或探测 unit。
+
 ## 5. scheduler
 
 - Python 3.10，systemd 服务 `llmsvc-scheduler.service`，状态存 sqlite，15 秒一轮。
@@ -183,7 +222,8 @@ pin / reserve 记录设置者（来源 IP → 容器名）与到期时间，stat
 | `POST /v1/place/{lease_id}/confirm` `POST /v1/place/{lease_id}/release` | 租约确认 / 释放 |
 | `POST /v1/free` | `{gpu?, ram?, need_gb?}` → `{freed_gb, slept[], stopped[], skipped[{model, reason}]}` |
 | `POST /v1/pin` `DELETE /v1/pin/{model}` | `{model, until, by}` |
-| `POST /v1/reserve` `DELETE /v1/reserve/{id}` | `{gpu, size_gb, until, by}` |
+| `POST /v1/reserve` | `{gpu, size_gb, until, by}` → `{id, gpu, size_gb, until, by, evacuation:{status, stopped, skipped, error?}}`，持久化与清退结果见 §4.4 |
+| `DELETE /v1/reserve/{id}` | 幂等移除意图 → `{id, by}`；不唤醒模型，取消未提交的清退步骤（§4.4） |
 | `POST /v1/wake/{model}` | |
 | `POST /v1/models` `DELETE /v1/models/{name}` | 临时模型登记，走安静时刻协议（§3） |
 | `GET /v1/usage?days=7&by=container` | 按来源汇总 |

@@ -45,6 +45,7 @@ class SchedulerConfig:
     lease_probe_seconds: float = 1.0
     model_actions_enabled: bool = False
     free_timeout_seconds: float = 120.0
+    reserve_timeout_seconds: float = 120.0
     wake_timeout_seconds: float = 900.0
     action_observe_seconds: float = 10.0
     action_poll_seconds: float = 0.2
@@ -62,7 +63,7 @@ class SchedulerConfig:
             raise ValueError("event_history_size must be a positive integer")
         for name in ("sample_interval_seconds", "event_heartbeat_seconds",
                      "request_timeout_seconds", "memory_budget_gb", "host_min_available_gb",
-                     "max_snapshot_age_seconds", "free_timeout_seconds", "wake_timeout_seconds",
+                     "max_snapshot_age_seconds", "free_timeout_seconds", "reserve_timeout_seconds", "wake_timeout_seconds",
                      "action_observe_seconds", "action_poll_seconds", "placement_wait_seconds",
                      "lease_timeout_seconds", "lease_probe_seconds", "data_plane_event_interval_seconds",
                      "data_plane_event_timeout_seconds", "data_plane_event_reconnect_seconds"):
@@ -76,6 +77,8 @@ class SchedulerConfig:
         for name in ("data_plane_event_capacity", "data_plane_event_batch_size"):
             if type(getattr(self, name)) is not int or not 1 <= getattr(self, name) <= 4096:
                 raise ValueError(f"{name} must be an integer in 1..4096")
+        if self.reserve_timeout_seconds > 120:
+            raise ValueError("reserve_timeout_seconds must not exceed 120")
         if self.placement_wait_seconds > 120:
             raise ValueError("placement_wait_seconds must not exceed 120")
         if type(self.placement_enabled) is not bool:

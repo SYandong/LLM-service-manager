@@ -2,7 +2,7 @@
 # Bind a specific container address in deployment; loopback is for local checks.
 listen_host: 127.0.0.1
 listen_port: 8011
-# Default blocks all live writes. Explicit false plus state_db_path enables only pin/unpin.
+# Default blocks all live writes. Explicit false plus state_db_path enables pin/unpin and reserve intent writes.
 # --dry-run, --once and --check-config force read-only access and never create a database.
 read_only: true
 sample_interval_seconds: 15
@@ -17,7 +17,7 @@ host_min_available_gb: 150
 # Telemetry supplies build_collector(mapping) and the probe configuration.
 collectors: {}
 # With read_only: true this must exist and opens read-only; empty disables intent reads.
-# With explicit read_only: false the configured database may be created for pin/unpin.
+# With explicit read_only: false the configured database may be created for intent writes.
 state_db_path: ""
 max_snapshot_age_seconds: 30
 # Model transports remain disabled separately from pin intent writes.
@@ -25,6 +25,8 @@ max_snapshot_age_seconds: 30
 # Isolated opt-in requires read_only: false and a populated collectors model/unit catalog.
 model_actions_enabled: false
 free_timeout_seconds: 120
+# One total reserve evacuation deadline; intent persists on blocked/partial outcomes.
+reserve_timeout_seconds: 120
 wake_timeout_seconds: 900
 action_observe_seconds: 10
 action_poll_seconds: 0.2

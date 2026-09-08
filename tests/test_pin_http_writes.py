@@ -156,7 +156,7 @@ def test_default_readonly_rejects_live_pin_without_calling_store(service, monkey
     assert exc.value.status == 405
 
 
-@pytest.mark.parametrize("route", ["/v1/free", "/v1/reserve", "/v1/wake/model", "/v1/place", "/v1/models"])
+@pytest.mark.parametrize("route", ["/v1/free", "/v1/wake/model", "/v1/place", "/v1/models"])
 def test_other_live_actions_remain_disabled(service, route):
     _, address, _, _ = service
     assert request(address, "POST", route, {}) == (405, {"error": "operation_not_enabled"})
@@ -209,3 +209,11 @@ def test_live_pin_preserves_required_request_shape(service):
     scheduler, address, _, _ = service
     assert request(address, "POST", "/v1/pin", {"model": "model", "until": 11000}) == (400, {"error": "invalid_request"})
     assert not scheduler.snapshot().pins
+
+
+
+def test_reserve_intent_route_validates_input_without_model_action_optin(service):
+    scheduler, address, _, _ = service
+    assert request(address, "POST", "/v1/reserve", {}) == (400, {"error": "invalid_request"})
+    assert scheduler.snapshot().reserves == ()
+    assert not scheduler.config.model_actions_enabled
