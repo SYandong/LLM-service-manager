@@ -1,0 +1,31 @@
+{
+  "generated_by": "Codex / gpt-6-astra",
+  "captured_at_unix": 1788846389.0217228,
+  "source": "live read-only llmsvc probes, Python 3.10",
+  "activity_rows": 31605,
+  "activity_read_ms": 33.07658800622448,
+  "usage_ms": 20.99980501225218,
+  "collector_ms": 493.5208630049601,
+  "usage_totals": {
+    "requests": 31605,
+    "input_tokens": 40480504,
+    "output_tokens": 4847906
+  },
+  "metrics_totals": {
+    "requests": 31605,
+    "input_tokens": 40480504,
+    "output_tokens": 4847906
+  },
+  "usage_reconciled": true,
+  "source_groups": [
+    "unknown"
+  ],
+  "gpu_count": 4,
+  "stopped_models": 7,
+  "inflight_total": 0,
+  "limits": [
+    "No active daemon HTTP or active unit measured",
+    "Original container memory probe subsequently disabled because cgroup-limited memory is not host memory",
+    "Fresh final collector verification recorded separately after review fixes"
+  ]
+}

@@ -1,0 +1,8 @@
+MainPID=0
+Result=success
+ExecMainStatus=0
+ControlGroup=
+Id=vllm-gemma-4-26b-a4b-nvfp4.service
+LoadState=not-found
+ActiveState=inactive
+SubState=dead
