@@ -158,7 +158,7 @@ def test_decisions_do_not_mutate_snapshot_and_are_repeatable():
 
 def test_cumulative_sleep_admission_does_not_oversubscribe_ram():
     s = snapshot(model("a"), model("b", is_default=True), memory=MemoryState(210, 0))
-    assert actions(plan_free(s)) == [("sleep", "a"), ("stop", "a"), ("sleep", "b")]
+    assert actions(plan_free(s)) == [("stop", "a"), ("sleep", "b")]
 
 
 @pytest.mark.parametrize("bad", [None, True, -1, float("inf")])

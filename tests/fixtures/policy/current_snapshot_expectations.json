@@ -1,0 +1,75 @@
+{
+  "generated_by": "Codex / gpt-6-astra",
+  "schema_version": 1,
+  "id": "captured_current_snapshot_blocks_unsafe_policy",
+  "source": {
+    "path": "../telemetry/snapshot-real.json",
+    "sha256": "c938af4891438f136b4c1e10e62e803ac624efd1feb52fc3b773b317456f180c",
+    "merged_pr": 49,
+    "sampled_at": 1788847361.9071412
+  },
+  "provenance": {
+    "kind": "captured_current_snapshot",
+    "snapshot_modified": false,
+    "expectations": "Policy-authored from DESIGN unknown-data protection; not recorded executed actions.",
+    "invocations": "Hypothetical policy evaluations on the unchanged capture, not observed user commands.",
+    "journal_markers": "Noncontemporaneous 2026-09-05 through 09-07 markers; not used as policy inputs or expected outcomes.",
+    "historical_reconstruction": false,
+    "independent_captures": 1
+  },
+  "basis": [
+    "The unmodified capture contains errors=[\"redacted collection error\"]; unsafe policy decisions must fail closed while observations are incomplete.",
+    "All seven recorded models are stopped; the capture does not justify sleeping, stopping or relocating an active model.",
+    "Host available RAM, model budgets and several activity fields are null; no missing value is filled or silently treated as zero.",
+    "Older journal start/stop/place words cannot establish the GPU/model state at their timestamps or prove an action completed."
+  ],
+  "expected": {
+    "actions": [],
+    "blocked_by": [
+      {
+        "model": null,
+        "reason": "unknown_snapshot: redacted collection error",
+        "gpu": null,
+        "user": null,
+        "in_flight": null
+      }
+    ]
+  },
+  "evaluations": [
+    {
+      "policy": "plan_free",
+      "rationale": "Incomplete snapshot cannot authorize a free action; all captured models are stopped."
+    },
+    {
+      "policy": "plan_idle_sleep",
+      "rationale": "No captured awake model is eligible, and incomplete observations cannot authorize TTL actions."
+    },
+    {
+      "policy": "plan_memory_pressure",
+      "rationale": "The snapshot error and unknown host RAM prohibit inferring a safe hard-stop target."
+    },
+    {
+      "policy": "plan_pressure_sleep",
+      "rationale": "High observed external use on GPU1 does not authorize acting on stopped models or incomplete observations."
+    },
+    {
+      "policy": "plan_sleeping_recovery",
+      "rationale": "There is no captured sleeping source, and incomplete observations cannot justify recovery."
+    },
+    {
+      "policy": "reload_admission",
+      "rationale": "An empty action list is not reload permission: the collection-error blocker must remain present."
+    },
+    {
+      "policy": "plan_placement",
+      "request_from_model": "model-1",
+      "rationale": "Use only unchanged captured model metadata; missing budget and collection error do not justify a placement or eviction."
+    }
+  ],
+  "limits": [
+    "One current capture evaluated seven ways is not seven independent scenarios.",
+    "No policy was executed on the machine by this replay.",
+    "No recovered 2026-09-06 19:00 or 18:42 state exists here; historical #15/#18 acceptance remains open.",
+    "No one-week calibration, latency or production-activation claim."
+  ]
+}
