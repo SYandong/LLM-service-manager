@@ -79,11 +79,52 @@ serve proxy 的 SIGTERM 处理还会再次调用 sleep。源码未传 query `mod
 删除先确认路由移除，再由 core 保护检查后
 停止目标 unit，并确认其不存在；七天未用自动注销也要重新检查活动与保护。
 
-触发方式决策由 [#60](https://github.com/SYandong/LLM-service-manager/issues/60)
-关联 #20 跟踪；实际 `notify_reload` 实现 PR 必须同步权威 DESIGN §3 第 4 条
-并取得 Fable 当前 SHA 审核。可靠连续 quiet 数据源另由
-[#53](https://github.com/SYandong/LLM-service-manager/issues/53) 跟踪。本次局部
-YAML 修复不决定触发方式，也不授权启用写入。
+## reload 的采用与收尾契约
+
+关联 [#60](https://github.com/SYandong/LLM-service-manager/issues/60) / #20。
+本节供草稿设计 PR 审核，实际适配器实现和启用仍需独立验证及当前 SHA 的
+Fable 审核。可靠 quiet 来源的 [#53](https://github.com/SYandong/LLM-service-manager/issues/53)
+不因触发实验或字段解析修正而解决；本节不修改 DESIGN §3 第 2 条。
+
+| 证据 | 已支持的结论 | 不能推出的结论 |
+|---|---|---|
+| [#79 固定提交的测量](https://github.com/SYandong/LLM-service-manager/blob/a65d6f508ae28926546a28f192ff491af0d244f8/deploy/reload-results-20260908.json)：真实 v252 swap/wrapper、fake 有限流后端，4 条在途，单次 SIGHUP | abort 为 4 条截断；candidate wait 为 4 条完成；sleep 调用分别是 abort/abort 与 wait/abort | watcher-only、真实 vLLM、持续新到达请求的排除、可靠 quiet 或旧 server 退出已证明 |
+| #79 的 `adoption_seconds`，约 22 ms | 新模型标识在 `/v1/models` 可见的时间；该实例未启用 watcher | 原生 generation 采用证明、退出完成或真实中断窗口 |
+| ops 新 watcher/native-witness 实测 | 尚未交付到本草稿的测量，不作为已证明能力 | 不能以源码描述或自制响应补成实测成功 |
+
+**触发约定。** watcher-only 是对已有 `-watch-config` 部署的候选途径，不能
+用 #79 的 signal-only 实验冒充其验证。采用它必须先验证实际二进制、单一
+配置来源、实例身份、监视标志及 mtime/size 变化能触发观察；不支持或未知
+即拒绝落盘，不补 SIGHUP。signal-only 也只适用于经过验证且无 watcher 的
+隔离配置，不能据此切换生产模式。源码的两秒轮询不是采用耗时上限。
+
+**采用证据。** #60 早期提案的候选是通过 pinned v252 的活动配置读取接口
+回读独有 generation，并绑定精确候选文件摘要、前一代基线和服务实例身份。
+`config__get_config`/generation 字段的真实可用性、响应形状、截断及错误语义
+须由实际二进制测量确认；在确认前不把它列为可用生产接口，也不添加标识或
+更改配置来兜底。历史提案中的协议头和字段不是实测支持声明。模型名列表、
+构建版本、通用日志或 SSE 提示不足以证明该绑定。即使新配置可见，也不证明
+旧 server 已完成退出；没有独立收尾证据时，其状态仍为 unknown。
+
+**现有回调签名，待验证的实现。** `notify_reload(*, deadline)` 只在候选采用
+以及旧 server 收尾均已确认后返回；采用可见但退出未知必须抛错/超时，不能
+触发 `after_apply(*, deadline)` 或提前解除事务阻塞。后者调用 core 的
+`stop_model(name, *, deadline)` / `unit_absent(name, *, deadline)` 完成受保护的
+目标 unit 清理，不能拿新实例的 `/running` 空表替代旧实例的退出证明。
+`deadline = min(submitted_monotonic + 600, replacement_monotonic + operation_timeout)`；
+现有 operation_timeout 默认 10 秒、最大 60 秒，每次 I/O 必须受剩余时间约束。
+
+配置提交前发现未知能力则不写；提交后采用、退出或目标清理未知/失败/超时，
+保留 `.llmsvc-pending` 并进入 `reconciliation_required`，不重触发或盲目回滚。
+核对实例未更换、候选绑定、旧 server 收尾及目标 unit 清理后才可恢复；仅有
+磁盘摘要相等不足以清除标记。观测回调保持 #57 的非阻塞行为；等待采用时即使
+释放 action lock，也必须用明确的事务状态阻塞冲突写入，不能让新 pin 在旧
+server 仍可能 sleep 时生效。`dry_run` 不创建候选、generation 或恢复状态。
+
+验收须覆盖 watcher-only 与 signal-only 的隔离边界、同 mtime/size、原生
+接口不存在/响应错误/截断/旧值、实例重启、采用先于延迟或失败退出、deadline、
+恢复及 dry-run。ops 负责可执行证据；core/registry 根据获批设计实现适配器，
+不把本节或 fixture 的合并视为实现完成、生产启用或新的发布许可。
 
 `reload.py` 用同一 scheduler action lock 串行化最终校验与替换，要求连续
 5 秒零在途、事件流未断、无 awake pin、整批 awake 权重满足 RAM 准入。
