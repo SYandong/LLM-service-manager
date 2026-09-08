@@ -48,6 +48,7 @@ class Scheduler:
         self._events = deque(maxlen=config.event_history_size)
         self._next_event_id = 1
         self.stopping = threading.Event()
+        self.sample_requested = threading.Event()
         self._thread = None
         self._sample_started = 0
         self._sample_published = 0
@@ -337,13 +338,17 @@ class Scheduler:
                 self.emit("lease_reconcile_error", detail={"error_type": type(exc).__name__})
         return self.snapshot()
 
+    def request_sample(self):
+        """Wake the existing sampler; callers never wait for collector I/O here."""
+        self.sample_requested.set()
+
     def _run(self):
         while not self.stopping.is_set():
+            self.sample_requested.clear()
             started = time.monotonic()
             self.sample_once()
             delay = max(0.0, self.config.sample_interval_seconds - (time.monotonic() - started))
-            if self.stopping.wait(delay):
-                break
+            self.sample_requested.wait(delay)
 
     def start(self):
         with self.action_lock:
@@ -356,6 +361,7 @@ class Scheduler:
 
     def stop(self):
         self.stopping.set()
+        self.sample_requested.set()
         with self.changed:
             self.changed.notify_all()
         if self._thread is not None:

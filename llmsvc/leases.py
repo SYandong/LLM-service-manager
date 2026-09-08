@@ -1,5 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
-"""Opt-in persisted placement admission and bounded waits (no eviction executor)."""
+"""Opt-in placement leases with protected, observed victim execution."""
 
 import math
 import shlex
@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, replace
 
 from llmsvc.policy import plan_placement
 from llmsvc.scheduler import IntentWriteError
-from llmsvc.state import Blocker, Lease, ModelState
+from llmsvc.state import Blocker, Lease, ModelState, Pin
 from llmsvc.store import finite_positive, nonempty
 
 
@@ -80,6 +80,7 @@ class PlacementController:
         self.monotonic = monotonic
         self.probe = probe or LeaseUnitProbe(transport, monotonic=monotonic)
         self._reconcile_cursor = 0
+        self._configuration_alerts = set()
         self.recovered = {lease.lease_id for lease, _ in scheduler.store.leases()} if scheduler.store else set()
 
     @contextmanager
@@ -150,10 +151,36 @@ class PlacementController:
             pending_weight += amount
         if available - weight - pending_weight < snapshot.memory.host_min_available_gb:
             return None, (Blocker(request.name, "host_memory_floor"),)
-        decision = plan_placement(snapshot, request, waiting=waiting)
-        if any(action.kind != "place" for action in decision.actions):
-            return None, decision.blocked_by + (Blocker(request.name, "eviction_required", decision.gpu),)
-        return decision, decision.blocked_by
+        controller = self.scheduler.model_actions
+        enabled = self.scheduler.config.model_actions_enabled and controller is not None
+        guarded = {}
+        # An unleased daemon has no durable retained budget during uncertain exit.
+        # Adoption/orphan cleanup is a separate protocol, never a fabricated lease.
+        confirmed = {lease.model for lease in snapshot.leases if lease.status == "confirmed"}
+        models = []
+        for model in snapshot.models:
+            if model.name != request.name and model.state in ("awake", "sleeping"):
+                unit = self.transport.units.get(model.name)
+                if unit is None or model.unit != unit:
+                    guarded[model.name] = "unmanaged_or_changed_unit"
+                elif enabled and model.name not in confirmed:
+                    guarded[model.name] = "unleased_model"
+                elif enabled and controller.transport.units.get(model.name) != unit:
+                    guarded[model.name] = "action_unit_mismatch"
+                elif enabled and (model.name in controller.pending or controller.free_active):
+                    guarded[model.name] = "operation_in_progress"
+            models.append(replace(model, is_default=True)
+                          if self.transport.models.get(model.name, {}).get("is_default") is True else model)
+        protected = replace(snapshot, models=tuple(models), pins=snapshot.pins + tuple(
+            Pin(name, self.scheduler.clock()+self.scheduler.config.placement_wait_seconds+1, "placement_guard")
+            for name in guarded))
+        decision = plan_placement(protected, request, waiting=waiting)
+        blockers = tuple(replace(blocker, reason=guarded[blocker.model])
+                         if blocker.model in guarded and blocker.reason == "pinned_until" else blocker
+                         for blocker in decision.blocked_by)
+        if any(action.kind != "place" for action in decision.actions) and not enabled:
+            return None, blockers + (Blocker(request.name, "eviction_required", decision.gpu),)
+        return decision, blockers
 
     def preview(self, operation, payload):
         # Deliberately no collector, process probe, ID allocation, event or writer.
@@ -190,9 +217,8 @@ class PlacementController:
                     if any(lease.model == request.name for lease in current.leases if lease.status != "released"):
                         raise LeaseError(409, "outstanding_lease", (Blocker(request.name, "outstanding_lease"),))
                     decision, blockers = self._decision(current, request, waiting=waiting)
-                    if decision and decision.actions:
-                        # A short bounded existence probe is part of the final locked
-                        # admission, not a readiness wait. No unit start is issued here.
+                    action = decision.actions[0] if decision and decision.actions else None
+                    if action is not None and action.kind == "place":
                         observation = self._inspect(request.name, deadline)
                         if observation.exists is False and self.monotonic() < deadline:
                             lease = Lease(uuid.uuid4().hex, request.name, decision.gpu, payload["util"],
@@ -202,13 +228,83 @@ class PlacementController:
                             self.scheduler.emit("place", model=request.name, detail={**asdict(lease), "dry_run": False})
                             return {"gpu": lease.gpu, "lease_id": lease.lease_id}
                         blockers = (Blocker(request.name, "unit_exists" if observation.exists else "unit_state_unknown"),)
-                    self.scheduler.changed.wait(timeout=min(self.scheduler.config.action_poll_seconds,
-                                                           max(0, deadline - self.monotonic())))
-                    waiting = True
+                    elif action is not None:
+                        controller = self.scheduler.model_actions
+                        # Pure placement currently emits coalesced direct stops.
+                        # Never reinterpret a new policy action as a different effect.
+                        if action.kind != "stop":
+                            raise LeaseError(503, "placement_action_not_supported", (Blocker(action.model, action.kind),))
+                        account = next((lease for lease in current.leases
+                                        if lease.model == action.model and lease.status == "confirmed"), None)
+                        identity = self._inspect(action.model, deadline)
+                        if account is None or not identity.active or identity.lease_id != account.lease_id:
+                            raise LeaseError(503, "placement_action_blocked",
+                                             (Blocker(action.model, "unit_identity_unconfirmed", action.gpu),))
+                        controller.pending.add(action.model)
+                        failure = None
+                        from llmsvc.actions import ActionDispatchError
+                        try:
+                            controller.dispatcher.execute(action, dry_run=False, deadline=deadline)
+                        except ActionDispatchError as exc:
+                            failure = exc.reason
+                        except Exception:
+                            controller.pending.discard(action.model)
+                            raise
+                    if action is None or action.kind == "place":
+                        self.scheduler.changed.wait(timeout=min(self.scheduler.config.action_poll_seconds,
+                                                               max(0, deadline - self.monotonic())))
+                        waiting = True
+                        continue
+                # Only one chosen action was submitted. Release the action lock
+                # for sampling/reconciliation, then discard the old victim plan.
+                try:
+                    confirmed = self._observe_victim(action, min(deadline, self.monotonic()+self.scheduler.config.action_observe_seconds))
+                    self.scheduler.emit("placement_action_result", model=action.model,
+                        detail={"action": asdict(action), "confirmed": confirmed,
+                                "error": failure if failure else (None if confirmed else "exit_unconfirmed"),
+                                "dry_run": False})
+                    if failure or not confirmed:
+                        outcome = (Blocker(action.model, failure or "exit_unconfirmed", action.gpu),)
+                        if self.monotonic() >= deadline:
+                            raise LeaseError(409, "placement_timeout", outcome)
+                        raise LeaseError(503, "placement_action_failed" if failure else "placement_no_progress", outcome)
+                finally:
+                    with self.scheduler.changed:
+                        controller.pending.discard(action.model)
+                        self.scheduler.changed.notify_all()
+                # The next iteration revalidates policy, protection, RAM and all
+                # allocations before another action or the final durable grant.
         except LeaseError as exc:
             if exc.error != "placement_timeout":
                 raise
+            blockers = exc.blockers or blockers
         raise LeaseError(409, "placement_timeout", blockers)
+
+    def _observe_victim(self, action, deadline):
+        """Observe exit/account release in two newer rounds without blocking I/O.
+
+        Request work from the existing sampler; even a stuck collector cannot
+        stretch this resource wait or hold the global lock across readiness.
+        """
+        effect_seen_at = None
+        self.scheduler.request_sample()  # Recollect even after an uncertain late submission.
+        try:
+            while self.monotonic() < deadline and not self.scheduler.stopping.is_set():
+                self.scheduler.request_sample()
+                with self._locked(deadline):
+                    snapshot = self.scheduler.snapshot()
+                    active_account = any(lease.model == action.model and lease.status != "released" for lease in snapshot.leases)
+                    effect = (self._fresh(snapshot) and not active_account
+                              and self.scheduler.model_actions._effect(action, snapshot))
+                    if effect and effect_seen_at is not None and snapshot.sampled_at > effect_seen_at:
+                        return True
+                    effect_seen_at = snapshot.sampled_at if effect else None
+                    self.scheduler.changed.wait(timeout=min(self.scheduler.config.action_poll_seconds,
+                                                           max(0, deadline-self.monotonic())))
+        except LeaseError as exc:
+            if exc.error != "placement_timeout":
+                raise
+        return False
 
     def _healthy(self, lease, unit, observation):
         snapshot = self.scheduler._snapshot
@@ -229,6 +325,7 @@ class PlacementController:
         self.scheduler.emit("lease_" + status, model=lease.model,
                             detail={"lease_id": lease.lease_id, "status": status, "dry_run": False})
         self.recovered.discard(lease.lease_id)
+        self._configuration_alerts = {item for item in self._configuration_alerts if item[0] != lease.lease_id}
 
     def finish(self, operation, lease_id):
         self._enabled()
@@ -282,9 +379,24 @@ class PlacementController:
                 break
             with self._locked(deadline):
                 self._reconcile_cursor += 1
+                if self.scheduler.store.lease(lease.lease_id) != (lease, unit):
+                    continue
                 generation = self.scheduler._sample_published
-            if unit != self.transport.units.get(lease.model):
-                continue
+            configured_unit = self.transport.units.get(lease.model)
+            alert = (lease.lease_id, unit, configured_unit)
+            if unit != configured_unit:
+                with self._locked(deadline):
+                    if alert not in self._configuration_alerts:
+                        self.scheduler.emit("lease_configuration_required", model=lease.model,
+                            detail={"lease_id": lease.lease_id, "persisted_unit": unit,
+                                    "configured_unit": configured_unit,
+                                    "reason": "missing_or_changed_trusted_identity",
+                                    "next_action": "restore_verified_model_configuration",
+                                    "budget_retained": True})
+                        self._configuration_alerts.add(alert)
+                continue  # A persisted unit name does not authorize probing it.
+            with self._locked(deadline):
+                self._configuration_alerts = {item for item in self._configuration_alerts if item[0] != lease.lease_id}
             observation = self._inspect(lease.model, deadline)
             if self.monotonic() >= deadline:
                 break

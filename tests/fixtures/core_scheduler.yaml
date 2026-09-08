@@ -21,6 +21,7 @@ collectors: {}
 state_db_path: ""
 max_snapshot_age_seconds: 30
 # Model transports remain disabled separately from pin intent writes.
+# Also gates placement-victim stops when placement_enabled is explicitly true.
 # Isolated opt-in requires read_only: false and a populated collectors model/unit catalog.
 model_actions_enabled: false
 free_timeout_seconds: 120
