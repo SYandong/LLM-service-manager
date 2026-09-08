@@ -1,0 +1,89 @@
+{
+  "_comment": "Generated-By: Codex / gpt-6-astra. Permission proposal only; this file executes nothing. Existing install/rollback scripts must be previewed with --dry-run before approved actions. No production activation is granted by this proposal.",
+  "approval_status": "pending",
+  "container": "llmsvc",
+  "service": "llmsvc-scheduler.service",
+  "candidate_config": "deploy/scheduler.observation.yaml",
+  "candidate_settings": "deploy/deployment.example.json",
+  "listen_host": "127.0.0.1",
+  "listen_port": 8011,
+  "required_exec_flag": "--dry-run",
+  "read_only": true,
+  "state_db_path": "",
+  "initial_enable_on_boot": false,
+  "start_after_permission_argv": [
+    "systemctl",
+    "start",
+    "llmsvc-scheduler.service"
+  ],
+  "stop_own_observer_argv": [
+    "systemctl",
+    "stop",
+    "llmsvc-scheduler.service"
+  ],
+  "capture_interval_seconds": 15,
+  "day_observation_seconds": 86400,
+  "week_observation_seconds": 604800,
+  "start_preconditions": [
+    "Exact source/config hashes have current Fable approval and CI success; merged runtime prerequisites consumed",
+    "The scheduler unit, install destinations, capture resources and alternate port are unused or explicitly owned by this approved rollout",
+    "Verify these selected source/config/CLI/observation paths, private capture capacity and ownership before approval; cross-container shared-CLI delivery remains a separate acceptance check",
+    "Configured collectors are available; unavailable probes remain explicit; empty collectors are not a functioning observation deployment",
+    "Host-memory proposal is separately approved and verified before selecting its target for RAM-dependent decisions; otherwise host RAM remains null and previews stay blocked",
+    "Final permission covers this exact observer start and the concrete private capture schedule; no producer/timer is created by this proposal"
+  ],
+  "rollback_before_any_TTL_change": [
+    "For observation-only rollout, stop only its verified owned scheduler/capture resources and retain private evidence/backups; production TTL/reaper/launcher/config remain untouched",
+    "Executable production rollback remains mandatory before #11 TTL-to-zero or the first #19 configuration write; current rollback.sh --root / deliberately rejects execution",
+    "Before M2 activation, implement and rehearse each DESIGN7 step independently: stop/disable scheduler, restore reviewed launcher/reaper and timer, validate full saved config, guarded quiet/protection/RAM adoption, reconcile units and observe original TTL",
+    "Do not enable M2/M4 writes while comment-preserving YAML, watcher/adoption behavior, reliable quiet evidence, or executable rollback gates remain unresolved"
+  ],
+  "production_rollback_ready": false,
+  "model_actions_allowed": false,
+  "TTL_reaper_routing_changes_allowed": false,
+  "observer_started": false,
+  "source_checkout_path": "/opt/llmsvc-source",
+  "scheduler_config_path": "/etc/llmsvc/scheduler.yaml",
+  "capture_config_path": "/etc/llmsvc/capture.json",
+  "private_observation_directory": "/var/lib/llmsvc/observations",
+  "shared_cli_candidate_path": "/srv/llmsvc/llm",
+  "install_argv": [
+    "/opt/llmsvc-source/deploy/install.sh",
+    "--root",
+    "/",
+    "--settings",
+    "/opt/llmsvc-source/deploy/deployment.example.json",
+    "--source",
+    "/opt/llmsvc-source",
+    "--config",
+    "/opt/llmsvc-source/deploy/scheduler.observation.yaml"
+  ],
+  "capture_argv": [
+    "/usr/bin/python3",
+    "/opt/llmsvc-source/deploy/capture.py",
+    "--config",
+    "/etc/llmsvc/capture.json",
+    "--output-dir",
+    "/var/lib/llmsvc/observations"
+  ],
+  "capture_config": {
+    "timeout_seconds": 2,
+    "max_output_bytes": 262144,
+    "sources": [
+      {
+        "name": "scheduler-state",
+        "type": "http_json",
+        "url": "http://127.0.0.1:8011/v1/state"
+      }
+    ]
+  },
+  "capture_schedule_proposal": {
+    "service": "llmsvc-observation-capture.service",
+    "timer": "llmsvc-observation-capture.timer",
+    "on_unit_active_seconds": 15,
+    "runtime_max_seconds": 10,
+    "umask": "0077",
+    "enabled_on_boot": false,
+    "implementation_status": "not installed; reviewed unit rendering/install still required before final activation"
+  }
+}
