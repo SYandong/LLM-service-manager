@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0-alpha.4 — 2026-09-08
+## 0.1.0-alpha.4 — 2026-09-09
 
 Incremental preview; Python distribution `0.1.0a4`.
 Includes #114, #117, #118, #119 and #122 since the immutable alpha.3 tag.
