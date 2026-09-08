@@ -175,8 +175,9 @@ report it again. This event requires the separately reviewed
 merged #88 baseline can retain the allocation without this actionable notice.
 Absence of the new event is not proof that identity or accounting is safe.
 
-1. Retain the original schema-v2 SQLite ledger and its backup. Record the event
-   or observed blocker, lease ID, current state and last verified model
+1. Retain the complete current SQLite ledger and its backup (schema v2, or v3
+   after an actual fault claim; see the fault-fence restrictions below). Record
+   the event or observed blocker, lease ID, current state and last verified model
    configuration. Do not delete an active ledger, remove SQL rows, fabricate a
    tombstone, rename the unit to bypass checks or infer stop authority from the
    error.
@@ -223,6 +224,50 @@ placement only after proven absence, and read-only reconciliation with no probe,
 writer or recovery-event mutation. Offline fixtures establish those code paths;
 they are not live recovery evidence. This documentation does not close #93,
 #14 or the remaining reserve/victim/fault-recovery acceptance.
+
+## Fault fences and ledger rollback (#130)
+
+The [fault-recovery contract](../llmsvc/FAULTS.md) adds an independent,
+default-off fault opt-in; effects also require model actions and non-read-only
+operation. The first **actual fault claim** atomically migrates schema v2 to v3.
+Default-off/read-only startup and dry-run do not perform this fault migration.
+Older schema-v2 binaries reject v3. Restoring model metadata under #93 does not
+clear a fault fence or make an older binary compatible.
+
+Before a separately authorized rollout, retain a verified, consistent SQLite
+backup of the **whole ledger**, including allocations, pin intents and any
+pending fault claims. Use a SQLite-consistent backup, not a copy of only the
+main database file while a writer may hold newer WAL contents. Record the schema,
+runtime/configuration identity and backup digest. Preserve the current ledger
+and fences through any rollback assessment. An older-binary rollback needs the
+appropriate verified pre-migration backup **and** reconciliation of current
+resources, lease/unit identities and pending claims. A historical backup cannot
+represent later allocations or unsettled unloads: do not overwrite active
+accounting with it, delete rows/claims, change `user_version` or drop fault
+metadata. This version supplies no executable downgrade or SQL recovery remedy.
+
+A persisted claim blocks conflicting operations on its model even after the
+worker is disabled or restarted. Positive unit exit must precede account release;
+account release does not mean proxy cleanup or model recovery completed. Pin
+records remain intact. Restart does not replay an old stop against an active,
+unknown or changed unit. Retain the fence and any unreleased budget when identity
+or exit cannot be proved; inspection is not permission to stop a workload.
+
+Each claim permits **at most one unload submission**, with its durable marker
+written before HTTP. Submitted-but-unacknowledged work remains fenced after a
+crash (including before HTTP), timeout, rejected response or late response.
+Stopped snapshots alone cannot prove that request will not execute later. No
+resend, time-only recovery, force-clear endpoint or manual SQL remedy is provided;
+a separate positive-settlement/owner protocol is **not implemented**. A timely
+2xx acknowledgment is accepted only with current identity/configuration and
+valid opt-ins. An acknowledged claim may resume observation-only, requiring
+two fresh post-submission stopped observations plus positive unit-exit proofs
+and current identity checks before completion. HTTP 200 alone is insufficient.
+
+These are recovery limits, not authority to upgrade/migrate/restart/stop a
+service or activate an observer, production policy, TTL/reaper or host source.
+Live recovery latency and long-term stability/calibration are **NOT MEASURED**;
+bounded checks and deterministic replay carry no calendar-wait requirement.
 
 ## GPU smoke ownership
 
