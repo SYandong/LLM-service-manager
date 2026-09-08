@@ -40,7 +40,7 @@ def test_per_gpu_ttl_and_exclusive_index_are_configurable():
     assert plan_pressure_sleep(snapshot(model(gpu=0), idle=100), settings=config).actions
 
 
-@pytest.mark.parametrize("changes", [{"external_gb": 0.1}, {"free_gb": 9},
+@pytest.mark.parametrize("changes", [{"external_gb": 1}, {"free_gb": 9},
                                      {"external_processes": (GPUProcess(101, 0),)}])
 def test_any_external_process_or_low_free_triggers_before_ttl(changes):
     s = snapshot(model(), idle=5)
@@ -123,3 +123,19 @@ def test_snapshot_is_unchanged_and_repeatable():
     s = snapshot(model()); before = s.to_dict()
     assert plan_pressure_sleep(s) == plan_pressure_sleep(s)
     assert s.to_dict() == before
+
+
+@pytest.mark.parametrize("external_gb", [0, 5 / 1024, 0.1, 0.999])
+def test_subthreshold_unattributed_memory_does_not_trigger_pressure(external_gb):
+    # Includes the 5 MiB driver-residue example reported in Fable's review.
+    s = snapshot(model(), idle=5)
+    s = replace(s, gpus=(s.gpus[0], replace(s.gpus[1], external_gb=external_gb)))
+    assert not plan_pressure_sleep(s).actions
+
+
+@pytest.mark.parametrize("external_gb,expected", [(1.5, False), (2, True), (2.1, True)])
+def test_external_memory_pressure_uses_configured_threshold_including_equality(external_gb, expected):
+    s = snapshot(model(), idle=5)
+    s = replace(s, gpus=(s.gpus[0], replace(s.gpus[1], external_gb=external_gb)))
+    decision = plan_pressure_sleep(s, settings=PolicySettings(shared_external_threshold_gb=2))
+    assert bool(decision.actions) is expected

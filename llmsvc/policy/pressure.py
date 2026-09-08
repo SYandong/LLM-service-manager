@@ -30,7 +30,8 @@ def plan_pressure_sleep(
             p.block(model, "unknown_gpu_pressure")
             continue
         shared = gpu.index != settings.exclusive_gpu
-        pressure = shared and (bool(gpu.external_processes) or gpu.external_gb > 0 or
+        pressure = shared and (bool(gpu.external_processes) or
+                               gpu.external_gb >= settings.shared_external_threshold_gb or
                                gpu.free_gb < settings.shared_free_threshold_gb)
         activity = p.activity.get(model.name)
         if activity is None or not known_number(activity.last_request_at) or activity.last_request_at > snapshot.sampled_at:
