@@ -113,7 +113,7 @@ class SchedulerClient:
         self.timeout = positive_timeout(timeout)
         self.opener = opener or build_opener(NoRedirect()).open
 
-    def request(self, method, path, payload=None):
+    def request(self, method, path, payload=None, *, timeout=None):
         if not path.startswith("/v1/"):
             raise ClientError("Client requests must use scheduler /v1/ endpoints")
         data = None if payload is None else json.dumps(payload, allow_nan=False).encode("utf-8")
@@ -122,7 +122,7 @@ class SchedulerClient:
             headers={"Accept": "application/json", "Content-Type": "application/json"},
         )
         try:
-            with self.opener(request, timeout=self.timeout) as response:
+            with self.opener(request, timeout=self.timeout if timeout is None else positive_timeout(timeout)) as response:
                 raw = response.read(4 * 1024 * 1024 + 1)
             if len(raw) > 4 * 1024 * 1024:
                 raise ClientError("Scheduler response is too large")
@@ -541,6 +541,119 @@ def format_usage(result, width=100):
 PIN_COMPATIBILITY_LABEL = "llm-client"
 
 
+def memory_amount(value):
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(?:G|GiB)?", value)
+    if match is None or not math.isfinite(float(match[1])):
+        raise argparse.ArgumentTypeError("Memory must be nonnegative GiB, for example 80G")
+    return float(match[1])
+
+
+def gpu_index(value):
+    if not re.fullmatch(r"[0-9]+", value):
+        raise argparse.ArgumentTypeError("GPU must be a nonnegative integer")
+    return int(value)
+
+
+def action_timeout(value):
+    try:
+        return positive_timeout(value)
+    except ClientError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def validate_action_result(args, result):
+    def finite(value, nullable=False):
+        return (nullable and value is None) or (type(value) in (int, float) and math.isfinite(value) and value >= 0)
+
+    try:
+        if args.dry_run:
+            if not isinstance(result["would"], list) or not isinstance(result["blocked_by"], list):
+                raise ValueError
+            for item in result["would"]:
+                if not isinstance(item["kind"], str) or not isinstance(item["model"], str):
+                    raise ValueError
+            for item in result["blocked_by"]:
+                if not isinstance(item["reason"], str):
+                    raise ValueError
+            if "estimated_freed_gb" in result and not finite(result["estimated_freed_gb"]):
+                raise ValueError
+        elif args.command == "free":
+            if result["status"] not in ("complete", "blocked", "partial", "failed", "timeout", "no_progress"):
+                raise ValueError
+            for key in ("slept", "stopped"):
+                if not isinstance(result[key], list) or not all(isinstance(item, str) for item in result[key]):
+                    raise ValueError
+            if not isinstance(result["skipped"], list):
+                raise ValueError
+            for item in result["skipped"]:
+                if not isinstance(item["reason"], str):
+                    raise ValueError
+            expected = "net_host_available_gib" if args.ram else "net_gpu_free_gib"
+            if result["measurement"] != expected or type(result["measurement_complete"]) is not bool:
+                raise ValueError
+            if not finite(result["freed_gb"], True) or not finite(result["measured_at"], True):
+                raise ValueError
+            if (result["freed_gb"] is None) != (result["measured_at"] is None):
+                raise ValueError
+            if result["measurement_complete"] and result["freed_gb"] is None:
+                raise ValueError
+        else:
+            if result["model"] != args.model or result["status"] not in ("ready", "blocked", "failed", "partial", "timeout"):
+                raise ValueError
+            if type(result["ready"]) is not bool or type(result["cold_start"]) is not bool:
+                raise ValueError
+            if result["status"] == "ready" and not result["ready"]:
+                raise ValueError
+            if not finite(result["elapsed_seconds"]):
+                raise ValueError
+        if "error" in result and not isinstance(result["error"], str):
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        raise ClientError("Invalid %s response; outcome may be unknown. Check status/events before retrying" % args.command) from None
+    return result
+
+
+def format_action_result(args, result):
+    if args.dry_run:
+        lines = ["Dry run: no model actions or persistent writes"]
+        lines += ["Would: " + json.dumps(item, ensure_ascii=False, sort_keys=True) for item in result["would"]]
+        lines += ["Blocked: " + json.dumps(item, ensure_ascii=False, sort_keys=True) for item in result["blocked_by"]]
+        if "estimated_freed_gb" in result:
+            lines.append("Estimated release: %s GiB (policy estimate, not measured)" % result["estimated_freed_gb"])
+    elif args.command == "free":
+        lines = ["Free status: " + result["status"]]
+        quantity = "unknown" if result["freed_gb"] is None else "%s GiB" % result["freed_gb"]
+        metric = "host MemAvailable" if args.ram else "GPU free memory"
+        lines.append("Measured net %s change: %s" % (metric, quantity))
+        lines.append("Measurement complete: %s; sampled at: %s" % (
+            "yes" if result["measurement_complete"] else "no (not a final/current total)",
+            "unknown" if result["measured_at"] is None else str(result["measured_at"]) + " Unix seconds"))
+        lines.append("Net change includes external activity; it is not per-model attribution or reserved capacity")
+        for key in ("slept", "stopped"):
+            lines.append("%s: %s" % (key.capitalize(), ", ".join(result[key]) or "none"))
+        lines += ["Skipped: " + json.dumps(item, ensure_ascii=False, sort_keys=True) for item in result["skipped"]]
+    else:
+        lines = ["Wake %s status: %s" % (result["model"], result["status"]),
+                 "Ready: %s; cold start: %s; elapsed: %s seconds" % (
+                     "yes" if result["ready"] else "no", "yes" if result["cold_start"] else "no",
+                     result["elapsed_seconds"])]
+    if result.get("error"):
+        lines.append("Error: " + result["error"])
+    if result.get("error_model") is not None:
+        lines.append("Error model: " + str(result["error_model"]))
+    return "\n".join(clean_text(line) for line in lines)
+
+
+def result_exit_code(args, result):
+    if args.command == "usage":
+        return 0 if result["known"] else 1
+    if args.command in ("pin", "unpin", "free", "wake") and args.dry_run:
+        return 1 if result["blocked_by"] else 0
+    if args.command in ("free", "wake"):
+        return 0 if result["status"] == ("complete" if args.command == "free" else "ready") else 1
+    return 0
+
+
 def pin_duration(value):
     match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(s|m|h|d)", value)
     if match is None:
@@ -607,7 +720,7 @@ def build_parser(parser_class=argparse.ArgumentParser):
     parser.add_argument("--version", action="version", version="0.1.0a1")
     parser.add_argument("--url", help="Scheduler URL (overrides LLM_URL and config)")
     parser.add_argument("--config", help="Config file (default: ~/.config/llm/config)")
-    parser.add_argument("--timeout", help="HTTP timeout in seconds")
+    parser.add_argument("--timeout", help="HTTP timeout in seconds (free/wake use --wait instead)")
     commands = parser.add_subparsers(dest="command")
     status = commands.add_parser("status", help="Show GPU, memory and model status")
     status.add_argument("--json", action="store_true", help="Print the complete JSON snapshot")
@@ -623,10 +736,40 @@ def build_parser(parser_class=argparse.ArgumentParser):
                                 help="Required duration, for example 8h or 30m")
         intent.add_argument("--dry-run", action="store_true", help="Preview without changing any pin record")
         intent.add_argument("--json", action="store_true", help="Print the server response")
+    for command, wait in (("free", 150), ("wake", 930)):
+        action = commands.add_parser(command, help="Release eligible models" if command == "free" else "Wait for model readiness")
+        if command == "free":
+            action.add_argument("--gpu", type=gpu_index, help="GPU index (default: all observed GPUs)")
+            action.add_argument("--ram", action="store_true", help="Reclaim host RAM by stopping eligible models")
+            action.add_argument("--need", type=memory_amount, help="Additional GiB desired, for example 80G")
+        else:
+            action.add_argument("model", type=model_name)
+        action.add_argument("--wait", type=action_timeout, default=wait,
+                            help="HTTP response wait in seconds (default: %s); does not change server deadline" % wait)
+        action.add_argument("--dry-run", action="store_true", help="Preview without model actions or persistent writes")
+        action.add_argument("--json", action="store_true", help="Print the full server outcome, including partial failures")
     return parser
 
 
 def execute_command(args, client, *, now=None):
+    if args.command in ("free", "wake"):
+        query = "?dry_run=1" if args.dry_run else ""
+        if args.command == "free":
+            payload = {"ram": args.ram}
+            if args.gpu is not None:
+                payload["gpu"] = args.gpu
+            if args.need is not None:
+                payload["need_gb"] = args.need
+            path = "/v1/free"
+        else:
+            path, payload = "/v1/wake/" + quote(args.model, safe=""), None
+        try:
+            result = client.request("POST", path + query, payload, timeout=args.wait)
+        except ClientError as exc:
+            if exc.status is not None or args.dry_run:
+                raise
+            raise ClientError(str(exc) + "; outcome unknown: the server may still finish. Check status/events before retrying; no automatic retry") from None
+        return validate_action_result(args, result)
     if args.command in ("pin", "unpin"):
         query = "?dry_run=1" if args.dry_run else ""
         if args.command == "pin":
@@ -661,6 +804,8 @@ def format_result(args, result, width=100):
         return format_usage(result, width=width)
     if args.command in ("pin", "unpin"):
         return format_pin_result(args, result)
+    if args.command in ("free", "wake"):
+        return format_action_result(args, result)
     return format_status(result, width=width)
 
 
@@ -686,11 +831,7 @@ def main(argv=None):
         print(format_result(args, result, width=shutil.get_terminal_size((100, 30)).columns))
         if args.command is None:
             print("TUI: install with pip install 'llmsvc[tui]' and run llm in a terminal.")
-        if args.command == "usage" and not result["known"]:
-            return 1
-        if args.command in ("pin", "unpin") and args.dry_run and result["blocked_by"]:
-            return 1
-        return 0
+        return result_exit_code(args, result)
     except ClientError as exc:
         print("llm: " + clean_text(exc), file=sys.stderr)
         return 1

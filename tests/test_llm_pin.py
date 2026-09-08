@@ -81,7 +81,7 @@ def test_required_duration_parses_to_seconds(pin_api, duration, seconds):
     ["pin", "model"], ["pin", "model", "--for", "0h"], ["pin", "model", "--for", "-1h"],
     ["pin", "model", "--for", "nan"], ["pin", "model", "--for", "1e309h"],
     ["pin", "model", "--for", "8"], ["unpin", ""], ["unpin", "x\nheader"],
-    ["free"], ["reserve"], ["wake", "model"], ["add", "/tmp/model"], ["rm", "model"],
+    ["reserve"], ["add", "/tmp/model"], ["rm", "model"],
 ])
 def test_invalid_or_unavailable_commands_never_execute(pin_api, args):
     with pytest.raises(SystemExit) as exc:
