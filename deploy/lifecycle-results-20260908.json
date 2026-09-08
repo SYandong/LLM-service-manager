@@ -1,0 +1,81 @@
+{
+  "generated_by": "Codex / gpt-6-astra",
+  "scope": "direct cached-base collector lifecycle, not production launcher/LoRA",
+  "vllm_version": "0.28.0",
+  "base": "Qwen2.5 7B Instruct",
+  "parameters": {
+    "util": 0.2,
+    "dtype": "bfloat16",
+    "max_model_len": 512,
+    "max_num_seqs": 1,
+    "enforce_eager": true,
+    "sleep_level": 1,
+    "retry_flashinfer_sampler": false
+  },
+  "attempts": [
+    {
+      "started_at": "2026-09-08T07:01:03.226679+00:00",
+      "ended_at": "2026-09-08T07:01:47.046681+00:00",
+      "elapsed_seconds": 43.820002,
+      "result": "failed",
+      "observed_cold_start_seconds": null,
+      "states": [
+        {
+          "state": "stopped",
+          "resident_gb": null,
+          "unit_active": false,
+          "health_ok": null,
+          "is_sleeping": null
+        }
+      ],
+      "error": "SmokeError: test daemon exited during startup",
+      "lora_measured": false
+    },
+    {
+      "started_at": "2026-09-08T07:04:45.486562+00:00",
+      "ended_at": "2026-09-08T07:05:36.513394+00:00",
+      "elapsed_seconds": 51.026832,
+      "result": "passed",
+      "observed_cold_start_seconds": 36.26179623499047,
+      "states": [
+        {
+          "state": "awake",
+          "resident_gb": 28.43359375,
+          "unit_active": true,
+          "health_ok": true,
+          "is_sleeping": false
+        },
+        {
+          "state": "sleeping",
+          "resident_gb": 0.763671875,
+          "unit_active": true,
+          "health_ok": true,
+          "is_sleeping": true
+        },
+        {
+          "state": "awake",
+          "resident_gb": 28.412109375,
+          "unit_active": true,
+          "health_ok": true,
+          "is_sleeping": false
+        },
+        {
+          "state": "stopped",
+          "resident_gb": null,
+          "unit_active": false,
+          "health_ok": null,
+          "is_sleeping": null
+        }
+      ],
+      "error": null,
+      "lora_measured": false
+    }
+  ],
+  "post_cleanup": {
+    "gpu0_used_mib": 5,
+    "own_units_absent": true,
+    "own_ports_closed": true,
+    "own_temp_and_reaper_markers_absent": true,
+    "preexisting_gpu1_workload_preserved": true
+  }
+}
