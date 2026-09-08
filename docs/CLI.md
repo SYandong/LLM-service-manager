@@ -134,13 +134,21 @@ LLM_URL=http://scheduler:8011 python cli/llm
 - 实际 `free --ram` 先弹出二次确认，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。Free/wake 完成后立即刷新，部分结果与错误仍保留；后台执行期间 UI 与事件面板继续响应。
 - `reserve`、模型登记/删除尚未开放。不能用本客户端命令启用生产调度。
 
-### Scheduler 事件流
+### Scheduler 与数据面事件流
 
-事件读取在独立线程中进行，界面每 0.1 秒接收已到达的事件。日志按 UTC 时间排序并按事件种类着色，保留最近 200 条；单条可见文本最多 2048 字符。连接失败后以 1–30 秒退避重连，携带上次完整接收的 `since` / `Last-Event-ID`，重复事件不会再显示。退出界面会中断活动流并等待读取线程关闭。
+事件读取在独立线程中进行，界面每 0.1 秒接收已到达的事件。面板标题为 `Events via scheduler`；每行显示 UTC 时间、`[scheduler]` 或 `[llama-swap]` 来源、全局 scheduler 事件 ID 与详情。日志按 scheduler 时间戳/ID 排序并着色，保留最近 200 条；单条可见文本最多 2048 字符，原始字段仍保存在这 200 条本地历史中。连接失败后以 1–30 秒退避重连，携带上次完整接收的 `since` / `Last-Event-ID`，重复事件不会再显示。退出界面会中断活动流并等待读取线程关闭。
 
 当前 daemon 的事件历史有界且仅保存在内存中，游标不跨重启持久化。**确认 daemon 已重启后**按 `Ctrl+R`，仅在本地清空事件历史和游标，从 0 重新订阅。普通网络断线不会自动归零；当前接口没有可用于自动识别重启的实例标识。后端已淘汰的历史不能重建，ID 缺口会提示不可用事件数量；客户端 256 条投递队列超限也会明确提示丢失数量。
 
-当前面板只读取 scheduler 的 `/v1/events`，不直连 llama-swap。两来源合流仍等待 scheduler 的数据面事件转发接口；合成事件的显示时延测试不是实际 free 操作或双来源验收。
+客户端始终只读取 scheduler 的 `/v1/events`，不直连 llama-swap。已接入桥接的 scheduler 可在部署方显式配置 `data_plane_events_enabled` 后，通过同一个 SSE 流转发 llama-swap 的脱敏状态、聚合在途计数、连接与错误摘要。该开关默认关闭；客户端不会启用它。没有转发事件不代表上游没有活动。一个 scheduler 管理一个共享订阅，而不是为每个 TUI 重建数据面连接。
+
+- 数据面行保留 `source: llama-swap`、本地 `received_at` 和 `trusted_for_quiet: false`。蓝色 `data_plane_state` 是原始 starting/ready/stopping/stopped 摘要，**stopped 不代表 daemon 被硬停，也不证明显存或租约释放**；模型表只由 `/v1/state` 刷新。它们不能作为 reload/安静期的可信证据。
+- `data_plane_dropped` 的黄色行显示本地条目丢弃计数及分项原因，明确上游丢失未知。`unlisted_model` 是允许列表之外模型的有意过滤；每次快照可能再次计数。`invalid_event` 包括模型负载或流的 framing/schema 错误；`buffer_full` 是本地缓冲容量；`limit_exceeded` 是本地来源限制。保留各自计数，不将过滤数叫做网络/传输丢失。
+- 面板底部的 scheduler 历史缺口和客户端投递队列溢出提示仍单独计数，不与上述 relay 计数合并。上游 v252 丢失没有可测总量；本地接收/发布顺序也不是分布式时钟的全局顺序保证。
+- 转发不包含请求正文、请求 ID、header/IP、模型显示名、原始异常或 logData。冷启动原始日志流仍不是本接口的交付内容。
+- 关闭 TUI 只关闭自己的 scheduler SSE 读线程；daemon 负责共享数据面订阅与桥接生命周期。scheduler 正常停止时，客户端可接收其已成功发布的最后批次；忙锁导致仅写 journal 的未发布条目或断线期间无法投递的条目，不会被客户端声称收到。
+
+CPU loopback 测试验证了两个来源从实际 HTTP、bridge、SSE 到 headless UI 的路径和清理；它不是生产 free 操作的一秒显示延迟证据。#23 的真实延迟及完整集成验收仍保持独立，桥接发布不授权 observer 或生产启用。
 
 ## 开发与验证
 
@@ -149,7 +157,7 @@ LLM_URL=http://scheduler:8011 python cli/llm
 ```sh
 python -m pytest -q tests/test_llm.py
 python -m pytest -q tests/test_llm_tui.py tests/test_tui.py
-python -m pytest -q tests/test_llm_events.py tests/test_tui_events.py
+python -m pytest -q tests/test_llm_events.py tests/test_tui_events.py tests/test_tui_relay.py
 python -m pytest -q tests/test_llm_usage.py tests/test_tui_usage.py
 python -m pytest -q tests/test_llm_pin.py tests/test_tui_pin.py
 python -m pytest -q tests/test_llm_actions.py tests/test_tui_actions.py

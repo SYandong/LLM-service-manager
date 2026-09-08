@@ -135,7 +135,7 @@ class SchedulerApp(App):
         with Horizontal(id="content"):
             yield DataTable(id="models", cursor_type="row")
             with Vertical(id="event-panel"):
-                yield Static("Scheduler events (last 200)", id="event-title", markup=False)
+                yield Static("Events via scheduler (last 200)", id="event-title", markup=False)
                 yield RichLog(id="events", max_lines=500, wrap=True, markup=False, highlight=False)
                 yield Static("SSE connecting", id="event-status", markup=False)
         with Vertical(id="usage-view"):
@@ -516,29 +516,47 @@ class SchedulerApp(App):
         log = self._event_log
         log.clear()
         for item in self.event_history:
-            kind = item["kind"]
-            color = "white"
-            if "error" in kind or "fail" in kind:
-                color = "bright_red"
-            elif kind in ("stop", "stopped"):
-                color = "red"
-            elif "evict" in kind:
-                color = "magenta"
-            elif "sleep" in kind:
+            log.write(self.format_event(item))
+
+    def format_event(self, item):
+        kind = item["kind"]
+        detail = item.get("detail", {})
+        relayed = (kind.startswith("data_plane_") and isinstance(detail, dict)
+                   and detail.get("source") == "llama-swap")
+        color, note = "white", ""
+        if relayed:
+            color = "bright_red" if kind == "data_plane_error" else "blue"
+            if kind == "data_plane_state":
+                note = "data-plane state only; not a daemon stop or resource release"
+            elif kind == "data_plane_dropped":
                 color = "yellow"
-            elif "pin" in kind or "reserve" in kind:
-                color = "cyan"
-            elif "load" in kind or "wake" in kind:
-                color = "green"
-            try:
-                timestamp = datetime.fromtimestamp(item["timestamp"], timezone.utc).strftime("%H:%M:%S")
-            except (ValueError, OverflowError, OSError):
-                timestamp = "?"
-            detail = json.dumps(item.get("detail", {}), ensure_ascii=False, sort_keys=True)
-            line = "%s %s %s %s" % (timestamp, kind, item.get("model") or "", detail)
-            if len(line) > 2048:
-                line = line[:2048] + " …"
-            log.write(Text(self.api.clean_text(line), style=color))
+                note = ("local relay discard counts; upstream loss unknown; "
+                        "unlisted_model=intentional filtering; "
+                        "invalid_event=payload/framing/schema; "
+                        "buffer_full=local buffer capacity; limit_exceeded=local source bound")
+        elif "error" in kind or "fail" in kind:
+            color = "bright_red"
+        elif kind in ("stop", "stopped"):
+            color = "red"
+        elif "evict" in kind:
+            color = "magenta"
+        elif "sleep" in kind:
+            color = "yellow"
+        elif "pin" in kind or "reserve" in kind:
+            color = "cyan"
+        elif "load" in kind or "wake" in kind:
+            color = "green"
+        try:
+            timestamp = datetime.fromtimestamp(item["timestamp"], timezone.utc).strftime("%H:%M:%S")
+        except (ValueError, OverflowError, OSError):
+            timestamp = "?"
+        payload = json.dumps(detail, ensure_ascii=False, sort_keys=True)
+        line = "%s [%s] #%s %s %s %s %s" % (
+            timestamp, "llama-swap" if relayed else "scheduler", item["id"],
+            kind, item.get("model") or "", note, payload)
+        if len(line) > 2048:
+            line = line[:2048] + " …"
+        return Text(self.api.clean_text(line), style=color)
 
     def on_input_submitted(self, event):
         try:
