@@ -32,11 +32,22 @@ class FakeClient:
         return self.snapshot
 
 
+class IdleEvents:
+    def start(self):
+        pass
+
+    def close(self):
+        return True
+
+    def drain(self):
+        return {"generation": 0, "events": [], "status": "SSE fixture", "dropped": 0}
+
+
 def make_app(snapshot):
     path = Path(__file__).resolve().parents[1] / "cli" / "llm"
     api = SimpleNamespace(**runpy.run_path(str(path)))
     client = FakeClient(snapshot)
-    return SchedulerApp(client, api), client
+    return SchedulerApp(client, api, event_reader=IdleEvents()), client
 
 
 @pytest.mark.parametrize("size", [(100, 30), (60, 24), (40, 24)])
@@ -53,6 +64,12 @@ def test_layout_and_selection(snapshot, size):
             assert command.region.bottom <= size[1]
             assert command.region.width <= size[0]
             assert table.region.bottom <= app.query_one("#details").region.y
+            panel = app.query_one("#event-panel")
+            if size[0] < 100:
+                assert panel.region.y >= table.region.bottom
+            else:
+                assert panel.region.x >= table.region.right
+            assert panel.region.bottom <= app.query_one("#details").region.y
             assert app.screen.has_class("narrow") == (size[0] < 100)
             await pilot.press("down")
             assert app.selected_model() == "research-model"
