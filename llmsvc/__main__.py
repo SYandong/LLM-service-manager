@@ -18,10 +18,31 @@ def build_collector(config):
         return None
     # The telemetry lane owns this adapter and its probe configuration.
     from llmsvc.collectors import build_collector as factory
-    collector = factory(config.collectors)
+    options = {**config.collectors, "memory_budget_gb": config.memory_budget_gb,
+               "host_min_available_gb": config.host_min_available_gb}
+    collector = factory(options)
     if not callable(collector):
+        close = getattr(collector, "close", None)
+        if close is not None:
+            close()
         raise TypeError("collector factory must return a callable")
     return collector
+
+
+
+def build_usage(collector):
+    reader = getattr(collector, "activity_reader", None)
+    if reader is None:
+        return None
+
+    def usage(*, days, by):
+        from llmsvc.activity import ActivityReader
+        # ActivityReader.last_error is mutable. A request-local reader prevents
+        # HTTP queries from overwriting the sampler's activity error signal.
+        request_reader = ActivityReader(reader.path, reader.ip_containers, reader.deadline_ms)
+        return request_reader.usage(days=days, by=by)
+
+    return usage
 
 
 def main():
@@ -35,17 +56,23 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     try:
         config = load_config(args.config)
-        if args.check_config:
-            return 0
-        scheduler = Scheduler(config, collect=build_collector(config))
+        collector = build_collector(config)
+        scheduler = Scheduler(config, collect=collector, usage=build_usage(collector))
     except (OSError, ValueError, TypeError, ImportError) as exc:
         parser.error(str(exc))
+    if args.check_config:
+        scheduler.stop()
+        return 0
     if args.once:
-        print(json.dumps(scheduler.sample_once().to_dict(), allow_nan=False))
+        try:
+            print(json.dumps(scheduler.sample_once().to_dict(), allow_nan=False))
+        finally:
+            scheduler.stop()
         return 0
     try:
         server = SchedulerHTTPServer((config.listen_host, config.listen_port), scheduler)
     except OSError as exc:
+        scheduler.stop()
         parser.error(str(exc))
     # Signal handlers only notify. HTTP shutdown must run outside serve_forever.
     exit_requested = threading.Event()
