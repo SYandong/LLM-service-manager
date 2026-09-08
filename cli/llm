@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import sys
@@ -20,7 +21,7 @@ import time
 from types import SimpleNamespace
 import unicodedata
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
@@ -537,6 +538,70 @@ def format_usage(result, width=100):
     return "\n".join(part for line in lines for part in wrap_line(line, width))
 
 
+PIN_COMPATIBILITY_LABEL = "llm-client"
+
+
+def pin_duration(value):
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)(s|m|h|d)", value)
+    if match is None:
+        raise argparse.ArgumentTypeError("Duration requires a positive value and s/m/h/d, for example 8h")
+    seconds = float(match[1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[match[2]]
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("Duration must be positive and finite")
+    return seconds
+
+
+def model_name(value):
+    if not value.strip() or any(unicodedata.category(ch).startswith("C") for ch in value):
+        raise argparse.ArgumentTypeError("Model name must be nonempty and contain no control characters")
+    return value
+
+
+def validate_pin_result(args, result):
+    try:
+        if args.dry_run:
+            if not isinstance(result["would"], list) or not isinstance(result["blocked_by"], list):
+                raise ValueError
+            for item in result["would"]:
+                if item["kind"] != args.command or item["model"] != args.model:
+                    raise ValueError
+                if args.command == "pin":
+                    if type(item["until"]) not in (int, float) or not math.isfinite(item["until"]):
+                        raise ValueError
+                    datetime.fromtimestamp(item["until"], timezone.utc)
+            for item in result["blocked_by"]:
+                if not isinstance(item["reason"], str):
+                    raise ValueError
+            return result
+        if result["model"] != args.model or not isinstance(result["by"], str) or not result["by"].strip():
+            raise ValueError
+        if args.command == "pin":
+            until = result["until"]
+            if type(until) not in (int, float) or not math.isfinite(until):
+                raise ValueError
+            datetime.fromtimestamp(until, timezone.utc)
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        raise ClientError("Invalid pin response; check status before retrying the request") from None
+    return result
+
+
+def format_pin_result(args, result):
+    if args.dry_run:
+        lines = ["Dry run: pin records unchanged; preview labels are hypothetical"]
+        for item in result["would"]:
+            line = "Would %s %s" % (item["kind"], item["model"])
+            if item.get("until") is not None:
+                line += " until " + datetime.fromtimestamp(item["until"], timezone.utc).isoformat()
+            lines.append(line)
+        for blocker in result["blocked_by"]:
+            lines.append("Blocked %s: %s" % (blocker.get("model") or "request", blocker["reason"]))
+        return "\n".join(clean_text(line) for line in lines)
+    if args.command == "pin":
+        return clean_text("Pin recorded for %s until %s; owner %s" % (
+            result["model"], datetime.fromtimestamp(result["until"], timezone.utc).isoformat(), result["by"]))
+    return clean_text("Unpinned %s; actor %s" % (result["model"], result["by"]))
+
+
 def build_parser(parser_class=argparse.ArgumentParser):
     parser = parser_class(prog="llm", description="Inspect the LLM scheduler")
     parser.add_argument("--version", action="version", version="0.1.0")
@@ -550,10 +615,34 @@ def build_parser(parser_class=argparse.ArgumentParser):
     usage.add_argument("--days", type=int, choices=(7, 30), default=7, help="Usage window (default: 7)")
     usage.add_argument("--by", choices=("container", "ip", "model"), default="container")
     usage.add_argument("--json", action="store_true", help="Print the complete usage response")
+    for command in ("pin", "unpin"):
+        intent = commands.add_parser(command, help="Set pin expiry" if command == "pin" else "Remove a pin record")
+        intent.add_argument("model", type=model_name)
+        if command == "pin":
+            intent.add_argument("--for", dest="duration", required=True, type=pin_duration,
+                                help="Required duration, for example 8h or 30m")
+        intent.add_argument("--dry-run", action="store_true", help="Preview without changing any pin record")
+        intent.add_argument("--json", action="store_true", help="Print the server response")
     return parser
 
 
-def execute_command(args, client):
+def execute_command(args, client, *, now=None):
+    if args.command in ("pin", "unpin"):
+        query = "?dry_run=1" if args.dry_run else ""
+        if args.command == "pin":
+            now = time.time() if now is None else now
+            until = now + args.duration
+            try:
+                if not math.isfinite(until) or until <= now:
+                    raise ValueError
+                datetime.fromtimestamp(until, timezone.utc)
+            except (ValueError, OverflowError, OSError):
+                raise ClientError("Pin expiry is outside the supported future UTC range") from None
+            result = client.request("POST", "/v1/pin" + query,
+                                    {"model": args.model, "until": until, "by": PIN_COMPATIBILITY_LABEL})
+        else:
+            result = client.request("DELETE", "/v1/pin/" + quote(args.model, safe="") + query)
+        return validate_pin_result(args, result)
     if args.command == "usage":
         try:
             result = client.request("GET", "/v1/usage?days=%s&by=%s" % (args.days, args.by))
@@ -570,6 +659,8 @@ def format_result(args, result, width=100):
         return json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
     if args.command == "usage":
         return format_usage(result, width=width)
+    if args.command in ("pin", "unpin"):
+        return format_pin_result(args, result)
     return format_status(result, width=width)
 
 
@@ -595,7 +686,11 @@ def main(argv=None):
         print(format_result(args, result, width=shutil.get_terminal_size((100, 30)).columns))
         if args.command is None:
             print("TUI: install with pip install 'llmsvc[tui]' and run llm in a terminal.")
-        return 1 if args.command == "usage" and not result["known"] else 0
+        if args.command == "usage" and not result["known"]:
+            return 1
+        if args.command in ("pin", "unpin") and args.dry_run and result["blocked_by"]:
+            return 1
+        return 0
     except ClientError as exc:
         print("llm: " + clean_text(exc), file=sys.stderr)
         return 1

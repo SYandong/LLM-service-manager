@@ -129,7 +129,7 @@ def test_resize_preserves_selection(snapshot):
             await pilot.pause()
             assert app.screen.has_class("narrow")
             assert app.selected_model() == "research-model"
-            assert len(app.query_one("#models", DataTable).columns) == 4
+            assert len(app.query_one("#models", DataTable).columns) == 5
     asyncio.run(scenario())
 
 

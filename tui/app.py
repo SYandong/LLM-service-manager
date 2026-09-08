@@ -1,5 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
-"""Read-only scheduler dashboard; command semantics come from the standalone CLI."""
+"""Scheduler dashboard; command semantics come from the standalone CLI."""
 
 import argparse
 import asyncio
@@ -68,6 +68,8 @@ class SchedulerApp(App):
         self.api = api
         self.snapshot = None
         self.fetching = False
+        self._pin_busy = False
+        self._state_generation = 0
         self.model_names = []
         self.terminal_width = 100
         self.event_reader = event_reader if event_reader is not None else api.EventReader(client)
@@ -103,8 +105,8 @@ class SchedulerApp(App):
         with VerticalScroll(id="details-view"):
             yield Static("Select a model with ↑/↓", id="details", markup=False)
         with VerticalScroll(id="result-view"):
-            yield Static("Read-only · refresh every 5 seconds", id="result", markup=False)
-        yield Input(placeholder="status | usage --days 30 | --help", id="command")
+            yield Static("Status · refresh every 5 seconds", id="result", markup=False)
+        yield Input(placeholder="status | pin MODEL --for 8h | usage --days 30", id="command")
         yield Footer()
 
     def on_mount(self):
@@ -135,13 +137,14 @@ class SchedulerApp(App):
     @work
     async def refresh_state(self, args=None):
         # A slow HTTP request must not start overlapping polls or freeze keyboard input.
-        if not self.is_running or self.fetching:
+        if not self.is_running or self.fetching or self._pin_busy:
             return
         self.fetching = True
+        generation = self._state_generation
         try:
             args = args or self.api.build_parser(UIParser).parse_args(["status"])
             snapshot = await asyncio.to_thread(self.api.execute_command, args, self.client)
-            if not self.is_running:
+            if not self.is_running or generation != self._state_generation:
                 return
             # Validate the shared response before replacing the last good display.
             self.api.format_status(snapshot)
@@ -151,17 +154,57 @@ class SchedulerApp(App):
                 message = json.dumps(snapshot, ensure_ascii=False)
             else:
                 errors = snapshot.get("errors", [])
-                message = "Updated · " + ("; ".join(errors) if errors else "read-only")
+                message = "Updated" + (" · " + "; ".join(errors) if errors else
+                                       " · read-only" if snapshot.get("read_only") else "")
             if not self.usage_active:
                 self.show_result(message)
         except Exception as exc:
-            if self.is_running and not self.usage_active:
+            if self.is_running and not self.usage_active and generation == self._state_generation:
                 self.show_result("Refresh failed; last snapshot retained: " + str(exc))
         finally:
             self.fetching = False
 
     def action_refresh_state(self):
         self.refresh_current()
+
+    @work
+    async def run_pin(self, args):
+        if not self.is_running:
+            return
+        if self._pin_busy:
+            self.show_result("A pin/unpin request is already running; wait for its result")
+            return
+        self._pin_busy = True
+        self._state_generation += 1
+        self.usage_active = False
+        self.usage_generation += 1
+        self.screen.remove_class("usage")
+        self.show_result("%s request in progress…" % args.command.capitalize())
+        try:
+            result = await asyncio.to_thread(self.api.execute_command, args, self.client)
+            if not self.is_running:
+                return
+            message = self.api.format_result(args, result, width=self.terminal_width)
+            try:
+                status_args = self.api.build_parser(UIParser).parse_args(["status"])
+                snapshot = await asyncio.to_thread(self.api.execute_command, status_args, self.client)
+                if not self.is_running:
+                    return
+                self.api.format_status(snapshot)
+                self.snapshot = snapshot
+                self.render_snapshot()
+                if args.model in self.model_names:
+                    self.query_one("#models", DataTable).move_cursor(row=self.model_names.index(args.model))
+                    self.update_details()
+            except Exception as exc:
+                message += "\nState refresh failed: " + str(exc)
+            if self.is_running:
+                self.show_result(message)
+        except Exception as exc:
+            if self.is_running:
+                self.show_result("%s request failed: %s" % (args.command, exc))
+        finally:
+            self._pin_busy = False
 
     def refresh_current(self):
         if self.usage_active:
@@ -265,8 +308,10 @@ class SchedulerApp(App):
         table.clear(columns=True)
         table_width = self.terminal_width if self.terminal_width < 100 else int(self.terminal_width * 0.6)
         narrow = table_width < 100
-        columns = [("MODEL", max(8, min(22, table_width - 27))), ("STATE", 8), ("GPU", 3), ("MEM", 6)]
-        if not narrow:
+        columns = [("MODEL", max(8, min(22, table_width - (33 if narrow else 27)))), ("STATE", 8), ("GPU", 3), ("MEM", 6)]
+        if narrow:
+            columns.append(("PIN", 3))
+        else:
             columns.extend([("USED", 6), ("10m", 4), ("FROM", 10), ("PIN", 16)])
         for label, width in columns:
             table.add_column(label, width=width)
@@ -281,7 +326,9 @@ class SchedulerApp(App):
             label = self.api.fit(name, columns[0][1] - 2).rstrip() + " *" if model.get("is_default") else name
             row = [label, model.get("state", "unknown"), "-" if model.get("gpu") is None else str(model["gpu"]),
                    self.api.number(model.get("resident_gb")) + "G"]
-            if not narrow:
+            if narrow:
+                row.append("yes" if pin else "-")
+            else:
                 used = None if now is None or stats.get("last_request_at") is None else now - stats["last_request_at"]
                 row.extend([self.api.age(used), "?" if stats.get("requests_last_10m") is None else str(stats["requests_last_10m"]),
                             ",".join(stats.get("by", [])) or "-", self.api.expiry(pin["until"]) if pin else "-"])
@@ -317,7 +364,7 @@ class SchedulerApp(App):
         self.query_one("#command", Input).focus()
 
     def action_help(self):
-        self.show_result("status [--json] · usage --days 7|30 [--by container|ip|model] · u toggle usage · r refresh · / command · Ctrl+R reset events after a known restart · q quit")
+        self.show_result("pin MODEL --for 8h [--dry-run] · unpin MODEL [--dry-run] · status · usage --days 7|30 · u toggle usage · r refresh · / command · Ctrl+R reset events after a known restart · q quit")
 
     def action_reset_events(self):
         self.event_reader.reset_cursor()
@@ -381,6 +428,8 @@ class SchedulerApp(App):
                 raise CommandMessage("Connection settings are fixed for this session; restart llm to change them")
             if args.command == "usage":
                 self.show_usage(args)
+            elif args.command in ("pin", "unpin"):
+                self.run_pin(args)
             else:
                 self.usage_active = False
                 self.usage_generation += 1
