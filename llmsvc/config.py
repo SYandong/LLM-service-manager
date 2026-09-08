@@ -22,6 +22,8 @@ class SchedulerConfig:
     host_min_available_gb: float = 150.0
     read_only: bool = True
     collectors: dict[str, Any] = field(default_factory=dict)
+    state_db_path: str = ""
+    max_snapshot_age_seconds: float = 30.0
 
     def __post_init__(self):
         try:
@@ -35,7 +37,8 @@ class SchedulerConfig:
         if type(self.event_history_size) is not int or self.event_history_size < 1:
             raise ValueError("event_history_size must be a positive integer")
         for name in ("sample_interval_seconds", "event_heartbeat_seconds",
-                     "request_timeout_seconds", "memory_budget_gb", "host_min_available_gb"):
+                     "request_timeout_seconds", "memory_budget_gb", "host_min_available_gb",
+                     "max_snapshot_age_seconds"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (float, int)):
                 raise ValueError(f"{name} must be a finite positive number")
@@ -43,6 +46,8 @@ class SchedulerConfig:
                 raise ValueError(f"{name} must be a finite positive number")
         if self.read_only is not True:
             raise ValueError("M1 only supports read_only: true")
+        if not isinstance(self.state_db_path, str):
+            raise ValueError("state_db_path must be a string")
         if not isinstance(self.collectors, dict):
             raise ValueError("collectors must be a mapping")
 
