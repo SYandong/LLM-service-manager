@@ -1,0 +1,9 @@
+# Generated-By: Codex / gpt-6-astra
+# Illustration of PER-MODEL keys, not a replacement for an existing full config.
+# Use prepare on a verified full config copy. Keep model commands/proxies/TTL intact.
+# 64 is the proposed admission floor for a32-client batch, not vLLM throughput proof.
+models:
+  example-a:
+    concurrencyLimit: 64
+  example-b:
+    concurrencyLimit: 64
