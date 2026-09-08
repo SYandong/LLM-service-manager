@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.1.0-alpha.5 — 2026-09-09
+
+Incremental preview; Python distribution `0.1.0a5`.
+Includes #123, #126, #128, #129 and #131 since the immutable alpha.4 tag.
+
+### Added and corrected
+
+- Optional per-GPU pressure/idle cycles (#126) retain the default fixed-idle
+  policy, prioritize memory pressure and select exactly one TTL planner. The
+  candidate exclusive/shared thresholds are configurable, not calibrated facts.
+- Default-off recovery for proven managed faults (#131) binds fresh bounded
+  observations to confirmed lease/unit/incarnation identity. A durable claim
+  precedes stop; positive exit proof precedes atomic account release. Pins and
+  ordinary healthy-model protections remain intact. Restart does not replay
+  stale stops, and the retained claim blocks conflicting same-model operations.
+- The free-controller adapter now uses explicit eligibility exclusions (#129),
+  retaining real user-pin provenance and independent exclusion reasons.
+- A held 32-client CPU harness and per-model concurrency configuration guidance
+  (#123) distinguish admitted streams from reused slots. These fixtures do not
+  establish real vLLM throughput or authorize live configuration changes.
+- Victim-fixture setup receives functional timing headroom before its initial
+  grant (#128), with setup diagnostics and explicit busy/idle event barriers.
+  Production deadlines and dedicated short-deadline negative tests are unchanged;
+  the historical CI scheduling delay was not measured.
+
+### Compatibility and limits
+
+No new dependency. Existing read-only and independent action/automation gates
+remain. Fault recovery additionally requires its own explicit opt-in. Its 1 Hz
+worker requests the whole existing sampler: confirm actual collection rounds
+remain reliably below 2 seconds before separately authorized activation. Slow
+or gapped evidence resets recovery decisions; the increased probe load is not
+proof of source continuity or reliable quiet.
+
+The first actual fault claim lazily and atomically migrates the ledger from v2
+to v3. Default-off/read-only startup and dry-run do not perform this migration.
+Older v2 binaries reject v3. Preserve the complete ledger, pins and pending
+claims plus a consistent backup; rollback requires current-resource/identity
+reconciliation. Never overwrite active accounting with a stale backup or remove
+claim rows to bypass a fence. See [fault rollback guidance](docs/OPERATIONS.md#fault-fences-and-ledger-rollback-130).
+
+Each claim submits unload at most once, with a durable marker before HTTP.
+Timely, identity-checked 2xx acknowledgment still requires two fresh stopped/exit
+observations. Unacknowledged, crashed, rejected or timed-out submissions retain
+the model fence across restart/disable: this version supplies no forced-clear,
+retry-based recovery or positive-settlement/owner protocol. Availability may
+remain blocked even after the old process exits; HTTP 200 alone is not recovery.
+
+Actual live fault recovery, per-GPU response latency and long-term stability/
+calibration are **NOT MEASURED**. Bounded tests replace calendar waits, not proof.
+Orphan adoption, relocation, reliable quiet/adoption/settlement, host-source
+configuration, LoRA and operational/owner acceptance remain separate work.
+This release performs no production migration, routing, TTL/reaper replacement,
+host bind, observer or model action and does not complete a milestone.
+
 ## 0.1.0-alpha.4 — 2026-09-09
 
 Incremental preview; Python distribution `0.1.0a4`.
