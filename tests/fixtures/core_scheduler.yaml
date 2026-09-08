@@ -27,3 +27,12 @@ free_timeout_seconds: 120
 wake_timeout_seconds: 900
 action_observe_seconds: 10
 action_poll_seconds: 0.2
+
+# Placement is a separate opt-in; existing pin/free/wake installs do not enable it.
+# Requires trusted collectors.models weights/util, host memory and a writable state_db_path.
+placement_enabled: false
+placement_wait_seconds: 120
+# Match the launcher's startup timeout (15 minutes by default).
+lease_timeout_seconds: 900
+# Per-inspection cap and per-round reconciliation budget; every probe is read-only.
+lease_probe_seconds: 1

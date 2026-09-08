@@ -35,6 +35,7 @@ class Scheduler:
         self.config = config
         self.collect = collect
         self.model_actions = None
+        self.placement = None
         self._usage = usage
         self._collector_closed = False
         # One lock for action/accounting and publication. Slow read-only probes
@@ -64,6 +65,8 @@ class Scheduler:
                 try:
                     pins, reserves = self.store.active(self.clock())
                     snapshot = replace(snapshot, pins=pins, reserves=reserves)
+                    from llmsvc.leases import accounting_snapshot
+                    snapshot = accounting_snapshot(snapshot, self.store.leases())
                 except Exception:
                     snapshot = replace(snapshot, errors=snapshot.errors + ("intent_store_unavailable",))
             return snapshot
@@ -71,6 +74,12 @@ class Scheduler:
 
     def preview(self, operation: str, payload: dict) -> dict:
         """Pure policy/intent preview; no executor, event append or store writer."""
+        if operation in ("place", "confirm", "release"):
+            if self.placement is None:
+                raise IntentWriteError(405, "operation_not_enabled")
+            result = self.placement.preview(operation, payload)
+            LOG.info(json.dumps({"kind": "action_preview", "operation": operation, "dry_run": True, **result}, allow_nan=False))
+            return result
         from llmsvc.policy import plan_free, plan_reserve
         if not isinstance(payload, dict):
             raise ValueError("request body must be a JSON object")
@@ -156,6 +165,16 @@ class Scheduler:
         except ActionDispatchError as exc:
             status = 409 if exc.reason in ("free_in_progress", "operation_in_progress") else 503
             raise IntentWriteError(status, exc.reason) from exc
+
+    def run_placement(self, operation, payload):
+        if self.placement is None:
+            raise IntentWriteError(405, "operation_not_enabled")
+        try:
+            if operation == "place":
+                return self.placement.place(payload)
+            return self.placement.finish(operation, payload["lease_id"])
+        except (sqlite3.Error, OSError) as exc:
+            raise IntentWriteError(503, "intent_store_unavailable") from exc
 
     def write_pin(self, operation: str, payload: dict, *, source_ip: str) -> dict:
         """Persist pin intent only; model lifecycle actions remain disabled."""
@@ -309,6 +328,13 @@ class Scheduler:
             self.emit("state", detail={"sampled_at": snapshot.sampled_at,
                                        "errors": list(snapshot.errors)})
             self.changed.notify_all()
+        # Action-triggered rounds need the same exit reconciliation as periodic
+        # rounds, so a proven stop can unblock measured free and waiting place.
+        if self.placement is not None:
+            try:
+                self.placement.reconcile()
+            except Exception as exc:
+                self.emit("lease_reconcile_error", detail={"error_type": type(exc).__name__})
         return self.snapshot()
 
     def _run(self):
