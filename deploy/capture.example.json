@@ -1,0 +1,43 @@
+{
+  "_comment": "Generated-By: Codex / gpt-6-astra. Command argv entries are trusted administrator configuration and should remain read-only probes. HTTP timeout is urllib connect/read socket timeout per operation.",
+  "schema_version": 1,
+  "timeout_seconds": 5,
+  "max_output_bytes": 262144,
+  "sources": [
+    {
+      "name": "gpu-summary",
+      "type": "command",
+      "argv": [
+        "nvidia-smi",
+        "--query-gpu=index,uuid,name,memory.total,memory.used,memory.free,utilization.gpu",
+        "--format=csv,noheader,nounits"
+      ]
+    },
+    {
+      "name": "gpu-processes",
+      "type": "command",
+      "argv": [
+        "nvidia-smi",
+        "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
+        "--format=csv,noheader,nounits"
+      ]
+    },
+    {
+      "name": "vllm-units",
+      "type": "command",
+      "argv": [
+        "systemctl",
+        "list-units",
+        "vllm-*.service",
+        "--all",
+        "--no-legend",
+        "--plain"
+      ]
+    },
+    {
+      "name": "scheduler-state",
+      "type": "http_json",
+      "url": "http://127.0.0.1:8011/v1/state"
+    }
+  ]
+}
