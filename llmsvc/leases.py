@@ -80,6 +80,7 @@ class PlacementController:
         self.monotonic = monotonic
         self.probe = probe or LeaseUnitProbe(transport, monotonic=monotonic)
         self._reconcile_cursor = 0
+        self._configuration_alerts = set()
         self.recovered = {lease.lease_id for lease, _ in scheduler.store.leases()} if scheduler.store else set()
 
     @contextmanager
@@ -229,6 +230,7 @@ class PlacementController:
         self.scheduler.emit("lease_" + status, model=lease.model,
                             detail={"lease_id": lease.lease_id, "status": status, "dry_run": False})
         self.recovered.discard(lease.lease_id)
+        self._configuration_alerts = {item for item in self._configuration_alerts if item[0] != lease.lease_id}
 
     def finish(self, operation, lease_id):
         self._enabled()
@@ -282,9 +284,24 @@ class PlacementController:
                 break
             with self._locked(deadline):
                 self._reconcile_cursor += 1
+                if self.scheduler.store.lease(lease.lease_id) != (lease, unit):
+                    continue
                 generation = self.scheduler._sample_published
-            if unit != self.transport.units.get(lease.model):
-                continue
+            configured_unit = self.transport.units.get(lease.model)
+            alert = (lease.lease_id, unit, configured_unit)
+            if unit != configured_unit:
+                with self._locked(deadline):
+                    if alert not in self._configuration_alerts:
+                        self.scheduler.emit("lease_configuration_required", model=lease.model,
+                            detail={"lease_id": lease.lease_id, "persisted_unit": unit,
+                                    "configured_unit": configured_unit,
+                                    "reason": "missing_or_changed_trusted_identity",
+                                    "next_action": "restore_verified_model_configuration",
+                                    "budget_retained": True})
+                        self._configuration_alerts.add(alert)
+                continue  # A persisted unit name does not authorize probing it.
+            with self._locked(deadline):
+                self._configuration_alerts = {item for item in self._configuration_alerts if item[0] != lease.lease_id}
             observation = self._inspect(lease.model, deadline)
             if self.monotonic() >= deadline:
                 break

@@ -487,3 +487,81 @@ def test_confirm_observation_timeout_is_not_a_revocation_conflict(system):
     assert caught.value.status == 503
     assert caught.value.error == "lease_observation_timeout"
     assert scheduler.store.lease(lease_id)[0].status == "pending"
+
+
+@pytest.mark.parametrize("mode", ["removed", "changed"])
+def test_missing_trusted_identity_reports_deduplicated_recovery_without_probe(system, mode):
+    scheduler, state, transport = system
+    lease_id = grant(scheduler)["lease_id"]
+    del state["models"]["a"]
+    if mode == "removed":
+        del transport.models["a"]
+        del transport.units["a"]
+    else:
+        transport.units["a"] = "vllm-replacement.service"
+    state["probes"].clear()
+    scheduler.sample_once()
+    scheduler.placement.reconcile()
+    errors = scheduler.snapshot().errors
+    assert "lease_model_unobserved:a" in errors
+    with pytest.raises(LeaseError):
+        grant(scheduler, "b")
+    assert state["probes"] == []
+    assert scheduler.store.lease(lease_id)[0].status == "pending"
+    events = [event for event in scheduler.events_since(0) if event.kind == "lease_configuration_required"]
+    assert len(events) == 1
+    assert events[0].detail["persisted_unit"] == "vllm-a.service"
+    assert events[0].detail["next_action"] == "restore_verified_model_configuration"
+    assert events[0].detail["budget_retained"] is True
+
+
+@pytest.mark.parametrize("mode,expected", [("absent", "released"), ("healthy", "confirmed"), ("unknown", "stale")])
+def test_restore_verified_identity_and_reopen_same_ledger_recovers_safely(system, mode, expected):
+    scheduler, state, transport = system
+    lease_id = grant(scheduler)["lease_id"]
+    scheduler.store.put_pin(Pin("a", time.time()+2000, "owner"))
+    original_model = state["models"].pop("a")
+    original_metadata = transport.models.pop("a")
+    original_unit = transport.units.pop("a")
+    scheduler.sample_once()
+    assert "lease_model_unobserved:a" in scheduler.snapshot().errors
+    # Operator restores a previously verified complete model mapping; no unit is
+    # automatically trusted just because its name occurs in a SQLite row.
+    transport.models["a"] = original_metadata
+    transport.units["a"] = original_unit
+    state["models"]["a"] = original_model
+    if mode == "healthy":
+        ready(scheduler, state, lease_id)
+    elif mode == "unknown":
+        state["observations"]["a"] = UnitObservation()
+    scheduler.store.close()
+    scheduler.store = IntentStore(scheduler.config.state_db_path, action_lock=scheduler.action_lock)
+    try:
+        scheduler.placement = PlacementController(scheduler, transport, probe=scheduler.placement.probe)
+        scheduler.sample_once()
+        assert scheduler.store.lease(lease_id)[0].status == expected
+        assert scheduler.snapshot().pins[0].model == "a"
+        if mode == "absent":
+            assert grant(scheduler, "b")["gpu"] == 0
+        else:
+            with pytest.raises(LeaseError):
+                grant(scheduler, "b")
+            assert scheduler.store.lease(lease_id)[0].budget_gb == 60
+    finally:
+        scheduler.store.close()
+
+
+def test_missing_identity_readonly_reconcile_is_zero_mutation(system):
+    scheduler, state, transport = system
+    grant(scheduler)
+    del state["models"]["a"]
+    del transport.models["a"]
+    del transport.units["a"]
+    scheduler.config = replace(scheduler.config, read_only=True)
+    events = scheduler.events_since(0)
+    before = open(scheduler.config.state_db_path, "rb").read()
+    state["probes"].clear()
+    scheduler.placement.reconcile()
+    assert scheduler.events_since(0) == events
+    assert open(scheduler.config.state_db_path, "rb").read() == before
+    assert state["probes"] == []
