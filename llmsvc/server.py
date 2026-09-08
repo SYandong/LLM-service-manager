@@ -128,14 +128,21 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 return
             operation = None
             payload = {}
+            wake_model = None
             if self.command == "POST":
                 operation = {"/v1/free": "free", "/v1/pin": "pin", "/v1/reserve": "reserve"}.get(target.path)
+                if target.path.startswith("/v1/wake/"):
+                    operation = "wake"
+                    wake_model = unquote(target.path[len("/v1/wake/"):])
             elif self.command == "DELETE":
                 for prefix, op, key in (("/v1/pin/", "unpin", "model"), ("/v1/reserve/", "unreserve", "id")):
                     if target.path.startswith(prefix):
                         operation = op
                         payload[key] = unquote(target.path[len(prefix):])
-            if operation is None or (not dry_run and operation not in ("pin", "unpin")):
+            if operation is None or (not dry_run and operation not in ("pin", "unpin", "free", "wake")):
+                self._reject_write()
+                return
+            if not dry_run and operation in ("free", "wake") and (not self.server.scheduler.config.model_actions_enabled or self.server.scheduler.model_actions is None):
                 self._reject_write()
                 return
             if self.headers.get("Transfer-Encoding") is not None:
@@ -156,8 +163,14 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 def reject_constant(value):
                     raise ValueError("non-finite JSON number")
                 payload = json.loads(data, parse_constant=reject_constant)
+            if operation == "wake":
+                if payload != {}:
+                    raise ValueError("wake accepts an empty body")
+                payload = {"model": wake_model}
             if dry_run:
                 result = self.server.scheduler.preview(operation, payload)
+            elif operation in ("free", "wake"):
+                result = self.server.scheduler.run_model_action(operation, payload, source_ip=self.client_address[0])
             else:
                 result = self.server.scheduler.write_pin(operation, payload, source_ip=self.client_address[0])
             self._json(200, result)

@@ -190,3 +190,481 @@ class ModelActionDispatcher:
             raise
         finally:
             self.action_lock.release()
+
+
+class ManagedModelTransport:
+    """Bounded transports limited to configured model paths and unit names."""
+
+    def __init__(self, *, swap_url, models, systemctl, monotonic=time.monotonic, run=None):
+        import subprocess
+        from urllib.parse import urlsplit
+        from urllib.request import HTTPRedirectHandler, ProxyHandler, build_opener
+        class NoRedirect(HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+        parts = urlsplit(swap_url)
+        if (parts.scheme not in ("http", "https") or not parts.hostname or parts.username
+                or parts.password or parts.query or parts.fragment or parts.path not in ("", "/")):
+            raise ValueError("model action swap_url must be an HTTP(S) origin without credentials/query/path")
+        if not isinstance(systemctl, str) or not systemctl:
+            raise ValueError("configured systemctl command is required")
+        if not isinstance(models, dict) or not models or any(not isinstance(value, dict) for value in models.values()):
+            raise ValueError("model actions require a nonempty configured model mapping")
+        self.models = {name: dict(value) for name, value in models.items()}
+        self.units = {}
+        self.paths = set()
+        for name, model in self.models.items():
+            if not isinstance(name, str) or not name or name in (".", ".."):
+                raise ValueError("invalid configured model name")
+            unit = model.get("unit", "vllm-" + name + ".service")
+            if not isinstance(unit, str) or not re.fullmatch(r"vllm-[A-Za-z0-9_.@-]+\.service", unit):
+                raise ValueError("model actions require a configured managed vllm unit")
+            if unit in self.units.values():
+                raise ValueError("model action unit aliases are ambiguous")
+            self.units[name] = unit
+            encoded = quote(name, safe="")
+            self.paths.update((("POST", "/api/models/unload/" + encoded), ("GET", "/upstream/" + encoded + "/")))
+        self.swap_url = swap_url.rstrip("/")
+        self.systemctl = systemctl
+        self.monotonic = monotonic
+        self.run = run or subprocess.run
+        self.opener = build_opener(ProxyHandler({}), NoRedirect())
+
+    def _remaining(self, deadline):
+        remaining = deadline - self.monotonic()
+        if not math.isfinite(remaining) or remaining <= 0:
+            raise TimeoutError("model action deadline exceeded")
+        return remaining
+
+    def unit_for_model(self, model):
+        if model not in self.units:
+            raise ActionDispatchError("unmanaged_model")
+        return self.units[model]
+
+    def http_request(self, method, path, *, deadline):
+        from urllib.error import HTTPError
+        from urllib.request import Request
+        if (method, path) not in self.paths:
+            raise ActionDispatchError("unapproved_model_path")
+        request = Request(self.swap_url + path, method=method)
+        try:
+            with self.opener.open(request, timeout=self._remaining(deadline)) as response:
+                return response.status
+        except HTTPError as exc:
+            status = exc.code
+            exc.close()
+            return status
+
+    def stop_unit(self, unit, *, deadline):
+        if unit not in self.units.values():
+            raise ActionDispatchError("unmanaged_unit")
+        result = self.run([self.systemctl, "stop", unit], capture_output=True, text=True,
+                          check=False, timeout=self._remaining(deadline))
+        return result.returncode
+
+
+class ModelActionController:
+    """Explicit free/wake operations; no automatic policy loop or lease writer.
+
+    A free operation serializes its measurement window. Pending model operations
+    are protected from other controller operations while waits release the lock.
+    Reported release is observed net free memory, not causal attribution or a
+    policy estimate. Accounting is never released here.
+    """
+
+    def __init__(self, scheduler, transport, *, monotonic=time.monotonic, settings=None):
+        from llmsvc.policy import PolicySettings
+        self.scheduler = scheduler
+        self.transport = transport
+        self.monotonic = monotonic
+        self.settings = settings or PolicySettings()
+        self.pending = set()
+        self.free_active = False
+        self.dispatcher = ModelActionDispatcher(
+            action_lock=scheduler.action_lock, snapshot=self._snapshot,
+            http_request=transport.http_request, stop_unit=transport.stop_unit,
+            timeout_seconds=scheduler.config.request_timeout_seconds,
+            max_snapshot_age_seconds=scheduler.config.max_snapshot_age_seconds,
+            enabled=True, monotonic=monotonic, wall_clock=scheduler.clock)
+
+    def _snapshot(self):
+        from dataclasses import replace
+        snapshot = self.scheduler.snapshot()
+        # Trusted configured default metadata may strengthen, never weaken, protection.
+        models = tuple(replace(model, is_default=True)
+                       if self.transport.models.get(model.name, {}).get("is_default") is True else model
+                       for model in snapshot.models)
+        return replace(snapshot, models=models)
+
+    def _locked(self, deadline):
+        from contextlib import contextmanager
+        @contextmanager
+        def lock():
+            remaining = deadline - self.monotonic()
+            if remaining <= 0 or not self.scheduler.action_lock.acquire(timeout=remaining):
+                raise ActionDispatchError("deadline_exceeded")
+            try:
+                yield
+            finally:
+                self.scheduler.action_lock.release()
+        return lock()
+
+    def _enabled(self):
+        if self.scheduler.config.read_only:
+            raise ActionDispatchError("read_only")
+        if not self.scheduler.config.model_actions_enabled:
+            raise ActionDispatchError("operation_not_enabled")
+
+    def _refresh(self, deadline):
+        if self.monotonic() >= deadline or self.scheduler.stopping.is_set():
+            raise ActionDispatchError("deadline_exceeded")
+        self.scheduler.sample_once()  # Collector I/O and publication run without our action lock.
+        return self._snapshot()
+
+    def _fresh(self, snapshot):
+        now = self.scheduler.clock()
+        return (_known(snapshot.sampled_at) and _known(now)
+                and 0 <= now - snapshot.sampled_at <= self.scheduler.config.max_snapshot_age_seconds
+                and not snapshot.errors)
+
+    def _model(self, snapshot, name):
+        unit = self.transport.unit_for_model(name)
+        models = [model for model in snapshot.models if model.name == name]
+        if len(models) != 1:
+            raise ActionDispatchError("unknown_or_duplicate_model")
+        model = models[0]
+        if model.unit not in (None, unit):
+            raise ActionDispatchError("configured_unit_mismatch")
+        return model
+
+    def plan_free(self, snapshot, **payload):
+        from dataclasses import replace
+        from llmsvc.policy import plan_free
+        from llmsvc.state import Pin
+        protected = {}
+        for model in snapshot.models:
+            if model.name not in self.transport.models:
+                protected[model.name] = "unmanaged_model"
+            elif model.unit != self.transport.unit_for_model(model.name):
+                protected[model.name] = "configured_unit_mismatch"
+            elif model.name in self.pending:
+                protected[model.name] = "operation_in_progress"
+        # Detached policy-only protection, never published or persisted as user pins.
+        until = self.scheduler.clock() + self.scheduler.config.free_timeout_seconds + 1
+        pins = snapshot.pins + tuple(Pin(name, until, "operation_guard") for name in protected)
+        decision = plan_free(replace(snapshot, pins=pins), settings=self.settings, **payload)
+        blockers = tuple(replace(blocker, reason=protected[blocker.model])
+                         if blocker.model in protected and blocker.reason == "pinned_until" else blocker
+                         for blocker in decision.blocked_by)
+        return replace(decision, blocked_by=blockers)
+
+    @staticmethod
+    def _metric(snapshot, *, ram, gpu_ids):
+        if ram:
+            return snapshot.memory.host_available_gb if _known(snapshot.memory.host_available_gb) else None
+        selected = [gpu for gpu in snapshot.gpus if gpu.index in gpu_ids]
+        if len(selected) != len(gpu_ids) or not selected or any(not _known(gpu.free_gb) for gpu in selected):
+            return None
+        return sum(gpu.free_gb for gpu in selected)
+
+    def _effect(self, action, snapshot):
+        models = [model for model in snapshot.models if model.name == action.model]
+        if len(models) != 1:
+            return False
+        model = models[0]
+        if model.unit != self.transport.unit_for_model(action.model):
+            return False
+        if action.kind == "sleep":
+            return (model.state == "sleeping" and model.is_sleeping is True and model.unit_active is True
+                    and (action.gpu is None or model.gpu == action.gpu))
+        return model.state == "stopped" and model.unit_active is False
+
+    def _wait_effect(self, action, deadline):
+        last = self._snapshot()
+        effect_seen_at = None
+        while self.monotonic() < deadline and not self.scheduler.stopping.is_set():
+            try:
+                last = self._refresh(deadline)
+                with self._locked(deadline):
+                    applied = self._fresh(last) and self._effect(action, last)
+                    if applied and effect_seen_at is not None and last.sampled_at > effect_seen_at:
+                        # This round started after a prior round had confirmed
+                        # the effect. Its memory probes are not pre-effect data
+                        # from the same non-atomic collector round.
+                        return last, True
+                    effect_seen_at = last.sampled_at if applied else None
+                    self.scheduler.changed.wait(timeout=min(self.scheduler.config.action_poll_seconds,
+                                                             max(0, deadline - self.monotonic())))
+            except ActionDispatchError as exc:
+                if exc.reason != "deadline_exceeded":
+                    raise
+                break
+        return last, False
+
+    def free(self, payload, *, by, dry_run=False):
+        if dry_run:
+            return self.scheduler.preview("free", payload)
+        if not isinstance(payload, dict):
+            raise ValueError("free body must be a JSON object")
+        self.scheduler._keys(payload, {"gpu", "ram", "need_gb"})
+        ram = payload.get("ram", False)
+        gpu = payload.get("gpu")
+        need = payload.get("need_gb")
+        if type(ram) is not bool or ("gpu" in payload and (type(gpu) is not int or gpu < 0)):
+            raise ValueError("invalid free selection")
+        if need is not None and not _known(need):
+            raise ValueError("invalid need_gb")
+        deadline = self.monotonic() + self.scheduler.config.free_timeout_seconds
+        with self._locked(deadline):
+            self._enabled()
+            if self.free_active:
+                raise ActionDispatchError("free_in_progress")
+            self.free_active = True
+        result = {"freed_gb": None, "slept": [], "stopped": [], "skipped": [], "status": "blocked",
+                  "measurement": "net_host_available_gib" if ram else "net_gpu_free_gib",
+                  "measured_at": None, "measurement_complete": False}
+        confirmed = set()
+        measured_effects = 0
+        pending = None
+        before = None
+        gpu_ids = set()
+        last = self._snapshot()
+
+        def record(snapshot, action=None):
+            nonlocal last, measured_effects
+            last = snapshot
+            metric = self._metric(snapshot, ram=ram, gpu_ids=gpu_ids)
+            if before is not None and metric is not None and self._fresh(snapshot):
+                result["freed_gb"] = max(0.0, metric - before)
+                result["measured_at"] = snapshot.sampled_at
+                result["measurement_complete"] = True
+                if action is not None:
+                    measured_effects += 1
+            elif action is not None and measured_effects == 0:
+                result["freed_gb"] = None
+                result["measured_at"] = None
+            if action is not None:
+                key = "slept" if action.kind == "sleep" else "stopped"
+                if action.model not in result[key]:
+                    result[key].append(action.model)
+                confirmed.add((action.kind, action.model))
+
+        try:
+            last = self._refresh(deadline)
+            gpu_ids = {gpu} if gpu is not None else {item.index for item in last.gpus}
+            before = self._metric(last, ram=ram, gpu_ids=gpu_ids)
+            record(last)
+            while self.monotonic() < deadline:
+                with self._locked(deadline):
+                    self._enabled()
+                    snapshot = self._snapshot()
+                    if not self._fresh(snapshot):
+                        result["status"] = "partial" if confirmed else "blocked"
+                        result["skipped"].append({"model": None, "reason": "unknown_or_stale_snapshot"})
+                        break
+                    if before is None:
+                        result["skipped"].append({"model": None, "reason": "measurement_unavailable"})
+                        break
+                    if need is not None and result["freed_gb"] is not None and result["freed_gb"] >= need:
+                        result["status"] = "complete"
+                        break
+                    remaining = None if need is None else max(0, need - (result["freed_gb"] or 0))
+                    decision = self.plan_free(snapshot, gpu=gpu, ram=ram, need_gb=remaining)
+                    result["skipped"] = [asdict(blocker) for blocker in decision.blocked_by]
+                    if not decision.actions:
+                        result["status"] = "partial" if confirmed and result["skipped"] else ("blocked" if result["skipped"] else "complete")
+                        break
+                    action = decision.actions[0]  # Never execute the rest of an old plan.
+                    if (action.kind, action.model) in confirmed:
+                        result["status"] = "no_progress"
+                        result["skipped"].append({"model": action.model, "reason": "repeated_action"})
+                        break
+                    self._model(snapshot, action.model)
+                    if action.model in self.pending:
+                        raise ActionDispatchError("operation_in_progress")
+                    self.pending.add(action.model)
+                    pending = action.model
+                    previous_release = result["freed_gb"]
+                    previous_host = snapshot.memory.host_available_gb
+                    try:
+                        self.dispatcher.execute(action, dry_run=False, deadline=deadline)
+                    except ActionDispatchError as exc:
+                        dispatch_error = exc
+                    else:
+                        dispatch_error = None
+                if dispatch_error is not None:
+                    # A failed request may have taken effect. Recollect once and
+                    # preserve observed partial results, but do not keep acting.
+                    observed = self._refresh(deadline)
+                    if dispatch_error.attempted and self._fresh(observed) and self._effect(action, observed):
+                        effect_seen_at = observed.sampled_at
+                        observed = self._refresh(deadline)
+                        if self._fresh(observed) and observed.sampled_at > effect_seen_at and self._effect(action, observed):
+                            record(observed, action)
+                    result["status"] = "partial" if confirmed else "failed"
+                    result["error"] = dispatch_error.reason
+                    result["error_model"] = action.model
+                    result["measurement_complete"] = (not dispatch_error.attempted or (action.kind, action.model) in confirmed) and self._metric(observed, ram=ram, gpu_ids=gpu_ids) is not None
+                    break
+                observation_deadline = min(deadline, self.monotonic() + self.scheduler.config.action_observe_seconds)
+                observed, applied = self._wait_effect(action, observation_deadline)
+                if not applied:
+                    result["status"] = "partial" if confirmed else ("timeout" if self.monotonic() >= deadline else "no_progress")
+                    result["error"] = "effect_not_confirmed"
+                    result["error_model"] = action.model
+                    result["measurement_complete"] = False
+                    break
+                record(observed, action)
+                if self._metric(observed, ram=ram, gpu_ids=gpu_ids) is None:
+                    result["status"] = "partial"
+                    result["error"] = "measurement_unavailable"
+                    result["error_model"] = action.model
+                    result["measurement_complete"] = False
+                    break
+                preparing_ram = (action.reason == "sleep_memory_admission" and _known(previous_host)
+                                 and _known(observed.memory.host_available_gb)
+                                 and observed.memory.host_available_gb > previous_host)
+                if result["freed_gb"] <= previous_release and not preparing_ram:
+                    result["status"] = "no_progress"
+                    result["error"] = "no_measured_release"
+                    result["error_model"] = action.model
+                    break
+                with self._locked(deadline):
+                    self.pending.discard(pending)
+                    pending = None
+            else:
+                result["status"] = "partial" if confirmed else "timeout"
+                result["error"] = "deadline_exceeded"
+                result["measurement_complete"] = False
+        except ActionDispatchError as exc:
+            result["status"] = "partial" if confirmed else "failed"
+            result["error"] = exc.reason
+            result["error_model"] = pending
+            result["measurement_complete"] = False
+        finally:
+            with self.scheduler.changed:
+                if pending is not None:
+                    self.pending.discard(pending)
+                self.free_active = False
+                self.scheduler.emit("free_result", detail={"by": by, **result})
+                self.scheduler.changed.notify_all()
+        return result
+
+    @staticmethod
+    def _ready(model):
+        return (model.state == "awake" and model.unit_active is True and model.health_ok is True
+                and model.is_sleeping is False and model.swap_state == "ready")
+
+    def wake_model(self, snapshot, name):
+        if not self._fresh(snapshot):
+            raise ActionDispatchError("unknown_or_stale_snapshot")
+        model = self._model(snapshot, name)
+        if model.name in self.pending:
+            raise ActionDispatchError("operation_in_progress")
+        if model.state not in ("awake", "sleeping", "stopped"):
+            raise ActionDispatchError("model_state_changed")
+        if model.state != "stopped" and model.unit != self.transport.unit_for_model(name):
+            raise ActionDispatchError("configured_unit_mismatch")
+        activity = [item for item in snapshot.activity if item.model == name]
+        if len(activity) != 1 or type(activity[0].in_flight) is not int or activity[0].in_flight < 0:
+            raise ActionDispatchError("unknown_in_flight")
+        if model.is_default and model.state != "stopped" and model.gpu != self.settings.exclusive_gpu:
+            raise ActionDispatchError("default_requires_exclusive_gpu")
+        if self._ready(model):
+            return model
+        if activity[0].in_flight:
+            raise ActionDispatchError("in_flight")
+        peers = {item.name: item for item in snapshot.models}
+        for name_pending in self.pending:
+            peer = peers.get(name_pending)
+            if peer is None or model.gpu is None or peer.gpu is None or model.gpu == peer.gpu:
+                # Reserve no new budget here; simply avoid overlapping our own
+                # wake admissions against the same (or not-yet-known) GPU.
+                raise ActionDispatchError("operation_in_progress")
+        memory = snapshot.memory
+        if not all(_known(value) for value in (memory.host_available_gb, memory.sleeping_weights_gb,
+                                               memory.budget_gb, memory.host_min_available_gb)):
+            raise ActionDispatchError("unknown_memory")
+        if model.state == "sleeping":
+            gpus = [gpu for gpu in snapshot.gpus if gpu.index == model.gpu]
+            if (len(gpus) != 1 or not _known(gpus[0].free_gb) or not _known(model.budget_gb)
+                    or not _known(model.resident_gb)):
+                raise ActionDispatchError("unknown_gpu_capacity")
+            if model.is_default and model.gpu != self.settings.exclusive_gpu:
+                raise ActionDispatchError("default_requires_exclusive_gpu")
+            if gpus[0].free_gb < max(0, model.budget_gb - model.resident_gb):
+                raise ActionDispatchError("insufficient_gpu_memory")
+        return model
+
+    def wake(self, name, *, by, dry_run=False):
+        if dry_run:
+            return self.scheduler.preview("wake", {"model": name})
+        started = self.monotonic()
+        deadline = started + self.scheduler.config.wake_timeout_seconds
+        result = {"model": name, "status": "blocked", "ready": False, "elapsed_seconds": 0.0, "cold_start": False}
+        owned = False
+        try:
+            self._enabled()
+            self._refresh(deadline)
+            with self._locked(deadline):
+                self._enabled()
+                initial = self._snapshot()
+                model = self.wake_model(initial, name)
+                result["cold_start"] = model.state == "stopped"
+                if self._ready(model):
+                    result.update(status="ready", ready=True)
+                    return result
+                self.pending.add(name)
+                owned = True
+                self.scheduler.emit("wake_requested", model=name, detail={"by": by, "cold_start": result["cold_start"]})
+            # No action lock during this request: it may synchronously reenter
+            # /v1/place through the data-plane launcher before returning.
+            try:
+                status = self.transport.http_request("GET", "/upstream/" + quote(name, safe="") + "/", deadline=deadline)
+                error = None if type(status) is int and (200 <= status < 300 or status == 404) else "upstream_rejected"
+            except Exception:
+                error = "upstream_error"
+            if error:
+                observed = self._refresh(deadline)
+                candidates = [model for model in observed.models if model.name == name]
+                ready = (self._fresh(observed) and observed.sampled_at > initial.sampled_at
+                         and len(candidates) == 1 and self._ready(candidates[0])
+                         and candidates[0].unit == self.transport.unit_for_model(name)
+                         and (not candidates[0].is_default or candidates[0].gpu == self.settings.exclusive_gpu))
+                result.update(status="partial" if ready else "failed", ready=ready, error=error)
+                return result
+            progress = None
+            while self.monotonic() < deadline and not self.scheduler.stopping.is_set():
+                observed = self._refresh(deadline)
+                with self._locked(deadline):
+                    candidates = [model for model in observed.models if model.name == name]
+                    model = candidates[0] if len(candidates) == 1 else None
+                    if model is not None and self._fresh(observed):
+                        if model.unit not in (None, self.transport.unit_for_model(name)):
+                            result.update(status="failed", error="configured_unit_mismatch")
+                            break
+                        if model.is_default and model.state == "awake" and model.gpu != self.settings.exclusive_gpu:
+                            result.update(status="blocked", error="default_requires_exclusive_gpu")
+                            break
+                        if (observed.sampled_at > initial.sampled_at and self._ready(model)
+                                and model.unit == self.transport.unit_for_model(name)):
+                            result.update(status="ready", ready=True)
+                            break
+                    state = (model.state, model.swap_state) if model is not None else ("unknown", None)
+                    if state != progress:
+                        progress = state
+                        self.scheduler.emit("wake_progress", model=name, detail={"state": state[0], "swap_state": state[1]})
+                    self.scheduler.changed.wait(timeout=min(self.scheduler.config.action_poll_seconds,
+                                                             max(0, deadline - self.monotonic())))
+            else:
+                result.update(status="timeout", error="readiness_timeout")
+        except ActionDispatchError as exc:
+            result.update(status="timeout" if exc.reason == "deadline_exceeded" else "blocked", error=exc.reason)
+        finally:
+            result["elapsed_seconds"] = max(0.0, self.monotonic() - started)
+            with self.scheduler.changed:
+                if owned:
+                    self.pending.discard(name)
+                self.scheduler.emit("wake_result", model=name, detail={"by": by, **result})
+                self.scheduler.changed.notify_all()
+        return result
