@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.1.0-alpha.4 — 2026-09-09
+
+Incremental preview; Python distribution `0.1.0a4`.
+Includes #114, #117, #118, #119 and #122 since the immutable alpha.3 tag.
+
+### Added and corrected
+
+- Default-off automatic memory-pressure and fixed-idle policy cycles (#119).
+  Effects require automation and model-action opt-ins, non-read-only mode and
+  trusted configured accounts. Each bounded cycle executes one protected action,
+  observes confirmed effects/accounting, and replans from fresh state. Cycles do
+  not overlap; the default idle threshold is 600 seconds. One-shot operation
+  remains read-only and logs a pure preview.
+- Placement, reservation and automatic policies use explicit internal exclusion
+  reasons instead of synthetic user Pins (#122). Existing actions/ranking and
+  full-budget accounting are preserved. Real pin plus independent exclusion now
+  reports both reasons without overwriting user pin provenance. The remaining
+  free-controller adapter is separately tracked in #121.
+- Mounted reserve CLI/TUI integration tests and API guidance (#117) cover real
+  temporary HTTP/SQLite complete/blocked/partial outcomes, retained intent IDs,
+  expiry/deletion and ambiguous-response no-retry behavior. No new client runtime
+  command is added by this validation slice.
+- Remaining ops runbook/lifecycle calendar prerequisites are replaced with
+  bounded measurements and replay (#114/#118). Capture summaries require the
+  actual configured interval; long-term stability/calibration are NOT MEASURED.
+
+### Compatibility and limits
+
+No schema migration or new dependency. Default read-only behavior and independent
+intent/action/automation gates remain; publishing or installing enables no model
+operation. Automatic sleep retains full accounting and automatic stop needs
+positive exit/account proof and two newer observations. Unknown or unleased
+models remain blocked; no orphan adoption, forced cleanup or estimated release.
+
+Production TTL/reaper replacement, per-GPU pressure/TTL integration, relocation,
+reliable quiet/adoption/settlement, host-source configuration, LoRA and owner
+acceptance remain separate work. This release changes no production routing,
+TTL/reaper, host bind or observer and does not complete a milestone. Existing
+schema-v2 ledger preservation and bounded operational checks still apply.
+
 ## 0.1.0-alpha.3 — 2026-09-08
 
 Incremental preview; Python distribution `0.1.0a3`.
