@@ -342,6 +342,8 @@ class SchedulerApp(App):
 
     def render_snapshot(self):
         state = self.snapshot
+        # The server filters active intents with its own clock.
+        reserved = {r["gpu"] for r in state.get("reserves", [])}
         lines = []
         for gpu in state.get("gpus", []):
             total = gpu.get("total_gb")
@@ -355,6 +357,8 @@ class SchedulerApp(App):
                 bar = "M" * own + "E" * other + "." * available + "?" * (12 - own - other - available)
             lines.append("GPU%s [%s] %s/%s GiB" % (
                 gpu["index"], bar, self.api.number(gpu.get("used_gb")), self.api.number(total)))
+            if gpu["index"] in reserved:
+                lines[-1] += " · reserved for placement"
         lines.append("M service · E external · . free · ? unknown")
         self.dashboard.query_one("#gpus", Static).update("\n".join(lines))
         memory = state.get("memory", {})
@@ -483,7 +487,7 @@ class SchedulerApp(App):
         self.prepare_command("wake")
 
     def action_help(self):
-        self.show_result("f prefill free · p prefill selected pin (duration required) · w prefill selected wake · Enter submits · free --ram confirms separately · free [--gpu N] [--need 80G] [--ram] · wake MODEL [--wait 930] · pin MODEL --for 8h · unpin MODEL · all operations accept --dry-run · status · usage --days 7|30 · u usage · / command · Ctrl+R reset events after known restart · q quit")
+        self.show_result("f prefill free · p prefill selected pin (duration required) · w prefill selected wake · Enter submits · free --ram confirms separately · free [--gpu N] [--need 80G] [--ram] · wake MODEL [--wait 930] · pin MODEL --for 8h · unpin MODEL · reserve --gpu N --size 80G --for 4h · all operations accept --dry-run · status · usage --days 7|30 · u usage · / command · Ctrl+R reset events after known restart · q quit")
 
     def action_reset_events(self):
         self.event_reader.reset_cursor()
@@ -568,7 +572,7 @@ class SchedulerApp(App):
                     raise CommandMessage("Shortcut model is no longer in the snapshot; refresh and select it again")
             if args.command == "usage":
                 self.show_usage(args)
-            elif args.command in ("pin", "unpin", "free", "wake"):
+            elif args.command in ("pin", "unpin", "free", "wake", "reserve"):
                 if self._write_busy:
                     self.show_result("An operation is already running; wait for its result (no request queued)")
                 elif args.command == "free" and args.ram and not args.dry_run:
