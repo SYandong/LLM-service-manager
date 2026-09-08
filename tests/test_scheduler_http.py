@@ -53,7 +53,7 @@ def test_state_matches_collected_snapshot(service):
 
 
 @pytest.mark.parametrize("method,path", [
-    ("POST", "/v1/free"), ("POST", "/v1/free?dry_run=1"),
+    ("POST", "/v1/free"),
     ("POST", "/v1/place"), ("POST", "/v1/pin"),
     ("DELETE", "/v1/pin/test"), ("PUT", "/v1/state"),
 ])

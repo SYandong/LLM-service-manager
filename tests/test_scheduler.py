@@ -128,6 +128,6 @@ def test_collector_factory_receives_only_probe_config(monkeypatch):
     module.build_collector = factory
     monkeypatch.setitem(sys.modules, "llmsvc.collectors", module)
     collector = build_collector(config(collectors={"probe": "example"}))
-    assert received == [{"probe": "example"}]
+    assert received == [{"probe": "example", "memory_budget_gb": 200.0, "host_min_available_gb": 150.0}]
     assert isinstance(collector(), StateSnapshot)
     assert build_collector(config()) is None

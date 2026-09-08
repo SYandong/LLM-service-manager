@@ -1,0 +1,62 @@
+{
+  "generated_by": "Codex / gpt-6-astra",
+  "source": "read-only live llmsvc activity database and collectors",
+  "timestamp": 1788846702.8461583,
+  "activity_read_ms": 33.23983697919175,
+  "activity_models": 5,
+  "activity_error": null,
+  "usage_ms": 21.092204988235608,
+  "usage_totals": {
+    "requests": 31605,
+    "input_tokens": 40480504,
+    "output_tokens": 4847906
+  },
+  "usage_known": true,
+  "usage_error": null,
+  "source_groups": [
+    "unknown"
+  ],
+  "metrics_totals": {
+    "requests": 31605,
+    "input_tokens": 40480504,
+    "output_tokens": 4847906
+  },
+  "usage_reconciled": true,
+  "collector_ms": 493.1156389939133,
+  "gpu_count": 4,
+  "model_states": {
+    "gemma-4-26b-a4b-it": "stopped",
+    "gemma-4-26b-a4b-nvfp4": "stopped",
+    "gemma-4-31b-it-bf16": "stopped",
+    "gemma-4-31b-it-nvfp4": "stopped",
+    "qwen2.5-7b-instruct": "stopped",
+    "qwen3.5-122b-a10b-nvfp4": "stopped",
+    "qwen3.8-27b-unofficial": "stopped"
+  },
+  "inflight": {
+    "gemma-4-26b-a4b-it": 0,
+    "gemma-4-26b-a4b-nvfp4": 0,
+    "gemma-4-31b-it-bf16": 0,
+    "gemma-4-31b-it-nvfp4": 0,
+    "qwen2.5-7b-instruct": 0,
+    "qwen3.5-122b-a10b-nvfp4": 0,
+    "qwen3.8-27b-unofficial": 0
+  },
+  "collector_errors": [
+    "memory: ValueError"
+  ],
+  "memory_probe_gb": null,
+  "vllm_version": "0.28.0",
+  "llama_swap_version": "v252 (e31a1ad)",
+  "limits": [
+    "No active daemon/GPU mutation tested",
+    "host_available_gb remains unknown until ops configures a trusted host meminfo source"
+  ],
+  "module_sha256": {
+    "llmsvc/activity.py": "3a13b4f5f03185e28fe6a70a0a8b13e896a735a4a527b1f73753a9ed1f142105",
+    "llmsvc/collectors/__init__.py": "321769a7284e9421ed87685cdf49689dca5ec53263ff2fb8b5a5080c2674418b",
+    "llmsvc/collectors/events.py": "fd0287c55501e3c88220d39a811ce43518f486b27beef194734bfc8b5e1caeef",
+    "llmsvc/collectors/parsers.py": "bbb82736dd4026aeaee9f0c65f7ff52be9ded22c4dd88d40810b7f5b0617572c",
+    "llmsvc/collectors/probes.py": "6a15e93d2aee6900589dc1d679dd8aac7998ec4d7c457e97a843513e22f5ee97"
+  }
+}
