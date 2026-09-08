@@ -138,6 +138,10 @@ def test_real_pin_and_independent_guard_keep_separate_provenance(adapter, lane, 
     blockers = [b for b in decision.blocked_by if b.model == "a"]
     reasons = [b.reason for b in blockers]
     expected = ["unleased_model"] if until == 9999 else ["pinned_until", "unleased_model"]
+    if lane == "placement":
+        # An excluded daemon still occupies its full budget on an infeasible
+        # GPU, independently of its pin and operational eligibility blockers.
+        expected.append("occupied_budget")
     assert reasons == expected
     assert all((b.gpu, b.user, b.in_flight) == (0, "tenant-a", 0) for b in blockers)
     assert snapshot.pins[0] is real_pin and real_pin.by == "real-owner"
