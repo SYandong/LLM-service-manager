@@ -3,7 +3,9 @@
 ## 0.1.0-alpha.2 — 2026-09-08
 
 Incremental preview after alpha.1; Python distribution `0.1.0a2`.
-Includes #80, #81, #82, #84, #85, #86, #87, #88, #89, #91, #92, #96, #97 and #99.
+Includes #80, #81, #82, #84, #85, #86, #87, #88, #89, #91, #92, #96,
+#97, #98, #99, #101, #102, #103, #104 and #105. The pure release PR #95
+is excluded from the twenty-PR batch count.
 
 ### Added and corrected
 
@@ -29,11 +31,20 @@ Includes #80, #81, #82, #84, #85, #86, #87, #88, #89, #91, #92, #96, #97 and #99
   plus single-trigger adoption/settlement design wording (#87). These do not
   enable a notifier: generation visibility and generic completion logs do not
   establish old-server settlement.
-- Bounded sanitized data-plane event relay adapter (#92), with explicit local
-  discard reporting. Scheduler bridging and dual-source/live-latency acceptance
-  remain pending; this adapter alone starts no subscription.
+- Bounded sanitized data-plane relay (#92) and opt-in scheduler SSE bridge
+  (#102). Native and data-plane events share one scheduler stream with explicit
+  provenance, global IDs and separate local-discard reasons. CLI and TUI
+  end-to-end CPU fixtures and presentation are included (#103/#104); upstream
+  loss stays unknown and real event-latency acceptance remains pending.
+- Trusted-identity recovery and launcher budget/error handling documentation
+  (#98/#101), including bounded scheduler maintenance while TTL is zero.
 - RAM-confirmation regression assertions tolerate background state polls while
   proving exactly one confirmed write and a subsequent refresh (#97).
+- Correct overly tight placement-victim test deadlines and add diagnostic
+  assertions and deterministic regressions proving exit reconciliation and two
+  fresh observations before a new lease (#105). Production deadlines and
+  protection rules are unchanged; the original pre-publication CI failure is
+  retained under #100.
 - Release cadence now follows batches of five merged non-release-only PRs,
   without a daily cap or complete-feature-group prerequisite (#90).
 
@@ -46,18 +57,21 @@ rollback; never delete an active allocation ledger to downgrade. Keep allocated
 models in the trusted collector configuration until their accounts can be
 safely reconciled. Removing one can block admission with an unobserved lease;
 restore the verified original mapping and reconcile the same ledger. The full
-operational runbook remains under review in #98; this release authorizes no
-restart or live recovery.
+operational runbook is included in #98/#101; this release authorizes no restart
+or live recovery.
 
 ### Experimental and incomplete
 
 Read-only remains the default. Model actions and placement have separate,
-default-off opt-ins; installation or publication enables neither. Placement of durably accounted victims is available for evaluation; unleased
-daemon handling, orphan cleanup, reserve evacuation and proven fault cleanup
+default-off opt-ins; installation or publication enables neither. Placement of
+durably accounted victims is available for evaluation; unleased daemon handling,
+orphan cleanup, reserve evacuation and proven fault cleanup
 remain incomplete. Live launcher/latency/release acceptance is still pending.
 
-Dual-source event relay, native reload adoption/old-server settlement, reliable
-quiet evidence and LoRA acceptance remain incomplete. Automatic reload stays
+Dual-source event delivery is available behind a default-off server option;
+actual production event latency remains unverified. Native reload adoption/
+old-server settlement, reliable quiet evidence and LoRA acceptance remain
+incomplete. Automatic reload stays
 disabled. The isolated base-model result does not certify these requirements.
 Required day/week observations, administrator/threshold decisions, production
 rollout and owner-approved legacy retirement remain separate gates. No milestone
