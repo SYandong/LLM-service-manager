@@ -91,7 +91,7 @@ def test_command_refresh_and_parser_errors(snapshot):
             await app.workers.wait_for_complete()
             assert len(client.calls) == 2
             assert command.value == ""
-            for value in ["free --ram", "status --bad", "'unterminated", "--help"]:
+            for value in ["reserve", "status --bad", "'unterminated", "--help"]:
                 command.value = value
                 await pilot.press("enter")
                 await pilot.pause()

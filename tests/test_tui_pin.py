@@ -93,7 +93,7 @@ def test_prewrite_state_response_cannot_erase_confirmed_pin(pin_api, pin_service
             stale = app.refresh_state()
             try:
                 assert await asyncio.to_thread(started.wait, 2)
-                await app.run_pin(command(pin_api, "pin", "model", "--for", "1h")).wait()
+                await app.run_write(command(pin_api, "pin", "model", "--for", "1h")).wait()
                 assert app.snapshot["pins"][0]["model"] == "model"
             finally:
                 release.set()
@@ -139,10 +139,10 @@ def test_inflight_pin_is_not_submitted_twice(pin_api, pin_service):
             await app.workers.wait_for_complete()
             pin_service.scheduler.write_pin = delayed
             args = command(pin_api, "pin", "model", "--for", "1h")
-            first = app.run_pin(args)
+            first = app.run_write(args)
             try:
                 assert await asyncio.to_thread(started.wait, 2)
-                await app.run_pin(args).wait()
+                await app.run_write(args).wait()
                 assert "already running" in str(app.query_one("#result", Static).render())
             finally:
                 release.set()
@@ -169,14 +169,14 @@ def test_accepted_pin_reply_after_shutdown_does_not_redraw(pin_api, pin_service)
             await app.workers.wait_for_complete()
             before = app.snapshot
             client.request = delayed
-            pending = app.run_pin(command(pin_api, "pin", "model", "--for", "1h"))
+            pending = app.run_write(command(pin_api, "pin", "model", "--for", "1h"))
             assert await asyncio.to_thread(started.wait, 2)
 
             async def teardown_boundary():
                 release.set()
                 await pending.wait()
                 assert app.snapshot is before
-                assert not app._pin_busy
+                assert not app._write_busy
 
             app.at_teardown = teardown_boundary
         assert pin_service.scheduler.snapshot().pins[0].by == "actual-owner"

@@ -11,6 +11,7 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Input, RichLog, Static
 
 
@@ -27,6 +28,39 @@ class UIParser(argparse.ArgumentParser):
 
     def error(self, message):
         raise CommandMessage(message)
+
+
+class ConfirmRam(ModalScreen):
+    """A separate explicit confirmation; Enter on the command never authorizes stop."""
+    DEFAULT_CSS = """
+    ConfirmRam { align: center middle; }
+    #ram-dialog { width: 90%; max-width: 70; height: auto; padding: 1; background: $surface; }
+    #ram-dialog Static { height: auto; }
+    #ram-dialog Horizontal { height: 3; }
+    #ram-dialog Button { width: 1fr; min-width: 0; }
+    """
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, command):
+        super().__init__()
+        self.command = command
+
+    def compose(self):
+        with Vertical(id="ram-dialog"):
+            yield Static("Confirm host RAM reclamation\n" + self.command +
+                         "\nEligible models may be stopped and need a cold start later.", markup=False)
+            with Horizontal():
+                yield Button("Cancel", id="ram-cancel")
+                yield Button("Confirm stop", id="ram-confirm", variant="warning")
+
+    def on_mount(self):
+        self.query_one("#ram-cancel", Button).focus()
+
+    def action_cancel(self):
+        self.dismiss(False)
+
+    def on_button_pressed(self, event):
+        self.dismiss(event.button.id == "ram-confirm")
 
 
 class SchedulerApp(App):
@@ -68,7 +102,7 @@ class SchedulerApp(App):
         self.api = api
         self.snapshot = None
         self.fetching = False
-        self._pin_busy = False
+        self._write_busy = False
         self._state_generation = 0
         self.model_names = []
         self.terminal_width = 100
@@ -83,6 +117,12 @@ class SchedulerApp(App):
         self.usage_error = "Loading usage…"
         self.usage_generation = 0
         self.usage_fetching = False
+
+    @property
+    def dashboard(self):
+        # Textual 0.70 App.query_one searches only the active modal screen.
+        # Background observations always belong to the original dashboard.
+        return self.screen_stack[0]
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -106,13 +146,13 @@ class SchedulerApp(App):
             yield Static("Select a model with ↑/↓", id="details", markup=False)
         with VerticalScroll(id="result-view"):
             yield Static("Status · refresh every 5 seconds", id="result", markup=False)
-        yield Input(placeholder="status | pin MODEL --for 8h | usage --days 30", id="command")
+        yield Input(placeholder="status | free --gpu 0 | wake MODEL | pin MODEL --for 8h", id="command")
         yield Footer()
 
     def on_mount(self):
-        self.query_one("#models", DataTable).focus()
-        self._event_status = self.query_one("#event-status", Static)
-        self._event_log = self.query_one("#events", RichLog)
+        self.dashboard.query_one("#models", DataTable).focus()
+        self._event_status = self.dashboard.query_one("#event-status", Static)
+        self._event_log = self.dashboard.query_one("#events", RichLog)
         self._ui_timers.append(self.set_interval(5, self.refresh_current))
         self.refresh_state()
         self.event_reader.start()
@@ -128,7 +168,7 @@ class SchedulerApp(App):
 
     def on_resize(self, event):
         self.terminal_width = event.size.width
-        self.screen.set_class(event.size.width < 100, "narrow")
+        self.dashboard.set_class(event.size.width < 100, "narrow")
         if self.snapshot is not None:
             self.render_snapshot()
         if self.usage_active:
@@ -137,7 +177,7 @@ class SchedulerApp(App):
     @work
     async def refresh_state(self, args=None):
         # A slow HTTP request must not start overlapping polls or freeze keyboard input.
-        if not self.is_running or self.fetching or self._pin_busy:
+        if not self.is_running or self.fetching or self._write_busy:
             return
         self.fetching = True
         generation = self._state_generation
@@ -168,17 +208,17 @@ class SchedulerApp(App):
         self.refresh_current()
 
     @work
-    async def run_pin(self, args):
+    async def run_write(self, args):
         if not self.is_running:
             return
-        if self._pin_busy:
-            self.show_result("A pin/unpin request is already running; wait for its result")
+        if self._write_busy:
+            self.show_result("An operation is already running; wait for its result (no request queued)")
             return
-        self._pin_busy = True
+        self._write_busy = True
         self._state_generation += 1
         self.usage_active = False
         self.usage_generation += 1
-        self.screen.remove_class("usage")
+        self.dashboard.remove_class("usage")
         self.show_result("%s request in progress…" % args.command.capitalize())
         try:
             result = await asyncio.to_thread(self.api.execute_command, args, self.client)
@@ -193,8 +233,8 @@ class SchedulerApp(App):
                 self.api.format_status(snapshot)
                 self.snapshot = snapshot
                 self.render_snapshot()
-                if args.model in self.model_names:
-                    self.query_one("#models", DataTable).move_cursor(row=self.model_names.index(args.model))
+                if getattr(args, "model", None) in self.model_names:
+                    self.dashboard.query_one("#models", DataTable).move_cursor(row=self.model_names.index(args.model))
                     self.update_details()
             except Exception as exc:
                 message += "\nState refresh failed: " + str(exc)
@@ -204,7 +244,17 @@ class SchedulerApp(App):
             if self.is_running:
                 self.show_result("%s request failed: %s" % (args.command, exc))
         finally:
-            self._pin_busy = False
+            self._write_busy = False
+
+    def confirm_ram(self, args, text):
+        def decided(confirmed):
+            if not self.is_running:
+                return
+            if confirmed:
+                self.run_write(args)
+            else:
+                self.show_result("Free --ram cancelled; no request sent")
+        self.push_screen(ConfirmRam(self.api.clean_text(text)), decided)
 
     def refresh_current(self):
         if self.usage_active:
@@ -221,8 +271,8 @@ class SchedulerApp(App):
     def show_status(self):
         self.usage_active = False
         self.usage_generation += 1
-        self.screen.remove_class("usage")
-        self.query_one("#models", DataTable).focus()
+        self.dashboard.remove_class("usage")
+        self.dashboard.query_one("#models", DataTable).focus()
         self.refresh_state()
 
     def show_usage(self, args):
@@ -231,9 +281,9 @@ class SchedulerApp(App):
         self.usage_generation += 1
         self.usage_snapshot = None
         self.usage_error = "Loading usage…"
-        self.screen.add_class("usage")
+        self.dashboard.add_class("usage")
         self.render_usage()
-        self.query_one("#usage-7", Button).focus()
+        self.dashboard.query_one("#usage-7", Button).focus()
         self.refresh_usage()
 
     @work
@@ -269,7 +319,7 @@ class SchedulerApp(App):
         else:
             text = self.api.format_result(self.usage_args, self.usage_snapshot,
                                           width=max(1, self.terminal_width - 4))
-        self.query_one("#usage-text", Static).update(text)
+        self.dashboard.query_one("#usage-text", Static).update(text)
 
     def on_button_pressed(self, event):
         if event.button.id == "usage-status":
@@ -280,7 +330,7 @@ class SchedulerApp(App):
             self.show_usage(args)
 
     def show_result(self, text):
-        self.query_one("#result", Static).update(self.api.clean_text(text))
+        self.dashboard.query_one("#result", Static).update(self.api.clean_text(text))
 
     def render_snapshot(self):
         state = self.snapshot
@@ -298,12 +348,12 @@ class SchedulerApp(App):
             lines.append("GPU%s [%s] %s/%s GiB" % (
                 gpu["index"], bar, self.api.number(gpu.get("used_gb")), self.api.number(total)))
         lines.append("M service · E external · . free · ? unknown")
-        self.query_one("#gpus", Static).update("\n".join(lines))
+        self.dashboard.query_one("#gpus", Static).update("\n".join(lines))
         memory = state.get("memory", {})
-        self.query_one("#memory", Static).update("RAM %s/%s GiB budget\nHost available %s GiB" % (
+        self.dashboard.query_one("#memory", Static).update("RAM %s/%s GiB budget\nHost available %s GiB" % (
             self.api.number(memory.get("sleeping_weights_gb")), self.api.number(memory.get("budget_gb")),
             self.api.number(memory.get("host_available_gb"))))
-        table = self.query_one("#models", DataTable)
+        table = self.dashboard.query_one("#models", DataTable)
         previous = self.selected_model()
         table.clear(columns=True)
         table_width = self.terminal_width if self.terminal_width < 100 else int(self.terminal_width * 0.6)
@@ -339,7 +389,7 @@ class SchedulerApp(App):
         self.update_details()
 
     def selected_model(self):
-        row = self.query_one("#models", DataTable).cursor_row
+        row = self.dashboard.query_one("#models", DataTable).cursor_row
         return self.model_names[row] if 0 <= row < len(self.model_names) else None
 
     def update_details(self):
@@ -354,17 +404,17 @@ class SchedulerApp(App):
             text += " · from " + (", ".join(stats.get("by", [])) or "-")
             if pin:
                 text += " · pin %s (%s)" % (self.api.expiry(pin["until"]), pin["by"])
-        self.query_one("#details", Static).update(self.api.clean_text(text))
+        self.dashboard.query_one("#details", Static).update(self.api.clean_text(text))
 
     def on_data_table_row_highlighted(self, event):
         if self.snapshot is not None and event.data_table.is_attached:
             self.update_details()
 
     def action_command(self):
-        self.query_one("#command", Input).focus()
+        self.dashboard.query_one("#command", Input).focus()
 
     def action_help(self):
-        self.show_result("pin MODEL --for 8h [--dry-run] · unpin MODEL [--dry-run] · status · usage --days 7|30 · u toggle usage · r refresh · / command · Ctrl+R reset events after a known restart · q quit")
+        self.show_result("free [--gpu N] [--need 80G] [--ram] · wake MODEL [--wait 930] · pin MODEL --for 8h · unpin MODEL · all operations accept --dry-run · status · usage --days 7|30 · u usage · / command · Ctrl+R reset events after known restart · q quit")
 
     def action_reset_events(self):
         self.event_reader.reset_cursor()
@@ -428,12 +478,17 @@ class SchedulerApp(App):
                 raise CommandMessage("Connection settings are fixed for this session; restart llm to change them")
             if args.command == "usage":
                 self.show_usage(args)
-            elif args.command in ("pin", "unpin"):
-                self.run_pin(args)
+            elif args.command in ("pin", "unpin", "free", "wake"):
+                if self._write_busy:
+                    self.show_result("An operation is already running; wait for its result (no request queued)")
+                elif args.command == "free" and args.ram and not args.dry_run:
+                    self.confirm_ram(args, event.value)
+                else:
+                    self.run_write(args)
             else:
                 self.usage_active = False
                 self.usage_generation += 1
-                self.screen.remove_class("usage")
+                self.dashboard.remove_class("usage")
                 self.refresh_state(args)
         except (CommandMessage, ValueError) as exc:
             self.show_result(str(exc))

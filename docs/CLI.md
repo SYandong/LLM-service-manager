@@ -1,6 +1,6 @@
 # CLI 使用说明
 
-`cli/llm` 是 Python 3.10+ 标准库脚本。只复制这一个文件即可运行，无需安装仓库、`rich` 或 `textual`。提供只读 `status`、`usage`、pin/unpin 记录命令和可选全屏面板；所有请求都发给配置的 scheduler。
+`cli/llm` 是 Python 3.10+ 标准库脚本。只复制这一个文件即可运行，无需安装仓库、`rich` 或 `textual`。提供只读 `status`、`usage`、pin/unpin 记录、free/wake 命令和可选全屏面板；所有请求都发给配置的 scheduler。
 
 ```sh
 python3 llm --help
@@ -18,7 +18,7 @@ LLM_URL=http://scheduler:8011 python3 llm status --json
 [llm]
 # 改成部署方提供的 scheduler 地址；支持 http 与 https。
 url = http://scheduler:8011
-# 每次 HTTP 请求的超时秒数，必须为正数；默认 10。
+# 普通 HTTP 请求超时秒数，必须为正数；默认 10。free/wake 单独使用 --wait。
 timeout = 10
 ```
 
@@ -88,9 +88,31 @@ LLM_URL=http://scheduler:8011 python3 llm unpin model
 - 模型名作为原样 JSON 值或 URL 编码路径段发送。带空格、斜杠、Unicode 或 `?/#/%` 的名称用 shell 引号包住；以 `-` 开头的名称可写为 `pin --for 8h -- '-model'` 或 `unpin -- '-model'`。
 - 写入成功表示 pin 记录已保存；不会预热模型。实际 TTL/reaper 接入、reserve 及完整保护验收仍是后续部署事项。请求不会自动重试；遇到不确定的连接/响应错误时先用 `status` 核对。
 
+## Free / wake
+
+```sh
+LLM_URL=http://scheduler:8011 python3 llm free --gpu 0 --need 80G --dry-run
+LLM_URL=http://scheduler:8011 python3 llm free --gpu 0 --need 80G
+LLM_URL=http://scheduler:8011 python3 llm free --ram --need 40G
+LLM_URL=http://scheduler:8011 python3 llm wake 'org/model name'
+LLM_URL=http://scheduler:8011 python3 llm wake --wait 1200 -- '-model'
+```
+
+这些命令只适用于部署方明确允许的服务。服务器默认 `read_only: true`、`model_actions_enabled: false`；客户端不会改变开关。`read_only` / `operation_not_enabled` 是失败，不会绕过或改走数据面接口。
+
+- `free` 不带 `--gpu` 时选择初始观测中的全部 GPU；`--need` 是希望**额外**释放的 GiB，可写 `80G`、`80GiB` 或 `80`，支持非负小数。省略数量表示不设置数量目标；`--need 0` 不执行模型动作。`--ram` 请求从宿主内存回收，可能停止符合条件的模型，之后需要冷启动。
+- `wake MODEL` 使用 URL 编码的模型路径和空请求体，显示服务器返回的 `ready`、`cold_start` 与耗时。状态 `ready` 才作为干净成功；即使 `partial` 同时带 `ready: true`，仍保留错误并返回非零退出码。
+- 两个命令均支持 `--dry-run` 与 `--json`。预览显示 `would` / `blocked_by`，明确把 `estimated_freed_gb` 标为策略估算；无模型动作、额外采集或持久化写入。阻塞预览返回退出码 1。
+- **HTTP 200 不等于操作成功。** Free 的 `complete`、wake 的 `ready` 返回 0；`blocked`、`partial`、`failed`、`timeout`、`no_progress` 返回 1。保留已确认的 slept/stopped、全部 skipped 原因与附带来源/在途字段，以及 error/error_model；`--json` 保留完整响应。
+- Free 显示的是所选 GPU 空闲显存或宿主 MemAvailable 的**实测净变化**，包括同期外部活动，不是逐模型释放归因或给用户保留的容量。`freed_gb: null` 显示 unknown；不以估计值或预算替代。`measurement_complete: false` 明确表示不是最终/当前总量，即使保留了此前已确认的部分实测值。采样时刻显示为 Unix 秒。模型可能先睡后停而出现在两份列表中；最新状态以 `status` 为准。
+
+响应等待独立于普通 `--timeout` / `LLM_TIMEOUT`：free 默认 `--wait 150` 秒，wake 默认 `--wait 930` 秒，为服务器默认 120/900 秒动作期限各留 30 秒返回余量。`--wait` 是客户端 HTTP 等待时间，不修改服务器期限；部署方延长期限时需相应调整。显式缩短等待、断线或退出客户端不能撤销已受理的操作。未知结果会提示先检查 `status` 与事件；客户端不自动重试，刷新失败也不重放写入。
+
+当前只消费 scheduler 事件，冷启动原始 llama-swap 日志转发与真实 sleeping-wake <3 秒、显存释放实测仍需 ops/integration 验收。命令发布不代表生产动作获准。
+
 ## 可选 TUI
 
-包含 TUI 的发布包使用 `pip install 'llmsvc[tui]'` 安装。也可将仓库中的实际 `tui/` 目录复制到独立 `llm` 脚本旁，再安装 `textual>=0.70`。仅复制 `llm` 仍可使用所有只读 CLI 功能。
+包含 TUI 的发布包使用 `pip install 'llmsvc[tui]'` 安装。也可将仓库中的实际 `tui/` 目录复制到独立 `llm` 脚本旁，再安装 `textual>=0.70`。仅复制 `llm` 仍可使用全部 CLI 命令。
 
 从源代码目录试用：
 
@@ -102,11 +124,12 @@ LLM_URL=http://scheduler:8011 python cli/llm
 状态面板每 5 秒刷新，显示 GPU 占用条、内存预算和可选择的模型表。100×30 时事件流在模型表右侧；小于 100 列时上方改为单列、事件流移到模型表下方。空间不足时模型表保留名称、状态、GPU、显存和 PIN 标记，选中模型的来源、pin 到期与 owner 在下方显示。鼠标可滚动较长的详情、命令结果和事件。
 
 - `↑` / `↓` 选择模型，`r` 刷新当前视图，`/` 聚焦命令框，`u` 在状态与 usage 之间切换，`?` 帮助，`q` 退出。用 `Tab` 聚焦详情或结果滚动区后，可用方向键翻动长内容；长错误不会限制在可见的两行内。
-- 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。
-- Pin/unpin 成功后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态。结果保留服务端 owner/actor；刷新失败会单独说明，已成功的写入不会因此重试。同一时刻只执行一个 pin/unpin 请求。
+- 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL`、`free`、`wake MODEL` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。
+- Pin/unpin 成功后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态。结果保留服务端 owner/actor；刷新失败会单独说明，已成功的写入不会因此重试。同一时刻只执行一个写请求（pin/unpin/free/wake），不会把重复提交排队。
 - usage 视图提供 7 天、30 天和返回状态按钮，每 5 秒刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
 - 请求在后台线程执行，慢请求不会叠加轮询或阻塞按键。连接失败保留上一份快照，并显示错误；新快照到达后保留选中模型。
-- 当前仅支持 pin/unpin 记录写入；`free`、`wake`、`reserve`、模型登记/删除和对应快捷键尚未开放。不能用本客户端命令启用生产调度。
+- 实际 `free --ram` 先弹出二次确认，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。Free/wake 完成后立即刷新，部分结果与错误仍保留；后台执行期间 UI 与事件面板继续响应。
+- `reserve`、模型登记/删除和 f/p/w 快捷键尚未开放。不能用本客户端命令启用生产调度。
 
 ### Scheduler 事件流
 
@@ -126,6 +149,7 @@ python -m pytest -q tests/test_llm_tui.py tests/test_tui.py
 python -m pytest -q tests/test_llm_events.py tests/test_tui_events.py
 python -m pytest -q tests/test_llm_usage.py tests/test_tui_usage.py
 python -m pytest -q tests/test_llm_pin.py tests/test_tui_pin.py
+python -m pytest -q tests/test_llm_actions.py tests/test_tui_actions.py
 ```
 
 测试使用核心包的状态结构生成 JSON，并在临时 loopback HTTP 服务上验证单文件复制、无 site-packages 的 Python 启动、JSON 保真与窄屏。Python 3.10 可用时直接执行该解释器的复制测试；CI 使用 Python 3.10。客户端测试不访问生产服务或 GPU。
@@ -137,5 +161,7 @@ SSE 解码按 [事件流格式](https://html.spec.whatwg.org/dev/server-sent-eve
 Usage 测试使用临时 SQLite、实际 `ActivityReader` / `build_usage` 和 scheduler HTTP 服务，核对 CLI/TUI 显示与后端计数，并确认数据库字节不变。独立的历史线上对账证据保存在 [telemetry/live-final.json](../tests/fixtures/telemetry/live-final.json)：该快照记录的 31,605 请求、40,480,504 输入 token、4,847,906 输出 token 与当时的数据面 metrics 总数一致。这是 telemetry 的采样时刻证据；当前客户端测试证明显示与后端协议一致，完整 #25 的集成与来源对账验收仍需相应实机证据。
 
 Pin/unpin 测试仅使用明确 opt-in 的临时 SQLite/loopback scheduler。覆盖伪造兼容标签后的权威 owner、编码模型名、空 DELETE body、写入陷阱下的零写入 dry-run，以及成功后的即时刷新与迟到响应。没有调用生产接口、模型执行器或 GPU；完整 #11/#24 验收保留在相应后续事项中。
+
+Free/wake 验证使用实际 core HTTP、临时 SQLite 和显式模拟的模型状态变化；另一个 loopback 数据面夹具验证 unload/upstream 路径。包括超时传参、零写入预览、空 wake body、编码名称、HTTP 200 阻塞、未知/部分实测、二次确认、迟到结果和退出生命周期。模拟的 12 GiB GPU 净变化与 25 GiB 宿主变化只证明协议和显示，不是 GPU 实测。
 
 <!-- Generated-By: Codex / gpt-6-astra -->
