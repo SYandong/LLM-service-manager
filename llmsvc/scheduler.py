@@ -1,5 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
-"""Sampling, usage and opt-in pin intent writes under one accounting lock."""
+"""Sampling, usage and opt-in intent writes under one accounting lock."""
 
 import copy
 import json
@@ -8,7 +8,9 @@ import math
 import sqlite3
 import threading
 import time
+import uuid
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime
 from typing import Callable, Optional
@@ -120,6 +122,7 @@ class Scheduler:
         self.collect = collect
         self.model_actions = None
         self.placement = None
+        self.reservation_actions = None
         self._usage = usage
         self._collector_closed = False
         # One lock for action/accounting and publication. Slow read-only probes
@@ -301,6 +304,95 @@ class Scheduler:
             # Persist, publish and wake waiters under the same accounting lock.
             self.emit(operation, model=model, detail={**result, "dry_run": False})
             return result
+
+    def _reserve_input(self, payload, *, source_ip, dry_run=False):
+        if not isinstance(payload, dict):
+            raise ValueError("request body must be a JSON object")
+        self._keys(payload, {"gpu", "size_gb", "until", "by"}, required={"gpu", "size_gb", "until", "by"})
+        nonempty(payload["by"], "by")  # Compatibility self-label, never authority.
+        self._gpu(payload["gpu"], self.snapshot())
+        reserve = Reserve("preview", payload["gpu"], payload["size_gb"],
+                          self._until(payload["until"], self.clock()),
+                          payload["by"] if dry_run else self.config.owner_for_ip(source_ip))
+        validate_reserve(reserve)
+        return reserve
+
+    @contextmanager
+    def _reserve_lock(self, deadline):
+        remaining = deadline-time.monotonic()
+        if remaining <= 0 or not self.action_lock.acquire(timeout=remaining):
+            raise IntentWriteError(503, "reserve_timeout")
+        try:
+            yield
+        finally:
+            self.action_lock.release()
+
+    def _save_reserve(self, payload, *, source_ip, dry_run=False, deadline=None):
+        """Commit the intent before starting any bounded evacuation."""
+        deadline = deadline if deadline is not None else time.monotonic()+self.config.reserve_timeout_seconds
+        with self._reserve_lock(deadline):
+            if not dry_run:
+                if self.config.read_only:
+                    raise IntentWriteError(405, "read_only")
+                if self.store is None or self.store.read_only:
+                    raise IntentWriteError(503, "intent_store_unavailable")
+            reserve = self._reserve_input(payload, source_ip=source_ip, dry_run=dry_run)
+            if dry_run:
+                # Match pin/legacy reserve previews: by is a hypothetical label.
+                # Only persisted records use authoritative transport ownership.
+                return reserve  # No ID allocation, writer, collection or event.
+            reserve = replace(reserve, id=uuid.uuid4().hex)
+            try:
+                self.store.put_reserve(reserve)
+            except (sqlite3.Error, OSError) as exc:
+                raise IntentWriteError(503, "intent_store_unavailable") from exc
+            self.emit("reserve", detail={**asdict(reserve), "dry_run": False})
+            return reserve
+
+    def _delete_reserve(self, reserve_id, *, source_ip, dry_run=False, deadline=None):
+        deadline = deadline if deadline is not None else time.monotonic()+self.config.request_timeout_seconds
+        with self._reserve_lock(deadline):
+            nonempty(reserve_id, "id")
+            owner = self.config.owner_for_ip(source_ip)
+            if not dry_run:
+                if self.config.read_only:
+                    raise IntentWriteError(405, "read_only")
+                if self.store is None or self.store.read_only:
+                    raise IntentWriteError(503, "intent_store_unavailable")
+                try:
+                    self.store.remove_reserve(reserve_id)
+                except (sqlite3.Error, OSError) as exc:
+                    raise IntentWriteError(503, "intent_store_unavailable") from exc
+                self.emit("unreserve", detail={"id": reserve_id, "by": owner, "dry_run": False})
+            return {"id": reserve_id, "by": owner}
+
+    def run_reserve(self, operation, payload, *, source_ip, dry_run=False):
+        if operation not in ("reserve", "unreserve"):
+            raise IntentWriteError(405, "operation_not_enabled")
+        if dry_run:
+            # Preserve the published pin/reserve preview contract: hypothetical
+            # request labels and pure policy plans, not live execution receipts.
+            return self.preview(operation, payload)
+        from llmsvc.actions import ReservationController
+        if operation == "unreserve":
+            if not isinstance(payload, dict):
+                raise ValueError("request body must be a JSON object")
+            self._keys(payload, {"id"}, required={"id"})
+            return self._delete_reserve(payload["id"], source_ip=source_ip)
+        deadline = time.monotonic()+self.config.reserve_timeout_seconds
+        record = self._save_reserve(payload, source_ip=source_ip, deadline=deadline)
+        try:
+            controller = self.reservation_actions or ReservationController(self)
+            outcome = controller.evacuate(record, deadline=deadline)
+        except Exception as exc:
+            # Persistence already succeeded: never hide that ID behind a generic
+            # error or imply rollback. No further model action is attempted.
+            LOG.warning(json.dumps({"kind": "reserve_execution_error", "reserve_id": record.id,
+                                    "error_type": type(exc).__name__}))
+            outcome = {"status": "blocked", "stopped": [],
+                       "skipped": [{"model": None, "reason": "reserve_execution_failed", "gpu": record.gpu}],
+                       "error": "reserve_execution_failed"}
+        return {**asdict(record), "evacuation": outcome}
 
     @staticmethod
     def _keys(payload, allowed, required=frozenset()):

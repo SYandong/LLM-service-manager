@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import re
+import sqlite3
 import threading
 import time
 from dataclasses import asdict
@@ -680,4 +681,189 @@ class ModelActionController:
                     self.pending.discard(name)
                 self.scheduler.emit("wake_result", model=name, detail={"by": by, **result})
                 self.scheduler.changed.notify_all()
+        return result
+
+
+class ReservationController:
+    """Bounded evacuation outcome for a persisted intent (DESIGN §4.4).
+
+    Only confirmed, configured sleeping daemons are candidates. A saved reserve
+    does not authorize awake relocation, orphan adoption or automatic recovery.
+    """
+
+    def __init__(self, scheduler, *, accounting=None, monotonic=time.monotonic):
+        self.scheduler = scheduler
+        self.monotonic = monotonic
+        self.controller = scheduler.model_actions
+        if accounting is None and self.controller is not None:
+            from llmsvc.leases import PlacementController
+            accounting = PlacementController(scheduler, self.controller.transport, monotonic=monotonic)
+        self.accounting = accounting
+
+    def _plan(self, snapshot, reserve, *, stopped=()):
+        from dataclasses import replace
+        from llmsvc.policy import Decision, plan_reserve
+        from llmsvc.state import Blocker, Pin
+        sampled = snapshot.sampled_at
+        if not _known(sampled) or not 0 <= self.scheduler.clock()-sampled <= self.scheduler.config.max_snapshot_age_seconds:
+            return Decision(blocked_by=(Blocker(None, "unknown_or_stale_snapshot", reserve.gpu),))
+        controller = self.controller
+        enabled = self.scheduler.config.model_actions_enabled and controller is not None and self.accounting is not None
+        models = []
+        guarded = {}
+        extra = []
+        confirmed = {lease.model for lease in snapshot.leases if lease.status == "confirmed"}
+        metadata = controller.transport.models if controller is not None else self.scheduler.config.collectors.get("models", {})
+        for model in snapshot.models:
+            if metadata.get(model.name, {}).get("is_default") is True:
+                model = replace(model, is_default=True)
+            models.append(model)
+            if model.gpu is None and model.state != "stopped":
+                extra.append(Blocker(model.name, "unknown_model_gpu"))
+            if model.gpu != reserve.gpu:
+                continue
+            if model.state == "awake":
+                extra.append(Blocker(model.name, "awake_model_untouched", reserve.gpu))
+            elif model.state == "stopped" and model.name not in stopped:
+                extra.append(Blocker(model.name, "exit_not_verified_by_reserve", reserve.gpu))
+            if model.state == "sleeping" and enabled:
+                unit = controller.transport.units.get(model.name)
+                if unit is None or model.unit != unit or self.accounting.transport.units.get(model.name) != unit:
+                    guarded[model.name] = "unmanaged_or_changed_unit"
+                elif model.name not in confirmed:
+                    guarded[model.name] = "unleased_model"
+                elif model.name in controller.pending or controller.free_active:
+                    guarded[model.name] = "operation_in_progress"
+        for lease in snapshot.leases:
+            if lease.gpu == reserve.gpu and lease.status in ("pending", "stale"):
+                extra.append(Blocker(lease.model, "outstanding_lease", reserve.gpu))
+        # Detached exclusions reuse the existing pure policy; no synthetic pin
+        # is saved or published as user intent.
+        pins = snapshot.pins + tuple(Pin(name, self.scheduler.clock()+self.scheduler.config.reserve_timeout_seconds+1,
+                                        "reserve_guard") for name in guarded)
+        decision = plan_reserve(replace(snapshot, models=tuple(models), pins=pins), gpu=reserve.gpu)
+        blockers = tuple(replace(blocker, reason=guarded[blocker.model])
+                         if blocker.model in guarded and blocker.reason == "pinned_until" else blocker
+                         for blocker in decision.blocked_by) + tuple(extra)
+        if not enabled:
+            blockers += tuple(Blocker(action.model, "model_actions_not_enabled", reserve.gpu) for action in decision.actions)
+            return replace(decision, actions=(), blocked_by=blockers)
+        return replace(decision, blocked_by=blockers)
+
+    def _intent_error(self, reserve):
+        if self.scheduler.config.read_only:
+            return "read_only"
+        if self.scheduler.store is None or self.scheduler.store.read_only:
+            return "intent_store_unavailable"
+        current = self.scheduler.store.reserve(reserve.id)
+        if current != reserve:
+            return "reservation_removed_or_changed"
+        if current.until <= self.scheduler.clock():
+            return "reservation_expired"
+        return None
+
+    def evacuate(self, reserve, *, deadline=None, dry_run=False):
+        """Return an observed outcome; the saved intent is never rolled back."""
+        from llmsvc.leases import LeaseError
+        from llmsvc.state import Blocker
+        if dry_run:
+            with self.scheduler.action_lock:
+                decision = self._plan(self.scheduler.snapshot(), reserve)
+                return {"would": [asdict(action) for action in decision.actions],
+                        "blocked_by": [asdict(blocker) for blocker in decision.blocked_by]}
+        if self.scheduler.config.read_only:
+            raise ActionDispatchError("read_only")
+        deadline = deadline if deadline is not None else self.monotonic()+self.scheduler.config.reserve_timeout_seconds
+        stopped = []
+        skipped = []
+        error = None
+        controller = self.controller
+        try:
+            while self.monotonic() < deadline:
+                if self.scheduler.stopping.is_set():
+                    error = "scheduler_stopping"
+                    break
+                remaining = deadline-self.monotonic()
+                if not self.scheduler.action_lock.acquire(timeout=max(0, remaining)):
+                    error = "deadline_exceeded"
+                    break
+                action = None
+                failure = None
+                try:
+                    error = self._intent_error(reserve)
+                    if error:
+                        break
+                    snapshot = self.scheduler.snapshot()
+                    decision = self._plan(snapshot, reserve, stopped=stopped)
+                    skipped = list(decision.blocked_by)
+                    if not decision.actions:
+                        break
+                    action = decision.actions[0]
+                    if action.kind != "stop":
+                        error = "reserve_action_not_supported"
+                        break
+                    account = next((lease for lease in snapshot.leases if lease.model == action.model and lease.status == "confirmed"), None)
+                    identity = self.accounting._inspect(action.model, deadline)
+                    if account is None or not identity.active or identity.lease_id != account.lease_id:
+                        error = "unit_identity_unconfirmed"
+                        skipped.append(Blocker(action.model, error, reserve.gpu))
+                        break
+                    # Expiry or a newly published wake/protection can invalidate
+                    # admission during the bounded identity probe. Recheck now.
+                    error = self._intent_error(reserve)
+                    if not error and not self.scheduler.config.model_actions_enabled:
+                        error = "model_actions_not_enabled"
+                    models = [model for model in self.scheduler.snapshot().models if model.name == action.model]
+                    if not error and (len(models) != 1 or models[0].state != "sleeping" or models[0].is_sleeping is not True):
+                        error = "model_no_longer_sleeping"
+                    if error:
+                        skipped.append(Blocker(action.model, error, reserve.gpu))
+                        break
+                    controller.pending.add(action.model)
+                    try:
+                        controller.dispatcher.execute(action, dry_run=False, deadline=deadline)
+                    except ActionDispatchError as exc:
+                        failure = exc.reason
+                    except Exception:
+                        controller.pending.discard(action.model)
+                        raise
+                finally:
+                    self.scheduler.action_lock.release()
+                if action is None:
+                    break
+                try:
+                    confirmed = self.accounting._observe_victim(action,
+                        min(deadline, self.monotonic()+self.scheduler.config.action_observe_seconds), reconcile_exit=True)
+                    if confirmed:
+                        stopped.append(action.model)
+                    self.scheduler.emit("reserve_action_result", model=action.model, detail={
+                        "reserve_id": reserve.id, "action": asdict(action), "confirmed": confirmed,
+                        "error": failure if failure else (None if confirmed else "exit_unconfirmed"), "dry_run": False})
+                    if failure or not confirmed:
+                        error = failure or ("deadline_exceeded" if self.monotonic() >= deadline else "exit_unconfirmed")
+                        skipped.append(Blocker(action.model, error, reserve.gpu))
+                        break
+                except LeaseError:
+                    error = "deadline_exceeded"
+                    break
+                finally:
+                    with self.scheduler.changed:
+                        controller.pending.discard(action.model)
+                        self.scheduler.changed.notify_all()
+            else:
+                error = "deadline_exceeded"
+        except (sqlite3.Error, OSError, ValueError):
+            error = "intent_store_unavailable"
+        except Exception as exc:
+            LOG.warning(json.dumps({"kind": "reserve_execution_error", "reserve_id": reserve.id,
+                                    "error_type": type(exc).__name__}))
+            error = "reserve_execution_failed"
+        if error and not any(blocker.reason == error for blocker in skipped):
+            skipped.append(Blocker(None, error, reserve.gpu))
+        incomplete = bool(skipped or error)
+        result = {"status": ("partial" if stopped else "blocked") if incomplete else "complete",
+                  "stopped": stopped, "skipped": [asdict(blocker) for blocker in skipped]}
+        if error:
+            result["error"] = error
+        self.scheduler.emit("reserve_result", detail={"reserve_id": reserve.id, **result, "dry_run": False})
         return result
