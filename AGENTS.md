@@ -26,12 +26,12 @@ LLM-service-manager 正在从"单后端 vLLM 代理"（`vllm_service/`，legacy�
 ## 3. 工作流：issue 先行，PR 合并
 
 1. **任何改动先有 issue**。发现问题、想改设计、想加功能，都先开 issue（用模板），说明动机与验收标准。做的过程中遇到新问题，另开 issue，不要在当前 PR 里顺手扩 scope。
-2. **从 issue 开分支**：`<type>/<issue号>-<短描述>`，type 取 `feat` / `fix` / `docs` / `ops` / `refactor`。例：`feat/7-llm-status`。
+2. **从 issue 开分支**：`<type>/<issue号>-<短描述>`，type 取 `feat` / `fix` / `docs` / `ops` / `refactor` / `chore`；`chore` 仅用于发版，需 issue 记录授权。例：`feat/7-llm-status`、`chore/76-release-alpha1`。
 3. **`main` 不直接 push**。所有改动走 PR，PR 描述用模板，正文写 `Closes #N`。
 4. **至少一位其他成员 review 通过再合并**，用 squash merge。作者不能自己批准自己。
 5. **CI 绿了才能合**：`pytest` 全过。策略类改动必须附带回放测试。
 6. 设计层面的变更（改状态机、改驱逐规则、改 API 形状）先开 `type:design` issue 讨论，达成一致后再改 `docs/DESIGN.md` 与代码，两者在同一个 PR 里。
-7. 提交信息：一行英文祈使句概括（≤72 字符），空一行，正文可中文，引用 issue 号。
+7. 提交信息：一行英文祈使句概括（≤72 字符），空一行，正文可中文，引用 issue 号。发版提交使用 `chore(release): <version>`；发版准备修订可使用同一前缀加简短英文动作描述。
 
 ## 4. 模型水印（强制）
 
@@ -77,3 +77,4 @@ Generated-By: <harness> / <model-id>
 - 完成一个 issue 的标准：验收标准逐条满足、测试通过、`docs/` 与代码一致、PR 描述写明验证方式、水印齐全。
 
 <!-- Generated-By: Claude Code / claude-fable-5-1 -->
+<!-- Generated-By: Codex / gpt-6-astra -->
