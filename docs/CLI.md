@@ -119,11 +119,11 @@ LLM_URL=http://scheduler:8011 python3 llm reserve --gpu 0 --size 80G --for 4h --
 
 `--gpu`、`--size`、`--for` 都是必填项。GPU 为非负整数，size 是正 GiB（`80G` / `80GiB` / `80`），时长复用 pin 的正数 `s/m/h/d` 规则。不提供默认或永久预约；零大小、零时长、非有限数与无法表示的到期时间在请求前被拒绝。
 
-- 当前已挂载的 `?dry_run=1` 返回 would/blocked_by：只预览预约和符合条件的 sleeping 模型清理，不持久化、不调用模型 transport、不分配预约 ID。`by` 是兼容请求标签，预览中标为假设值。阻塞预览返回退出码 1；`--json` 保留完整内容。
-- 本客户端切片交付时，当前 main 的非 dry-run reserve 尚未挂载，返回 405；默认只读服务也拒绝实际写入。客户端显示服务器的 `read_only` / `operation_not_enabled`，不会自动改走预览或重试。Core 的 live 接入与对应 DESIGN 在 #107 的实现审核中推进，客户端发布不代表后端已经启用。
-- 对采用 #107 响应的服务，去掉 `--dry-run` 才发送实际预约。成功保存返回 `{id,gpu,size_gb,until,by,evacuation:{status,stopped,skipped,error?}}`。客户端显示服务端权威 owner 和保存回执，单独显示 evacuation 的 complete/blocked/partial 及全部确认停止、阻塞与错误详情。
+- 当前已挂载的 `?dry_run=1` 返回 would/blocked_by：只预览预约和符合条件的 sleeping 模型清理，不持久化、不调用模型 transport、不分配预约 ID。`by` 是兼容请求标签，预览中标为假设值；实际保存时才按连接来源确定权威 owner。阻塞预览返回退出码 1；`--json` 保留完整内容。
+- 采用 #112 接口的 scheduler 在 `read_only: false` 且有可写状态库时接受实际预约；默认只读仍返回 405。意图写入与 `model_actions_enabled` 分开：关闭模型动作也可保存意图，但不能据此认为清理完成。客户端显示服务器的 `read_only` / 旧版本 `operation_not_enabled`，不会自动改走预览、重试或更改服务器配置。
+- 去掉 `--dry-run` 才发送实际预约。成功保存返回 `{id,gpu,size_gb,until,by,evacuation:{status,stopped,skipped,error?}}`。客户端显示服务端权威 owner 和保存回执，单独显示 evacuation 的 complete/blocked/partial 及全部确认停止、阻塞与错误详情。
 - **HTTP 200、保存成功与清理完成是不同结果。** blocked/partial 返回退出码 1，但不撤销或隐藏已保存的 ID/意图，也不重发 POST。`size_gb` 只是请求的预约注记；有效预约从调度器放置中排除整张 GPU，不代表实测释放容量。complete 也不保证 GPU 物理使用为零或没有其他用户进程。
-- 回执说明保存时的事实；到达客户端前可能已过期或被其他调用删除。用 `status` 查询当前状态。客户端采用 150 秒的独立 `--wait` 响应等待，可按部署方期限调整；它不改变后端期限。超时或丢失响应时意图可能已保存，先核对状态，不能以自动重试解决歧义。
+- 回执说明保存时的事实；到达客户端前可能已过期或被其他调用删除。用 `status` 查询当前状态。客户端采用 150 秒的独立 `--wait` 响应等待，覆盖服务端默认/上限 120 秒的 reserve 期限并留出返回余量，可显式调整；它不改变后端期限。超时或丢失响应时意图可能已保存，先核对状态，不能以自动重试解决歧义。
 
 TUI 输入框支持同一 reserve 命令与选项，沿用单写请求、迟到响应保护和执行后即时 GET 状态。有效预约的 GPU 标记为 `reserved for placement`；blocked/partial 回执仍显示并刷新当前预约。此切片未增加 unreserve、模型登记/删除接口或快捷键；完整 #11 的 live 预约/清理、TTL/reaper 与运行期验收继续单独跟进。
 
@@ -149,7 +149,7 @@ LLM_URL=http://scheduler:8011 python cli/llm
 - usage 视图提供 7 天、30 天和返回状态按钮，每 5 秒刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
 - 请求在后台线程执行，慢请求不会叠加轮询或阻塞按键。连接失败保留上一份快照，并显示错误；新快照到达后保留选中模型。
 - 实际 `free --ram` 先弹出二次确认，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。Free/wake 完成后立即刷新，部分结果与错误仍保留；后台执行期间 UI 与事件面板继续响应。
-- Reserve 的当前预览/405 与后续 live 回执边界见上节；unreserve、模型登记/删除尚未开放。不能用本客户端命令启用生产调度。
+- Reserve 的预览、只读拒绝与实际回执语义见上节；unreserve、模型登记/删除尚未开放。不能用本客户端命令启用生产调度。
 
 ### Scheduler 与数据面事件流
 
@@ -177,7 +177,7 @@ python -m pytest -q tests/test_llm_tui.py tests/test_tui.py
 python -m pytest -q tests/test_llm_events.py tests/test_tui_events.py tests/test_tui_relay.py
 python -m pytest -q tests/test_llm_usage.py tests/test_tui_usage.py
 python -m pytest -q tests/test_llm_pin.py tests/test_tui_pin.py
-python -m pytest -q tests/test_llm_reserve.py tests/test_tui_reserve.py
+python -m pytest -q tests/test_llm_reserve.py tests/test_llm_reserve_http.py tests/test_tui_reserve.py
 python -m pytest -q tests/test_llm_actions.py tests/test_tui_actions.py
 python -m pytest -q tests/test_tui_shortcuts.py
 ```
@@ -196,6 +196,6 @@ Free/wake 验证使用实际 core HTTP、临时 SQLite 和显式模拟的模型�
 
 快捷键测试通过 headless Pilot 实际按键，覆盖输入焦点、草稿保留、所选模型/失效目标、引号与前导连字符、空/零 pin 时长拒绝、显式提交与刷新、RAM 确认/取消，以及现有 usage/help/quit。它们复用上述临时服务，不进行实机模型操作。
 
-Reserve 测试直接请求当前 SchedulerHTTPServer 的预览/默认只读 405 路径，并以临时 SQLite 字节、状态、事件和采集次数及写入陷阱验证零副作用。Live 回执使用明确标记的 #107 响应夹具与预置意图验证显示、非零退出码和刷新；这部分不冒充尚未挂载的真实 reserve POST 验收。单文件 `-I -S`、非法参数、丢失响应无重试、线程屏障和退出回调也纳入检查。
+Reserve 测试直接请求当前 SchedulerHTTPServer 的预览/默认只读 405 路径，并以临时 SQLite 字节、状态、事件和采集次数及写入陷阱验证零副作用。实际挂载的 POST/DELETE 通过 core 的临时 HTTP/SQLite 与模拟受管 unit 夹具验证：complete/blocked/partial、伪造标签后的权威 owner、保存 ID、不完整 evacuation 后保留意图、幂等删除、响应前删除/到期及真实保存后丢失回复不重试。TUI 也使用此实际 API 刷新预约；额外的响应夹具仅保留为无效响应/格式化单测，不代替实际链路。未登记租约的 sleeping 模型明确以 `unleased_model` 阻塞，不把纯策略估计当可执行动作。单文件 `-I -S`、非法参数、丢失响应无重试、线程屏障和退出回调也纳入检查。
 
 <!-- Generated-By: Codex / gpt-6-astra -->
