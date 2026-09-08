@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass, replace
 from math import isfinite
-from typing import Optional, Tuple
+from typing import Mapping, Optional, Tuple
 
 from llmsvc.state import Action, Activity, Blocker, ModelState, StateSnapshot
 from .ranking import keep_value
@@ -60,7 +60,15 @@ class Projection:
     dependent actions. Estimated RAM/VRAM releases are never observed results.
     """
 
-    def __init__(self, snapshot: StateSnapshot, settings: PolicySettings):
+    def __init__(
+        self, snapshot: StateSnapshot, settings: PolicySettings, *,
+        exclusions: Optional[Mapping[str, str]] = None,
+    ):
+        self.exclusions = {} if exclusions is None else dict(exclusions)
+        if any(not isinstance(name, str) or not name.strip()
+               or not isinstance(reason, str) or not reason.strip()
+               for name, reason in self.exclusions.items()):
+            raise ValueError("exclusions require nonempty model names and reasons")
         self.snapshot = snapshot
         self.settings = settings
         self.models = {m.name: m for m in snapshot.models}
@@ -80,12 +88,21 @@ class Projection:
         blocker = Blocker(model.name, reason, model.gpu, ", ".join(activity.by) or None, activity.in_flight)
         if blocker not in self.blockers:
             self.blockers.append(blocker)
+        # Real user intent and independent controller eligibility are separate
+        # causes. Preserve the pin blocker instead of relabeling it as a guard.
+        exclusion = self.exclusions.get(model.name)
+        if reason == "pinned_until" and exclusion is not None:
+            excluded = replace(blocker, reason=exclusion)
+            if excluded not in self.blockers:
+                self.blockers.append(excluded)
 
     def protection(self, model, *, stop=False, min_idle=None):
         if model.state not in ("awake", "sleeping"):
             return "unknown_model_state"
         if any(p.model == model.name and (not known_number(p.until) or p.until > self.snapshot.sampled_at) for p in self.snapshot.pins):
             return "pinned_until"
+        if model.name in self.exclusions:
+            return self.exclusions[model.name]
         activity = self.activity.get(model.name)
         if activity is None or not isinstance(activity.in_flight, int) or isinstance(activity.in_flight, bool) or activity.in_flight < 0:
             return "unknown_in_flight"
