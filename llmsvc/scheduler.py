@@ -27,11 +27,95 @@ class IntentWriteError(RuntimeError):
         self.error = error
 
 
+class DataPlaneBridge:
+    """One bounded consumer; producer drain always finishes before publication.
+
+    A busy action lock retains one detached batch, never blocks the source
+    reader, and lets its bounded buffer report local discard counts next round.
+    """
+
+    def __init__(self, scheduler, relay):
+        self.scheduler = scheduler
+        self.relay = relay
+        self.pending = None
+        self.thread = None
+        self.stopping = threading.Event()
+        self.closed = False
+        self.shutdown_discard = None
+
+    def start(self):
+        if self.closed or self.thread is not None:
+            raise RuntimeError("data-plane bridge already started or closed")
+        self.relay.start()
+        self.thread = threading.Thread(target=self._run, name="llmsvc-event-relay", daemon=True)
+        self.thread.start()
+
+    def drain_once(self, max_events=None):
+        # Only the consumer thread calls this, or close() after joining it.
+        if self.pending is None:
+            self.pending = self.relay.drain(max_events=self.scheduler.config.data_plane_event_batch_size if max_events is None else max_events)
+        if not self.scheduler.action_lock.acquire(blocking=False):
+            return False
+        try:
+            batch = self.pending
+            for event in batch["events"]:
+                self.scheduler.emit(event["kind"], model=event["model"], detail=event["detail"])
+            if batch["dropped"]:
+                self.scheduler.emit("data_plane_dropped", detail={
+                    "source": "llama-swap", "received_at": self.scheduler.clock(),
+                    "trusted_for_quiet": False, "dropped": batch["dropped"],
+                    "dropped_by_reason": batch["dropped_by_reason"], "upstream_loss_unknown": True})
+            self.pending = None
+            return True
+        finally:
+            self.scheduler.action_lock.release()
+
+    def _run(self):
+        while not self.stopping.is_set():
+            try:
+                self.drain_once()
+            except Exception as exc:
+                LOG.warning(json.dumps({"kind": "data_plane_bridge_error", "error_type": type(exc).__name__}))
+            self.stopping.wait(self.scheduler.config.data_plane_event_interval_seconds)
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.stopping.set()
+        try:
+            self.relay.close()  # Interrupt and join the upstream reader first.
+        finally:
+            if self.thread is not None and self.thread.is_alive():
+                self.thread.join(timeout=self.scheduler.config.request_timeout_seconds)
+                if self.thread.is_alive():
+                    raise RuntimeError("data-plane bridge consumer did not stop")
+            # Producer is closed. At most one pending batch plus one full source
+            # buffer is forwarded; never loop waiting for the action lock.
+            self.drain_once()
+            if self.pending is None:
+                self.drain_once(max_events=self.scheduler.config.data_plane_event_capacity)
+            if self.pending is not None:
+                remainder = self.relay.drain(max_events=self.scheduler.config.data_plane_event_capacity)
+                reasons = dict(self.pending["dropped_by_reason"])
+                for reason, count in remainder["dropped_by_reason"].items():
+                    reasons[reason] = reasons.get(reason, 0) + count
+                self.shutdown_discard = {
+                    "kind": "data_plane_bridge_shutdown_discard", "source": "llama-swap",
+                    "received_at": self.scheduler.clock(), "trusted_for_quiet": False,
+                    "unpublished_events": len(self.pending["events"]) + len(remainder["events"]),
+                    "dropped": self.pending["dropped"] + remainder["dropped"],
+                    "dropped_by_reason": reasons, "upstream_loss_unknown": True}
+                LOG.warning(json.dumps(self.shutdown_discard))
+                self.pending = None
+
+
 class Scheduler:
     def __init__(self, config: SchedulerConfig,
                  collect: Optional[Callable[[], StateSnapshot]] = None, *,
                  usage: Optional[Callable[..., dict]] = None,
-                 store: Optional[IntentStore] = None, clock: Callable[[], float] = time.time):
+                 store: Optional[IntentStore] = None, clock: Callable[[], float] = time.time,
+                 event_relay=None):
         self.config = config
         self.collect = collect
         self.model_actions = None
@@ -49,6 +133,10 @@ class Scheduler:
         self._next_event_id = 1
         self.stopping = threading.Event()
         self.sample_requested = threading.Event()
+        self.events_closed = threading.Event()
+        if event_relay is not None and not config.data_plane_events_enabled:
+            raise ValueError("data-plane bridge requires explicit opt-in")
+        self.event_bridge = DataPlaneBridge(self, event_relay) if event_relay is not None else None
         self._thread = None
         self._sample_started = 0
         self._sample_published = 0
@@ -297,7 +385,7 @@ class Scheduler:
     def events_since(self, cursor: int, timeout: float = 0.0) -> tuple[Event, ...]:
         with self.changed:
             self.changed.wait_for(
-                lambda: self.stopping.is_set() or any(e.id > cursor for e in self._events),
+                lambda: self.events_closed.is_set() or any(e.id > cursor for e in self._events),
                 timeout=timeout,
             )
             return tuple(copy.deepcopy(e) for e in self._events if e.id > cursor)
@@ -357,19 +445,33 @@ class Scheduler:
             if self.stopping.is_set():
                 raise RuntimeError("scheduler already stopped")
             self._thread = threading.Thread(target=self._run, name="llmsvc-sampler", daemon=True)
+        try:
+            if self.event_bridge is not None:
+                self.event_bridge.start()
             self._thread.start()
+        except Exception:
+            self.stop()
+            raise
 
     def stop(self):
         self.stopping.set()
         self.sample_requested.set()
-        with self.changed:
-            self.changed.notify_all()
-        if self._thread is not None:
-            self._thread.join(timeout=self.config.request_timeout_seconds)
-        with self.action_lock:
-            if self._collector_closed:
-                return
-            self._collector_closed = True
-        close = getattr(self.collect, "close", None)
-        if close is not None:
-            close()
+        try:
+            if self.event_bridge is not None:
+                self.event_bridge.close()
+        finally:
+            try:
+                if self._thread is not None and self._thread.is_alive():
+                    self._thread.join(timeout=self.config.request_timeout_seconds)
+                with self.action_lock:
+                    if self._collector_closed:
+                        return
+                    self._collector_closed = True
+                close = getattr(self.collect, "close", None)
+                if close is not None:
+                    close()
+            finally:
+                # SSE may send its final buffered relay events before closing.
+                self.events_closed.set()
+                with self.changed:
+                    self.changed.notify_all()

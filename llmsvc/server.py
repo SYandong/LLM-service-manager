@@ -97,7 +97,7 @@ class SchedulerHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         self.wfile.write(b": connected\n\n")
         self.wfile.flush()
-        while not scheduler.stopping.is_set():
+        while True:
             events = scheduler.events_since(cursor, scheduler.config.event_heartbeat_seconds)
             for event in events:
                 data = json.dumps(asdict(event), allow_nan=False)
@@ -106,6 +106,8 @@ class SchedulerHandler(BaseHTTPRequestHandler):
             if not events:
                 self.wfile.write(b": heartbeat\n\n")
             self.wfile.flush()
+            if scheduler.events_closed.is_set() and not scheduler.events_since(cursor):
+                break
 
     def _read_only(self):
         self._json(405, {"error": "read_only", "message": "Scheduler is read-only"})

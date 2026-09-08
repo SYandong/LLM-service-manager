@@ -32,6 +32,12 @@ class SchedulerConfig:
     read_only: bool = True
     collectors: dict[str, Any] = field(default_factory=dict)
     state_db_path: str = ""
+    data_plane_events_enabled: bool = False
+    data_plane_event_capacity: int = 256
+    data_plane_event_batch_size: int = 128
+    data_plane_event_interval_seconds: float = 0.2
+    data_plane_event_timeout_seconds: float = 2.0
+    data_plane_event_reconnect_seconds: float = 1.0
     max_snapshot_age_seconds: float = 30.0
     placement_enabled: bool = False
     placement_wait_seconds: float = 120.0
@@ -58,12 +64,18 @@ class SchedulerConfig:
                      "request_timeout_seconds", "memory_budget_gb", "host_min_available_gb",
                      "max_snapshot_age_seconds", "free_timeout_seconds", "wake_timeout_seconds",
                      "action_observe_seconds", "action_poll_seconds", "placement_wait_seconds",
-                     "lease_timeout_seconds", "lease_probe_seconds"):
+                     "lease_timeout_seconds", "lease_probe_seconds", "data_plane_event_interval_seconds",
+                     "data_plane_event_timeout_seconds", "data_plane_event_reconnect_seconds"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (float, int)):
                 raise ValueError(f"{name} must be a finite positive number")
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be a finite positive number")
+        if type(self.data_plane_events_enabled) is not bool:
+            raise ValueError("data_plane_events_enabled must be a boolean")
+        for name in ("data_plane_event_capacity", "data_plane_event_batch_size"):
+            if type(getattr(self, name)) is not int or not 1 <= getattr(self, name) <= 4096:
+                raise ValueError(f"{name} must be an integer in 1..4096")
         if self.placement_wait_seconds > 120:
             raise ValueError("placement_wait_seconds must not exceed 120")
         if type(self.placement_enabled) is not bool:
