@@ -401,4 +401,13 @@ def test_actual_wire_model_field_counts_without_certifying_current_source():
     payload = ''.join('event:message\ndata:' + json.dumps(e) + '\n\n' for e in envelopes).encode()
     with pytest.raises(ConnectionError):
         sub._consume(io.BytesIO(payload))
-    assert calls == [(1, False)]
+    assert calls == [(1, False), (2, False), (2, False), (1, False), (0, False)]
+
+
+def test_wrong_wire_field_after_valid_count_invalidates_untrusted_stream():
+    calls, heartbeats = run([
+        message('inflight', {'operation': 'snapshot', 'requests': [{'id': '1', 'model': 'm'}]}),
+        message('inflight', {'operation': 'upsert', 'request': {'id': '2', 'modelID': 'm'}}),
+    ], ordered_source=False)
+    assert calls == [(None, False), (1, False), (None, False)]
+    assert heartbeats == []
