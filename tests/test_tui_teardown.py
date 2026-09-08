@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip("textual")  # Match the existing optional-UI collection contract.
+
 from textual.css.query import NoMatches
 from textual.widgets import RichLog
 from tui.app import SchedulerApp
