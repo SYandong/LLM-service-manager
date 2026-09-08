@@ -48,6 +48,8 @@ class Scheduler:
         self._next_event_id = 1
         self.stopping = threading.Event()
         self._thread = None
+        self._sample_started = 0
+        self._sample_published = 0
 
     def _unknown(self, reason: str) -> StateSnapshot:
         return StateSnapshot(memory=MemoryState(
@@ -281,6 +283,9 @@ class Scheduler:
             return tuple(copy.deepcopy(e) for e in self._events if e.id > cursor)
 
     def sample_once(self) -> StateSnapshot:
+        with self.action_lock:
+            self._sample_started += 1
+            generation = self._sample_started
         try:
             snapshot = self.collect() if self.collect else self._unknown("collectors_not_configured")
             if not isinstance(snapshot, StateSnapshot):
@@ -297,6 +302,9 @@ class Scheduler:
             snapshot = self._unknown("collection_failed")
             self.emit("collection_error", detail={"error_type": type(exc).__name__})
         with self.changed:
+            if generation < self._sample_published:
+                return self.snapshot()
+            self._sample_published = generation
             self._snapshot = snapshot
             self.emit("state", detail={"sampled_at": snapshot.sampled_at,
                                        "errors": list(snapshot.errors)})
