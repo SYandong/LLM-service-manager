@@ -66,8 +66,10 @@ environment file.
 
 This is a direct-daemon cached-base lifecycle/readiness baseline. It does not
 satisfy production launcher latency, scheduler free execution, LoRA, permanent
-installation, day/week observation or production-policy acceptance. Actual
-LoRA still requires its compatible cached adapter and semantic fixture. Test
-cleanup may never stop/sleep existing workloads to make space.
+installation or production-policy acceptance. Use bounded measurements and
+deterministic replay; long-term stability and calibration remain NOT MEASURED,
+not a day/week completion gate. Actual LoRA still requires its compatible cached
+adapter and semantic fixture. Test cleanup may never stop/sleep existing
+workloads to make space.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
