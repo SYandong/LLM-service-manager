@@ -1,0 +1,16 @@
+# Generated-By: Codex / gpt-6-astra
+# Start with a specific loopback/private container address and an alternate port.
+# Do not expose the unauthenticated scheduler on a public or wildcard address.
+listen_host: 127.0.0.1
+listen_port: 8011
+read_only: true
+sample_interval_seconds: 15
+request_timeout_seconds: 10
+event_history_size: 1000
+event_heartbeat_seconds: 15
+# Candidate GiB budgets; production stakeholder approval remains pending.
+memory_budget_gb: 200
+host_min_available_gb: 150
+# Empty collectors intentionally report unknown. Supply the integrated #4/#5
+# adapter settings before counting the one-day/one-week observation evidence.
+collectors: {}
