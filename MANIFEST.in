@@ -1,0 +1,11 @@
+# Generated-By: Codex / gpt-6-astra
+include AGENTS.md CHANGELOG.md README.md
+include cli/llm cli/llm.py
+graft docs
+graft deploy
+graft tests
+graft config
+graft examples
+graft tools
+graft vllm_service
+global-exclude __pycache__ *.py[cod] .DS_Store
