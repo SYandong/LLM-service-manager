@@ -5,12 +5,14 @@ import argparse
 import json
 import logging
 import signal
+import sqlite3
 import threading
 
 from llmsvc import __version__
 from llmsvc.config import load_config
 from llmsvc.scheduler import Scheduler
 from llmsvc.server import SchedulerHTTPServer
+from llmsvc.store import IntentStore
 
 
 def build_collector(config):
@@ -33,19 +35,32 @@ def main():
     parser.add_argument("--once", action="store_true", help="collect one JSON snapshot and exit")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    store = None
     try:
         config = load_config(args.config)
         if args.check_config:
             return 0
-        scheduler = Scheduler(config, collect=build_collector(config))
-    except (OSError, ValueError, TypeError, ImportError) as exc:
+        collector = build_collector(config)
+        if config.state_db_path:
+            store = IntentStore(config.state_db_path, action_lock=threading.RLock(), read_only=True)
+        scheduler = Scheduler(config, collect=collector, store=store)
+    except (OSError, ValueError, TypeError, ImportError, sqlite3.Error) as exc:
+        if store is not None:
+            store.close()
         parser.error(str(exc))
     if args.once:
-        print(json.dumps(scheduler.sample_once().to_dict(), allow_nan=False))
+        try:
+            scheduler.sample_once()
+            print(json.dumps(scheduler.snapshot().to_dict(), allow_nan=False))
+        finally:
+            if store is not None:
+                store.close()
         return 0
     try:
         server = SchedulerHTTPServer((config.listen_host, config.listen_port), scheduler)
     except OSError as exc:
+        if store is not None:
+            store.close()
         parser.error(str(exc))
     # Signal handlers only notify. HTTP shutdown must run outside serve_forever.
     exit_requested = threading.Event()
@@ -66,6 +81,8 @@ def main():
             server.shutdown()
         server.server_close()
         http_thread.join(timeout=config.request_timeout_seconds)
+        if store is not None:
+            store.close()
         for signum, handler in previous.items():
             signal.signal(signum, handler)
     return 0
