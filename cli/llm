@@ -1,16 +1,294 @@
 #!/usr/bin/env python3
 # Generated-By: Codex / gpt-6-astra
-"""Standalone standard-library CLI scaffold; status is implemented in M1."""
+"""A standalone, standard-library scheduler client; reusable by the optional TUI."""
 
 import argparse
+import configparser
+from datetime import datetime, timezone
+from http.client import HTTPException
+import json
+import math
+import os
+from pathlib import Path
+import shutil
+import sys
+import time
+import unicodedata
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
-def main():
-    parser = argparse.ArgumentParser(description="llmsvc command-line scaffold")
+class ClientError(Exception):
+    """An actionable configuration, connection or protocol error."""
+
+
+def clean_text(value):
+    """Keep untrusted model names/errors from controlling the user's terminal."""
+    return "".join(
+        ch if not unicodedata.category(ch).startswith("C") else " "
+        for ch in str(value)
+    )
+
+
+def validate_url(value):
+    try:
+        parsed = urlsplit(value)
+        valid = (
+            parsed.scheme in ("http", "https") and parsed.hostname
+            and not parsed.username and not parsed.password
+            and not parsed.query and not parsed.fragment
+            and not any(ch.isspace() or ord(ch) < 32 for ch in value)
+        )
+        parsed.port
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ClientError("Scheduler URL must be an http(s) URL without credentials, query or fragment")
+    return value.rstrip("/")
+
+
+def positive_timeout(value):
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        raise ClientError("Timeout must be a positive finite number") from None
+    if not math.isfinite(result) or result <= 0:
+        raise ClientError("Timeout must be a positive finite number")
+    return result
+
+
+def load_config(environ=None, path=None, url=None, timeout=None):
+    environ = os.environ if environ is None else environ
+    path = Path(path or environ.get("LLM_CONFIG", "~/.config/llm/config")).expanduser()
+    values = {}
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        content = ""
+    except (OSError, UnicodeError) as exc:
+        raise ClientError("Cannot read config: " + str(exc)) from None
+    if content.strip():
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            if not any(line.lstrip().startswith("[") for line in content.splitlines()):
+                content = "[llm]\n" + content
+            parser.read_string(content)
+            values = dict(parser["llm"])
+            unknown = set(values) - {"url", "timeout"}
+            if unknown or parser.sections() != ["llm"]:
+                raise ValueError("Only [llm] keys url and timeout are supported")
+        except (configparser.Error, KeyError, ValueError) as exc:
+            raise ClientError("Invalid config: " + str(exc)) from None
+    address = url or environ.get("LLM_URL") or values.get("url")
+    if not address:
+        raise ClientError("Set LLM_URL or url in ~/.config/llm/config to the scheduler address")
+    wait = timeout if timeout is not None else environ.get("LLM_TIMEOUT", values.get("timeout", "10"))
+    return {"url": validate_url(address), "timeout": positive_timeout(wait)}
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def invalid_constant(value):
+    raise ClientError("Scheduler returned an invalid JSON response: " + value)
+
+
+class SchedulerClient:
+    def __init__(self, url, timeout=10, opener=None):
+        self.url = validate_url(url)
+        self.timeout = positive_timeout(timeout)
+        self.opener = opener or build_opener(NoRedirect()).open
+
+    def request(self, method, path, payload=None):
+        if not path.startswith("/v1/"):
+            raise ClientError("Client requests must use scheduler /v1/ endpoints")
+        data = None if payload is None else json.dumps(payload, allow_nan=False).encode("utf-8")
+        request = Request(
+            self.url + path, data=data, method=method,
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+        )
+        try:
+            with self.opener(request, timeout=self.timeout) as response:
+                raw = response.read(4 * 1024 * 1024 + 1)
+            if len(raw) > 4 * 1024 * 1024:
+                raise ClientError("Scheduler response is too large")
+            result = json.loads(raw.decode("utf-8"), parse_constant=invalid_constant)
+            if not isinstance(result, dict):
+                raise ClientError("Scheduler response must be a JSON object")
+            return result
+        except HTTPError as exc:
+            with exc:
+                detail = exc.read(8192).decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(detail)
+                detail = parsed.get("error", parsed) if isinstance(parsed, dict) else parsed
+            except ValueError:
+                pass
+            raise ClientError("HTTP %s: %s" % (exc.code, clean_text(detail))) from None
+        except (URLError, OSError, HTTPException) as exc:
+            raise ClientError("Cannot reach scheduler: " + clean_text(getattr(exc, "reason", exc))) from None
+        except (ValueError, UnicodeError):
+            raise ClientError("Scheduler returned an invalid JSON response") from None
+
+
+def cell_width(text):
+    return sum(0 if unicodedata.combining(ch) else 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def fit(value, width):
+    text = clean_text(value)
+    if cell_width(text) <= width:
+        return text + " " * (width - cell_width(text))
+    result = ""
+    for ch in text:
+        if cell_width(result + ch) > width - 1:
+            break
+        result += ch
+    return result + "~" + " " * max(0, width - 1 - cell_width(result))
+
+
+def number(value):
+    return "?" if value is None else format(value, ".1f").rstrip("0").rstrip(".")
+
+
+def age(seconds):
+    if seconds is None:
+        return "?"
+    seconds = max(0, seconds)
+    if seconds < 60:
+        return "%ss" % int(seconds)
+    if seconds < 3600:
+        return "%sm" % number(seconds / 60)
+    if seconds < 86400:
+        return "%.1fh" % (seconds / 3600)
+    return "%.1fd" % (seconds / 86400)
+
+
+def expiry(timestamp):
+    return "?" if timestamp is None else datetime.fromtimestamp(timestamp, timezone.utc).strftime("%m-%d %H:%MZ")
+
+
+def wrap_line(line, width):
+    """Wrap even long identifiers without exceeding terminal display cells."""
+    lines, current = [], ""
+    for ch in clean_text(line):
+        if cell_width(ch) > width:
+            ch = "?"
+        if current and cell_width(current + ch) > width:
+            lines.append(current.rstrip())
+            current = ""
+        current += ch
+    lines.append(current.rstrip())
+    return lines
+
+
+def format_status(snapshot, width=100, now=None):
+    width = max(1, width)
+    if now is None:
+        now = snapshot.get("sampled_at")
+    if now is None:
+        now = time.time()
+    activity = {item["model"]: item for item in snapshot.get("activity", [])}
+    pins = {item["model"]: item for item in snapshot.get("pins", []) if item["until"] > now}
+    lines = []
+    for gpu in snapshot.get("gpus", []):
+        lines.append("GPU%s  %s/%s GiB  llmsvc %s  external %s  free %s" % (
+            gpu["index"], number(gpu.get("used_gb")), number(gpu.get("total_gb")),
+            number(gpu.get("managed_gb")), number(gpu.get("external_gb")), number(gpu.get("free_gb")),
+        ))
+        for process in gpu.get("external_processes", []):
+            lines.append("  external: %s (%s), %s GiB" % (
+                process.get("name") or "?", process.get("user") or "?", number(process.get("used_gb")),
+            ))
+    if not snapshot.get("gpus"):
+        lines.append("GPU observations unavailable")
+    memory = snapshot.get("memory") or {}
+    lines.append("RAM   llmsvc %s/%s GiB budget  host available %s GiB" % (
+        number(memory.get("sleeping_weights_gb")), number(memory.get("budget_gb")), number(memory.get("host_available_gb")),
+    ))
+    lines.append("")
+    if width >= 100:
+        columns = [("MODEL", width - 73), ("STATE", 8), ("GPU", 3), ("MEM", 6), ("USED", 6), ("10m", 4), ("FROM", 10), ("PIN (UTC)", 22)]
+    else:
+        columns = [("MODEL", max(8, width - 37)), ("STATE", 8), ("GPU", 3), ("MEM", 6), ("PIN", 8)]
+    lines.append(" ".join(fit(label, size) for label, size in columns).rstrip())
+    for model in snapshot.get("models", []):
+        name = model["name"]
+        stats = activity.get(name, {})
+        pin = pins.get(name)
+        used = age(None if stats.get("last_request_at") is None else now - stats["last_request_at"])
+        count = "?" if stats.get("requests_last_10m") is None else str(stats["requests_last_10m"])
+        source = ",".join(stats.get("by", [])) or "-"
+        pin_text = "%s (%s)" % (expiry(pin["until"]), pin.get("by", "?")) if pin else "-"
+        display_name = fit(name, columns[0][1] - 2).rstrip() + " *" if model.get("is_default") else name
+        values = [display_name, model.get("state", "unknown"),
+                  "-" if model.get("gpu") is None else str(model["gpu"]), number(model.get("resident_gb")) + "G"]
+        if width >= 100:
+            values.extend([used, count, source, pin_text])
+        else:
+            values.append(age(pin["until"] - now) if pin else "-")
+        lines.append(" ".join(fit(value, size) for value, (_, size) in zip(values, columns)).rstrip())
+        if width < 100:
+            lines.append("  used %s  10m %s  from %s  pin %s" % (used, count, source, pin_text))
+        if model.get("state") == "stopped":
+            lines.append("  cold start estimate: %s" % age(model.get("cold_start_seconds")))
+    if not snapshot.get("models"):
+        lines.append("No model observations")
+    for reserve in snapshot.get("reserves", []):
+        if reserve["until"] > now:
+            lines.append("RESERVE %s GPU%s %s GiB until %s (%s)" % (
+                reserve["id"], reserve["gpu"], number(reserve["size_gb"]), expiry(reserve["until"]), reserve["by"],
+            ))
+    for lease in snapshot.get("leases", []):
+        if lease.get("status") not in ("released", "confirmed"):
+            lines.append("LEASE %s GPU%s %s GiB %s until %s" % (
+                lease["model"], lease["gpu"], number(lease.get("budget_gb")), lease.get("status", "pending"), expiry(lease.get("expires_at")),
+            ))
+    for blocked in snapshot.get("blocked_by", []):
+        lines.append("BLOCKED %s: %s" % (blocked["model"], blocked["reason"]))
+    for error in snapshot.get("errors", []):
+        lines.append("WARNING " + clean_text(error))
+    lines.append("* default model | ? unknown | sampled %s%s" % (
+        expiry(snapshot.get("sampled_at")), " | read-only" if snapshot.get("read_only") else "",
+    ))
+    return "\n".join(part for line in lines for part in wrap_line(line, width))
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="llm", description="Inspect the LLM scheduler")
     parser.add_argument("--version", action="version", version="0.1.0")
-    parser.parse_args()
-    parser.print_help()
+    parser.add_argument("--url", help="Scheduler URL (overrides LLM_URL and config)")
+    parser.add_argument("--config", help="Config file (default: ~/.config/llm/config)")
+    parser.add_argument("--timeout", help="HTTP timeout in seconds")
+    commands = parser.add_subparsers(dest="command")
+    status = commands.add_parser("status", help="Show GPU, memory and model status")
+    status.add_argument("--json", action="store_true", help="Print the complete JSON snapshot")
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        config = load_config(path=args.config, url=args.url, timeout=args.timeout)
+        result = SchedulerClient(**config).request("GET", "/v1/state")
+        if getattr(args, "json", False):
+            print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
+        else:
+            print(format_status(result, width=shutil.get_terminal_size((100, 30)).columns))
+        return 0
+    except ClientError as exc:
+        print("llm: " + clean_text(exc), file=sys.stderr)
+        return 1
+    except (KeyError, TypeError, ValueError, OverflowError):
+        print("llm: Invalid scheduler state response; check the server API version", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
