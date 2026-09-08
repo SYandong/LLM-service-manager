@@ -1,6 +1,7 @@
 # Policy replay fixtures
 
-`scenarios.json` contains synthetic regression examples constructed from
+`scenarios.json` (M2 intentions) and `placement.json` (M3 placement) contain
+synthetic regression examples constructed from
 `docs/DESIGN.md`. These are not the 2026-09-06 19:00 or 18:42 historical traces.
 The scenario adapter in the replay tests supplies explicit known defaults for
 omitted fields; production snapshots must preserve unknown values.
