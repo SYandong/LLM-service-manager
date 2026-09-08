@@ -1,6 +1,6 @@
 # CLI 使用说明
 
-`cli/llm` 是 Python 3.10+ 标准库脚本。只复制这一个文件即可运行，无需安装仓库、`rich` 或 `textual`。当前提供只读 `status`、`usage` 和可选全屏面板，只请求 scheduler 的 `GET /v1/state`、`GET /v1/events` 与 `GET /v1/usage`。
+`cli/llm` 是 Python 3.10+ 标准库脚本。只复制这一个文件即可运行，无需安装仓库、`rich` 或 `textual`。提供只读 `status`、`usage`、pin/unpin 记录命令和可选全屏面板；所有请求都发给配置的 scheduler。
 
 ```sh
 python3 llm --help
@@ -72,7 +72,23 @@ LLM_URL=http://scheduler:8011 python3 llm usage --days 7 --by model --json
 - 后端返回不可用响应（503、`known: false`）时显示原因与 `?`；`--json` 保留 null 总量，退出码为 1。来源可用且窗口确实为空时，零总量才是有效结果。连接或协议错误沿用前述非零退出码与 stderr 说明。
 - 客户端核对行计数与总计一致，并拒绝缺失、负数、非整数或窗口不匹配的响应。
 
-## 可选只读 TUI
+## Pin / unpin 记录
+
+```sh
+LLM_URL=http://scheduler:8011 python3 llm pin model --for 8h --dry-run
+LLM_URL=http://scheduler:8011 python3 llm pin model --for 8h
+LLM_URL=http://scheduler:8011 python3 llm unpin model
+```
+
+`pin` 必须给出 `--for`，支持正数与 `s` / `m` / `h` / `d`，例如 `30m`、`1.5h`、`2d`。不提供永久 pin。`unpin` 无需时长，重复解除已经不存在的记录也可成功。两个命令都支持 `--dry-run` 和 `--json`。
+
+- 服务器默认只读；只有部署方明确允许的服务才接受实际记录写入。客户端不会更改服务器配置，`read_only` / `operation_not_enabled` 会作为失败显示并返回非零退出码。
+- 成功结果中的 owner（pin）或 actor（unpin）来自服务器对连接来源的判断。客户端按协议提供兼容 `body.by`，但它不决定实际归属；没有映射时保留服务器返回的 `ip:...` 标记。
+- Dry-run 不改变记录，输出计划或阻塞原因；阻塞计划返回退出码 1。预览 JSON 的 `by` 是假设标签，不是经服务器确认的实际操作者。
+- 模型名作为原样 JSON 值或 URL 编码路径段发送。带空格、斜杠、Unicode 或 `?/#/%` 的名称用 shell 引号包住；以 `-` 开头的名称可写为 `pin --for 8h -- '-model'` 或 `unpin -- '-model'`。
+- 写入成功表示 pin 记录已保存；不会预热模型。实际 TTL/reaper 接入、reserve 及完整保护验收仍是后续部署事项。请求不会自动重试；遇到不确定的连接/响应错误时先用 `status` 核对。
+
+## 可选 TUI
 
 包含 TUI 的发布包使用 `pip install 'llmsvc[tui]'` 安装。也可将仓库中的实际 `tui/` 目录复制到独立 `llm` 脚本旁，再安装 `textual>=0.70`。仅复制 `llm` 仍可使用所有只读 CLI 功能。
 
@@ -83,13 +99,14 @@ python -m pip install '.[tui]'
 LLM_URL=http://scheduler:8011 python cli/llm
 ```
 
-状态面板每 5 秒刷新，显示 GPU 占用条、内存预算和可选择的模型表。100×30 时事件流在模型表右侧；小于 100 列时上方改为单列、事件流移到模型表下方。空间不足时模型表保留名称、状态、GPU 和显存，选中模型的来源与 pin 在下方显示。鼠标可滚动较长的详情、命令结果和事件。
+状态面板每 5 秒刷新，显示 GPU 占用条、内存预算和可选择的模型表。100×30 时事件流在模型表右侧；小于 100 列时上方改为单列、事件流移到模型表下方。空间不足时模型表保留名称、状态、GPU、显存和 PIN 标记，选中模型的来源、pin 到期与 owner 在下方显示。鼠标可滚动较长的详情、命令结果和事件。
 
 - `↑` / `↓` 选择模型，`r` 刷新当前视图，`/` 聚焦命令框，`u` 在状态与 usage 之间切换，`?` 帮助，`q` 退出。用 `Tab` 聚焦详情或结果滚动区后，可用方向键翻动长内容；长错误不会限制在可见的两行内。
-- 输入框复用 CLI 解析器，支持 `status`、`usage --days 7|30 --by container|ip|model`、各自的 `--json` 选项和 `--help`。连接参数固定为启动时的配置；修改地址需退出后重新运行。
+- 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。
+- Pin/unpin 成功后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态。结果保留服务端 owner/actor；刷新失败会单独说明，已成功的写入不会因此重试。同一时刻只执行一个 pin/unpin 请求。
 - usage 视图提供 7 天、30 天和返回状态按钮，每 5 秒刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
 - 请求在后台线程执行，慢请求不会叠加轮询或阻塞按键。连接失败保留上一份快照，并显示错误；新快照到达后保留选中模型。
-- 当前是只读界面。`free`、`pin`、`wake`、`reserve` 操作与对应快捷键在各自 issue 中接入；当前不会发送写请求。
+- 当前仅支持 pin/unpin 记录写入；`free`、`wake`、`reserve`、模型登记/删除和对应快捷键尚未开放。不能用本客户端命令启用生产调度。
 
 ### Scheduler 事件流
 
@@ -108,6 +125,7 @@ python -m pytest -q tests/test_llm.py
 python -m pytest -q tests/test_llm_tui.py tests/test_tui.py
 python -m pytest -q tests/test_llm_events.py tests/test_tui_events.py
 python -m pytest -q tests/test_llm_usage.py tests/test_tui_usage.py
+python -m pytest -q tests/test_llm_pin.py tests/test_tui_pin.py
 ```
 
 测试使用核心包的状态结构生成 JSON，并在临时 loopback HTTP 服务上验证单文件复制、无 site-packages 的 Python 启动、JSON 保真与窄屏。Python 3.10 可用时直接执行该解释器的复制测试；CI 使用 Python 3.10。客户端测试不访问生产服务或 GPU。
@@ -117,5 +135,7 @@ python -m pytest -q tests/test_llm_usage.py tests/test_tui_usage.py
 SSE 解码按 [事件流格式](https://html.spec.whatwg.org/dev/server-sent-events.html#the-event-stream-format) 处理 UTF-8、BOM、注释、换行和空行提交，并按 scheduler 契约要求每个事件带匹配的数字 ID 与 JSON 记录。单行和单帧上限分别为 64 KiB、256 KiB；不完整尾帧不会提交游标。loopback 测试覆盖重连、明确重启后归零与退出清理。
 
 Usage 测试使用临时 SQLite、实际 `ActivityReader` / `build_usage` 和 scheduler HTTP 服务，核对 CLI/TUI 显示与后端计数，并确认数据库字节不变。独立的历史线上对账证据保存在 [telemetry/live-final.json](../tests/fixtures/telemetry/live-final.json)：该快照记录的 31,605 请求、40,480,504 输入 token、4,847,906 输出 token 与当时的数据面 metrics 总数一致。这是 telemetry 的采样时刻证据；当前客户端测试证明显示与后端协议一致，完整 #25 的集成与来源对账验收仍需相应实机证据。
+
+Pin/unpin 测试仅使用明确 opt-in 的临时 SQLite/loopback scheduler。覆盖伪造兼容标签后的权威 owner、编码模型名、空 DELETE body、写入陷阱下的零写入 dry-run，以及成功后的即时刷新与迟到响应。没有调用生产接口、模型执行器或 GPU；完整 #11/#24 验收保留在相应后续事项中。
 
 <!-- Generated-By: Codex / gpt-6-astra -->
