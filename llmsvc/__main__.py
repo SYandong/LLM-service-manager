@@ -20,10 +20,31 @@ def build_collector(config):
         return None
     # The telemetry lane owns this adapter and its probe configuration.
     from llmsvc.collectors import build_collector as factory
-    collector = factory(config.collectors)
+    options = {**config.collectors, "memory_budget_gb": config.memory_budget_gb,
+               "host_min_available_gb": config.host_min_available_gb}
+    collector = factory(options)
     if not callable(collector):
+        close = getattr(collector, "close", None)
+        if close is not None:
+            close()
         raise TypeError("collector factory must return a callable")
     return collector
+
+
+
+def build_usage(collector):
+    reader = getattr(collector, "activity_reader", None)
+    if reader is None:
+        return None
+
+    def usage(*, days, by):
+        from llmsvc.activity import ActivityReader
+        # ActivityReader.last_error is mutable. A request-local reader prevents
+        # HTTP queries from overwriting the sampler's activity error signal.
+        request_reader = ActivityReader(reader.path, reader.ip_containers, reader.deadline_ms)
+        return request_reader.usage(days=days, by=by)
+
+    return usage
 
 
 def main():
@@ -36,29 +57,37 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     store = None
+    collector = None
     try:
         config = load_config(args.config)
-        if args.check_config:
-            return 0
         collector = build_collector(config)
         if config.state_db_path:
             store = IntentStore(config.state_db_path, action_lock=threading.RLock(), read_only=True)
-        scheduler = Scheduler(config, collect=collector, store=store)
+        scheduler = Scheduler(config, collect=collector, store=store, usage=build_usage(collector))
     except (OSError, ValueError, TypeError, ImportError, sqlite3.Error) as exc:
         if store is not None:
             store.close()
+        close = getattr(collector, "close", None)
+        if close is not None:
+            close()
         parser.error(str(exc))
+    if args.check_config:
+        scheduler.stop()
+        if store is not None:
+            store.close()
+        return 0
     if args.once:
         try:
-            scheduler.sample_once()
-            print(json.dumps(scheduler.snapshot().to_dict(), allow_nan=False))
+            print(json.dumps(scheduler.sample_once().to_dict(), allow_nan=False))
         finally:
+            scheduler.stop()
             if store is not None:
                 store.close()
         return 0
     try:
         server = SchedulerHTTPServer((config.listen_host, config.listen_port), scheduler)
     except OSError as exc:
+        scheduler.stop()
         if store is not None:
             store.close()
         parser.error(str(exc))

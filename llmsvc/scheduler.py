@@ -22,9 +22,12 @@ LOG = logging.getLogger("llmsvc.scheduler")
 class Scheduler:
     def __init__(self, config: SchedulerConfig,
                  collect: Optional[Callable[[], StateSnapshot]] = None, *,
+                 usage: Optional[Callable[..., dict]] = None,
                  store: Optional[IntentStore] = None, clock: Callable[[], float] = time.time):
         self.config = config
         self.collect = collect
+        self._usage = usage
+        self._collector_closed = False
         # One lock for action/accounting and publication. Slow read-only probes
         # run outside it; Condition.wait releases it for other handlers.
         self.store = store
@@ -136,6 +139,49 @@ class Scheduler:
             raise ValueError("until must be in the future")
         return value
 
+    def usage(self, *, days: int = 7, by: str = "container") -> dict:
+        """Read usage outside action_lock; unknown origins remain unknown."""
+        if type(days) is not int or days < 1 or days > (2**63 - 1) // 86400:
+            raise ValueError("days must be a positive supported integer")
+        if by not in ("container", "ip", "model"):
+            raise ValueError("unsupported usage grouping")
+        unknown = {"days": days, "by": by, "known": False, "error": "usage_not_configured",
+                   "rows": [], "totals": {"requests": None, "input_tokens": None, "output_tokens": None}}
+        if self._usage is None:
+            return unknown
+        try:
+            result = self._usage(days=days, by=by)
+            if not isinstance(result, dict) or type(result.get("known")) is not bool:
+                raise TypeError("invalid usage result")
+            json.dumps(result, allow_nan=False)
+            return result
+        except Exception as exc:
+            LOG.warning(json.dumps({"kind": "usage_error", "error_type": type(exc).__name__}))
+            return {**unknown, "error": "usage_unavailable"}
+
+    def quiet_callbacks(self, quiet):
+        """Adapters for a future continuous stream; no stream is mounted here.
+
+        Observations use QuietPeriod's own brief mutex before notification.
+        Skipping a busy notification must never delay the next observation.
+        """
+        def notify_if_unlocked():
+            if self.action_lock.acquire(blocking=False):
+                try:
+                    self.changed.notify_all()
+                finally:
+                    self.action_lock.release()
+
+        def on_inflight(inflight, *, connected=True):
+            quiet.observe(inflight, connected=connected)
+            notify_if_unlocked()
+
+        def on_heartbeat():
+            quiet.heartbeat()
+            notify_if_unlocked()
+
+        return on_inflight, on_heartbeat
+
     def emit(self, kind: str, *, model: Optional[str] = None,
              detail: Optional[dict] = None) -> Event:
         with self.changed:
@@ -203,3 +249,10 @@ class Scheduler:
             self.changed.notify_all()
         if self._thread is not None:
             self._thread.join(timeout=self.config.request_timeout_seconds)
+        with self.action_lock:
+            if self._collector_closed:
+                return
+            self._collector_closed = True
+        close = getattr(self.collect, "close", None)
+        if close is not None:
+            close()
