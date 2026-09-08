@@ -801,7 +801,7 @@ def format_pin_result(args, result):
 
 def build_parser(parser_class=argparse.ArgumentParser):
     parser = parser_class(prog="llm", description="Inspect the LLM scheduler")
-    parser.add_argument("--version", action="version", version="0.1.0a3")
+    parser.add_argument("--version", action="version", version="0.1.0a4")
     parser.add_argument("--url", help="Scheduler URL (overrides LLM_URL and config)")
     parser.add_argument("--config", help="Config file (default: ~/.config/llm/config)")
     parser.add_argument("--timeout", help="HTTP timeout in seconds (free/wake/reserve use --wait instead)")
