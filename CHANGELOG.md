@@ -3,7 +3,7 @@
 ## 0.1.0-alpha.2 — 2026-09-08
 
 Incremental preview after alpha.1; Python distribution `0.1.0a2`.
-Includes #80, #81, #82, #84, #85, #86, #87, #88, #89, #91, #92 and #97.
+Includes #80, #81, #82, #84, #85, #86, #87, #88, #89, #91, #92, #96, #97 and #99.
 
 ### Added and corrected
 
@@ -16,6 +16,13 @@ Includes #80, #81, #82, #84, #85, #86, #87, #88, #89, #91, #92 and #97.
   fresh memory measurements; late older samples cannot replace newer activity.
 - Separately opt-in direct-fit placement, durable model-unique leases,
   confirm/release endpoints, restart reconciliation and bounded admission waits.
+- Placement can stop one policy-selected, durably accounted victim, confirm
+  observed exit/account release and replan before a grant when both placement
+  and model-action opt-ins are enabled (#99). Unknown or unleased daemons remain
+  protected; the overall wait stays bounded.
+- Retained leases with missing or changed trusted model identities emit a
+  diagnostic, preserving budget and pin. Restoring verified original identity
+  and reopening the same ledger enables existing reconciliation (#96).
 - Bounded cached-base lifecycle tooling and measured isolated evidence (#80);
   current directory/partial-acceptance guidance (#86).
 - Pinned v252 watcher-only native-generation fixture and measured records (#91),
@@ -38,13 +45,15 @@ back up the database before upgrade and reconcile live allocations before any
 rollback; never delete an active allocation ledger to downgrade. Keep allocated
 models in the trusted collector configuration until their accounts can be
 safely reconciled. Removing one can block admission with an unobserved lease;
-a dedicated recovery procedure remains follow-up work.
+restore the verified original mapping and reconcile the same ledger. The full
+operational runbook remains under review in #98; this release authorizes no
+restart or live recovery.
 
 ### Experimental and incomplete
 
 Read-only remains the default. Model actions and placement have separate,
-default-off opt-ins; installation or publication enables neither. Placement
-requiring eviction, orphan cleanup, reserve evacuation and proven fault cleanup
+default-off opt-ins; installation or publication enables neither. Placement of durably accounted victims is available for evaluation; unleased
+daemon handling, orphan cleanup, reserve evacuation and proven fault cleanup
 remain incomplete. Live launcher/latency/release acceptance is still pending.
 
 Dual-source event relay, native reload adoption/old-server settlement, reliable
