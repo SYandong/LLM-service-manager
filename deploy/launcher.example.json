@@ -1,0 +1,25 @@
+{
+  "_comment": "Generated-By: Codex / gpt-6-astra. Adjust endpoints, paths and bounded timeouts for the target; production adoption requires integrated scheduler lease endpoints.",
+  "scheduler_url": "http://127.0.0.1:8001",
+  "place_path": "/v1/place",
+  "confirm_path_template": "/v1/place/{lease_id}/confirm",
+  "release_path_template": "/v1/place/{lease_id}/release",
+  "health_url_template": "http://127.0.0.1:{port}/health",
+  "lock_dir": "/run/llmsvc-launch/locks",
+  "request_timeout_seconds": 130,
+  "health_timeout_seconds": 3,
+  "health_poll_seconds": 3,
+  "startup_timeout_seconds": 900,
+  "command_timeout_seconds": 30,
+  "lock_timeout_seconds": 120,
+  "unit_suffix": ".service",
+  "systemd_run": {
+    "collect": true,
+    "quiet": true,
+    "properties": {
+      "Restart": "no",
+      "TimeoutStopSec": "90"
+    },
+    "environment_file": "/etc/llama-swap.env"
+  }
+}
