@@ -12,14 +12,32 @@
   "state_db_path": "",
   "initial_enable_on_boot": false,
   "start_after_permission_argv": [
-    "systemctl",
+    "/opt/llmsvc-scheduler/venv/bin/python",
+    "-m",
+    "deploy.observer",
     "start",
-    "llmsvc-scheduler.service"
+    "--settings",
+    "/opt/llmsvc-source/deploy/deployment.example.json",
+    "--proposal",
+    "/opt/llmsvc-source/deploy/observer-activation-proposal.json",
+    "--config",
+    "/opt/llmsvc-source/deploy/scheduler.observation.yaml",
+    "--root",
+    "/"
   ],
   "stop_own_observer_argv": [
-    "systemctl",
+    "/opt/llmsvc-scheduler/venv/bin/python",
+    "-m",
+    "deploy.observer",
     "stop",
-    "llmsvc-scheduler.service"
+    "--settings",
+    "/opt/llmsvc-source/deploy/deployment.example.json",
+    "--proposal",
+    "/opt/llmsvc-source/deploy/observer-activation-proposal.json",
+    "--config",
+    "/opt/llmsvc-source/deploy/scheduler.observation.yaml",
+    "--root",
+    "/"
   ],
   "capture_interval_seconds": 15,
   "day_observation_seconds": 86400,
@@ -48,15 +66,18 @@
   "private_observation_directory": "/var/lib/llmsvc/observations",
   "shared_cli_candidate_path": "/srv/llmsvc/llm",
   "install_argv": [
-    "/opt/llmsvc-source/deploy/install.sh",
-    "--root",
-    "/",
+    "/opt/llmsvc-scheduler/venv/bin/python",
+    "-m",
+    "deploy.observer",
+    "stage",
     "--settings",
     "/opt/llmsvc-source/deploy/deployment.example.json",
-    "--source",
-    "/opt/llmsvc-source",
+    "--proposal",
+    "/opt/llmsvc-source/deploy/observer-activation-proposal.json",
     "--config",
-    "/opt/llmsvc-source/deploy/scheduler.observation.yaml"
+    "/opt/llmsvc-source/deploy/scheduler.observation.yaml",
+    "--root",
+    "/"
   ],
   "capture_argv": [
     "/usr/bin/python3",
@@ -84,6 +105,22 @@
     "runtime_max_seconds": 10,
     "umask": "0077",
     "enabled_on_boot": false,
-    "implementation_status": "not installed; reviewed unit rendering/install still required before final activation"
-  }
+    "implementation_status": "Implemented by deploy/observer.py; stage-tested only, not installed or activated"
+  },
+  "helper_working_directory": "/opt/llmsvc-source",
+  "remove_own_observer_argv": [
+    "/opt/llmsvc-scheduler/venv/bin/python",
+    "-m",
+    "deploy.observer",
+    "remove",
+    "--settings",
+    "/opt/llmsvc-source/deploy/deployment.example.json",
+    "--proposal",
+    "/opt/llmsvc-source/deploy/observer-activation-proposal.json",
+    "--config",
+    "/opt/llmsvc-source/deploy/scheduler.observation.yaml",
+    "--root",
+    "/"
+  ],
+  "package_provisioning": "Preprovision reviewed source and package venv only; observer helper refuses preexisting unit/config destinations and preserves a separately owned venv on remove"
 }

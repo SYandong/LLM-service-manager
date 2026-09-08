@@ -1,0 +1,59 @@
+{
+  "generated_by": "Codex / gpt-6-astra",
+  "python": "3.10.12",
+  "llama_swap_version": "version: v252 (e31a1ad), built at 2026-08-31T16:54:46Z",
+  "llama_swap_sha256": "32aea60b5c1be987c27dde6ea4aaa84f9be7ad93eaede011295fad1e276e80ea",
+  "wrapper_sha256": "b5e8847983c70fb4d1af9bb3893120cd26c88d50eb101f8aacef1647f758e566",
+  "real_swap_and_wrapper": true,
+  "vllm_backend": "fake streaming fixture",
+  "gpu_used": false,
+  "production_quiet_certified": false,
+  "reports": [
+    {
+      "mode": "abort",
+      "elapsed_seconds": 1.5257906609913334,
+      "request_summary": {
+        "completed": 0,
+        "http_5xx": 0,
+        "http_error": 0,
+        "timeout": 0,
+        "truncated_stream": 4
+      },
+      "active_at_reload": 4,
+      "certified_quiet": false,
+      "trigger": "SIGHUP_to_owned_process",
+      "adoption_seconds": 0.02255406600306742,
+      "sleep_calls": [
+        "abort",
+        "abort"
+      ],
+      "cleanup": {
+        "owned_process_exited": true,
+        "owned_tmpdir_removed": true
+      }
+    },
+    {
+      "mode": "wait",
+      "elapsed_seconds": 3.3379576849984005,
+      "request_summary": {
+        "completed": 4,
+        "http_5xx": 0,
+        "http_error": 0,
+        "timeout": 0,
+        "truncated_stream": 0
+      },
+      "active_at_reload": 4,
+      "certified_quiet": false,
+      "trigger": "SIGHUP_to_owned_process",
+      "adoption_seconds": 0.021637181023834273,
+      "sleep_calls": [
+        "wait",
+        "abort"
+      ],
+      "cleanup": {
+        "owned_process_exited": true,
+        "owned_tmpdir_removed": true
+      }
+    }
+  ]
+}

@@ -11,7 +11,6 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Footer, Header, Input, RichLog, Static
 
 
@@ -74,6 +73,8 @@ class SchedulerApp(App):
         self.event_reader = event_reader if event_reader is not None else api.EventReader(client)
         self.event_history = []
         self.event_generation = 0
+        self._ui_timers = []
+        self._ui_closed = False
         self.usage_active = False
         self.usage_args = api.build_parser(UIParser).parse_args(["usage"])
         self.usage_snapshot = None
@@ -108,12 +109,19 @@ class SchedulerApp(App):
 
     def on_mount(self):
         self.query_one("#models", DataTable).focus()
-        self.set_interval(5, self.refresh_current)
+        self._event_status = self.query_one("#event-status", Static)
+        self._event_log = self.query_one("#events", RichLog)
+        self._ui_timers.append(self.set_interval(5, self.refresh_current))
         self.refresh_state()
         self.event_reader.start()
-        self.set_interval(0.1, self.update_events)
+        self._ui_timers.append(self.set_interval(0.1, self.update_events))
 
     async def on_unmount(self):
+        if self._ui_closed:
+            return
+        self._ui_closed = True
+        for timer in self._ui_timers:
+            timer.stop()
         await asyncio.to_thread(self.event_reader.close)
 
     def on_resize(self, event):
@@ -127,12 +135,14 @@ class SchedulerApp(App):
     @work
     async def refresh_state(self, args=None):
         # A slow HTTP request must not start overlapping polls or freeze keyboard input.
-        if self.fetching:
+        if not self.is_running or self.fetching:
             return
         self.fetching = True
         try:
             args = args or self.api.build_parser(UIParser).parse_args(["status"])
             snapshot = await asyncio.to_thread(self.api.execute_command, args, self.client)
+            if not self.is_running:
+                return
             # Validate the shared response before replacing the last good display.
             self.api.format_status(snapshot)
             self.snapshot = snapshot
@@ -145,7 +155,7 @@ class SchedulerApp(App):
             if not self.usage_active:
                 self.show_result(message)
         except Exception as exc:
-            if not self.usage_active:
+            if self.is_running and not self.usage_active:
                 self.show_result("Refresh failed; last snapshot retained: " + str(exc))
         finally:
             self.fetching = False
@@ -185,7 +195,7 @@ class SchedulerApp(App):
 
     @work
     async def refresh_usage(self):
-        if self.usage_fetching:
+        if not self.is_running or self.usage_fetching:
             return
         self.usage_fetching = True
         try:
@@ -197,6 +207,8 @@ class SchedulerApp(App):
                     result, error = None, "Usage unavailable: " + str(exc)
                 else:
                     error = ""
+                if not self.is_running:
+                    return
                 if self.usage_active and generation == self.usage_generation:
                     self.usage_snapshot, self.usage_error = result, error
                     self.render_usage()
@@ -313,10 +325,11 @@ class SchedulerApp(App):
         self.show_result("Event cursor reset locally; replaying available scheduler history")
 
     def update_events(self):
-        # A queued timer may run after its panel has been removed during shutdown.
-        try:
-            status_widget = self.query_one("#event-status", Static)
-        except NoMatches:
+        # Textual marks the app stopped before pruning widgets, but closes the
+        # App timers afterwards. A callback in that window must not drain/redraw.
+        if not self.is_running:
+            return
+        if not self._event_status.is_attached or not self._event_log.is_attached:
             return
         update = self.event_reader.drain()
         changed = update["generation"] != self.event_generation or bool(update["events"])
@@ -328,13 +341,13 @@ class SchedulerApp(App):
             status += " · %s events unavailable in server history" % update["missed"]
         if update["dropped"]:
             status += " · %s events dropped from delivery queue" % update["dropped"]
-        status_widget.update(self.api.clean_text(status))
+        self._event_status.update(self.api.clean_text(status))
         if not changed:
             return
         self.event_history.extend(update["events"])
         self.event_history.sort(key=lambda item: (item["timestamp"], item["id"]))
         self.event_history = self.event_history[-200:]
-        log = self.query_one("#events", RichLog)
+        log = self._event_log
         log.clear()
         for item in self.event_history:
             kind = item["kind"]
