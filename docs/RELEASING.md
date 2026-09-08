@@ -2,18 +2,25 @@
 
 ## Cadence and ownership
 
-The user authorized `chore(release)` releases and delegated cadence to the
-coordinator in #76. Batch a useful, independently verifiable group of changes
-into an alpha, normally at most once per calendar day (Asia/Singapore).
-A significant regression fix may justify an immediate additional alpha.
-Do not publish on every merge or on every timer tick. Unchanged state requires
-neither a release nor a model wakeup.
+The user authorized GitHub prereleases and PR-count batching in #90.
+Prepare one alpha whenever **five qualifying PRs** have merged into main since
+its last published tag commit. Count feature, fix, test, documentation and
+maintenance PRs; exclude pure `chore(release)` version/changelog maintenance PRs
+so publication cannot trigger itself. Recount against the actual remote tag
+and main, not a stale status snapshot.
+
+There is no daily cap, date delay, complete-feature-group or milestone
+prerequisite. An alpha may be an incremental snapshot with explicit limits.
+Urgent fixes may release below five PRs with the reason recorded by integration.
+Keep at most one candidate in flight; continue that candidate instead of opening
+a duplicate. Additional merged PRs included in its actual release commit belong
+to the same batch. After publication, reset the counting baseline to that exact
+tag commit. Unchanged state requires neither a release nor a model wakeup.
 
 The initial series uses GitHub tags `v0.1.0-alpha.N` and Python distribution
 versions `0.1.0aN`. Advance N only for a new immutable release. The first alpha
-covers the read-only scheduler/CLI/TUI evaluation path. Subsequent candidates
-should add complete protected-action, lease/placement, model-registration or
-UI-operation slices with corresponding evidence, rather than just more files.
+covers the read-only scheduler/CLI/TUI evaluation path. Later alphas describe
+newly included behavior and remaining acceptance without implying completion.
 The first stable `v0.1.0` requires the planned product and environment acceptance
 through M6, including observation periods and deployment/retirement gates.
 An alpha does not close incomplete milestone issues.
