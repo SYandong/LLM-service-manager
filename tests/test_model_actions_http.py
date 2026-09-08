@@ -246,3 +246,13 @@ def test_cold_wake_preserves_configured_host_memory_floor(system):
     status, result = request(address, "POST", "/v1/wake/model")
     assert status == 200 and result["status"] == "blocked" and result["error"] == "memory_budget"
     assert not state["http_calls"]
+
+
+@pytest.mark.parametrize("active", [False, None])
+def test_contradictory_sleeping_unit_observation_blocks_wake(system, active):
+    _, address, _, state = system
+    state["model"] = replace(state["model"], state="sleeping", unit_active=active, health_ok=True,
+                             is_sleeping=True, swap_state="stopped", gpu=0, resident_gb=2)
+    status, result = request(address, "POST", "/v1/wake/model")
+    assert status == 200 and result["status"] == "blocked" and result["error"] == "model_state_changed"
+    assert not state["http_calls"]

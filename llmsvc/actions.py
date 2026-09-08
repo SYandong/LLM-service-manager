@@ -567,6 +567,12 @@ class ModelActionController:
             raise ActionDispatchError("model_state_changed")
         if model.state != "stopped" and model.unit != self.transport.unit_for_model(name):
             raise ActionDispatchError("configured_unit_mismatch")
+        if model.state == "stopped":
+            if model.unit_active is not False:
+                raise ActionDispatchError("model_state_changed")
+        elif (model.unit_active is not True or model.health_ok is not True
+              or model.is_sleeping is not (model.state == "sleeping")):
+            raise ActionDispatchError("model_state_changed")
         activity = [item for item in snapshot.activity if item.model == name]
         if len(activity) != 1 or type(activity[0].in_flight) is not int or activity[0].in_flight < 0:
             raise ActionDispatchError("unknown_in_flight")
