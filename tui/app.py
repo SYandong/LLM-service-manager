@@ -66,6 +66,8 @@ class SchedulerApp(App):
         self.event_reader = event_reader if event_reader is not None else api.EventReader(client)
         self.event_history = []
         self.event_generation = 0
+        self._ui_timers = []
+        self._ui_closed = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -87,12 +89,17 @@ class SchedulerApp(App):
 
     def on_mount(self):
         self.query_one("#models", DataTable).focus()
-        self.set_interval(5, self.refresh_state)
+        self._ui_timers.append(self.set_interval(5, self.refresh_state))
         self.refresh_state()
         self.event_reader.start()
-        self.set_interval(0.1, self.update_events)
+        self._ui_timers.append(self.set_interval(0.1, self.update_events))
 
     async def on_unmount(self):
+        if self._ui_closed:
+            return
+        self._ui_closed = True
+        for timer in self._ui_timers:
+            timer.stop()
         await asyncio.to_thread(self.event_reader.close)
 
     def on_resize(self, event):
@@ -104,12 +111,14 @@ class SchedulerApp(App):
     @work
     async def refresh_state(self, args=None):
         # A slow HTTP request must not start overlapping polls or freeze keyboard input.
-        if self.fetching:
+        if not self.is_running or self.fetching:
             return
         self.fetching = True
         try:
             args = args or self.api.build_parser(UIParser).parse_args(["status"])
             snapshot = await asyncio.to_thread(self.api.execute_command, args, self.client)
+            if not self.is_running:
+                return
             # Validate the shared response before replacing the last good display.
             self.api.format_status(snapshot)
             self.snapshot = snapshot
@@ -121,7 +130,8 @@ class SchedulerApp(App):
                 message = "Updated · " + ("; ".join(errors) if errors else "read-only")
             self.show_result(message)
         except Exception as exc:
-            self.show_result("Refresh failed; last snapshot retained: " + str(exc))
+            if self.is_running:
+                self.show_result("Refresh failed; last snapshot retained: " + str(exc))
         finally:
             self.fetching = False
 
@@ -217,6 +227,10 @@ class SchedulerApp(App):
         self.show_result("Event cursor reset locally; replaying available scheduler history")
 
     def update_events(self):
+        # Textual marks the app stopped before pruning widgets, but closes the
+        # App timers afterwards. A callback in that window must not drain/redraw.
+        if not self.is_running:
+            return
         update = self.event_reader.drain()
         changed = update["generation"] != self.event_generation or bool(update["events"])
         if update["generation"] != self.event_generation:
