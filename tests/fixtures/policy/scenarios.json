@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "generated_by": "Codex / gpt-6-astra",
+  "cases": [
+    {
+      "id": "default_low_score_sleeps_last",
+      "operation": "free",
+      "models": [
+        {
+          "name": "default",
+          "gpu": 0,
+          "is_default": true,
+          "keep_value": 1
+        },
+        {
+          "name": "ordinary",
+          "gpu": 0,
+          "keep_value": 100
+        }
+      ],
+      "request": {},
+      "expect": {
+        "slept": [
+          "ordinary",
+          "default"
+        ],
+        "stopped": []
+      },
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from docs/DESIGN.md invariants; not a recorded historical trace"
+      }
+    },
+    {
+      "id": "same_size_cold_sleeps_before_hot",
+      "operation": "free",
+      "models": [
+        {
+          "name": "hot",
+          "gpu": 0,
+          "budget_gb": 40,
+          "requests_last_hour": 30
+        },
+        {
+          "name": "cold",
+          "gpu": 0,
+          "budget_gb": 40,
+          "requests_last_hour": 0
+        }
+      ],
+      "request": {
+        "need_gb": 30
+      },
+      "expect": {
+        "slept": [
+          "cold"
+        ],
+        "stopped": []
+      },
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from docs/DESIGN.md invariants; not a recorded historical trace"
+      }
+    },
+    {
+      "id": "pin_and_inflight_protected",
+      "operation": "free",
+      "models": [
+        {
+          "name": "pinned",
+          "gpu": 0,
+          "pinned": true
+        },
+        {
+          "name": "busy",
+          "gpu": 0,
+          "in_flight": 2
+        },
+        {
+          "name": "idle",
+          "gpu": 0
+        }
+      ],
+      "request": {},
+      "expect": {
+        "slept": [
+          "idle"
+        ],
+        "stopped": [],
+        "blocked": [
+          "pinned",
+          "busy"
+        ]
+      },
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from docs/DESIGN.md invariants; not a recorded historical trace"
+      }
+    },
+    {
+      "id": "default_admission_blocked_keeps_awake",
+      "operation": "free",
+      "memory": {
+        "available_gb": 160,
+        "minimum_available_gb": 150,
+        "sleeping_budget_gb": 200
+      },
+      "models": [
+        {
+          "name": "default",
+          "gpu": 0,
+          "weight_gb": 40,
+          "is_default": true
+        }
+      ],
+      "request": {},
+      "expect": {
+        "actions": [],
+        "blocked": [
+          "default"
+        ]
+      },
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from docs/DESIGN.md invariants; not a recorded historical trace"
+      }
+    },
+    {
+      "id": "fixed_ttl_sleeps_only_idle",
+      "operation": "idle",
+      "models": [
+        {
+          "name": "idle"
+        },
+        {
+          "name": "recent",
+          "idle_seconds": 100
+        }
+      ],
+      "expect": {
+        "slept": [
+          "idle"
+        ],
+        "stopped": []
+      },
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from docs/DESIGN.md invariants; not a recorded historical trace"
+      }
+    },
+    {
+      "id": "memory_pressure_cold_before_hot",
+      "operation": "memory",
+      "memory": {
+        "available_gb": 140,
+        "sleeping_budget_gb": 60
+      },
+      "models": [
+        {
+          "name": "cold",
+          "state": "sleeping",
+          "weight_gb": 40
+        },
+        {
+          "name": "hot",
+          "state": "sleeping",
+          "weight_gb": 40,
+          "requests_last_hour": 20
+        }
+      ],
+      "expect": {
+        "slept": [],
+        "stopped": [
+          "cold"
+        ]
+      },
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from docs/DESIGN.md invariants; not a recorded historical trace"
+      }
+    },
+    {
+      "id": "reserve_preserves_default_and_awake",
+      "operation": "reserve",
+      "models": [
+        {
+          "name": "idle",
+          "state": "sleeping"
+        },
+        {
+          "name": "default",
+          "state": "sleeping",
+          "is_default": true
+        },
+        {
+          "name": "awake"
+        }
+      ],
+      "request": {
+        "gpu": 0
+      },
+      "expect": {
+        "slept": [],
+        "stopped": [
+          "idle"
+        ],
+        "blocked": [
+          "default"
+        ]
+      },
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from docs/DESIGN.md invariants; not a recorded historical trace"
+      }
+    },
+    {
+      "id": "reload_batch_admission_no_eviction",
+      "operation": "reload",
+      "memory": {
+        "available_gb": 210
+      },
+      "models": [
+        {
+          "name": "a",
+          "weight_gb": 40
+        },
+        {
+          "name": "b",
+          "weight_gb": 40
+        },
+        {
+          "name": "sleeper",
+          "state": "sleeping",
+          "weight_gb": 40
+        }
+      ],
+      "expect": {
+        "actions": [],
+        "reasons": [
+          "memory_budget"
+        ]
+      },
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from docs/DESIGN.md invariants; not a recorded historical trace"
+      }
+    }
+  ]
+}
