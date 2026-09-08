@@ -172,9 +172,9 @@ def test_waiting_requires_more_than_thirty_seconds_idle_and_reports_owner():
     assert plan_placement(replace(s, sampled_at=10001), request(), waiting=True).gpu == 0
 
 
-def test_awake_eviction_sleep_is_admitted_or_direct_stop_with_known_ram_pressure():
+def test_awake_eviction_coalesces_sleep_stop_after_memory_admission_checks():
     s = state(resident("a", budget=80, state="awake"), gpus=(GPUState(0, total_gb=100, external_gb=0),))
-    assert [a.kind for a in plan_placement(s, request()).actions] == ["sleep", "stop", "place"]
+    assert [a.kind for a in plan_placement(s, request()).actions] == ["stop", "place"]
     s = replace(s, memory=MemoryState(160, 0))
     assert [a.kind for a in plan_placement(s, request()).actions] == ["stop", "place"]
     assert not plan_placement(replace(s, memory=MemoryState(None, 0)), request()).actions

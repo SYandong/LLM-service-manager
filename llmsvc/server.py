@@ -8,7 +8,7 @@ from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from llmsvc.scheduler import Scheduler
+from llmsvc.scheduler import IntentWriteError, Scheduler
 
 LOG = logging.getLogger("llmsvc.http")
 
@@ -108,17 +108,24 @@ class SchedulerHandler(BaseHTTPRequestHandler):
             self.wfile.flush()
 
     def _read_only(self):
-        self._json(405, {"error": "read_only", "message": "M1 does not execute actions"})
+        self._json(405, {"error": "read_only", "message": "Scheduler is read-only"})
 
-    def _preview_request(self):
+    def _reject_write(self):
+        if self.server.scheduler.config.read_only:
+            self._read_only()
+        else:
+            self._json(405, {"error": "operation_not_enabled"})
+
+    def _write_request(self):
         try:
             target = urlsplit(self.path)
             query = parse_qs(target.query, keep_blank_values=True)
-            if "dry_run" not in query:
+            dry_run = "dry_run" in query
+            if query and query != {"dry_run": ["1"]}:
+                raise ValueError("expected dry_run=1")
+            if not dry_run and self.server.scheduler.config.read_only:
                 self._read_only()
                 return
-            if query != {"dry_run": ["1"]}:
-                raise ValueError("expected dry_run=1")
             operation = None
             payload = {}
             if self.command == "POST":
@@ -128,8 +135,8 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                     if target.path.startswith(prefix):
                         operation = op
                         payload[key] = unquote(target.path[len(prefix):])
-            if operation is None:
-                self._read_only()
+            if operation is None or (not dry_run and operation not in ("pin", "unpin")):
+                self._reject_write()
                 return
             if self.headers.get("Transfer-Encoding") is not None:
                 raise ValueError("transfer encoding is not supported")
@@ -141,7 +148,7 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 self._json(413, {"error": "request_too_large"})
                 return
             if self.command == "DELETE" and length:
-                raise ValueError("DELETE preview does not accept a body")
+                raise ValueError("DELETE does not accept a body")
             if length:
                 data = self.rfile.read(length)
                 if len(data) != length:
@@ -149,13 +156,19 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 def reject_constant(value):
                     raise ValueError("non-finite JSON number")
                 payload = json.loads(data, parse_constant=reject_constant)
-            self._json(200, self.server.scheduler.preview(operation, payload))
+            if dry_run:
+                result = self.server.scheduler.preview(operation, payload)
+            else:
+                result = self.server.scheduler.write_pin(operation, payload, source_ip=self.client_address[0])
+            self._json(200, result)
+        except IntentWriteError as exc:
+            self._json(exc.status, {"error": exc.error})
         except (ValueError, TypeError, UnicodeError):
             self._json(400, {"error": "invalid_request"})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             self.close_connection = True
 
-    do_POST = _preview_request
-    do_DELETE = _preview_request
-    do_PUT = _read_only
-    do_PATCH = _read_only
+    do_POST = _write_request
+    do_DELETE = _write_request
+    do_PUT = _reject_write
+    do_PATCH = _reject_write

@@ -11,7 +11,7 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
+from textual.widgets import Button, DataTable, Footer, Header, Input, RichLog, Static
 
 
 class CommandMessage(Exception):
@@ -49,11 +49,18 @@ class SchedulerApp(App):
     #details-view, #result-view { height: 2; }
     #details, #result { height: auto; min-height: 2; padding: 0 1; }
     #result { color: $text-muted; }
+    #usage-view { display: none; height: 1fr; }
+    #usage-controls { height: 3; }
+    #usage-controls Button { width: 1fr; min-width: 0; }
+    #usage-scroll { height: 1fr; }
+    #usage-text { height: auto; padding: 0 1; }
+    Screen.usage #summary, Screen.usage #content, Screen.usage #details-view { display: none; }
+    Screen.usage #usage-view { display: block; }
     #command { height: 3; }
     """
     BINDINGS = [("q", "quit", "Quit"), ("r", "refresh_state", "Refresh"),
                 ("slash", "command", "Command"), ("question_mark", "help", "Help"),
-                ("ctrl+r", "reset_events", "Reset events")]
+                ("ctrl+r", "reset_events", "Reset events"), ("u", "usage", "Usage")]
 
     def __init__(self, client, api, event_reader=None, **kwargs):
         super().__init__(**kwargs)
@@ -68,6 +75,12 @@ class SchedulerApp(App):
         self.event_generation = 0
         self._ui_timers = []
         self._ui_closed = False
+        self.usage_active = False
+        self.usage_args = api.build_parser(UIParser).parse_args(["usage"])
+        self.usage_snapshot = None
+        self.usage_error = "Loading usage…"
+        self.usage_generation = 0
+        self.usage_fetching = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -80,16 +93,25 @@ class SchedulerApp(App):
                 yield Static("Scheduler events (last 200)", id="event-title", markup=False)
                 yield RichLog(id="events", max_lines=500, wrap=True, markup=False, highlight=False)
                 yield Static("SSE connecting", id="event-status", markup=False)
+        with Vertical(id="usage-view"):
+            with Horizontal(id="usage-controls"):
+                yield Button("7 days", id="usage-7")
+                yield Button("30 days", id="usage-30")
+                yield Button("Status", id="usage-status")
+            with VerticalScroll(id="usage-scroll"):
+                yield Static("Loading usage…", id="usage-text", markup=False)
         with VerticalScroll(id="details-view"):
             yield Static("Select a model with ↑/↓", id="details", markup=False)
         with VerticalScroll(id="result-view"):
             yield Static("Read-only · refresh every 5 seconds", id="result", markup=False)
-        yield Input(placeholder="status | status --json | --help", id="command")
+        yield Input(placeholder="status | usage --days 30 | --help", id="command")
         yield Footer()
 
     def on_mount(self):
         self.query_one("#models", DataTable).focus()
-        self._ui_timers.append(self.set_interval(5, self.refresh_state))
+        self._event_status = self.query_one("#event-status", Static)
+        self._event_log = self.query_one("#events", RichLog)
+        self._ui_timers.append(self.set_interval(5, self.refresh_current))
         self.refresh_state()
         self.event_reader.start()
         self._ui_timers.append(self.set_interval(0.1, self.update_events))
@@ -107,6 +129,8 @@ class SchedulerApp(App):
         self.screen.set_class(event.size.width < 100, "narrow")
         if self.snapshot is not None:
             self.render_snapshot()
+        if self.usage_active:
+            self.render_usage()
 
     @work
     async def refresh_state(self, args=None):
@@ -128,15 +152,89 @@ class SchedulerApp(App):
             else:
                 errors = snapshot.get("errors", [])
                 message = "Updated · " + ("; ".join(errors) if errors else "read-only")
-            self.show_result(message)
+            if not self.usage_active:
+                self.show_result(message)
         except Exception as exc:
-            if self.is_running:
+            if self.is_running and not self.usage_active:
                 self.show_result("Refresh failed; last snapshot retained: " + str(exc))
         finally:
             self.fetching = False
 
     def action_refresh_state(self):
+        self.refresh_current()
+
+    def refresh_current(self):
+        if self.usage_active:
+            self.refresh_usage()
+        else:
+            self.refresh_state()
+
+    def action_usage(self):
+        if self.usage_active:
+            self.show_status()
+        else:
+            self.show_usage(self.usage_args)
+
+    def show_status(self):
+        self.usage_active = False
+        self.usage_generation += 1
+        self.screen.remove_class("usage")
+        self.query_one("#models", DataTable).focus()
         self.refresh_state()
+
+    def show_usage(self, args):
+        self.usage_args = args
+        self.usage_active = True
+        self.usage_generation += 1
+        self.usage_snapshot = None
+        self.usage_error = "Loading usage…"
+        self.screen.add_class("usage")
+        self.render_usage()
+        self.query_one("#usage-7", Button).focus()
+        self.refresh_usage()
+
+    @work
+    async def refresh_usage(self):
+        if not self.is_running or self.usage_fetching:
+            return
+        self.usage_fetching = True
+        try:
+            while self.usage_active:
+                generation, args = self.usage_generation, self.usage_args
+                try:
+                    result = await asyncio.to_thread(self.api.execute_command, args, self.client)
+                except Exception as exc:
+                    result, error = None, "Usage unavailable: " + str(exc)
+                else:
+                    error = ""
+                if not self.is_running:
+                    return
+                if self.usage_active and generation == self.usage_generation:
+                    self.usage_snapshot, self.usage_error = result, error
+                    self.render_usage()
+                    self.show_result("Usage updated" if result and result["known"] else
+                                     "Usage unavailable; counts are unknown")
+                    break
+                # Window changes during a slow query queue only the latest selection.
+        finally:
+            self.usage_fetching = False
+
+    def render_usage(self):
+        if self.usage_snapshot is None:
+            text = "Usage: last %s days by %s\n%s" % (
+                self.usage_args.days, self.usage_args.by, self.api.clean_text(self.usage_error))
+        else:
+            text = self.api.format_result(self.usage_args, self.usage_snapshot,
+                                          width=max(1, self.terminal_width - 4))
+        self.query_one("#usage-text", Static).update(text)
+
+    def on_button_pressed(self, event):
+        if event.button.id == "usage-status":
+            self.show_status()
+        elif event.button.id in ("usage-7", "usage-30"):
+            days = event.button.id.removeprefix("usage-")
+            args = self.api.build_parser(UIParser).parse_args(["usage", "--days", days, "--by", self.usage_args.by])
+            self.show_usage(args)
 
     def show_result(self, text):
         self.query_one("#result", Static).update(self.api.clean_text(text))
@@ -219,7 +317,7 @@ class SchedulerApp(App):
         self.query_one("#command", Input).focus()
 
     def action_help(self):
-        self.show_result("status [--json] · r refresh · / command · ↑/↓ select · Ctrl+R reset events after a known daemon restart · q quit")
+        self.show_result("status [--json] · usage --days 7|30 [--by container|ip|model] · u toggle usage · r refresh · / command · Ctrl+R reset events after a known restart · q quit")
 
     def action_reset_events(self):
         self.event_reader.reset_cursor()
@@ -231,6 +329,8 @@ class SchedulerApp(App):
         # App timers afterwards. A callback in that window must not drain/redraw.
         if not self.is_running:
             return
+        if not self._event_status.is_attached or not self._event_log.is_attached:
+            return
         update = self.event_reader.drain()
         changed = update["generation"] != self.event_generation or bool(update["events"])
         if update["generation"] != self.event_generation:
@@ -241,13 +341,13 @@ class SchedulerApp(App):
             status += " · %s events unavailable in server history" % update["missed"]
         if update["dropped"]:
             status += " · %s events dropped from delivery queue" % update["dropped"]
-        self.query_one("#event-status", Static).update(self.api.clean_text(status))
+        self._event_status.update(self.api.clean_text(status))
         if not changed:
             return
         self.event_history.extend(update["events"])
         self.event_history.sort(key=lambda item: (item["timestamp"], item["id"]))
         self.event_history = self.event_history[-200:]
-        log = self.query_one("#events", RichLog)
+        log = self._event_log
         log.clear()
         for item in self.event_history:
             kind = item["kind"]
@@ -279,7 +379,13 @@ class SchedulerApp(App):
             args = self.api.build_parser(UIParser).parse_args(shlex.split(event.value))
             if args.url or args.config or args.timeout:
                 raise CommandMessage("Connection settings are fixed for this session; restart llm to change them")
-            self.refresh_state(args)
+            if args.command == "usage":
+                self.show_usage(args)
+            else:
+                self.usage_active = False
+                self.usage_generation += 1
+                self.screen.remove_class("usage")
+                self.refresh_state(args)
         except (CommandMessage, ValueError) as exc:
             self.show_result(str(exc))
         event.input.value = ""

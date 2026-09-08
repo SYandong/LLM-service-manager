@@ -1,5 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
-"""Read-only scheduler entry point; systemd captures structured stderr logs."""
+"""Scheduler entry point: read-only by default, with opt-in pin intent writes."""
 
 import argparse
 import json
@@ -7,6 +7,7 @@ import logging
 import signal
 import sqlite3
 import threading
+from dataclasses import replace
 
 from llmsvc import __version__
 from llmsvc.config import load_config
@@ -48,10 +49,10 @@ def build_usage(collector):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="llmsvc read-only scheduler")
+    parser = argparse.ArgumentParser(description="llmsvc scheduler (read-only by default)")
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--config", required=True, help="scheduler YAML configuration")
-    parser.add_argument("--dry-run", action="store_true", help="disable actions (always enforced in M1)")
+    parser.add_argument("--dry-run", action="store_true", help="force read-only operation and never create or write the intent database")
     parser.add_argument("--check-config", action="store_true", help="validate configuration and exit")
     parser.add_argument("--once", action="store_true", help="collect one JSON snapshot and exit")
     args = parser.parse_args()
@@ -60,9 +61,11 @@ def main():
     collector = None
     try:
         config = load_config(args.config)
+        if args.dry_run or args.check_config or args.once:
+            config = replace(config, read_only=True)
         collector = build_collector(config)
         if config.state_db_path:
-            store = IntentStore(config.state_db_path, action_lock=threading.RLock(), read_only=True)
+            store = IntentStore(config.state_db_path, action_lock=threading.RLock(), read_only=config.read_only)
         scheduler = Scheduler(config, collect=collector, store=store, usage=build_usage(collector))
     except (OSError, ValueError, TypeError, ImportError, sqlite3.Error) as exc:
         if store is not None:
@@ -100,7 +103,7 @@ def main():
     try:
         scheduler.start()
         http_thread.start()
-        scheduler.emit("started", detail={"read_only": True})
+        scheduler.emit("started", detail={"read_only": config.read_only})
         while not exit_requested.wait(0.5):
             if not http_thread.is_alive():
                 raise RuntimeError("HTTP server thread exited")

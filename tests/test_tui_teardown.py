@@ -38,6 +38,11 @@ class TeardownApp(SchedulerApp):
         super().__init__(*args, **kwargs)
         self.captured_timers = []
         self.at_teardown = None
+        self.callback_phases = []
+
+    def update_events(self):
+        self.callback_phases.append(self.is_running)
+        return super().update_events()
 
     def set_interval(self, interval, callback=None, **kwargs):
         timer = super().set_interval(interval, callback, **kwargs)
@@ -74,12 +79,16 @@ def test_pending_timer_after_widget_removal_keeps_mounted_delivery(api, snapshot
             async def pending_tick():
                 queued.set()
                 await release.wait()
-                await timer._tick(next_timer=asyncio.get_running_loop().time(), count=2)
+                await timer._tick(next_timer=asyncio.get_running_loop().time(), count=3)
 
             pending = asyncio.create_task(pending_tick())
             await queued.wait()
 
             async def teardown_boundary():
+                assert not app._exit  # Timer._tick must invoke, not skip, its callback.
+                before = reader.drains
+                await timer._tick(next_timer=asyncio.get_running_loop().time(), count=2)
+                drain_counts.append((before, reader.drains))
                 await app.query_one("#event-panel").remove()
                 before = reader.drains
                 release.set()
@@ -89,6 +98,7 @@ def test_pending_timer_after_widget_removal_keeps_mounted_delivery(api, snapshot
             app.at_teardown = teardown_boundary
         assert pending.done()
         assert app._exception is None
+        assert app.callback_phases[-2:] == [False, False]
         assert all(before == after for before, after in drain_counts)
         assert reader.closes == 1
         # 0.70 retains its completed Task; current Textual clears the reference.
@@ -99,7 +109,8 @@ def test_pending_timer_after_widget_removal_keeps_mounted_delivery(api, snapshot
     asyncio.run(scenario())
 
 
-def test_late_status_response_cannot_redraw_during_shutdown(api, snapshot):
+@pytest.mark.parametrize("command", ["status", "usage"])
+def test_late_response_cannot_redraw_during_shutdown(api, snapshot, command):
     async def scenario():
         reader = TrackedReader()
         client = FakeClient(snapshot)
@@ -111,26 +122,33 @@ def test_late_status_response_cannot_redraw_during_shutdown(api, snapshot):
             await pilot.pause()
             for _, timer in app.captured_timers:
                 timer.pause()
-            original = app.snapshot
+            original = app.snapshot if command == "status" else app.usage_snapshot
 
             def delayed(method, path):
                 started.set()
                 assert release.wait(2)
-                return {"models": [{"name": "late-response"}]}
+                if command == "status":
+                    return {"models": [{"name": "late-response"}]}
+                return {"days": 7, "by": "container", "known": True, "error": None, "rows": [],
+                        "totals": {"requests": 0, "input_tokens": 0, "output_tokens": 0}}
 
             client.request = delayed
-            pending = app.refresh_state()
+            if command == "status":
+                app.refresh_state()
+            else:
+                app.show_usage(api["build_parser"]().parse_args(["usage"]))
             assert await asyncio.to_thread(started.wait, 2)
 
             async def teardown_boundary():
                 release.set()
-                await pending.wait()
-                shutdown_snapshots.append(app.snapshot)
+                await app.workers.wait_for_complete()
+                shutdown_snapshots.append(app.snapshot if command == "status" else app.usage_snapshot)
 
             app.at_teardown = teardown_boundary
         assert shutdown_snapshots == [original]
         assert shutdown_snapshots[0] is original
         assert not app.fetching
+        assert not app.usage_fetching
         assert reader.closes == 1
     asyncio.run(scenario())
 
@@ -143,15 +161,13 @@ def test_mounted_widget_errors_are_not_suppressed(api, snapshot, monkeypatch):
             await pilot.pause()
             for _, timer in app.captured_timers:
                 timer.pause()
-            original = app.query_one
+            status = app.query_one("#event-status")
 
-            def missing_status(selector, *args, **kwargs):
-                if selector == "#event-status":
-                    raise NoMatches("mounted structural error")
-                return original(selector, *args, **kwargs)
+            def broken_update(*args, **kwargs):
+                raise NoMatches("mounted structural error")
 
             with monkeypatch.context() as patch:
-                patch.setattr(app, "query_one", missing_status)
+                patch.setattr(status, "update", broken_update)
                 assert app.is_running
                 with pytest.raises(NoMatches, match="mounted structural error"):
                     app.update_events()
