@@ -15,20 +15,17 @@ subscription.start()
 # Core must call subscription.close() during shutdown.
 ```
 
-Core supplies these callbacks using its existing condition/global lock:
+Core supplies callbacks through merged #57:
 
 ```python
-def on_inflight(inflight, *, connected=True):
-    with scheduler.changed:
-        quiet.observe(inflight, connected=connected)
-        scheduler.changed.notify_all()
-
-
-def on_heartbeat():
-    with scheduler.changed:
-        quiet.heartbeat()
-        scheduler.changed.notify_all()
+on_inflight, on_heartbeat = scheduler.quiet_callbacks(quiet)
 ```
+
+These closures record `quiet.observe(...)` / `quiet.heartbeat()` first, using only
+QuietPeriod's brief observation mutex. Notification then tries the scheduler's
+action lock without blocking; if it is busy, notification is skipped and a bounded
+tick retries. Never hold or wait for `scheduler.changed` / `action_lock` around
+stream observations: subsequent arrivals must remain visible during validation.
 
 Construction/start/stop never changes a model, configuration or GPU. The adapter
 has one reader/observer path so callbacks preserve receive order. Every connection

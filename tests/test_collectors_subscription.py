@@ -1,5 +1,6 @@
 # Generated-By: Codex / gpt-6-astra
 import json
+import io
 import queue
 import threading
 import time
@@ -95,8 +96,8 @@ def test_snapshot_upsert_remove_observes_ordered_aggregate_counts():
         message("logData", {"source": "proxy", "data": "raw logs are ignored"}),
         message("profileChanged", {"active": None}),
         message("inflight", {"operation": "snapshot"}),
-        message("inflight", {"operation": "upsert", "request": {"id": "a", "modelID": "m1"}}),
-        message("inflight", {"operation": "upsert", "request": {"id": "b", "modelID": "m2"}}),
+        message("inflight", {"operation": "upsert", "request": {"id": "a", "model": "m1"}}),
+        message("inflight", {"operation": "upsert", "request": {"id": "b", "model": "m2"}}),
         message("inflight", {"operation": "remove", "id": "a"}),
         message("inflight", {"operation": "remove", "id": "b"}),
         EOFError(),
@@ -132,7 +133,7 @@ def test_constructor_rejects_ambiguous_or_non_finite_options(kwargs):
 def test_disconnect_invalidates_and_reconnect_uses_fresh_snapshot():
     streams = iter([
         Stream([
-            message("inflight", {"operation": "snapshot", "requests": [{"id": "old", "modelID": "m"}]}),
+            message("inflight", {"operation": "snapshot", "requests": [{"id": "old", "model": "m"}]}),
             EOFError(),
         ]),
         Stream([
@@ -162,8 +163,8 @@ def test_disconnect_invalidates_and_reconnect_uses_fresh_snapshot():
 
 @pytest.mark.parametrize("frame", [
     message("unknown", {"anything": True}),
-    message("inflight", {"operation": "upsert", "request": {"id": "a", "modelID": "m"}}),
-    message("inflight", {"operation": "snapshot", "requests": [{"id": "", "modelID": "m"}]}),
+    message("inflight", {"operation": "upsert", "request": {"id": "a", "model": "m"}}),
+    message("inflight", {"operation": "snapshot", "requests": [{"id": "", "model": "m"}]}),
     [b"event:not-message\n", b"data:{}\n", b"\n"],
 ])
 def test_unknown_malformed_or_out_of_order_events_reset_to_unknown(frame):
@@ -174,7 +175,7 @@ def test_unknown_malformed_or_out_of_order_events_reset_to_unknown(frame):
 def test_replacement_snapshot_and_unknown_remove_reset_to_unknown():
     calls, _ = run([
         message("inflight", {"operation": "snapshot"}),
-        message("inflight", {"operation": "snapshot", "requests": [{"id": "fresh", "modelID": "m"}]}),
+        message("inflight", {"operation": "snapshot", "requests": [{"id": "fresh", "model": "m"}]}),
         message("inflight", {"operation": "remove", "id": "missing"}),
         EOFError(),
     ])
@@ -184,7 +185,7 @@ def test_replacement_snapshot_and_unknown_remove_reset_to_unknown():
 
 def test_incremental_after_reconnect_is_discarded_until_snapshot():
     calls, _ = run([
-        message("inflight", {"operation": "upsert", "request": {"id": "a", "modelID": "m"}}),
+        message("inflight", {"operation": "upsert", "request": {"id": "a", "model": "m"}}),
         EOFError(),
     ])
 
@@ -228,7 +229,7 @@ def test_no_local_elapsed_timer_heartbeat_is_invented():
 def test_untrusted_v252_source_reports_counts_without_certifying_quiet():
     calls, _ = run([
         message("inflight", {"operation": "snapshot"}),
-        message("inflight", {"operation": "upsert", "request": {"id": "a", "modelID": "m"}}),
+        message("inflight", {"operation": "upsert", "request": {"id": "a", "model": "m"}}),
         EOFError(),
     ], ordered_source=False)
 
@@ -249,7 +250,7 @@ def test_callback_sequence_is_serialized_for_slow_observer():
         on_inflight,
         stream_factory=lambda: Stream([
             message("inflight", {"operation": "snapshot"}),
-            message("inflight", {"operation": "upsert", "request": {"id": "a", "modelID": "m"}}),
+            message("inflight", {"operation": "upsert", "request": {"id": "a", "model": "m"}}),
         ]),
         reconnect_delay=999,
         timeout=.1,
@@ -278,7 +279,7 @@ def test_bounded_subscription_resets_and_shutdown_cleans_thread():
         lambda value, *, connected=True: calls.append((value, connected)),
         stream_factory=lambda: Stream([
             message("inflight", {"operation": "snapshot"}),
-            message("inflight", {"operation": "upsert", "request": {"id": "a", "modelID": "m"}}),
+            message("inflight", {"operation": "upsert", "request": {"id": "a", "model": "m"}}),
         ]),
         reconnect_delay=999,
         timeout=.1,
@@ -389,3 +390,15 @@ def test_subscription_rejects_upstream_model_routing_before_any_request():
     from llmsvc.collectors.subscription import _HTTPEventStream
     with pytest.raises(ValueError, match='upstream'):
         _HTTPEventStream('http://localhost/upstream/model', .1)
+
+
+def test_actual_wire_model_field_counts_without_certifying_current_source():
+    from pathlib import Path
+    fixture = Path(__file__).parent / 'fixtures/telemetry/inflight-wire-v252.json'
+    envelopes = json.loads(fixture.read_text())['envelopes']
+    calls = []
+    sub = InflightSubscription('http://unused', lambda n, *, connected: calls.append((n, connected)))
+    payload = ''.join('event:message\ndata:' + json.dumps(e) + '\n\n' for e in envelopes).encode()
+    with pytest.raises(ConnectionError):
+        sub._consume(io.BytesIO(payload))
+    assert calls == [(1, False)]
