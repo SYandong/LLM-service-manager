@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.1.0-alpha.3 — 2026-09-08
+
+Incremental preview; Python distribution `0.1.0a3`.
+Includes #109, #110, #111, #112 and #113 since the immutable alpha.2 tag.
+
+### Added and corrected
+
+- Reserve CLI/TUI input, preview and explicit saved-intent/evacuation outcome
+  handling (#110), paired with actual reserve POST/DELETE persistence and
+  bounded evacuation of eligible sleeping models (#112). Saved intentions
+  exclude the whole GPU while active; blocked/partial evacuation retains the
+  record. Preview keeps a hypothetical request label; actual writes attribute
+  ownership from the socket peer. Only proved exits enter the stopped list.
+- Read-only pinned-v252 native-generation witness with bounded I/O and explicit
+  instance/candidate binding (#111). It is not mounted in the scheduler and
+  never proves old-server settlement, reliable quiet or an applied reload.
+- Offline observation summaries verify captured hashes/schema/source identity
+  and report sample coverage, gaps, unknowns and per-GPU external occupancy
+  distributions in JSON/CSV (#113). No new observer or model probe is started.
+- Bounded minutes-scale validation and deterministic replay replace mandatory
+  day/week calendar waits (#109). Long-term stability and calibration are
+  **NOT MEASURED**, rather than inferred from a short run.
+
+### Compatibility and limits
+
+The existing schema-v2 ledger remains unchanged. Reserve intent writes require
+explicit writable intent mode; actual evacuation also requires the separate
+model-action opt-in. Default read-only behavior remains. DELETE removes an
+intent without waking/restarting models; expiry/deletion cancels future steps.
+HTTP200 reports a saved intent, not necessarily completed evacuation. Clients
+must inspect complete/blocked/partial outcomes and must not retry ambiguous POSTs.
+Awake/protected/unknown/unleased models stay blocked; no relocation, orphan
+adoption or forced cleanup is added.
+
+Native-generation visibility is not old-server settlement and does not satisfy
+the reliable five-second quiet requirement. Offline coverage does not establish
+continuous uptime or choose production thresholds. Trusted host-memory input,
+real action/TTL/reaper integration, LoRA and owner-authorized retirement retain
+their applicable acceptance and authorization requirements. Publishing enables
+no production routing, TTL/reaper, host bind, observer or model action and
+completes no milestone automatically.
+
 ## 0.1.0-alpha.2 — 2026-09-08
 
 Incremental preview after alpha.1; Python distribution `0.1.0a2`.
