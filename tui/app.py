@@ -3,14 +3,15 @@
 
 import argparse
 import asyncio
+from datetime import datetime, timezone
 import json
 import shlex
 
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal
-from textual.widgets import DataTable, Footer, Header, Input, Static
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
 
 
 class CommandMessage(Exception):
@@ -37,15 +38,24 @@ class SchedulerApp(App):
     #memory { width: 1fr; height: auto; padding: 0 1; }
     Screen.narrow #summary { layout: vertical; }
     Screen.narrow #gpus, Screen.narrow #memory { width: 1fr; }
-    #models { height: 1fr; min-height: 3; }
-    #details { height: 2; padding: 0 1; overflow-y: auto; }
-    #result { height: 2; padding: 0 1; color: $text-muted; overflow-y: auto; }
+    #content { height: 1fr; min-height: 6; }
+    #models { width: 3fr; height: 1fr; min-height: 3; }
+    #event-panel { width: 2fr; height: 1fr; min-width: 20; }
+    #event-title, #event-status { height: 1; }
+    #events { height: 1fr; }
+    Screen.narrow #content { layout: vertical; }
+    Screen.narrow #models { width: 1fr; }
+    Screen.narrow #event-panel { width: 1fr; height: 6; }
+    #details-view, #result-view { height: 2; }
+    #details, #result { height: auto; min-height: 2; padding: 0 1; }
+    #result { color: $text-muted; }
     #command { height: 3; }
     """
     BINDINGS = [("q", "quit", "Quit"), ("r", "refresh_state", "Refresh"),
-                ("slash", "command", "Command"), ("question_mark", "help", "Help")]
+                ("slash", "command", "Command"), ("question_mark", "help", "Help"),
+                ("ctrl+r", "reset_events", "Reset events")]
 
-    def __init__(self, client, api, **kwargs):
+    def __init__(self, client, api, event_reader=None, **kwargs):
         super().__init__(**kwargs)
         self.client = client
         self.api = api
@@ -53,15 +63,25 @@ class SchedulerApp(App):
         self.fetching = False
         self.model_names = []
         self.terminal_width = 100
+        self.event_reader = event_reader if event_reader is not None else api.EventReader(client)
+        self.event_history = []
+        self.event_generation = 0
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="summary"):
             yield Static("Loading GPU observations…", id="gpus", markup=False)
             yield Static("Loading RAM observations…", id="memory", markup=False)
-        yield DataTable(id="models", cursor_type="row")
-        yield Static("Select a model with ↑/↓", id="details", markup=False)
-        yield Static("Read-only · refresh every 5 seconds", id="result", markup=False)
+        with Horizontal(id="content"):
+            yield DataTable(id="models", cursor_type="row")
+            with Vertical(id="event-panel"):
+                yield Static("Scheduler events (last 200)", id="event-title", markup=False)
+                yield RichLog(id="events", max_lines=500, wrap=True, markup=False, highlight=False)
+                yield Static("SSE connecting", id="event-status", markup=False)
+        with VerticalScroll(id="details-view"):
+            yield Static("Select a model with ↑/↓", id="details", markup=False)
+        with VerticalScroll(id="result-view"):
+            yield Static("Read-only · refresh every 5 seconds", id="result", markup=False)
         yield Input(placeholder="status | status --json | --help", id="command")
         yield Footer()
 
@@ -69,6 +89,11 @@ class SchedulerApp(App):
         self.query_one("#models", DataTable).focus()
         self.set_interval(5, self.refresh_state)
         self.refresh_state()
+        self.event_reader.start()
+        self.set_interval(0.1, self.update_events)
+
+    async def on_unmount(self):
+        await asyncio.to_thread(self.event_reader.close)
 
     def on_resize(self, event):
         self.terminal_width = event.size.width
@@ -130,8 +155,9 @@ class SchedulerApp(App):
         table = self.query_one("#models", DataTable)
         previous = self.selected_model()
         table.clear(columns=True)
-        narrow = self.terminal_width < 100
-        columns = [("MODEL", max(8, min(22, self.terminal_width - 27))), ("STATE", 8), ("GPU", 3), ("MEM", 6)]
+        table_width = self.terminal_width if self.terminal_width < 100 else int(self.terminal_width * 0.6)
+        narrow = table_width < 100
+        columns = [("MODEL", max(8, min(22, table_width - 27))), ("STATE", 8), ("GPU", 3), ("MEM", 6)]
         if not narrow:
             columns.extend([("USED", 6), ("10m", 4), ("FROM", 10), ("PIN", 16)])
         for label, width in columns:
@@ -183,7 +209,56 @@ class SchedulerApp(App):
         self.query_one("#command", Input).focus()
 
     def action_help(self):
-        self.show_result("status [--json] · r refresh · / command · ↑/↓ select · q quit")
+        self.show_result("status [--json] · r refresh · / command · ↑/↓ select · Ctrl+R reset events after a known daemon restart · q quit")
+
+    def action_reset_events(self):
+        self.event_reader.reset_cursor()
+        self.update_events()
+        self.show_result("Event cursor reset locally; replaying available scheduler history")
+
+    def update_events(self):
+        update = self.event_reader.drain()
+        changed = update["generation"] != self.event_generation or bool(update["events"])
+        if update["generation"] != self.event_generation:
+            self.event_generation = update["generation"]
+            self.event_history.clear()
+        status = update["status"]
+        if update.get("missed"):
+            status += " · %s events unavailable in server history" % update["missed"]
+        if update["dropped"]:
+            status += " · %s events dropped from delivery queue" % update["dropped"]
+        self.query_one("#event-status", Static).update(self.api.clean_text(status))
+        if not changed:
+            return
+        self.event_history.extend(update["events"])
+        self.event_history.sort(key=lambda item: (item["timestamp"], item["id"]))
+        self.event_history = self.event_history[-200:]
+        log = self.query_one("#events", RichLog)
+        log.clear()
+        for item in self.event_history:
+            kind = item["kind"]
+            color = "white"
+            if "error" in kind or "fail" in kind:
+                color = "bright_red"
+            elif kind in ("stop", "stopped"):
+                color = "red"
+            elif "evict" in kind:
+                color = "magenta"
+            elif "sleep" in kind:
+                color = "yellow"
+            elif "pin" in kind or "reserve" in kind:
+                color = "cyan"
+            elif "load" in kind or "wake" in kind:
+                color = "green"
+            try:
+                timestamp = datetime.fromtimestamp(item["timestamp"], timezone.utc).strftime("%H:%M:%S")
+            except (ValueError, OverflowError, OSError):
+                timestamp = "?"
+            detail = json.dumps(item.get("detail", {}), ensure_ascii=False, sort_keys=True)
+            line = "%s %s %s %s" % (timestamp, kind, item.get("model") or "", detail)
+            if len(line) > 2048:
+                line = line[:2048] + " …"
+            log.write(Text(self.api.clean_text(line), style=color))
 
     def on_input_submitted(self, event):
         try:

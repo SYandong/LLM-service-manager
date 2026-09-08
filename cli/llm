@@ -3,6 +3,7 @@
 """A standalone, standard-library scheduler client; reusable by the optional TUI."""
 
 import argparse
+from collections import deque
 import configparser
 from datetime import datetime, timezone
 from http.client import HTTPException
@@ -12,7 +13,9 @@ import math
 import os
 from pathlib import Path
 import shutil
+import socket
 import sys
+import threading
 import time
 from types import SimpleNamespace
 import unicodedata
@@ -134,6 +137,195 @@ class SchedulerClient:
             raise ClientError("Cannot reach scheduler: " + clean_text(getattr(exc, "reason", exc))) from None
         except (ValueError, UnicodeError):
             raise ClientError("Scheduler returned an invalid JSON response") from None
+
+
+def event_lines(response):
+    """Read available bytes without waiting for a full buffer; accept LF/CRLF/CR."""
+    line, after_cr = bytearray(), False
+    while True:
+        chunk = response.read1(4096)
+        if not chunk:
+            return  # An incomplete line/event at EOF is replayed after reconnect.
+        for value in chunk:
+            if after_cr:
+                after_cr = False
+                if value == 10:
+                    continue
+            if value in (10, 13):
+                yield bytes(line)
+                line.clear()
+                after_cr = value == 13
+            else:
+                line.append(value)
+                if len(line) > 65536:
+                    raise ClientError("Scheduler SSE line exceeds 64 KiB")
+
+
+def iter_events(response):
+    """Decode bounded scheduler SSE frames; heartbeats never advance the cursor."""
+    data, event_id, size = [], None, 0
+    first = True
+    for raw in event_lines(response):
+        size += len(raw) + 1
+        if size > 262144:
+            raise ClientError("Scheduler SSE frame exceeds 256 KiB")
+        try:
+            line = raw.decode("utf-8")
+        except UnicodeError:
+            raise ClientError("Scheduler SSE contains invalid UTF-8") from None
+        if first:
+            line = line.removeprefix("\ufeff")
+            first = False
+        if not line:
+            if data:
+                try:
+                    item = json.loads("\n".join(data), parse_constant=invalid_constant)
+                    valid = (
+                        event_id is not None and isinstance(item, dict)
+                        and type(item.get("id")) is int and item["id"] == event_id
+                        and isinstance(item.get("kind"), str)
+                        and type(item.get("timestamp")) in (int, float)
+                        and math.isfinite(item["timestamp"])
+                    )
+                except (ValueError, OverflowError):
+                    valid = False
+                if not valid:
+                    raise ClientError("Scheduler SSE contains an invalid event record")
+                yield item
+            data, event_id, size = [], None, 0
+            continue
+        if line.startswith(":"):
+            continue
+        field, _, value = line.partition(":")
+        value = value.removeprefix(" ")
+        if field == "data":
+            data.append(value)
+        elif field == "id":
+            if not value.isascii() or not value.isdigit():
+                raise ClientError("Scheduler SSE contains an invalid event ID")
+            try:
+                event_id = int(value)
+            except ValueError:
+                raise ClientError("Scheduler SSE contains an invalid event ID") from None
+
+
+class EventReader:
+    """One background subscription to scheduler SSE with a bounded delivery queue."""
+
+    def __init__(self, client, *, stream_timeout=30, retry_delay=1, max_retry_delay=30, queue_size=256):
+        self.client = client
+        self.stream_timeout = positive_timeout(stream_timeout)
+        self.retry_delay = positive_timeout(retry_delay)
+        self.max_retry_delay = max(self.retry_delay, positive_timeout(max_retry_delay))
+        if not isinstance(queue_size, int) or queue_size < 1:
+            raise ClientError("Event queue size must be positive")
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._queue = deque(maxlen=queue_size)
+        self._cursor = 0
+        self._generation = 0
+        self._dropped = 0
+        self._missed = 0
+        self._status = "SSE connecting"
+        self._socket = None
+        self.thread = None
+
+    def start(self):
+        if self.thread is not None:
+            raise ClientError("Event reader is already started")
+        self.thread = threading.Thread(target=self._run, name="llm-scheduler-events", daemon=True)
+        self.thread.start()
+
+    def drain(self):
+        with self._lock:
+            result = {"generation": self._generation, "events": list(self._queue),
+                      "status": self._status, "dropped": self._dropped,
+                      "missed": self._missed, "cursor": self._cursor}
+            self._queue.clear()
+            return result
+
+    def _interrupt(self):
+        with self._lock:
+            connection = self._socket
+        if connection is not None:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def reset_cursor(self):
+        """Call only after a known daemon restart, not on ordinary disconnects."""
+        with self._lock:
+            self._generation += 1
+            self._cursor = 0
+            self._queue.clear()
+            self._dropped = 0
+            self._missed = 0
+            self._status = "SSE cursor reset after known restart"
+        self._wake.set()
+        self._interrupt()
+
+    def close(self):
+        self._stop.set()
+        self._wake.set()
+        self._interrupt()
+        if self.thread is not None:
+            self.thread.join(timeout=self.client.timeout + self.stream_timeout + 1)
+            return not self.thread.is_alive()
+        return True
+
+    def _run(self):
+        delay = self.retry_delay
+        while not self._stop.is_set():
+            with self._lock:
+                cursor, generation = self._cursor, self._generation
+            response = None
+            try:
+                request = Request(self.client.url + "/v1/events?since=" + str(cursor),
+                                  headers={"Accept": "text/event-stream", "Last-Event-ID": str(cursor)})
+                response = self.client.opener(request, timeout=self.client.timeout)
+                if response.headers.get_content_type() != "text/event-stream":
+                    raise ClientError("Scheduler SSE response has an invalid content type")
+                # urllib returns an HTTPResponse; shutting down its transport unblocks
+                # reads before closing the buffered stream, including TLS sockets.
+                connection = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+                if connection is not None:
+                    connection.settimeout(self.stream_timeout)
+                with self._lock:
+                    if generation != self._generation or self._stop.is_set():
+                        continue
+                    self._socket = connection
+                    self._status = "SSE connected"
+                for item in iter_events(response):
+                    with self._lock:
+                        if generation != self._generation or self._stop.is_set():
+                            break
+                        if item["id"] <= self._cursor:
+                            continue
+                        self._missed += item["id"] - self._cursor - 1
+                        if len(self._queue) == self._queue.maxlen:
+                            self._dropped += 1
+                        self._queue.append(item)
+                        self._cursor = item["id"]
+                        delay = self.retry_delay
+                with self._lock:
+                    if generation == self._generation:
+                        self._status = "SSE disconnected; reconnecting"
+            except (ClientError, HTTPError, URLError, OSError, HTTPException, ValueError) as exc:
+                if isinstance(exc, HTTPError):
+                    exc.close()
+                with self._lock:
+                    if generation == self._generation:
+                        self._status = "SSE reconnecting: " + clean_text(exc)
+            finally:
+                with self._lock:
+                    self._socket = None
+                if response is not None:
+                    response.close()
+            self._wake.wait(delay)
+            self._wake.clear()
+            delay = min(self.max_retry_delay, delay * 2)
 
 
 def cell_width(text):

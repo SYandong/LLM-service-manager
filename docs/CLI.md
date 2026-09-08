@@ -1,6 +1,6 @@
 # CLI 使用说明
 
-`cli/llm` 是 Python 3.10+ 标准库脚本。只复制这一个文件即可运行，无需安装仓库、`rich` 或 `textual`。当前提供只读 `status` 和可选全屏面板，只请求 scheduler 的 `GET /v1/state`。
+`cli/llm` 是 Python 3.10+ 标准库脚本。只复制这一个文件即可运行，无需安装仓库、`rich` 或 `textual`。当前提供只读 `status` 和可选全屏面板，只请求 scheduler 的 `GET /v1/state` 与 `GET /v1/events`。
 
 ```sh
 python3 llm --help
@@ -68,12 +68,20 @@ python -m pip install '.[tui]'
 LLM_URL=http://scheduler:8011 python cli/llm
 ```
 
-全屏面板每 5 秒刷新，显示 GPU 占用条、内存预算和可选择的模型表。100×30 时显示完整表；小于 100 列时上方改为单列，模型表保留名称、状态、GPU 和显存，选中模型的来源与 pin 在下方显示。鼠标可滚动较长的详情和命令结果。
+状态面板每 5 秒刷新，显示 GPU 占用条、内存预算和可选择的模型表。100×30 时事件流在模型表右侧；小于 100 列时上方改为单列、事件流移到模型表下方。空间不足时模型表保留名称、状态、GPU 和显存，选中模型的来源与 pin 在下方显示。鼠标可滚动较长的详情、命令结果和事件。
 
-- `↑` / `↓` 选择模型，`r` 刷新，`/` 聚焦命令框，`?` 帮助，`q` 退出。
+- `↑` / `↓` 选择模型，`r` 刷新，`/` 聚焦命令框，`?` 帮助，`q` 退出。用 `Tab` 聚焦详情或结果滚动区后，可用方向键翻动长内容；长错误不会限制在可见的两行内。
 - 输入框复用 CLI 解析器，支持 `status`、`status --json` 和 `--help`。连接参数固定为启动时的配置；修改地址需退出后重新运行。
 - 请求在后台线程执行，慢请求不会叠加轮询或阻塞按键。连接失败保留上一份快照，并显示错误；新快照到达后保留选中模型。
-- 当前是只读骨架。`free`、`pin`、`wake`、`reserve` 操作与对应快捷键，以及事件流、usage 视图在各自 issue 中接入；当前不会发送写请求。
+- 当前是只读界面。`free`、`pin`、`wake`、`reserve` 操作与对应快捷键，以及 usage 视图在各自 issue 中接入；当前不会发送写请求。
+
+### Scheduler 事件流
+
+事件读取在独立线程中进行，界面每 0.1 秒接收已到达的事件。日志按 UTC 时间排序并按事件种类着色，保留最近 200 条；单条可见文本最多 2048 字符。连接失败后以 1–30 秒退避重连，携带上次完整接收的 `since` / `Last-Event-ID`，重复事件不会再显示。退出界面会中断活动流并等待读取线程关闭。
+
+当前 daemon 的事件历史有界且仅保存在内存中，游标不跨重启持久化。**确认 daemon 已重启后**按 `Ctrl+R`，仅在本地清空事件历史和游标，从 0 重新订阅。普通网络断线不会自动归零；当前接口没有可用于自动识别重启的实例标识。后端已淘汰的历史不能重建，ID 缺口会提示不可用事件数量；客户端 256 条投递队列超限也会明确提示丢失数量。
+
+当前面板只读取 scheduler 的 `/v1/events`，不直连 llama-swap。两来源合流仍等待 scheduler 的数据面事件转发接口；合成事件的显示时延测试不是实际 free 操作或双来源验收。
 
 ## 开发与验证
 
@@ -82,10 +90,13 @@ LLM_URL=http://scheduler:8011 python cli/llm
 ```sh
 python -m pytest -q tests/test_llm.py
 python -m pytest -q tests/test_llm_tui.py tests/test_tui.py
+python -m pytest -q tests/test_llm_events.py tests/test_tui_events.py
 ```
 
 测试使用核心包的状态结构生成 JSON，并在临时 loopback HTTP 服务上验证单文件复制、无 site-packages 的 Python 启动、JSON 保真与窄屏。Python 3.10 可用时直接执行该解释器的复制测试；CI 使用 Python 3.10。客户端测试不访问生产服务或 GPU。
 
 没有安装 Textual 时，headless UI 测试明确跳过；CLI 降级测试仍运行。界面测试使用 Textual 的 [headless Pilot](https://textual.textualize.io/guide/testing/) 检查尺寸、选择、定时刷新、输入与错误恢复。
+
+SSE 解码按 [事件流格式](https://html.spec.whatwg.org/dev/server-sent-events.html#the-event-stream-format) 处理 UTF-8、BOM、注释、换行和空行提交，并按 scheduler 契约要求每个事件带匹配的数字 ID 与 JSON 记录。单行和单帧上限分别为 64 KiB、256 KiB；不完整尾帧不会提交游标。loopback 测试覆盖重连、明确重启后归零与退出清理。
 
 <!-- Generated-By: Codex / gpt-6-astra -->
