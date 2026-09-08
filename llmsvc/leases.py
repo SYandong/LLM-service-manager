@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, replace
 
 from llmsvc.policy import plan_placement
 from llmsvc.scheduler import IntentWriteError
-from llmsvc.state import Blocker, Lease, ModelState, Pin
+from llmsvc.state import Blocker, Lease, ModelState
 from llmsvc.store import finite_positive, nonempty
 
 
@@ -171,13 +171,9 @@ class PlacementController:
                     guarded[model.name] = "operation_in_progress"
             models.append(replace(model, is_default=True)
                           if self.transport.models.get(model.name, {}).get("is_default") is True else model)
-        protected = replace(snapshot, models=tuple(models), pins=snapshot.pins + tuple(
-            Pin(name, self.scheduler.clock()+self.scheduler.config.placement_wait_seconds+1, "placement_guard")
-            for name in guarded))
-        decision = plan_placement(protected, request, waiting=waiting)
-        blockers = tuple(replace(blocker, reason=guarded[blocker.model])
-                         if blocker.model in guarded and blocker.reason == "pinned_until" else blocker
-                         for blocker in decision.blocked_by)
+        protected = replace(snapshot, models=tuple(models))
+        decision = plan_placement(protected, request, waiting=waiting, exclusions=guarded)
+        blockers = decision.blocked_by
         if any(action.kind != "place" for action in decision.actions) and not enabled:
             return None, blockers + (Blocker(request.name, "eviction_required", decision.gpu),)
         return decision, blockers
