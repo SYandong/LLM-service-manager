@@ -865,7 +865,7 @@ class ReservationController:
 
 
 class AutomaticPolicyController:
-    """Default-off M2 idle/memory cycles; no per-GPU TTL or daemon adoption.
+    """Default-off memory/idle or GPU-pressure cycles; no daemon adoption.
 
     A cycle consumes fresh publications, submits one protected policy action,
     observes it, then replans. All actual actions need a confirmed managed
@@ -890,7 +890,7 @@ class AutomaticPolicyController:
 
     def plan(self, snapshot):
         from dataclasses import replace
-        from llmsvc.policy import Decision, plan_idle_sleep, plan_memory_pressure
+        from llmsvc.policy import Decision, plan_idle_sleep, plan_memory_pressure, plan_pressure_sleep
         from llmsvc.state import Blocker
         controller = self.controller
         if controller is None or self.accounting is None:
@@ -914,11 +914,18 @@ class AutomaticPolicyController:
             elif model.name in controller.pending or controller.free_active:
                 guards[model.name] = "operation_in_progress"
         protected = replace(snapshot, models=tuple(models))
-        settings = replace(controller.settings, fixed_ttl_seconds=self.scheduler.config.automation_idle_seconds)
+        config = self.scheduler.config
+        settings = replace(controller.settings, fixed_ttl_seconds=config.automation_idle_seconds)
+        if config.automation_policy == "gpu_pressure":
+            settings = replace(settings, exclusive_ttl_seconds=config.automation_exclusive_ttl_seconds,
+                               shared_ttl_seconds=config.automation_shared_ttl_seconds,
+                               shared_external_threshold_gb=config.automation_shared_external_threshold_gb,
+                               shared_free_threshold_gb=config.automation_shared_free_threshold_gb)
         # Do not add sleepers while current memory pressure is unresolved.
         decision = plan_memory_pressure(protected, settings=settings, exclusions=guards)
         if not decision.actions and not decision.blocked_by:
-            decision = plan_idle_sleep(protected, settings=settings, exclusions=guards)
+            planner = plan_pressure_sleep if config.automation_policy == "gpu_pressure" else plan_idle_sleep
+            decision = planner(protected, settings=settings, exclusions=guards)
         return decision
 
     def _fresh_round(self, deadline):
