@@ -76,7 +76,7 @@ def test_dry_run_never_allocates_id_writes_collects_or_publishes(service, monkey
     service.store.put_reserve = lambda *a, **k: pytest.fail("dry-run wrote")
     service.store.remove_reserve = lambda *a, **k: pytest.fail("dry-run deleted")
     preview = service._save_reserve(payload(), source_ip="127.0.0.1", dry_run=True)
-    assert preview.by == "trusted-owner"
+    assert preview.by == "spoofed-owner"  # Hypothetical label; no record is written.
     service._delete_reserve(existing.id, source_ip="127.0.0.1", dry_run=True)
     assert service.events_since(0) == events
     assert open(service.config.state_db_path, "rb").read() == before

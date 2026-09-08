@@ -165,6 +165,26 @@ adoption 回调必须确认新配置已被采用，不能把「信号发送成�
 确认完成的时长，不冒充 HTTP 中断窗口。**客户端仍须对 reload 窗口内的
 5xx/断流按业务幂等性重试；当前没有零中断保证。**
 
+### 可复用的只读 witness 适配器
+
+`llmsvc.reload_witness.NativeGenerationReader(base_url).read(deadline=...)` 复用
+#91 的固定请求/严格标量解析，返回带开始、接收时间和错误码的 `GenerationRead`。
+只接受直接 HTTP IP 地址；DNS 名称、HTTPS、代理与重定向不在本版支持范围内。
+固定协议头与 `PINNED_COMMIT` 对应；调用方仍须验证实际二进制和端点身份。
+默认单次 I/O 总预算 0.5 秒（可显式配置，最大 60 秒），且不能延长调用方的
+monotonic deadline；socket watchdog 终止停滞或持续滴流的读取，迟到结果不算成功。
+响应 body 上限 64 KiB，原生文本上限 32 KiB；不重试、不回显远端错误正文。
+
+纯函数 `check_visibility(expected, before, reading, after, now=..., max_age=5)`
+检查调用方提供的 `CandidateBinding`（端点、唯一 generation、实例 PID/start
+ticks、候选 SHA256）与前后 `BindingObservation`：观测须覆盖本次读取、
+保持新鲜、身份和摘要匹配，且仍在读取 deadline 内。它不自行读文件或探测进程，
+也不证明观测间未发生重启/文件替换再恢复。`candidate_generation_visible=False`
+表示未确认；`settlement_confirmed` 始终为 `None`。这不是 notifier、`applied`
+决策或 #53 quiet 证明，不写 generation/恢复标记、不发信号、不激活任何接口。
+core 后续须在独立集成中提供可靠的前后观测及收尾证据。测试使用 fake HTTP 和
+#91 已提交的原生响应，不重复长实验。
+
 ## 交给 ops 的有界实测计划
 
 只有 ops 持有 `gpu-test.lock` 后执行。每次目标不超过 5 分钟；没有缓存的

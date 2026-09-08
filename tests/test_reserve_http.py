@@ -95,7 +95,7 @@ def test_invalid_post_is_400_before_any_persistence_or_transport(api, invalid):
     assert not scheduler.snapshot().reserves and state["calls"] == []
 
 
-def test_readonly_defaults_and_dry_run_zero_effects_with_authoritative_owner(api, monkeypatch):
+def test_readonly_defaults_and_dry_run_zero_effects_with_hypothetical_label(api, monkeypatch):
     scheduler, address, controller, state, transport, _ = api
     existing = scheduler._save_reserve(payload(), source_ip="127.0.0.1")
     scheduler.stop()
@@ -109,7 +109,7 @@ def test_readonly_defaults_and_dry_run_zero_effects_with_authoritative_owner(api
     for method, path, body in (("POST","/v1/reserve",payload()), ("DELETE","/v1/reserve/"+existing.id,None)):
         assert request(address, method, path, body)[0] == 405
     code, preview = request(address, "POST", "/v1/reserve?dry_run=1", payload())
-    assert code == 200 and preview["would"][0]["by"] == "actual-owner"
+    assert code == 200 and preview["would"][0]["by"] == "spoofed-owner"
     assert "id" not in preview["would"][0]
     assert [action["kind"] for action in preview["would"]] == ["reserve","stop","stop"]
     code, preview = request(address, "DELETE", "/v1/reserve/"+existing.id+"?dry_run=1")
