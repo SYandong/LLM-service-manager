@@ -1,10 +1,11 @@
 # Generated-By: Codex / gpt-6-astra
-"""Read-only sampling and an event stream sharing the future action lock."""
+"""Sampling, usage and opt-in pin intent writes under one accounting lock."""
 
 import copy
 import json
 import logging
 import math
+import sqlite3
 import threading
 import time
 from collections import deque
@@ -17,6 +18,13 @@ from llmsvc.state import Event, MemoryState, Pin, Reserve, StateSnapshot
 from llmsvc.store import IntentStore, finite_positive, nonempty, validate_pin, validate_reserve
 
 LOG = logging.getLogger("llmsvc.scheduler")
+
+
+class IntentWriteError(RuntimeError):
+    def __init__(self, status: int, error: str):
+        super().__init__(error)
+        self.status = status
+        self.error = error
 
 
 class Scheduler:
@@ -44,7 +52,7 @@ class Scheduler:
         return StateSnapshot(memory=MemoryState(
             budget_gb=self.config.memory_budget_gb,
             host_min_available_gb=self.config.host_min_available_gb,
-        ), errors=(reason,))
+        ), errors=(reason,), read_only=self.config.read_only)
 
     def snapshot(self) -> StateSnapshot:
         with self.action_lock:
@@ -113,6 +121,43 @@ class Scheduler:
             if snapshot.errors:
                 result = {"would": [], "blocked_by": [{"model": None, "reason": error} for error in snapshot.errors]}
             LOG.info(json.dumps({"kind": "action_preview", "operation": operation, "dry_run": True, **result}, allow_nan=False))
+            return result
+
+    def write_pin(self, operation: str, payload: dict, *, source_ip: str) -> dict:
+        """Persist pin intent only; model lifecycle actions remain disabled."""
+        if not isinstance(payload, dict):
+            raise ValueError("request body must be a JSON object")
+        with self.changed:
+            if self.config.read_only:
+                raise IntentWriteError(405, "read_only")
+            if operation not in ("pin", "unpin"):
+                raise IntentWriteError(405, "operation_not_enabled")
+            if self.store is None or self.store.read_only:
+                raise IntentWriteError(503, "intent_store_unavailable")
+            owner = self.config.owner_for_ip(source_ip)
+            if operation == "pin":
+                self._keys(payload, {"model", "until", "by"}, required={"model", "until", "by"})
+                model = nonempty(payload["model"], "model")
+                nonempty(payload["by"], "by")  # Existing request shape; not authoritative.
+                known = any(item.name == model for item in self._snapshot.models)
+                configured = model in self.config.collectors.get("models", {})
+                if not known and not configured:
+                    raise IntentWriteError(404, "unknown_model")
+                pin = Pin(model, self._until(payload["until"], self.clock()), owner)
+                validate_pin(pin)
+            else:
+                self._keys(payload, {"model"}, required={"model"})
+                model = nonempty(payload["model"], "model")
+            try:
+                if operation == "pin":
+                    result = self.store.put_pin(pin)
+                else:
+                    self.store.remove_pin(model)
+                    result = {"model": model, "by": owner}
+            except (sqlite3.Error, OSError) as exc:
+                raise IntentWriteError(503, "intent_store_unavailable") from exc
+            # Persist, publish and wake waiters under the same accounting lock.
+            self.emit(operation, model=model, detail={**result, "dry_run": False})
             return result
 
     @staticmethod
@@ -210,7 +255,7 @@ class Scheduler:
                 raise TypeError("collector must return StateSnapshot")
             snapshot = replace(
                 snapshot, sampled_at=snapshot.sampled_at if snapshot.sampled_at is not None else time.time(),
-                read_only=True,
+                read_only=self.config.read_only,
                 memory=replace(snapshot.memory, budget_gb=self.config.memory_budget_gb,
                                host_min_available_gb=self.config.host_min_available_gb),
             )

@@ -10,6 +10,15 @@ from typing import Any
 import yaml
 
 
+def canonical_ip(value: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError("IP address must be a string")
+    address = ipaddress.ip_address(value)
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return str(address)
+
+
 @dataclass(frozen=True)
 class SchedulerConfig:
     listen_host: str
@@ -44,12 +53,33 @@ class SchedulerConfig:
                 raise ValueError(f"{name} must be a finite positive number")
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be a finite positive number")
-        if self.read_only is not True:
-            raise ValueError("M1 only supports read_only: true")
+        if type(self.read_only) is not bool:
+            raise ValueError("read_only must be a boolean")
         if not isinstance(self.state_db_path, str):
             raise ValueError("state_db_path must be a string")
+        if not self.read_only and not self.state_db_path.strip():
+            raise ValueError("writable pin intent mode requires state_db_path")
         if not isinstance(self.collectors, dict):
             raise ValueError("collectors must be a mapping")
+        owners = self.collectors.get("ip_containers", {})
+        if not isinstance(owners, dict):
+            raise ValueError("collectors.ip_containers must be a mapping")
+        normalized = {}
+        for source, owner in owners.items():
+            source = canonical_ip(source)
+            if not isinstance(owner, str) or not owner.strip():
+                raise ValueError("configured container names must be nonempty strings")
+            if source in normalized and normalized[source] != owner:
+                raise ValueError("conflicting container mappings for the same IP")
+            normalized[source] = owner
+
+    def owner_for_ip(self, source_ip: str) -> str:
+        """Use the socket peer, never a body label or forwarded header."""
+        source = canonical_ip(source_ip)
+        for configured_ip, owner in self.collectors.get("ip_containers", {}).items():
+            if canonical_ip(configured_ip) == source:
+                return owner
+        return "ip:" + source
 
 
 def load_config(path: str) -> SchedulerConfig:
