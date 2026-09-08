@@ -20,7 +20,7 @@ collectors:
   activity_path: /var/lib/llama-swap/activity.sqlite
   ip_containers: {}
   deadline: 1.8
-  probe_timeout: 0.5
+  probe_timeout: 0.8
   nvidia_smi: /usr/bin/nvidia-smi
   systemctl: /usr/bin/systemctl
   proc_root: /proc

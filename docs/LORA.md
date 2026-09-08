@@ -68,9 +68,22 @@ serve proxy 的 SIGTERM 处理还会再次调用 sleep。源码未传 query `mod
 
 完整权重登记继承选定 base 的运行参数与 util 预算，要求权重格式与 base
 兼容；配置验证不能代替一次实际冷启动。临时记录存于上游支持的每模型
-`metadata.llmsvc_registry`，随配置一起原子落盘；序列化保留配置值，但会
-规范化 YAML 格式并去掉原注释。删除先确认路由移除，再由 core 保护检查后
+`metadata.llmsvc_registry`，随配置一起原子落盘。登记仅插入新的模型块；
+删除仅移除目标模型块，并局部修改相关 group 的 `members`。无关配置的
+注释、锚点名称、别名、空白和字节保持不变，只有新增模型块由 PyYAML 生成。
+支持 UTF-8、统一 LF/CRLF、文件末尾换行、显式 block 形式的根和 models
+映射，以及 block 或单行 flow 成员列表。需要编辑的映射若是 flow、merge、
+重复/复杂键或别名引用，或成员列表为多行 flow，则在写入前拒绝；不做
+静默格式归一化。局部结果还要通过语义比对，移除会留下悬空锚点引用时也
+拒绝。同样的检查适用于手工删除、七天过期注销和排队后的重新校验。
+删除先确认路由移除，再由 core 保护检查后
 停止目标 unit，并确认其不存在；七天未用自动注销也要重新检查活动与保护。
+
+触发方式决策由 [#60](https://github.com/SYandong/LLM-service-manager/issues/60)
+关联 #20 跟踪；实际 `notify_reload` 实现 PR 必须同步权威 DESIGN §3 第 4 条
+并取得 Fable 当前 SHA 审核。可靠连续 quiet 数据源另由
+[#53](https://github.com/SYandong/LLM-service-manager/issues/53) 跟踪。本次局部
+YAML 修复不决定触发方式，也不授权启用写入。
 
 `reload.py` 用同一 scheduler action lock 串行化最终校验与替换，要求连续
 5 秒零在途、事件流未断、无 awake pin、整批 awake 权重满足 RAM 准入。

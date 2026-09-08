@@ -28,10 +28,10 @@ def test_snapshot_updates_idempotent_upsert_remove_and_reconnect():
     events = EventSnapshot()
     feed(events, 'modelStatus', [{'id': 'm', 'state': 'ready'}])
     assert events.count('m') is None
-    feed(events, 'inflight', {'operation': 'snapshot', 'requests': [{'id': 'a', 'modelID': 'm'}]})
+    feed(events, 'inflight', {'operation': 'snapshot', 'requests': [{'id': 'a', 'model': 'm'}]})
     assert events.count('m') == 1
     for _ in range(2):
-        feed(events, 'inflight', {'operation': 'upsert', 'request': {'id': 'a', 'modelID': 'm'}})
+        feed(events, 'inflight', {'operation': 'upsert', 'request': {'id': 'a', 'model': 'm'}})
     assert events.count('m') == 1
     feed(events, 'inflight', {'operation': 'remove', 'id': 'a'})
     assert events.count('m') == 0
@@ -42,11 +42,30 @@ def test_snapshot_updates_idempotent_upsert_remove_and_reconnect():
 @pytest.mark.parametrize('payload', [
     {'operation': 'snapshot', 'requests': None},
     {'operation': 'snapshot', 'requests': [{'id': 'a'}]},
-    {'operation': 'snapshot', 'requests': [{'id': 'a', 'modelID': 'm'}] * 2},
-    {'operation': 'upsert', 'request': {'id': 'a', 'modelID': 'm'}},
+    {'operation': 'snapshot', 'requests': [{'id': 'a', 'model': 'm'}] * 2},
+    {'operation': 'upsert', 'request': {'id': 'a', 'model': 'm'}},
 ])
 def test_malformed_or_out_of_order_events_do_not_claim_zero_inflight(payload):
     events = EventSnapshot()
     with pytest.raises(ValueError):
         feed(events, 'inflight', payload)
     assert events.count('m') is None
+
+
+def test_pinned_upstream_nonempty_wire_shape():
+    fixture = Path(__file__).parent / 'fixtures/telemetry/inflight-wire-v252.json'
+    data = json.loads(fixture.read_text())
+    events = EventSnapshot()
+    counts = []
+    for envelope in data['envelopes']:
+        events.feed(envelope)
+        if events.complete:
+            counts.append(events.count('example-model'))
+    assert counts == data['expected_inflight_counts'] == [1, 2, 2, 1, 0]
+    assert events.requests == {}
+
+
+def test_internal_context_modelid_is_not_the_wire_model_field():
+    events = EventSnapshot()
+    with pytest.raises(ValueError):
+        feed(events, 'inflight', {'operation': 'snapshot', 'requests': [{'id': '1', 'modelID': 'm'}]})

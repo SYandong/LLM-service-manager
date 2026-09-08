@@ -70,7 +70,7 @@ class EventSnapshot:
     def _request(entry):
         if not isinstance(entry, dict):
             raise ValueError("invalid inflight request")
-        request_id, model = entry.get("id"), entry.get("modelID")
+        request_id, model = entry.get("id"), entry.get("model")
         if not isinstance(request_id, str) or not request_id or not isinstance(model, str) or not model:
             raise ValueError("inflight request identity missing")
         return request_id, model
