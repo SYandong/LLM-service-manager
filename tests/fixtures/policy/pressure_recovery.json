@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "generated_by": "Codex / gpt-6-astra",
+  "cases": [
+    {
+      "id": "shared_ttl_at_five_minutes",
+      "operation": "pressure",
+      "idle": 300,
+      "expected": [
+        "sleep"
+      ],
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from DESIGN section 4; not historical traces or real one-week calibration."
+      }
+    },
+    {
+      "id": "exclusive_does_not_sleep_after_ten_minutes",
+      "operation": "pressure",
+      "gpu": 0,
+      "idle": 600,
+      "expected": [],
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from DESIGN section 4; not historical traces or real one-week calibration."
+      }
+    },
+    {
+      "id": "external_pressure_before_ttl",
+      "operation": "pressure",
+      "idle": 10,
+      "external_gb": 1,
+      "expected": [
+        "sleep"
+      ],
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from DESIGN section 4; not historical traces or real one-week calibration."
+      }
+    },
+    {
+      "id": "recent_sleeper_relocates_after_reserve",
+      "operation": "recovery",
+      "reason": "reserve",
+      "recent": true,
+      "reserved": true,
+      "expected": [
+        "stop",
+        "place"
+      ],
+      "destination": 0,
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from DESIGN section 4; not historical traces or real one-week calibration."
+      }
+    },
+    {
+      "id": "unused_sleeper_stops_on_wake_deficit",
+      "operation": "recovery",
+      "reason": "cannot_wake",
+      "recent": false,
+      "external_gb": 30,
+      "expected": [
+        "stop"
+      ],
+      "destination": null,
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from DESIGN section 4; not historical traces or real one-week calibration."
+      }
+    },
+    {
+      "id": "impossible_relocation_does_not_stop_source",
+      "operation": "recovery",
+      "reason": "cannot_wake",
+      "recent": true,
+      "external_gb": 30,
+      "destination_reserved": true,
+      "expected": [],
+      "destination": null,
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from DESIGN section 4; not historical traces or real one-week calibration."
+      }
+    },
+    {
+      "id": "default_protection_during_reserved_recovery",
+      "operation": "recovery",
+      "reason": "reserve",
+      "recent": true,
+      "reserved": true,
+      "is_default": true,
+      "expected": [],
+      "destination": null,
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed from DESIGN section 4; not historical traces or real one-week calibration."
+      }
+    }
+  ]
+}
