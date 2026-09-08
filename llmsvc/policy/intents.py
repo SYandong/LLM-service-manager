@@ -1,7 +1,7 @@
 # Generated-By: Codex / gpt-6-astra
 """Free, M2 fixed TTL and RAM budget policies from DESIGN §4."""
 
-from typing import Optional
+from typing import Mapping, Optional
 
 from llmsvc.state import Blocker, StateSnapshot
 from .common import Decision, PolicySettings, Projection, known_number
@@ -48,9 +48,12 @@ def plan_free(
     return p.result(freed=freed)
 
 
-def plan_idle_sleep(snapshot: StateSnapshot, *, settings: PolicySettings = PolicySettings()) -> Decision:
+def plan_idle_sleep(
+    snapshot: StateSnapshot, *, settings: PolicySettings = PolicySettings(),
+    exclusions: Optional[Mapping[str, str]] = None,
+) -> Decision:
     """M2 fixed ten-minute TTL; M3 pressure policy provides per-GPU TTL."""
-    p = Projection(snapshot, settings)
+    p = Projection(snapshot, settings, exclusions=exclusions)
     if p.blockers:
         return p.result()
     models = [m for m in snapshot.models if m.state == "awake"]
@@ -59,9 +62,12 @@ def plan_idle_sleep(snapshot: StateSnapshot, *, settings: PolicySettings = Polic
     return p.result()
 
 
-def plan_memory_pressure(snapshot: StateSnapshot, *, settings: PolicySettings = PolicySettings()) -> Decision:
+def plan_memory_pressure(
+    snapshot: StateSnapshot, *, settings: PolicySettings = PolicySettings(),
+    exclusions: Optional[Mapping[str, str]] = None,
+) -> Decision:
     """Stop lowest-value unprotected sleepers until both RAM limits hold."""
-    p = Projection(snapshot, settings)
+    p = Projection(snapshot, settings, exclusions=exclusions)
     if p.blockers:
         return p.result()
     if not p.memory_known():
@@ -105,7 +111,10 @@ def reload_admission(snapshot: StateSnapshot, *, settings: PolicySettings = Poli
     return p.result()
 
 
-def plan_reserve(snapshot: StateSnapshot, *, gpu: int, settings: PolicySettings = PolicySettings()) -> Decision:
+def plan_reserve(
+    snapshot: StateSnapshot, *, gpu: int, settings: PolicySettings = PolicySettings(),
+    exclusions: Optional[Mapping[str, str]] = None,
+) -> Decision:
     """Clear eligible sleepers from a reserved GPU; persistence is core-owned.
 
     Awake models are left alone. Protected sleepers report blockers. Subsequent
@@ -113,7 +122,7 @@ def plan_reserve(snapshot: StateSnapshot, *, gpu: int, settings: PolicySettings 
     """
     if isinstance(gpu, bool) or not isinstance(gpu, int) or gpu < 0:
         raise ValueError("gpu must be a non-negative integer")
-    p = Projection(snapshot, settings)
+    p = Projection(snapshot, settings, exclusions=exclusions)
     if p.blockers:
         return p.result()
     for model in p.candidates(
