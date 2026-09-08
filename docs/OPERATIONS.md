@@ -97,6 +97,25 @@ and no managed model units. One GPU had an external engine using about 130 GiB;
 the other three were near-empty. This is historical evidence, not permission to
 assume the next test window is idle.
 
+## Preview readiness after configured-runtime integration
+
+Merged #41 collectors and #50 previews do not make an empty collector
+configuration usable. `collectors: {}` produces unknown state, and preview
+responses must be checked for `blocked_by` even when HTTP status is 200.
+RAM decisions require a verified live host-memory source plus known weight
+budgets; cached snapshots and container cgroup meminfo are not substitutes.
+Keep host availability null until the trusted-source proposal is approved and
+validated. Collection errors conservatively block current previews.
+
+The bounded configured runtime/CLI check, 0.8-second probe candidate, expected
+host-RAM blocker and exact observer/host-source permission proposals are recorded
+in [deployment observation preparation](../deploy/OBSERVATION.md). This evidence
+advances API/CLI integration only; actual systemd restart/journal, the full-day
+observer and week-long observations remain open. No production activation is
+implied. Comment-preserving YAML, watcher/adoption/quiet-source design alignment
+and executable production rollback must be resolved before the first #19 write
+or #11 TTL transition.
+
 ## Production transitions and rollback (#11–#14)
 
 These are pending runbook gates, not changes applied by this PR:

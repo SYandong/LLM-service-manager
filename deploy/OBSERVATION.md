@@ -1,7 +1,8 @@
 # Observation and isolated smoke preparation
 
 Refs #8, #20 and #21. This preparation consumes the merged scheduler/CLI and the
-telemetry factory contract from #41 at `cd4a3607`. It does not activate a service,
+merged telemetry #41 and intent/preview #50 contracts (integrated source
+`e80b550`). It does not activate a service,
 mount a host file, replace production configuration, or start a full-day observer.
 
 ## Exact observation configuration
@@ -29,7 +30,49 @@ The config can be validated in a disposable combined checkout using core's
 `--check-config` and the exact telemetry `build_collector(config.collectors)`
 factory, closing the collector afterward. Construction/validation does not run
 probes. That is configuration validation, not systemd, live data, one-day, or
-one-week acceptance. #41 must be integrated before installing this config.
+one-week acceptance. #41 is now merged; installed-runtime and final activation
+authority remain separate gates.
+
+## Configured runtime and preview readiness
+
+Merged #50 can expose preview endpoints while remaining read-only. An HTTP 200
+or empty `would` list is not proof of a feasible action: inspect `blocked_by`.
+With `collectors: {}`, observations are unknown and previews must remain blocked.
+Use the configured #41 collector factory for real observations. RAM-dependent
+policies additionally need trusted live host memory and measured weight budgets;
+never substitute stale samples or container cgroup meminfo to clear a blocker.
+Current core conservatively blocks previews on any snapshot collection error.
+
+On **2026-09-08 06:35:58 UTC**, a bounded configured check ran in the service
+container using Python 3.10.12, the merged source `e80b550` and PyYAML 6.0.2's pure
+Python modules delivered in memory. No package or container file was installed.
+A single real collection observed **four GPUs and seven models in 0.538 seconds**.
+The ephemeral loopback `/v1/state` JSON and the actual CLI's `status --json`
+matched the same fixed sample exactly. Rendered CLI output retained unknown host
+RAM and unknown historical origins.
+
+`POST /v1/free?dry_run=1` with `{"ram":true}` returned `would: []` and
+`blocked_by: [{model: null, reason: "memory: ValueError"}]`. This is the expected
+unconfigured-host-source blocker, not a successful RAM release. Snapshot and
+event history were unchanged by the preview. The temporary HTTP server and
+collector were closed; no service, store, mount, model workload or persistent
+container file was created. This does not prove systemd restart/journal behavior,
+installed-package acceptance, the full-day observer, or one-week data coverage.
+
+The initial 0.5-second probe timeout produced one explicit GPU TimeoutExpired;
+it was not interpreted as an idle card. The candidate now uses 0.8 seconds per
+probe, below the factory's one-second limit, while retaining the 1.8-second round
+deadline. The subsequent run observed all four cards. This is a measured bounded
+check, not a promise that future probes cannot time out.
+
+`observer-activation-proposal.json` separates an eventual owned read-only observer
+start/capture schedule from model actions and production cutover. It requires
+final permission and verification that destinations/port/unit are unused; it does
+not install a timer, enable boot startup, or activate anything. Exact deployment
+paths, evidence retention/capacity and capture schedule must be reviewed before
+that permission. Its rollback section preserves the mandatory executable
+production-rollback gate before #11/#19 writes; a stage-only byte restoration is
+not sufficient for those transitions.
 
 ## Trusted host-memory proposal for final permission
 
