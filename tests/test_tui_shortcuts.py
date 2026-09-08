@@ -31,26 +31,37 @@ async def finish(app, pilot):
 
 
 @pytest.mark.parametrize("size", [(100, 30), (40, 24)])
-def test_free_shortcut_only_prefills_and_retains_ram_confirmation(pin_api, action_service, size):
+def test_free_shortcut_only_prefills_and_retains_ram_confirmation(pin_api, action_service, monkeypatch, size):
     async def scenario():
         action_service.effects["model"] = replace(action_service.effects["model"],
             state="sleeping", is_sleeping=True, resident_gb=2)
         action_service.scheduler.sample_once()
         app = app_for(pin_api, action_service)
+        displayed = []
+        show_result = app.show_result
+
+        def record_result(text):
+            displayed.append(text)
+            show_result(text)
+
+        monkeypatch.setattr(app, "show_result", record_result)
+
+        def writes():
+            return [request for request in action_service.requests if request[0] != "GET"]
+
         async with app.run_test(size=size) as pilot:
             await finish(app, pilot)
-            before = list(action_service.requests)
             await pilot.press("f")
             assert app.focused is entry(app) and entry(app).value == "free "
-            assert action_service.requests == before
+            assert writes() == []
             await pilot.press(*"--ram --need 20G", "enter")
             assert isinstance(app.screen, ConfirmRam)
             assert app.screen.focused.id == "ram-cancel"
-            assert action_service.requests == before
+            assert writes() == []
             # Printable shortcuts cannot edit the hidden field or issue actions.
             await pilot.press("f", "p", "w")
             assert isinstance(app.screen, ConfirmRam) and entry(app).value == ""
-            assert action_service.requests == before
+            assert writes() == []
             await pilot.press("escape")
             assert app.screen is app.dashboard and "cancelled" in output(app)
             assert not action_service.effects["calls"]
@@ -58,11 +69,28 @@ def test_free_shortcut_only_prefills_and_retains_ram_confirmation(pin_api, actio
             select(app, "model")
             await pilot.press("f")
             await pilot.press(*"--ram --need 20G", "enter")
+            confirmation_start = len(action_service.requests)
             await pilot.click("#ram-confirm")
             await finish(app, pilot)
-            assert action_service.requests[-2:] == [("POST", "/v1/free"), ("GET", "/v1/state")]
+
+            def assert_confirmed_refresh():
+                # Exactly one write in the entire interaction, after confirmation,
+                # followed by a refresh. Background GETs may occur anywhere.
+                assert writes() == [("POST", "/v1/free")]
+                confirmed = action_service.requests[confirmation_start:]
+                post = confirmed.index(("POST", "/v1/free"))
+                assert ("GET", "/v1/state") in confirmed[post + 1:]
+
+            assert_confirmed_refresh()  # Prove the action's refresh before adding a poll.
+            # Deterministically exercise the same callback used by the five-second
+            # timer, so the old final-two-requests assumption cannot pass by luck.
+            app.refresh_current()
+            await finish(app, pilot)
+            assert_confirmed_refresh()
             assert app.snapshot["models"][0]["state"] == "stopped"
-            assert "Free status: complete" in output(app)
+            # A later poll may replace the result with "Updated"; the action must
+            # still have displayed its successful outcome through the real widget.
+            assert any(text.startswith("Free status: complete\n") for text in displayed)
     asyncio.run(scenario())
 
 
