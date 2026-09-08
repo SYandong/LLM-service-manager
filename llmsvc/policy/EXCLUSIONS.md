@@ -1,7 +1,7 @@
 # Internal policy exclusions
 
-`plan_placement`, `plan_reserve`, `plan_memory_pressure` and `plan_idle_sleep`
-accept the optional keyword `exclusions: Optional[Mapping[str, str]] = None`.
+`plan_placement`, `plan_reserve`, `plan_memory_pressure`, `plan_idle_sleep` and
+`plan_pressure_sleep` accept the optional keyword `exclusions: Optional[Mapping[str, str]] = None`.
 Keys are model names; values are existing nonempty operational blocker reasons.
 The pure planner copies the mapping. `None` and `{}` retain existing behavior.
 Invalid names/reasons raise `ValueError` when the exclusion input is consumed.

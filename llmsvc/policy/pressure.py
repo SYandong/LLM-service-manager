@@ -1,12 +1,15 @@
 # Generated-By: Codex / gpt-6-astra
 """Observation-driven pressure and per-GPU idle TTL (DESIGN §4.1)."""
 
+from typing import Mapping, Optional
+
 from llmsvc.state import StateSnapshot
 from .common import Decision, PolicySettings, Projection, known_number
 
 
 def plan_pressure_sleep(
     snapshot: StateSnapshot, *, settings: PolicySettings = PolicySettings(),
+    exclusions: Optional[Mapping[str, str]] = None,
 ) -> Decision:
     """Return one sleep attempt, including its RAM-admission prerequisites.
 
@@ -16,7 +19,7 @@ def plan_pressure_sleep(
     configured values are candidates pending real calibration. The M2 fixed-TTL
     planner must not run alongside this replacement.
     """
-    p = Projection(snapshot, settings)
+    p = Projection(snapshot, settings, exclusions=exclusions)
     if p.blockers:
         return p.result()
     gpus = {g.index: g for g in snapshot.gpus}
