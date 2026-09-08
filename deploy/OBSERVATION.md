@@ -5,6 +5,102 @@ merged telemetry #41 and intent/preview #50 contracts (integrated source
 `e80b550`). It does not activate a service,
 mount a host file, replace production configuration, or start a full-day observer.
 
+## Offline observation summaries (#8 / #16)
+
+Current validation uses bounded, minutes-scale checks and deterministic replay;
+there is no mandatory day/week development, release or completion wait. Historical
+long-duration plans below are not current calendar gates. Long-term stability and
+threshold calibration remain **NOT MEASURED**, and publishing or analyzing a
+summary grants no producer/timer, GPU, host-mount or production authority.
+
+`summarize_observation.py` reads completed capture snapshot/manifest pairs without
+network, subprocesses, probes or writes to the input directory. It uses only the
+Python 3.10 standard library. All implementation, deterministic fixtures and usage
+ship together; it does not require an observer to be activated first.
+
+```sh
+# Preview the exact JSON report: validates input but creates no output file.
+python3 deploy/summarize_observation.py --input-dir /path/to/finished-capture \
+  --interval-seconds 15 --output /path/to/private/summary.json --dry-run
+# Write one new private JSON file, preserving the original artifacts.
+python3 deploy/summarize_observation.py --input-dir /path/to/finished-capture \
+  --interval-seconds 15 --output /path/to/private/summary.json
+# The same information as a reproducible long-form CSV.
+python3 deploy/summarize_observation.py --input-dir /path/to/finished-capture \
+  --interval-seconds 15 --format csv --output /path/to/private/summary.csv
+# Example two-minute window; replace these with the actual recorded bounds.
+python3 deploy/summarize_observation.py --input-dir /path/to/finished-capture \
+  --window-start 2026-09-08T12:00:00Z --window-end 2026-09-08T12:02:00Z
+```
+
+The output parent must exist. Output files are private (0600), atomically published
+and never overwrite an existing file; output within the capture directory is
+rejected. Without `--output`, the report goes to stdout. `--dry-run` performs the
+same offline reads and prints the report without creating a file. Exit0 means a
+report was produced, **not** that its input is complete or accepted; invocation or
+output errors return2. Bad individual artifacts remain explicit report entries.
+Use a completed/retained directory or a stable copy: concurrent capture writes can
+legitimately appear as incomplete snapshot/manifest pairs during analysis.
+
+The immediate directory's `manifest-*.json` records identify snapshot files. The
+reader bounds each file to16MiB, rejects traversal/symlink/special-file references,
+checks the exact snapshot SHA256, and requires understood schema-v1 non-dry-run
+capture records. It reports rejected/missing/corrupt files, wrong hashes and
+snapshots without a verified association. The inventory records manifest/snapshot
+hashes for understood verified pairs; a matching checksum is integrity evidence
+relative to that manifest,
+not independent authenticity or proof that the service ran continuously.
+
+Record ordering means **lexicographic manifest filename order**, not filesystem
+mtime or inferred arrival order. Repeated references/payloads are counted once;
+conflicting captures at the same timestamp are excluded. Timestamps are normalized
+to UTC; neither current time nor file mtime enters statistics. The CSV contains
+`field,json_value` rows for every JSON leaf, including errors and empty collections.
+`field` is an escaped JSON Pointer (for example `/gpus/0/identity`), preserving
+source names with punctuation; `json.loads(json_value)` retains type/null distinctions. String values remain
+JSON-quoted rather than executable spreadsheet formula cells.
+
+Per-source `valid` means successful, non-truncated capture transport with valid
+recorded timing. Missing, failed and truncated sources remain separately counted;
+truncation is also a failure, so those counts overlap. Raw commands, stdout,
+exception details and model/request payloads are not exported or executed.
+For GPU summaries, select the HTTP state source with `--state-source` (default
+`scheduler-state`). The command requires its reported URL/type to match capture
+provenance. Different source/config identities are reported by opaque hashes and
+are not pooled; analyze them separately. This check does not prove an unchanged
+runtime version or process behind an unchanged endpoint/config path.
+
+The state source must contain schema-v1 scheduler JSON. Its actual collector
+`sampled_at`, rather than merely capture time, controls GPU samples. A state more
+than `--max-state-age-seconds` old (default30), or a future/invalid timestamp, is
+excluded. Repeated cached collector timestamps do not inflate distributions;
+conflicting GPU values at one collector timestamp are excluded. Without explicit
+window bounds, distributions retain all fresh state values from accepted captures,
+including a cached sample just before capture start or a refresh during its HTTP
+request. Explicit bounds filter both capture and collector timestamps. Capture
+and usable-state cadence are reported separately against capture bounds (or the
+explicit window); coverage may contain fewer points than the distribution. Missing
+source data cannot become a measured zero.
+
+`--tolerance-seconds` (default2, less than the interval) defines permitted timing
+jitter. Coverage reports actual first/last timestamps, observed span, leading/
+trailing gaps and internal gaps beyond interval+tolerance. Missing intervals are
+**estimates against the configured cadence and window boundaries**, not a count
+of proven producer failures. Bounds inferred from the files cannot reveal losses
+before the first or after the last capture; explicit bounds make those edges
+visible. A complete sampled window still does not prove continuous-running time.
+No day/week acceptance or automatic calibration is inferred, even from a long
+span; short data and gaps remain visible rather than being filled or extrapolated.
+
+Per-GPU identity uses UUID when present, otherwise an explicit index fallback.
+Index-only identity cannot prove the physical card stayed the same. Each group
+reports known/unknown/missing counts and the **reported external GiB** distribution
+(min/max/mean, interpolated p50/p95/p99, zero/positive sample counts and histogram).
+`--bucket-gib` sets histogram width (default10); unknown/invalid occupancy never
+becomes zero. These are sample-weighted values, not duration-weighted exposure or
+independently verified foreign-process ownership. They support bounded inspection
+and replay inputs, not an automatic #16 threshold or #28 absence conclusion.
+
 ## Exact observation configuration
 
 `scheduler.observation.yaml` records the seven configured model identifiers,
