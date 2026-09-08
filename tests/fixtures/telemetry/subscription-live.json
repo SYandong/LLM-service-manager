@@ -1,0 +1,37 @@
+{
+  "generated_by": "Codex / gpt-6-astra",
+  "source": "live read-only v252 SSE plus actual registry QuietPeriod class",
+  "captured_at_unix": 1788848695.209425,
+  "observations": [
+    {
+      "count": null,
+      "connected": false
+    },
+    {
+      "count": 0,
+      "connected": false
+    },
+    {
+      "count": null,
+      "connected": false
+    },
+    {
+      "count": 0,
+      "connected": false
+    },
+    {
+      "count": null,
+      "connected": false
+    }
+  ],
+  "quiet_blockers": [
+    {
+      "reason": "inflight_stream_unknown"
+    }
+  ],
+  "worker_stopped": true,
+  "close_ms": 0.3228279820177704,
+  "subscription_sha256": "bb6af19c596b10324d4007f5b4035d6e67cddbba56ce8a51888bca27fe932328",
+  "registry_quiet_source_sha256": "942e6b40a36f137e67c23a8ebdb51012ed87d49f292fea4125acaf3cebdfbb8f",
+  "design_blocker": "https://github.com/SYandong/LLM-service-manager/issues/53"
+}
