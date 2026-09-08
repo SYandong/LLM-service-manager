@@ -1,0 +1,138 @@
+{
+  "_comment": "Generated-By: Codex / gpt-6-astra",
+  "scope": "New controlled synthetic CPU fixture through real pinned v252; no private production capture data",
+  "pin": "e31a1adee494bb7a578e2a97ec891b3e809899dc",
+  "binary_sha256": "32aea60b5c1be987c27dde6ea4aaa84f9be7ad93eaede011295fad1e276e80ea",
+  "provenance": {
+    "generated_by": "Codex / gpt-6-astra",
+    "measured_source_sha256": "8337c22a0b6188ca64743488743903b32efa82231670088c803ddb1b0671708f",
+    "later_change_scope": "Failed/partial-timeout accounting and terminal snapshot locking only; successful held-request/admission paths unchanged, successful native runs not repeated.",
+    "source_pin": "e31a1adee494bb7a578e2a97ec891b3e809899dc"
+  },
+  "cases": [
+    {
+      "configured_limit": null,
+      "expected_default_limit": 10,
+      "request_count": 32,
+      "attempted": 32,
+      "peak_backend_active": 10,
+      "single_model_start_count": 1,
+      "outcomes": {
+        "completed": 10,
+        "rejected": 22,
+        "timeout": 0,
+        "http_error": 0,
+        "transport_error": 0,
+        "stream_error": 0,
+        "truncated": 0,
+        "not_attempted": 0
+      },
+      "expected_outcomes": {
+        "completed": 10,
+        "rejected": 22
+      },
+      "cleanup": {
+        "owned_session_empty": true,
+        "owned_temp_removed": true
+      },
+      "signal_reload_count": 0,
+      "before_release": {
+        "attempted": 32,
+        "arrived": 10,
+        "held_active": 10,
+        "terminal": {
+          "completed": 0,
+          "rejected": 22,
+          "timeout": 0,
+          "http_error": 0,
+          "transport_error": 0,
+          "stream_error": 0,
+          "truncated": 0,
+          "not_attempted": 0
+        }
+      },
+      "elapsed_seconds": 2.016348,
+      "raw_private_record_sha256": "833ac3e2718400694c70d04258f9169b52b0fdcfb104c729a204878930c9b4a2",
+      "actual_429_envelope": {
+        "src": "llama-swap",
+        "error": {
+          "message": "Too many requests",
+          "type": "rate_limit_error",
+          "param": null,
+          "code": "concurrency_limit"
+        }
+      }
+    },
+    {
+      "configured_limit": 64,
+      "expected_default_limit": 10,
+      "request_count": 32,
+      "attempted": 32,
+      "peak_backend_active": 32,
+      "single_model_start_count": 1,
+      "outcomes": {
+        "completed": 32,
+        "rejected": 0,
+        "timeout": 0,
+        "http_error": 0,
+        "transport_error": 0,
+        "stream_error": 0,
+        "truncated": 0,
+        "not_attempted": 0
+      },
+      "expected_outcomes": {
+        "completed": 32,
+        "rejected": 0
+      },
+      "cleanup": {
+        "owned_session_empty": true,
+        "owned_temp_removed": true
+      },
+      "signal_reload_count": 0,
+      "before_release": {
+        "attempted": 32,
+        "arrived": 32,
+        "held_active": 32,
+        "terminal": {
+          "completed": 0,
+          "rejected": 0,
+          "timeout": 0,
+          "http_error": 0,
+          "transport_error": 0,
+          "stream_error": 0,
+          "truncated": 0,
+          "not_attempted": 0
+        }
+      },
+      "elapsed_seconds": 2.072476,
+      "raw_private_record_sha256": "55785ed53a8a077f881f6f391807addc609dd9d46bdf85307b0f200ed1493621"
+    }
+  ],
+  "configuration_preparation": {
+    "generated_by": "Codex / gpt-6-astra",
+    "scope": "synthetic full-config copy only; real pinned binary -validate, no model/process/service activation",
+    "preview_zero_writes": true,
+    "source_unchanged": true,
+    "original_candidate_validated": true,
+    "rollback_bytes_equal_original": true,
+    "changes": [
+      {
+        "model": "first",
+        "previous": 10,
+        "candidate": 64
+      },
+      {
+        "model": "second",
+        "previous": null,
+        "candidate": 64
+      }
+    ],
+    "higher_original_cap_preserved": 128,
+    "source_sha256": "5a675ab825094224c5a6f48390ecf5c46e81223bd895e5142704d9f3de051049",
+    "candidate_sha256": "658f892c3069d558c51592b77e286a89e48ba1c9e6d1f2738678dab3a64e79ff",
+    "files_private": true
+  },
+  "live_vllm_serving_acceptance": "NOT MEASURED",
+  "production_activation": false,
+  "long_term_stability_and_calibration": "NOT MEASURED"
+}

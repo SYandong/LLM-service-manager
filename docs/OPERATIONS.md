@@ -134,10 +134,12 @@ These are pending runbook gates, not changes applied by this PR:
    its guard is after eviction, so never invoke it to prove zero mutation.
 4. #12: disable the old reaper timer only when scheduler memory-policy tests and
    agreed budget thresholds are ready. Do not leave simultaneous policy writers.
-5. #13: prepare per-model `concurrencyLimit: 64` as a candidate, validate the
-   complete config, and use the quiet-period queue to apply it. Acceptance is a
-   measured 32-concurrent-request run without 429 responses; a config diff or
-   mocked response cannot satisfy it.
+5. #13: use the [concurrency preparation and measured fixture](../deploy/CONCURRENCY.md)
+   for per-model `concurrencyLimit: 64`, exact full-config backup/candidate and
+   rollback review bytes. The real pinned-swap/fake-backend fixture proves32 held
+   requests complete without429 and detects default-limit rejection. Actual vLLM/
+   live-serving acceptance and guarded quiet/adoption/authority remain separate;
+   neither the fixture nor a config diff authorizes production application.
 6. #14: retain the original launcher for rollback. Adopt the thin launcher only
    after the place/confirm/release contract and concurrent accounting tests are
    integrated. Measure cold-start latency against the retained baseline.
