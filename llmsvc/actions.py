@@ -587,6 +587,11 @@ class ModelActionController:
         if not all(_known(value) for value in (memory.host_available_gb, memory.sleeping_weights_gb,
                                                memory.budget_gb, memory.host_min_available_gb)):
             raise ActionDispatchError("unknown_memory")
+        if model.state == "stopped":
+            if not _known(model.weights_gb):
+                raise ActionDispatchError("unknown_memory")
+            if memory.host_available_gb - model.weights_gb < memory.host_min_available_gb:
+                raise ActionDispatchError("memory_budget")
         if model.state == "sleeping":
             gpus = [gpu for gpu in snapshot.gpus if gpu.index == model.gpu]
             if (len(gpus) != 1 or not _known(gpus[0].free_gb) or not _known(model.budget_gb)

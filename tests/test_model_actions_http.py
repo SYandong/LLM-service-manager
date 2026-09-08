@@ -238,3 +238,11 @@ def test_unknown_ram_blocks_cold_wake_before_request(system):
     status, result = request(address, "POST", "/v1/wake/model")
     assert status == 200 and result["status"] == "blocked" and result["error"] == "unknown_memory"
     assert not state["http_calls"]
+
+
+def test_cold_wake_preserves_configured_host_memory_floor(system):
+    _, address, _, state = system
+    state["available"] = 170
+    status, result = request(address, "POST", "/v1/wake/model")
+    assert status == 200 and result["status"] == "blocked" and result["error"] == "memory_budget"
+    assert not state["http_calls"]
