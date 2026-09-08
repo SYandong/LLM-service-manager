@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+# Generated-By: Codex / gpt-6-astra
+"""Standalone standard-library CLI scaffold; status is implemented in M1."""
+
+import argparse
+
+
+def main():
+    parser = argparse.ArgumentParser(description="llmsvc command-line scaffold")
+    parser.add_argument("--version", action="version", version="0.1.0")
+    parser.parse_args()
+    parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

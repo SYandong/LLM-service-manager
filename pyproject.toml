@@ -1,0 +1,21 @@
+# Generated-By: Codex / gpt-6-astra
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmsvc"
+version = "0.1.0"
+description = "A control plane for llama-swap on shared GPU servers"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6", "rich>=13"]
+
+[project.optional-dependencies]
+tui = ["textual>=0.70"]
+test = ["pytest", "huggingface_hub", "openai"]
+
+[tool.setuptools.packages.find]
+include = ["llmsvc", "llmsvc.*"]
+
+[tool.setuptools]
+script-files = ["cli/llm"]
