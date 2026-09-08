@@ -3,7 +3,7 @@
 ## 0.1.0-alpha.2 — 2026-09-08
 
 Incremental preview after alpha.1; Python distribution `0.1.0a2`.
-Includes #80, #81, #82, #84, #85, #86, #88 and #89.
+Includes #80, #81, #82, #84, #85, #86, #87, #88, #89 and #91.
 
 ### Added and corrected
 
@@ -18,6 +18,10 @@ Includes #80, #81, #82, #84, #85, #86, #88 and #89.
   confirm/release endpoints, restart reconciliation and bounded admission waits.
 - Bounded cached-base lifecycle tooling and measured isolated evidence (#80);
   current directory/partial-acceptance guidance (#86).
+- Pinned v252 watcher-only native-generation fixture and measured records (#91),
+  plus single-trigger adoption/settlement design wording (#87). These do not
+  enable a notifier: generation visibility and generic completion logs do not
+  establish old-server settlement.
 - Release cadence now follows batches of five merged non-release-only PRs,
   without a daily cap or complete-feature-group prerequisite (#90).
 
