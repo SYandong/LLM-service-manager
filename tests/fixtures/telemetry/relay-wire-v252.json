@@ -1,0 +1,35 @@
+{
+  "generated_by": "Codex / gpt-6-astra",
+  "provenance": "Source-derived synthetic v252 UI trace; not a live capture",
+  "source_url": "https://github.com/mostlygeek/llama-swap/blob/e31a1adee494bb7a578e2a97ec891b3e809899dc/internal/swaputil/events.go",
+  "envelopes": [
+    {
+      "type": "logData",
+      "data": "TEST_ONLY_PRIVATE_MARKER"
+    },
+    {
+      "type": "modelStatus",
+      "data": "[{\"id\": \"m\", \"state\": \"starting\", \"name\": \"TEST_ONLY_PRIVATE_MARKER\"}]"
+    },
+    {
+      "type": "modelStatus",
+      "data": "[{\"id\": \"m\", \"state\": \"ready\", \"description\": \"TEST_ONLY_PRIVATE_MARKER\"}]"
+    },
+    {
+      "type": "inflight",
+      "data": "{\"operation\": \"snapshot\", \"requests\": [{\"id\": \"1\", \"model\": \"m\", \"req_headers\": {\"Authorization\": \"TEST_ONLY_PRIVATE_MARKER\"}, \"remote_ip\": \"192.0.2.10\"}]}"
+    },
+    {
+      "type": "inflight",
+      "data": "{\"operation\": \"upsert\", \"request\": {\"id\": \"2\", \"model\": \"m\", \"req_body\": \"TEST_ONLY_PRIVATE_MARKER\"}}"
+    },
+    {
+      "type": "inflight",
+      "data": "{\"operation\": \"remove\", \"id\": \"1\"}"
+    },
+    {
+      "type": "inflight",
+      "data": "{\"operation\": \"remove\", \"id\": \"2\"}"
+    }
+  ]
+}
