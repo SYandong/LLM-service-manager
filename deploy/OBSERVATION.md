@@ -3,7 +3,7 @@
 Refs #8, #20 and #21. This preparation consumes the merged scheduler/CLI and the
 merged telemetry #41 and intent/preview #50 contracts (integrated source
 `e80b550`). It does not activate a service,
-mount a host file, replace production configuration, or start a full-day observer.
+mount a host file, replace production configuration, or start an observer.
 
 ## Offline observation summaries (#8 / #16)
 
@@ -82,14 +82,17 @@ and usable-state cadence are reported separately against capture bounds (or the
 explicit window); coverage may contain fewer points than the distribution. Missing
 source data cannot become a measured zero.
 
-`--tolerance-seconds` (default2, less than the interval) defines permitted timing
-jitter. Coverage reports actual first/last timestamps, observed span, leading/
+Pass `--interval-seconds` from the actual capture schedule (for example, the
+configured timer cadence). The defaults15seconds and2seconds tolerance are
+assumptions, not detected settings; using the wrong interval distorts missing-
+interval estimates. `--tolerance-seconds` must remain less than the interval
+and describe expected capture jitter, not hide observed gaps. Coverage reports actual first/last timestamps, observed span, leading/
 trailing gaps and internal gaps beyond interval+tolerance. Missing intervals are
 **estimates against the configured cadence and window boundaries**, not a count
 of proven producer failures. Bounds inferred from the files cannot reveal losses
 before the first or after the last capture; explicit bounds make those edges
 visible. A complete sampled window still does not prove continuous-running time.
-No day/week acceptance or automatic calibration is inferred, even from a long
+No long-term stability or automatic calibration is inferred, even from a long
 span; short data and gaps remain visible rather than being filled or extrapolated.
 
 Per-GPU identity uses UUID when present, otherwise an explicit index fallback.
@@ -125,8 +128,8 @@ prove mount provenance or reject arbitrary stale files on its own.
 The config can be validated in a disposable combined checkout using core's
 `--check-config` and the exact telemetry `build_collector(config.collectors)`
 factory, closing the collector afterward. Construction/validation does not run
-probes. That is configuration validation, not systemd, live data, one-day, or
-one-week acceptance. #41 is now merged; installed-runtime and final activation
+probes. That is configuration validation, not installed-service or production
+acceptance. #41 is now merged; installed-runtime and final activation
 authority remain separate gates.
 
 ## Configured runtime and preview readiness
@@ -153,7 +156,7 @@ unconfigured-host-source blocker, not a successful RAM release. Snapshot and
 event history were unchanged by the preview. The temporary HTTP server and
 collector were closed; no service, store, mount, model workload or persistent
 container file was created. This does not prove systemd restart/journal behavior,
-installed-package acceptance, the full-day observer, or one-week data coverage.
+installed-package acceptance or long-term stability/calibration.
 
 The initial 0.5-second probe timeout produced one explicit GPU TimeoutExpired;
 it was not interpreted as an idle card. The candidate now uses 0.8 seconds per
@@ -203,8 +206,9 @@ After an approved mount, before selecting the path in scheduler config:
 
 Rollback restores the observation setting to null before removing only the named
 LXC device. Never replace it with cgroup values. Device/config changes and any
-scheduler restart need the final scoped permission; the separate full-day
-observer activation also needs integrated runtime readiness and final authority.
+scheduler restart need the final scoped permission. Any additional observer
+activation needs an explicit bounded scope, integrated runtime readiness and
+final authority.
 No permission here includes TTL, reaper, production routing or model operations.
 
 ## LoRA test decision and budget

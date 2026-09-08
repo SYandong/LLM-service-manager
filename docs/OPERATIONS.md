@@ -77,10 +77,12 @@ python3 deploy/capture.py --config /path/to/capture.json \
 ```
 
 Record start/end timestamps, interval, missing samples, source failures,
-scheduler commit/config hashes, and readiness results. One capture does not
-satisfy the one-week requirement. A full day on the alternate port with actions
-disabled is required **before enabling any production actions**. The one-week
-M1 dataset supplies the shared-GPU threshold decision for #16.
+scheduler commit/config hashes and readiness results. Use bounded minutes-scale
+checks and deterministic replay; there is no mandatory day/week development,
+release or completion wait. Before production actions, verify the bounded
+alternate-port dry-run, protection and rollback checks and obtain the specific
+activation authority. Report #16 occupancy over the actual measured span;
+long-term stability and threshold calibration remain **NOT MEASURED**.
 
 Verified on 2026-09-08: a Python 3.10.12 venv installed the #6 scheduler at
 `cad2958`, validated its YAML, restored complete baseline bytes (including model
@@ -110,9 +112,9 @@ validated. Collection errors conservatively block current previews.
 The bounded configured runtime/CLI check, 0.8-second probe candidate, expected
 host-RAM blocker and exact observer/host-source permission proposals are recorded
 in [deployment observation preparation](../deploy/OBSERVATION.md). This evidence
-advances API/CLI integration only; actual systemd restart/journal, the full-day
-observer and week-long observations remain open. No production activation is
-implied. Comment-preserving YAML, watcher/adoption/quiet-source design alignment
+advances API/CLI integration only; bounded installed-service restart/journal
+and rollback verification remain separate. Long-term stability and calibration
+are NOT MEASURED. No production activation is implied. Comment-preserving YAML, watcher/adoption/quiet-source design alignment
 and executable production rollback must be resolved before the first #19 write
 or #11 TTL transition.
 
@@ -120,8 +122,9 @@ or #11 TTL transition.
 
 These are pending runbook gates, not changes applied by this PR:
 
-1. Collect the full-day alternate-port dry-run evidence and current green tests
-   for protection, memory admission, lease accounting, and failure recovery.
+1. Collect bounded alternate-port dry-run/replay evidence and current green
+   tests for protection, memory admission, lease accounting and failure recovery.
+   Record actual timing, samples, gaps and failures; no calendar soak is required.
 2. Preserve the complete baseline config/scripts and record existing timer/unit
    enablement. Obtain the specific production cutover authority in the issue.
 3. #11: install the pin-aware launcher guard before exposing durable pin intent;
@@ -241,8 +244,10 @@ rehearsal. Legacy code and tests remain until deployment and zero-consumer
 proofs satisfy #27. For #28, identify each other-container service, its owner,
 consumer routing and rollback procedure, then obtain that owner's explicit
 shutdown consent. No group announcement or shutdown is authorized by a brief
-idle-GPU smoke permission. A one-week absence observation needs actual
-start/end records; it cannot be marked complete immediately.
+idle-GPU smoke permission. Record actual discovery timestamps and scope.
+Long-term absence/stability are NOT MEASURED; do not invent them or impose a
+calendar wait. Verified consumers, owner consent and rollback still control
+any retirement action.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
 

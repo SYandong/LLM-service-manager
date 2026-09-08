@@ -90,7 +90,7 @@ the launcher.
 
 Do not replace the installed launcher from this draft. Keep a complete original
 script backup, finish the scheduler lease/reserve/recovery integration and the
-full-day alternate-port dry-run gate, then obtain the production transition
+bounded alternate-port dry-run/replay checks, then obtain the production transition
 handoff. Existing unit aliases and real cold-start latency need verification.
 The tests use fake systemd responses, an actual concurrent flock test and a
 local fake HTTP server; they do not constitute a live GPU/cold-start benchmark.
