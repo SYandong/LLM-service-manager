@@ -360,3 +360,12 @@ def test_repeated_timestamp_is_not_post_effect_measurement_evidence(tmp_path):
     assert result["status"] == "no_progress"
     assert result["slept"] == [] and result["measurement_complete"] is False
     assert backend.calls == [("sleep", "a")]
+
+
+def test_measured_goal_removes_stale_estimate_based_insufficiency(tmp_path):
+    backend = Backend(("a",))
+    backend.models["a"] = replace(backend.models["a"], resident_gb=4)
+    _, controller, backend = setup(tmp_path, backend)
+    result = controller.free({"need_gb": 25}, by="caller")
+    assert result["status"] == "complete" and result["freed_gb"] == 30
+    assert not any(item["reason"] == "insufficient_reclaimable_memory" for item in result["skipped"])

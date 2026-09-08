@@ -467,6 +467,8 @@ class ModelActionController:
                         break
                     if need is not None and result["freed_gb"] is not None and result["freed_gb"] >= need:
                         result["status"] = "complete"
+                        result["skipped"] = [item for item in result["skipped"]
+                                             if item["reason"] != "insufficient_reclaimable_memory"]
                         break
                     remaining = None if need is None else max(0, need - (result["freed_gb"] or 0))
                     decision = self.plan_free(snapshot, gpu=gpu, ram=ram, need_gb=remaining)
