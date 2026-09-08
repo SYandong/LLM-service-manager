@@ -94,7 +94,9 @@ class SchedulerApp(App):
     """
     BINDINGS = [("q", "quit", "Quit"), ("r", "refresh_state", "Refresh"),
                 ("slash", "command", "Command"), ("question_mark", "help", "Help"),
-                ("ctrl+r", "reset_events", "Reset events"), ("u", "usage", "Usage")]
+                ("ctrl+r", "reset_events", "Reset events"), ("u", "usage", "Usage"),
+                ("f", "prepare_free", "Free"), ("p", "prepare_pin", "Pin"),
+                ("w", "prepare_wake", "Wake")]
 
     def __init__(self, client, api, event_reader=None, **kwargs):
         super().__init__(**kwargs)
@@ -103,6 +105,7 @@ class SchedulerApp(App):
         self.snapshot = None
         self.fetching = False
         self._write_busy = False
+        self._shortcut_target = None
         self._state_generation = 0
         self.model_names = []
         self.terminal_width = 100
@@ -146,7 +149,12 @@ class SchedulerApp(App):
             yield Static("Select a model with ↑/↓", id="details", markup=False)
         with VerticalScroll(id="result-view"):
             yield Static("Status · refresh every 5 seconds", id="result", markup=False)
-        yield Input(placeholder="status | free --gpu 0 | wake MODEL | pin MODEL --for 8h", id="command")
+        command = Input(placeholder="status | free --gpu 0 | wake MODEL | pin MODEL --for 8h", id="command")
+        # Newer Textual selects all on focus; typing a parameter must append at
+        # the requested cursor instead of replacing the prefilled command.
+        if hasattr(command, "select_on_focus"):
+            command.select_on_focus = False
+        yield command
         yield Footer()
 
     def on_mount(self):
@@ -413,8 +421,69 @@ class SchedulerApp(App):
     def action_command(self):
         self.dashboard.query_one("#command", Input).focus()
 
+    def shortcut_model_present(self, name):
+        return self.snapshot is not None and name is not None and sum(
+            item.get("name") == name for item in self.snapshot.get("models", [])) == 1
+
+    def prepare_command(self, command):
+        # Printable keys belong to focused inputs. A modal owns its interaction
+        # until dismissed; no shortcut may edit the command hidden underneath it.
+        if not self.is_running or self.screen is not self.dashboard or isinstance(self.focused, Input):
+            return
+        if self._write_busy:
+            self.show_result("An operation is already running; wait for its result (no request queued)")
+            return
+        entry = self.dashboard.query_one("#command", Input)
+        if entry.value.strip():
+            entry.focus()
+            self.show_result("Existing command draft retained; edit or clear it before choosing another shortcut")
+            return
+        name = self.selected_model() if command != "free" else None
+        if command != "free":
+            if not self.shortcut_model_present(name):
+                self.show_result("No current model selection; refresh and select a model first")
+                return
+            try:
+                self.api.model_name(name)
+            except argparse.ArgumentTypeError as exc:
+                self.show_result(str(exc))
+                return
+            self._shortcut_target = (command, name)
+        else:
+            self._shortcut_target = None
+        if command == "pin":
+            # Empty duration intentionally fails the shared parser on Enter.
+            # -- ends options before every name, including leading-dash names.
+            entry.value = "pin --for  -- " + shlex.quote(name)
+            cursor = len("pin --for ")
+            message = "Enter a positive pin duration at the cursor (for example 1h), then press Enter; nothing sent"
+        else:
+            entry.value = "free " if command == "free" else "wake -- " + shlex.quote(name)
+            cursor = len(entry.value)
+            message = "Review/edit the command, then press Enter; nothing sent"
+        entry.focus()
+        entry.cursor_position = cursor
+        # 0.70 moves the cursor to the end when the queued Focus arrives.
+        # Restore the parameter position after focus/layout, without overwriting
+        # text typed meanwhile or touching widgets after shutdown.
+        self.call_after_refresh(self.position_prefill_cursor, entry, entry.value, cursor)
+        self.show_result(message)
+
+    def position_prefill_cursor(self, entry, value, cursor):
+        if self.is_running and entry.is_attached and entry.has_focus and entry.value == value:
+            entry.cursor_position = cursor
+
+    def action_prepare_free(self):
+        self.prepare_command("free")
+
+    def action_prepare_pin(self):
+        self.prepare_command("pin")
+
+    def action_prepare_wake(self):
+        self.prepare_command("wake")
+
     def action_help(self):
-        self.show_result("free [--gpu N] [--need 80G] [--ram] · wake MODEL [--wait 930] · pin MODEL --for 8h · unpin MODEL · all operations accept --dry-run · status · usage --days 7|30 · u usage · / command · Ctrl+R reset events after known restart · q quit")
+        self.show_result("f prefill free · p prefill selected pin (duration required) · w prefill selected wake · Enter submits · free --ram confirms separately · free [--gpu N] [--need 80G] [--ram] · wake MODEL [--wait 930] · pin MODEL --for 8h · unpin MODEL · all operations accept --dry-run · status · usage --days 7|30 · u usage · / command · Ctrl+R reset events after known restart · q quit")
 
     def action_reset_events(self):
         self.event_reader.reset_cursor()
@@ -476,6 +545,9 @@ class SchedulerApp(App):
             args = self.api.build_parser(UIParser).parse_args(shlex.split(event.value))
             if args.url or args.config or args.timeout:
                 raise CommandMessage("Connection settings are fixed for this session; restart llm to change them")
+            if self._shortcut_target == (args.command, getattr(args, "model", None)):
+                if not self.shortcut_model_present(args.model):
+                    raise CommandMessage("Shortcut model is no longer in the snapshot; refresh and select it again")
             if args.command == "usage":
                 self.show_usage(args)
             elif args.command in ("pin", "unpin", "free", "wake"):
@@ -492,4 +564,5 @@ class SchedulerApp(App):
                 self.refresh_state(args)
         except (CommandMessage, ValueError) as exc:
             self.show_result(str(exc))
+        self._shortcut_target = None
         event.input.value = ""
