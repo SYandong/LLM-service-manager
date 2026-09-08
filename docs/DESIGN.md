@@ -73,8 +73,9 @@ systemd `InvocationID` 相符，且已观察到该实例健康服务，或明确
   monotonic 秒，才满足 sleeping 判据。这是**有界重复采样的故障判据**，不证明
   两次采样之间未发生状态变化，不提供 §3 / #53 所要求的无丢失连续事件保证。
   任一 fresh 观测不满足该组合就重置本判据。
-- 健康判据要求同一合格实例连续 3 次实际 `health_ok is False`；`None`、传输
-  不明或缺失不是失败票。新鲜健康结果重置健康失败计数，但不替代 ready/sleeping
+- 健康判据默认要求同一合格实例连续 3 次实际 `health_ok is False`；配置
+  `fault_health_failures` 仅允许 3–100 次，可以保守提高，不能低于 3 次。
+  `None`、传输不明或缺失不是失败票。新鲜健康结果重置健康失败计数，但不替代 ready/sleeping
   组合自身的判断。退出信号也必须是意料之外的已核实实例退出，而非普通生命周期。
 
 故障事务以精确 lease/model/unit/incarnation 为身份，**先持久化清理声明再提交
