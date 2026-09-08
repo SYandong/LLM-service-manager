@@ -24,14 +24,15 @@ from llmsvc.store import IntentStore
 
 
 @pytest.fixture
-def system(tmp_path):
+def system(tmp_path, request):
+    gpu = getattr(request, "param", {}).get("gpu", 0)
     state = {"now":10000.0, "available":500.0, "calls":[], "mode":"apply", "gain":40,
              "idle":{"a":1000,"b":1000}, "inflight":{"a":0,"b":0}, "errors":(),
              "after_action":None, "collect_hook":None, "probe_hook":None,
              "transport_entered":threading.Event(), "transport_release":threading.Event(),
              "events":queue.Queue(), "source_done":threading.Event()}
     state["transport_release"].set()
-    models = {name:ModelState(name, state="awake" if name=="a" else "sleeping", gpu=0, util=0.3,
+    models = {name:ModelState(name, state="awake" if name=="a" else "sleeping", gpu=gpu, util=0.3,
         budget_gb=60, weights_gb=40, resident_gb=60 if name=="a" else 2,
         unit="vllm-"+name+".service", unit_active=True, health_ok=True,
         is_sleeping=name!="a", cold_start_seconds=1) for name in ("a","b")}
@@ -85,7 +86,7 @@ def system(tmp_path):
         request_timeout_seconds=1,lease_probe_seconds=0.1)
     store=IntentStore(config.state_db_path, action_lock=threading.RLock())
     for name in models:
-        store.create_lease(Lease("lease-"+name,name,0,0.3,20000,60),"vllm-"+name+".service")
+        store.create_lease(Lease("lease-"+name,name,gpu,0.3,20000,60),"vllm-"+name+".service")
         store.transition_lease("lease-"+name,"confirmed")
     def collect():
         if state["collect_hook"]:
@@ -93,7 +94,7 @@ def system(tmp_path):
         state["now"] += 0.01
         sleeping=sum(m.weights_gb for m in models.values() if m.state=="sleeping")
         return StateSnapshot(sampled_at=state["now"],models=tuple(models.values()),errors=state["errors"],
-            gpus=(GPUState(0,total_gb=200,free_gb=100,external_gb=0),),
+            gpus=(GPUState(gpu,total_gb=200,free_gb=100,external_gb=0),),
             memory=MemoryState(state["available"],state.get("sleeping",sleeping)),
             activity=tuple(Activity(name,state["now"]-state["idle"][name],0,0,state["inflight"][name]) for name in models))
     scheduler=Scheduler(config,collect,store=store,clock=lambda:state["now"])

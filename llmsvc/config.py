@@ -48,6 +48,11 @@ class SchedulerConfig:
     automation_interval_seconds: float = 15.0
     automation_cycle_timeout_seconds: float = 120.0
     automation_idle_seconds: float = 600.0
+    automation_policy: str = "fixed_idle"
+    automation_exclusive_ttl_seconds: float = 3600.0
+    automation_shared_ttl_seconds: float = 300.0
+    automation_shared_external_threshold_gb: float = 1.0
+    automation_shared_free_threshold_gb: float = 10.0
     free_timeout_seconds: float = 120.0
     reserve_timeout_seconds: float = 120.0
     wake_timeout_seconds: float = 900.0
@@ -71,7 +76,8 @@ class SchedulerConfig:
                      "action_observe_seconds", "action_poll_seconds", "placement_wait_seconds",
                      "lease_timeout_seconds", "lease_probe_seconds", "data_plane_event_interval_seconds",
                      "data_plane_event_timeout_seconds", "data_plane_event_reconnect_seconds",
-                     "automation_interval_seconds", "automation_cycle_timeout_seconds", "automation_idle_seconds"):
+                     "automation_interval_seconds", "automation_cycle_timeout_seconds", "automation_idle_seconds",
+                     "automation_exclusive_ttl_seconds", "automation_shared_ttl_seconds"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (float, int)):
                 raise ValueError(f"{name} must be a finite positive number")
@@ -82,6 +88,13 @@ class SchedulerConfig:
         for name in ("data_plane_event_capacity", "data_plane_event_batch_size"):
             if type(getattr(self, name)) is not int or not 1 <= getattr(self, name) <= 4096:
                 raise ValueError(f"{name} must be an integer in 1..4096")
+        if not isinstance(self.automation_policy, str) or self.automation_policy not in ("fixed_idle", "gpu_pressure"):
+            raise ValueError("automation_policy must be fixed_idle or gpu_pressure")
+        for name in ("automation_shared_external_threshold_gb", "automation_shared_free_threshold_gb"):
+            value = getattr(self, name)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0):
+                raise ValueError(f"{name} must be a finite non-negative number")
         if type(self.automation_enabled) is not bool:
             raise ValueError("automation_enabled must be a boolean")
         if self.automation_cycle_timeout_seconds > 120:
