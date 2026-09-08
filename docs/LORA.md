@@ -79,11 +79,76 @@ serve proxy 的 SIGTERM 处理还会再次调用 sleep。源码未传 query `mod
 删除先确认路由移除，再由 core 保护检查后
 停止目标 unit，并确认其不存在；七天未用自动注销也要重新检查活动与保护。
 
-触发方式决策由 [#60](https://github.com/SYandong/LLM-service-manager/issues/60)
-关联 #20 跟踪；实际 `notify_reload` 实现 PR 必须同步权威 DESIGN §3 第 4 条
-并取得 Fable 当前 SHA 审核。可靠连续 quiet 数据源另由
-[#53](https://github.com/SYandong/LLM-service-manager/issues/53) 跟踪。本次局部
-YAML 修复不决定触发方式，也不授权启用写入。
+## reload 的采用与收尾契约
+
+关联 [#60](https://github.com/SYandong/LLM-service-manager/issues/60) / #20。
+本节供草稿设计 PR 审核，实际适配器实现和启用仍需独立验证及当前 SHA 的
+Fable 审核。可靠 quiet 来源的 [#53](https://github.com/SYandong/LLM-service-manager/issues/53)
+不因触发实验或字段解析修正而解决；本节不修改 DESIGN §3 第 2 条。
+
+| 证据 | 已支持的结论 | 不能推出的结论 |
+|---|---|---|
+| [#79 固定提交的测量](https://github.com/SYandong/LLM-service-manager/blob/a65d6f508ae28926546a28f192ff491af0d244f8/deploy/reload-results-20260908.json)：真实 v252 swap/wrapper、fake 有限流后端，4 条在途，单次 SIGHUP | abort 为 4 条截断；candidate wait 为 4 条完成；sleep 调用分别是 abort/abort 与 wait/abort | watcher-only、真实 vLLM、持续新到达请求的排除、可靠 quiet 或旧 server 退出已证明 |
+| #79 的 `adoption_seconds`，约 22 ms | 新模型标识在 `/v1/models` 可见的时间；该实例未启用 watcher | 原生 generation 采用证明、退出完成或真实中断窗口 |
+| [#91 原生测量](https://github.com/SYandong/LLM-service-manager/blob/e98694635406019224d8bd7c280c65f43c6c99c3/deploy/watcher-witness-results-20260908.json)：固定 v252 二进制、CPU dummy 进程、mock 上游，8 个场景；零 reload 信号/兜底写入 | watcher-only 的 delayed-stop 场景中，候选字节已落盘时仍读到旧 G，约 1.692 秒后收到新 G；文件摘要及同一进程身份随读数记录 | 不是读取磁盘即算采用；观测时间不是指针切换精确时刻，也不是生产时延上限 |
+| #91 stranded-stop / failed-stop | 新 G 约 1.673 秒可见；约 31.625 秒出现通用完成日志时旧 stop helper 仍存活。另一场景 cmdStop 退出码为 7，之后也有通用完成日志 | G 可见或完成日志均不证明旧资源收尾；不能把 cmdStop 失败等同于已观测到 `old.Shutdown` 返回错误 |
+| #91 负例 | 相同 mtime/size 未触发 reload；无效候选保留旧 G且在观测期无自动重试；缺 witness 的 HTTP 200 工具错误在写入前阻塞；重启/超时仍保留失败分类 | 后续诊断成功或 fixture 最终清理不能追认 deadline 内采用/收尾成功；`status: ok` 只是测量工具完成 |
+
+**触发约定。** #91 在与已有记录一致的 v252/e31a1ad 二进制上验证了单一
+`-config PATH -watch-config`、一次原子替换、零 SIGHUP 的受控路径；七个
+场景写入一次，缺 witness 场景不写。八个场景均清理了自身会话和临时目录。
+这使 watcher-only 从仅有源码依据变为隔离实测支持，不改变生产门槛。采用它
+仍须核对实际二进制、单一配置来源、实例身份、监视标志和可检测的 mtime/size
+变化；未知即拒绝落盘，不补 SIGHUP。#79 的 signal-only 证据限于无 watcher
+的隔离实例，不能据此切换生产模式。两秒轮询不是采用耗时上限。
+
+**已实测的原生采用读数。** #91 使用 SHA256 为
+`32aea60b5c1be987c27dde6ea4aaa84f9be7ad93eaede011295fad1e276e80ea`
+的原始 v252 二进制，在临时配置中放入无业务引用的
+`macros.llmsvc_reload_generation`，绑定前一代、新一代、精确文件摘要与
+PID/start ticks。原生请求为 POST `/api/mcp`，头部是
+`Mcp-Protocol-Version: 2026-07-28`、`Mcp-Method: tools/call`、
+`Mcp-Name: config__get_config`，JSON-RPC body 为：
+
+```json
+{"jsonrpc":"2.0","id":"<fresh-id>","method":"tools/call","params":{"name":"config__get_config","arguments":{"path":"macros.llmsvc_reload_generation"}}}
+```
+
+成功响应的 id 匹配，没有 JSON-RPC error 或 `result.isError`；单一 text
+内容包含该路径的说明及完整 YAML fence，解析后是期望的 `gen_<32位hex>`
+标量。精确响应样例及时间在上述测量文件中；[复现说明](https://github.com/SYandong/LLM-service-manager/blob/e98694635406019224d8bd7c280c65f43c6c99c3/deploy/WATCHER_WITNESS.md)
+区分请求开始和响应接收时间。采用可见性取响应接收时刻，不回填为请求开始。
+缺 macro、错误协议版本和未知工具实际返回 HTTP 200 错误；不能只检查状态码。
+docs-disabled/auth/redirect/截断或畸形响应并非全部做过真实二进制实验；离线
+回归覆盖的故障不能写成已实测。测量后的错误 body 诊断修正另由离线测试覆盖，
+成功测量所用 harness 摘要保留在证据文件中，没有为它重复成功场景。
+
+这些读数证明受控同实例、同候选字节绑定下的新配置可见机制，不证明旧 server
+收尾或生产可用性。所有可见 G 的案例仍为 `settlement_confirmed: false`，
+且要求保留 barrier/reconciliation。重启即使返回新 G 也因实例绑定改变被拒绝；
+验证 deadline 后的只读诊断不升级原分类。fixture 最终清理其自有进程不是
+采用时刻的退出证明。生产 generation 局部编辑、持久化事务/屏障和 notifier
+仍未因此实现；不能将临时 JSON 配置写法用于绕过 #61 的格式保留约束。
+
+**现有回调签名，待验证的实现。** `notify_reload(*, deadline)` 只在候选采用
+以及旧 server 收尾均已确认后返回；采用可见但退出未知必须抛错/超时，不能
+触发 `after_apply(*, deadline)` 或提前解除事务阻塞。后者调用 core 的
+`stop_model(name, *, deadline)` / `unit_absent(name, *, deadline)` 完成受保护的
+目标 unit 清理，不能拿新实例的 `/running` 空表替代旧实例的退出证明。
+`deadline = min(submitted_monotonic + 600, replacement_monotonic + operation_timeout)`；
+现有 operation_timeout 默认 10 秒、最大 60 秒，每次 I/O 必须受剩余时间约束。
+
+配置提交前发现未知能力则不写；提交后采用、退出或目标清理未知/失败/超时，
+保留 `.llmsvc-pending` 并进入 `reconciliation_required`，不重触发或盲目回滚。
+核对实例未更换、候选绑定、旧 server 收尾及目标 unit 清理后才可恢复；仅有
+磁盘摘要相等不足以清除标记。观测回调保持 #57 的非阻塞行为；等待采用时即使
+释放 action lock，也必须用明确的事务状态阻塞冲突写入，不能让新 pin 在旧
+server 仍可能 sleep 时生效。`dry_run` 不创建候选、generation 或恢复状态。
+
+验收须覆盖 watcher-only 与 signal-only 的隔离边界、同 mtime/size、原生
+接口不存在/响应错误/截断/旧值、实例重启、采用先于延迟或失败退出、deadline、
+恢复及 dry-run。ops 负责可执行证据；core/registry 根据获批设计实现适配器，
+不把本节或 fixture 的合并视为实现完成、生产启用或新的发布许可。
 
 `reload.py` 用同一 scheduler action lock 串行化最终校验与替换，要求连续
 5 秒零在途、事件流未断、无 awake pin、整批 awake 权重满足 RAM 准入。

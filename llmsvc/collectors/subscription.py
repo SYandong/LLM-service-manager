@@ -70,7 +70,7 @@ class InflightSubscription:
     def __init__(self, swap_url, on_inflight, *, on_heartbeat=None,
                  stream_factory=None, timeout=10, reconnect_delay=1,
                  max_frame_bytes=1024 * 1024, max_requests=100000,
-                 ordered_source=False):
+                 ordered_source=False, event_buffer=None):
         if not callable(on_inflight):
             raise ValueError("on_inflight callback is required")
         if on_heartbeat is not None and not callable(on_heartbeat):
@@ -86,6 +86,11 @@ class InflightSubscription:
             raise ValueError("max_requests must be positive")
         if type(ordered_source) is not bool:
             raise ValueError("ordered_source must be a bool")
+        if event_buffer is not None:
+            from .relay import DataPlaneEventBuffer
+            if not isinstance(event_buffer, DataPlaneEventBuffer):
+                raise ValueError("event_buffer must be a DataPlaneEventBuffer")
+        self.event_buffer = event_buffer
         self.swap_url = swap_url.rstrip("/")
         self.on_inflight = on_inflight
         self.on_heartbeat = on_heartbeat
@@ -123,16 +128,29 @@ class InflightSubscription:
         self._emit_unknown()
         while not self._stop.is_set():
             try:
+                if self.event_buffer is not None:
+                    self.event_buffer.connection("connecting")
                 with self._open() as stream:
                     self._stream = stream
+                    if self.event_buffer is not None:
+                        self.event_buffer.connection("connected")
                     self._consume(stream)
-            except Exception:
-                pass
+            except Exception as exc:
+                if self.event_buffer is not None and not self._stop.is_set():
+                    reason = ("timeout" if isinstance(exc, TimeoutError) else
+                              "limit_exceeded" if isinstance(exc, BufferError) else
+                              "invalid_event" if isinstance(exc, ValueError) else
+                              "disconnected" if isinstance(exc, ConnectionError) else "read_failed")
+                    self.event_buffer.error(reason)
             finally:
                 self._stream = None
                 self._emit_unknown()
+                if self.event_buffer is not None and not self._stop.is_set():
+                    self.event_buffer.connection("disconnected")
             if self._stop.wait(self.reconnect_delay):
                 break
+        if self.event_buffer is not None:
+            self.event_buffer.connection("closed")
 
     def _open(self):
         if self.stream_factory is not None:
@@ -179,6 +197,8 @@ class InflightSubscription:
         envelope = json.loads(b"\n".join(data))
         if not isinstance(envelope, dict):
             raise ValueError("invalid SSE envelope")
+        if self.event_buffer is not None:
+            self.event_buffer.observe(envelope)
         kind = envelope.get("type")
         if kind in ("logData", "activity", "uiConfig", "profile", "profileChanged", "modelStatus"):
             return
@@ -199,9 +219,13 @@ class InflightSubscription:
         if len(state.requests) > self.max_requests:
             raise BufferError("inflight request bound exceeded")
         self.on_inflight(len(state.requests), connected=self.ordered_source)
+        if self.event_buffer is not None:
+            self.event_buffer.inflight(len(state.requests), payload["operation"])
 
     def _emit_unknown(self):
         self.on_inflight(None, connected=False)
+        if self.event_buffer is not None:
+            self.event_buffer.inflight(None, "unknown")
 
 
 def subscribe_inflight(swap_url, on_inflight, *, on_heartbeat=None, **kwargs):
