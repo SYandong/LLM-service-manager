@@ -149,6 +149,71 @@ last check and reload and record any interrupted requests. Reconcile units with
 and independently repeatable; stopping only the scheduler while TTL is zero is
 an incomplete rollback.
 
+## Allocated-model configuration recovery (#93)
+
+This procedure applies in a separately authorized control-plane maintenance
+window; it requests no running-service change. If an active allocation's model
+is missing from `collectors.models`, or its configured unit name changed, the
+scheduler retains the complete allocation. It does not trust a unit merely
+because its name appears in SQLite. `lease_model_unobserved` and
+`configured_unit_mismatch` are safety blocks, not instructions to erase the
+record or stop an arbitrary unit.
+
+The core diagnostic contract under [#93](https://github.com/SYandong/LLM-service-manager/issues/93)
+is `lease_configuration_required` in journal/SSE, with `model`, `lease_id`,
+`persisted_unit`, `configured_unit` (null when absent), and
+`next_action=restore_verified_model_configuration` and `budget_retained: true`.
+Repeated notices coalesce while the same mismatch persists; restoring identity
+or transitioning the allocation clears that notice, and a daemon restart can
+report it again. This event requires the separately reviewed
+[core #96 implementation](https://github.com/SYandong/LLM-service-manager/pull/96); the
+merged #88 baseline can retain the allocation without this actionable notice.
+Absence of the new event is not proof that identity or accounting is safe.
+
+1. Retain the original schema-v2 SQLite ledger and its backup. Record the event
+   or observed blocker, lease ID, current state and last verified model
+   configuration. Do not delete an active ledger, remove SQL rows, fabricate a
+   tombstone, rename the unit to bypass checks or infer stop authority from the
+   error.
+2. Restore the complete original trusted model entry from reviewed configuration
+   or a verified backup: model name, exact unit, daemon probe URL, util, weights,
+   default protection and any explicit budget. The persisted unit name identifies
+   what needs verification; it is not sufficient authority to adopt that unit.
+   If the identity or original metadata cannot be verified, keep the allocation
+   charged and investigate through a separately approved procedure.
+3. In the authorized maintenance window, restart only the scheduler with that
+   restored configuration and the **same ledger**. No data-plane stop, unload or
+   new revoke API is part of this recovery. The implementation does not repair
+   or hot-reload the configuration automatically. Preflight configuration checks
+   and previews remain read-only; they do not perform the recovery transition.
+4. Check fresh collector and configured-unit observations. A healthy active unit
+   with matching `LLMSVC_LEASE_ID` and GPU confirms the same allocation. A
+   loading, mismatched-token or unknown unit retains its budget (stale on
+   recovery). Release requires a bounded configured-unit inspection proving
+   absence, or inactive/failed with `MainPID=0` and an empty control group,
+   **and** a fresh collector observing that exact configured unit stopped.
+   A failed probe, missing health response or `MainPID=0` alone is insufficient.
+5. Confirm the existing lease's resulting status and that pin intent is intact.
+   Only proven exit permits the next placement to reuse its budget. Existing
+   confirm/release endpoints keep their guards: 503 means uncertainty; 409 on
+   confirm means revoked/superseded. No force-revoke endpoint is introduced.
+
+Schema v2 remains incompatible with older binaries. Preserve the pre-upgrade
+backup for a separately planned rollback, but do not overwrite an active v2
+ledger with an old backup: that would lose allocations created since the
+backup. Reconcile live allocations before any approved rollback. This recovery
+procedure provides neither automatic orphan cleanup nor permission to stop
+production workloads. See the [launcher budget clarification](../deploy/LAUNCHER.md)
+for the distinction between requested `lease.util` and authoritative `budget_gb`.
+
+Core owns the diagnostic and regression implementation. Its #93 acceptance
+covers restored trusted mapping with the same ledger, healthy confirmation,
+proven-exit release, unknown-state retained budget, unchanged pin, subsequent
+placement only after proven absence, and read-only reconciliation with no probe,
+writer or recovery-event mutation. Offline fixtures establish those code paths;
+they are not live recovery evidence. This documentation does not close #93,
+#14 or the remaining reserve/victim/fault-recovery acceptance.
+
 ## GPU smoke ownership
 
 Only ops schedules live GPU tests and holds the shared `gpu-test.lock` for the
