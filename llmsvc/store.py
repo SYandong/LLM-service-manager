@@ -107,6 +107,17 @@ class IntentStore:
                         (reserve.id, reserve.gpu, reserve.size_gb, reserve.until, reserve.by))
         return intent_result("reserve", asdict(reserve), dry_run)
 
+    def reserve(self, reserve_id):
+        """Read one intent including expired rows, without changing expiry state."""
+        nonempty(reserve_id, "id")
+        with self.action_lock:
+            row = self._db.execute("SELECT id, gpu, size_gb, until, owner FROM llmsvc_reserves WHERE id = ?", (reserve_id,)).fetchone()
+            if row is None:
+                return None
+            reserve = Reserve(*row)
+            validate_reserve(reserve)
+            return reserve
+
     def remove_reserve(self, reserve_id: str, *, dry_run=False):
         nonempty(reserve_id, "id")
         if not dry_run:

@@ -148,7 +148,7 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                     if target.path.startswith(prefix):
                         operation = op
                         payload[key] = unquote(target.path[len(prefix):])
-            if operation is None or (not dry_run and operation not in ("pin", "unpin", "free", "wake", "place", "confirm", "release")):
+            if operation is None or (not dry_run and operation not in ("pin", "unpin", "free", "wake", "place", "confirm", "release", "reserve", "unreserve")):
                 self._reject_write()
                 return
             if not dry_run and operation in ("free", "wake") and (not self.server.scheduler.config.model_actions_enabled or self.server.scheduler.model_actions is None):
@@ -183,7 +183,9 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 if payload != {}:
                     raise ValueError("lease transition accepts an empty body")
                 payload = {"lease_id": lease_id}
-            if dry_run:
+            if operation in ("reserve", "unreserve"):
+                result = self.server.scheduler.run_reserve(operation, payload, source_ip=self.client_address[0], dry_run=dry_run)
+            elif dry_run:
                 result = self.server.scheduler.preview(operation, payload)
             elif operation in ("place", "confirm", "release"):
                 result = self.server.scheduler.run_placement(operation, payload)
