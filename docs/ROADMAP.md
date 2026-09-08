@@ -120,7 +120,7 @@
 
 交接必须明确记录，避免双写：
 
-- #3 的 CLI 占位与 README legacy 提示由 core 一次性建立；随后 `cli/` 交给 client，README 在 #26 交给 ops。公共接口与包元数据始终由 core 发布，其他任务消费契约，不另建同名状态结构。
+- #3 的 CLI 占位与 README legacy 提示由 core 一次性建立；随后 `cli/` 交给 client，README 后续补充（含 #7 状态示例）与 #26 重写交给 ops。公共接口与包元数据始终由 core 发布，其他任务消费契约，不另建同名状态结构。
 - telemetry 提供 `DESIGN.md` §2 的三种失败信号；core 负责故障判定、清理/恢复、保留 pin 记录；policy 保证默认模型只放独占 GPU。故障清理与自动策略驱逐分别验证。
 - #27 退役门槛满足后，ops 才接管删除 `vllm_service/`、`tools/dashboard.py`、`config/server.yaml` 及对应 legacy 测试；core 同步调整包元数据与 CI。此前这些路径保持冻结。
 
@@ -131,7 +131,7 @@
 | M0 | core 完成 #3，ops 准备 #2；其余任务可做只读取证、测试场景和 #21 调研 | 先发布可安装的 Python 3.10 骨架与共享状态/JSON 契约；后续实现绑定该契约。#2 的 admin 门槛不阻止本地开发。 |
 | M1 | telemetry #4/#5、core #6、client #7 | ops #8 消费集成后的只读 API；部署与卸载先在隔离目录验证。保持只读，线上行为不变。 |
 | M2 | policy 保护/内存策略、core 意图持久化与动作、client 命令；ops 准备 TTL/reaper/concurrency 切换及回滚 | 保护规则与 dry-run 验证通过后，按 DESIGN §7 在独立配置的验证端口完整运行一天 dry-run 并记录起止时间和结果，再进入生产动作启用门槛。短 GPU smoke 不替代这一天。 |
-| M3 | policy 放置/压力/回放、core 原子租约与等待、ops 薄 launcher | 决策、记账、动作由全局锁串行化；空闲等待释放锁，允许采集、release、confirm、free 推进，重新持锁后重验条件。 |
+| M3 | policy 放置/压力/回放、core 原子租约与等待、ops 薄 launcher | 锁范围、等待与恢复后的重验遵循 DESIGN §4.2 第 5 条（#37）；#17 验证等待能被其他操作解除且保持原子记账。 |
 | M4/M5 | registry/reload 与 TUI 可在稳定契约上并行开发 | registry 接入依赖全局锁、内存准入和事件/在途计数；TUI 只调用 scheduler API。LoRA 结论需版本依据与验证，完整权重登记按现有设计实施。 |
 | M6 | README、回滚演练与退役证据准备 | 按原依赖在 M5 后验收；无 legacy 消费者后才删除；#28 涉及他人服务的停止需其所有者同意。 |
 
@@ -151,7 +151,7 @@
 
 ### Fable 审核与合并门槛
 
-实现与集成由 Codex / gpt-6-astra 完成，Fable 独立审核。沿用每 10 分钟运行的 Fable 审核流程，不另起重复 reviewer，也不以 Astra 自审代替批准。只有 integration 执行合并，且每次合并前重新读取 GitHub reviews、review threads、comments 与 checks，逐项核对：
+实现与集成由 Codex / gpt-6-astra 完成，Fable 独立审核。沿用每 10 分钟运行的 Fable 审核流程，不另起重复 reviewer，也不以 Astra 自审代替批准。Fable 通过后的每次合并均绑定已核验的 head SHA；执行合并前重新读取 GitHub reviews、review threads、comments 与 checks，逐项核对：
 
 1. Fable 审核明确标注 harness/model，并对 **PR 当前完整 head SHA** 无歧义地表示可以合并。共享账号发布的 `COMMENTED` review 可以作为证据，但沉默、旧提交批准、普通 bot 评论或作者自报通过均不算。不能核实归属或 head 时保持 `waiting_review`，列出缺失证据。
 2. 当前 head 的 CI `test` 为 `SUCCESS`，没有未解决的阻塞反馈，依赖 PR 已合入。任何新提交都需重新取得 Fable 审核。
