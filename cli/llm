@@ -6,6 +6,7 @@ import argparse
 import configparser
 from datetime import datetime, timezone
 from http.client import HTTPException
+import importlib
 import json
 import math
 import os
@@ -13,6 +14,7 @@ from pathlib import Path
 import shutil
 import sys
 import time
+from types import SimpleNamespace
 import unicodedata
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -257,8 +259,8 @@ def format_status(snapshot, width=100, now=None):
     return "\n".join(part for line in lines for part in wrap_line(line, width))
 
 
-def build_parser():
-    parser = argparse.ArgumentParser(prog="llm", description="Inspect the LLM scheduler")
+def build_parser(parser_class=argparse.ArgumentParser):
+    parser = parser_class(prog="llm", description="Inspect the LLM scheduler")
     parser.add_argument("--version", action="version", version="0.1.0")
     parser.add_argument("--url", help="Scheduler URL (overrides LLM_URL and config)")
     parser.add_argument("--config", help="Config file (default: ~/.config/llm/config)")
@@ -269,16 +271,35 @@ def build_parser():
     return parser
 
 
+def execute_command(args, client):
+    return client.request("GET", "/v1/state")
+
+
+def tui_app():
+    try:
+        return importlib.import_module("tui.app").SchedulerApp
+    except ImportError:
+        return None
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         config = load_config(path=args.config, url=args.url, timeout=args.timeout)
-        result = SchedulerClient(**config).request("GET", "/v1/state")
+        client = SchedulerClient(**config)
+        if args.command is None and sys.stdout.isatty():
+            app = tui_app()
+            if app is not None:
+                app(client=client, api=SimpleNamespace(**globals())).run()
+                return 0
+        result = execute_command(args, client)
         if getattr(args, "json", False):
             print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
         else:
             print(format_status(result, width=shutil.get_terminal_size((100, 30)).columns))
+        if args.command is None:
+            print("TUI: install with pip install 'llmsvc[tui]' and run llm in a terminal.")
         return 0
     except ClientError as exc:
         print("llm: " + clean_text(exc), file=sys.stderr)
