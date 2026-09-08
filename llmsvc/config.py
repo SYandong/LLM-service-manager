@@ -33,6 +33,10 @@ class SchedulerConfig:
     collectors: dict[str, Any] = field(default_factory=dict)
     state_db_path: str = ""
     max_snapshot_age_seconds: float = 30.0
+    placement_enabled: bool = False
+    placement_wait_seconds: float = 120.0
+    lease_timeout_seconds: float = 900.0
+    lease_probe_seconds: float = 1.0
     model_actions_enabled: bool = False
     free_timeout_seconds: float = 120.0
     wake_timeout_seconds: float = 900.0
@@ -53,12 +57,17 @@ class SchedulerConfig:
         for name in ("sample_interval_seconds", "event_heartbeat_seconds",
                      "request_timeout_seconds", "memory_budget_gb", "host_min_available_gb",
                      "max_snapshot_age_seconds", "free_timeout_seconds", "wake_timeout_seconds",
-                     "action_observe_seconds", "action_poll_seconds"):
+                     "action_observe_seconds", "action_poll_seconds", "placement_wait_seconds",
+                     "lease_timeout_seconds", "lease_probe_seconds"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (float, int)):
                 raise ValueError(f"{name} must be a finite positive number")
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be a finite positive number")
+        if self.placement_wait_seconds > 120:
+            raise ValueError("placement_wait_seconds must not exceed 120")
+        if type(self.placement_enabled) is not bool:
+            raise ValueError("placement_enabled must be a boolean")
         if type(self.model_actions_enabled) is not bool:
             raise ValueError("model_actions_enabled must be a boolean")
         if type(self.read_only) is not bool:

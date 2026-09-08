@@ -12,6 +12,7 @@ from dataclasses import replace
 from llmsvc import __version__
 from llmsvc.actions import ManagedModelTransport, ModelActionController
 from llmsvc.config import load_config
+from llmsvc.leases import PlacementController
 from llmsvc.scheduler import Scheduler
 from llmsvc.server import SchedulerHTTPServer
 from llmsvc.store import IntentStore
@@ -66,14 +67,16 @@ def main():
             config = replace(config, read_only=True)
         collector = build_collector(config)
         transport = None
-        if config.model_actions_enabled:
+        if config.model_actions_enabled or config.placement_enabled:
             transport = ManagedModelTransport(swap_url=config.collectors.get("swap_url", ""),
                 models=config.collectors.get("models", {}), systemctl=config.collectors.get("systemctl", "systemctl"))
         if config.state_db_path:
             store = IntentStore(config.state_db_path, action_lock=threading.RLock(), read_only=config.read_only)
         scheduler = Scheduler(config, collect=collector, store=store, usage=build_usage(collector))
-        if transport is not None:
+        if config.model_actions_enabled:
             scheduler.model_actions = ModelActionController(scheduler, transport)
+        if config.placement_enabled:
+            scheduler.placement = PlacementController(scheduler, transport)
     except (OSError, ValueError, TypeError, ImportError, sqlite3.Error) as exc:
         if store is not None:
             store.close()

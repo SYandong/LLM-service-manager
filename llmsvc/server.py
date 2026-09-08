@@ -129,20 +129,30 @@ class SchedulerHandler(BaseHTTPRequestHandler):
             operation = None
             payload = {}
             wake_model = None
+            lease_id = None
             if self.command == "POST":
-                operation = {"/v1/free": "free", "/v1/pin": "pin", "/v1/reserve": "reserve"}.get(target.path)
+                operation = {"/v1/free": "free", "/v1/pin": "pin", "/v1/reserve": "reserve", "/v1/place": "place"}.get(target.path)
                 if target.path.startswith("/v1/wake/"):
                     operation = "wake"
                     wake_model = unquote(target.path[len("/v1/wake/"):])
+                parts = target.path.split("/")
+                if len(parts) == 5 and parts[:3] == ["", "v1", "place"] and parts[4] in ("confirm", "release"):
+                    operation = parts[4]
+                    lease_id = unquote(parts[3])
+                    if not lease_id or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in lease_id):
+                        raise ValueError("invalid lease id")
             elif self.command == "DELETE":
                 for prefix, op, key in (("/v1/pin/", "unpin", "model"), ("/v1/reserve/", "unreserve", "id")):
                     if target.path.startswith(prefix):
                         operation = op
                         payload[key] = unquote(target.path[len(prefix):])
-            if operation is None or (not dry_run and operation not in ("pin", "unpin", "free", "wake")):
+            if operation is None or (not dry_run and operation not in ("pin", "unpin", "free", "wake", "place", "confirm", "release")):
                 self._reject_write()
                 return
             if not dry_run and operation in ("free", "wake") and (not self.server.scheduler.config.model_actions_enabled or self.server.scheduler.model_actions is None):
+                self._reject_write()
+                return
+            if not dry_run and operation in ("place", "confirm", "release") and (not self.server.scheduler.config.placement_enabled or self.server.scheduler.placement is None):
                 self._reject_write()
                 return
             if self.headers.get("Transfer-Encoding") is not None:
@@ -167,15 +177,24 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 if payload != {}:
                     raise ValueError("wake accepts an empty body")
                 payload = {"model": wake_model}
+            if lease_id is not None:
+                if payload != {}:
+                    raise ValueError("lease transition accepts an empty body")
+                payload = {"lease_id": lease_id}
             if dry_run:
                 result = self.server.scheduler.preview(operation, payload)
+            elif operation in ("place", "confirm", "release"):
+                result = self.server.scheduler.run_placement(operation, payload)
             elif operation in ("free", "wake"):
                 result = self.server.scheduler.run_model_action(operation, payload, source_ip=self.client_address[0])
             else:
                 result = self.server.scheduler.write_pin(operation, payload, source_ip=self.client_address[0])
             self._json(200, result)
         except IntentWriteError as exc:
-            self._json(exc.status, {"error": exc.error})
+            error = {"error": exc.error}
+            if hasattr(exc, "blockers"):
+                error["blockers"] = [asdict(blocker) for blocker in exc.blockers]
+            self._json(exc.status, error)
         except (ValueError, TypeError, UnicodeError):
             self._json(400, {"error": "invalid_request"})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
