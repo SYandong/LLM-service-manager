@@ -369,3 +369,26 @@ def test_measured_goal_removes_stale_estimate_based_insufficiency(tmp_path):
     result = controller.free({"need_gb": 25}, by="caller")
     assert result["status"] == "complete" and result["freed_gb"] == 30
     assert not any(item["reason"] == "insufficient_reclaimable_memory" for item in result["skipped"])
+
+
+def test_older_collection_cannot_overwrite_newer_activity_observation(tmp_path):
+    from llmsvc.state import StateSnapshot
+    entered, release = threading.Event(), threading.Event()
+    class DelayedSnapshot(StateSnapshot):
+        def to_dict(self):
+            entered.set()
+            assert release.wait(1)
+            return super().to_dict()
+    old = DelayedSnapshot(sampled_at=time.time(), activity=(Activity("a", in_flight=0),))
+    new = StateSnapshot(sampled_at=time.time(), activity=(Activity("a", in_flight=1),))
+    observations = iter((old, new))
+    service = Scheduler(SchedulerConfig("127.0.0.1", 8011), lambda: next(observations))
+    worker = threading.Thread(target=service.sample_once)
+    worker.start()
+    try:
+        assert entered.wait(1)
+        service.sample_once()
+    finally:
+        release.set()
+        worker.join(1)
+    assert service.snapshot().activity[0].in_flight == 1
