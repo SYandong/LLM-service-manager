@@ -189,3 +189,19 @@ def test_entrypoint_closes_collector_for_check_once_and_bind_failure(monkeypatch
         entry.main()
     assert exc.value.code == 2
     assert collector.closed == 1
+
+
+def test_failed_store_startup_closes_created_collector(tmp_path, monkeypatch):
+    import pytest
+    import llmsvc.__main__ as entry
+    closed = []
+    collector = SimpleNamespace(close=lambda: closed.append(True))
+    config = SchedulerConfig("127.0.0.1", 8011, state_db_path=str(tmp_path / "missing.sqlite"))
+    monkeypatch.setattr(entry, "load_config", lambda path: config)
+    monkeypatch.setattr(entry, "build_collector", lambda config: collector)
+    monkeypatch.setattr("sys.argv", ["llmsvc", "--config", "unused", "--once"])
+    with pytest.raises(SystemExit) as exc:
+        entry.main()
+    assert exc.value.code == 2
+    assert closed == [True]
+    assert not (tmp_path / "missing.sqlite").exists()
