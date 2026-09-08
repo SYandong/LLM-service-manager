@@ -1,3 +1,4 @@
+# Generated-By: Claude Code / claude-fable-5-1
 # Generated-By: Codex / gpt-6-astra
 name: ci
 on:
@@ -12,7 +13,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: python -m pip install ".[test]"
+      - run: python -m pip install ".[test,tui]"
       - run: python -m pytest -q tests
       - run: python -m llmsvc --help
       - run: llm --help
+      - run: llmsvc-scheduler --config tests/fixtures/core_scheduler.yaml --check-config
+      - name: Import installed optional TUI outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: python -c "from tui.app import SchedulerApp"

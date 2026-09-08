@@ -1,0 +1,15 @@
+{
+  "_comment": "Generated-By: Codex / gpt-6-astra. Edit paths/user for the target container; install never activates the unit. backup_files must all exist under --root; copy sanitized fixture files there for rehearsal.",
+  "prefix": "/opt/llmsvc-scheduler",
+  "unit_path": "/etc/systemd/system/llmsvc-scheduler.service",
+  "config_path": "/etc/llmsvc/scheduler.yaml",
+  "cli_path": "/srv/llmsvc/llm",
+  "state_dir": "/var/lib/llmsvc",
+  "python": "/usr/bin/python3",
+  "user": "root",
+  "backup_files": [
+    "/etc/llama-swap/config.yaml",
+    "/usr/local/sbin/vllm-launch",
+    "/usr/local/sbin/vllm-reaper"
+  ]
+}

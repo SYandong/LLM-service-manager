@@ -10,12 +10,15 @@ description = "A control plane for llama-swap on shared GPU servers"
 requires-python = ">=3.10"
 dependencies = ["PyYAML>=6", "rich>=13"]
 
+[project.scripts]
+llmsvc-scheduler = "llmsvc.__main__:main"
+
 [project.optional-dependencies]
 tui = ["textual>=0.70"]
 test = ["pytest", "huggingface_hub", "openai"]
 
 [tool.setuptools.packages.find]
-include = ["llmsvc", "llmsvc.*"]
+include = ["llmsvc", "llmsvc.*", "tui", "tui.*"]
 
 [tool.setuptools]
 script-files = ["cli/llm"]

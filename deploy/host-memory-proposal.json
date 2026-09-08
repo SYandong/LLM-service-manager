@@ -1,0 +1,18 @@
+{
+  "_comment": "Generated-By: Codex / gpt-6-astra. Reviewable proposal only; no command is executed by this file. Requires explicit final permission before applying the LXC device or scheduler config change.",
+  "container": "llmsvc",
+  "device_name": "llmsvc-host-meminfo",
+  "source": "/proc/meminfo",
+  "target": "/run/llmsvc-host/meminfo",
+  "source_kind": "live host procfs file, not a regular snapshot and not container lxcfs",
+  "readonly": true,
+  "apply_argv": ["lxc", "config", "device", "add", "llmsvc", "llmsvc-host-meminfo", "disk", "source=/proc/meminfo", "path=/run/llmsvc-host/meminfo", "readonly=true"],
+  "rollback_argv": ["lxc", "config", "device", "remove", "llmsvc", "llmsvc-host-meminfo"],
+  "collector_setting": "collectors.host_meminfo_path",
+  "current_value": null,
+  "proposed_value_after_verification": "/run/llmsvc-host/meminfo",
+  "requires_new_producer_service": false,
+  "requires_scheduler_activation": false,
+  "observer_activation_separately_authorized": false,
+  "approval_status": "pending"
+}

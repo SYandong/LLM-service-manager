@@ -1,0 +1,21 @@
+# Generated-By: Codex / gpt-6-astra
+# Bind a specific container address in deployment; loopback is for local checks.
+listen_host: 127.0.0.1
+listen_port: 8011
+# M1 rejects read_only: false; --dry-run also documents staged intent.
+read_only: true
+sample_interval_seconds: 15
+# Bounded, process-local SSE history; persistent events arrive in M2.
+event_history_size: 1000
+event_heartbeat_seconds: 15
+request_timeout_seconds: 10
+# GiB. Candidate thresholds pending the production stakeholder gate.
+memory_budget_gb: 200
+host_min_available_gb: 150
+# No probes configured: state explicitly reports collectors_not_configured.
+# Telemetry supplies build_collector(mapping) and the probe configuration.
+collectors: {}
+# Optional existing intent database, opened read-only. Empty disables persistence reads.
+# The daemon does not create this file or activate live intent/action writes.
+state_db_path: ""
+max_snapshot_age_seconds: 30
