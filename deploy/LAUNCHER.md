@@ -51,6 +51,39 @@ an authorized scheduler maintenance window. Retain unknown/loading budgets and
 pin; release requires proven exit. This condition grants no authority to delete
 SQLite rows, force-revoke a lease or stop an unconfigured unit.
 
+## Placement errors and victim blockers (#14 / #17)
+
+The guarded victim path in merged #99 retains the default-off settings:
+`read_only: true`, `placement_enabled: false`, and `model_actions_enabled: false`.
+Victim execution requires both opt-ins, a confirmed durable daemon account and
+an active configured unit with the matching current `LLMSVC_LEASE_ID`, followed
+by fresh protection checks. These are implementation prerequisites, not
+permission to enable the path in production.
+
+| Response field/value | Meaning |
+|---|---|
+| HTTP503 `placement_action_blocked` | Current unit/lease identity did not authorize the proposed victim stop. |
+| HTTP503 `placement_action_failed` | The action attempt reported a sanitized failure; inspect its blocker reason. |
+| HTTP503 `placement_no_progress` | Victim exit and durable account release could not be confirmed. |
+| `blockers[].reason: unit_identity_unconfirmed` | The victim's currently observed unit/lease identity was not verified. |
+| `blockers[].reason: unleased_model` | The model has no eligible confirmed durable account; this path cannot adopt or stop it speculatively. |
+| `blockers[].reason: operation_in_progress` | Another pending model operation or free operation protects the model from a duplicate stop. |
+
+Blocker reasons can also appear in previews or the final HTTP409
+`placement_timeout`; they are not separate stop commands. On a placement-stage
+failure the launcher logs the response and exits unsuccessfully, without starting
+or stopping a unit. None of these errors/reasons authorizes the launcher to stop
+its own unit, a named victim or another workload, or to clear/revoke a lease.
+They must not be handled as the later **confirm** HTTP409, whose existing cleanup
+is restricted to this invocation's exact matching lease token.
+
+An action error may follow a positively observed exit: the current placement
+still fails without granting a new lease. Consult `placement_action_result` and
+fresh observations; preserve confirmed partial progress and retain budgets whose
+exit is still unproven. Keep the ledger intact. Further allocation/accounting is
+the scheduler's responsibility; there is no speculative cleanup or retry stop in
+the launcher.
+
 Do not replace the installed launcher from this draft. Keep a complete original
 script backup, finish the scheduler lease/reserve/recovery integration and the
 full-day alternate-port dry-run gate, then obtain the production transition
