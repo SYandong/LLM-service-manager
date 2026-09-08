@@ -37,3 +37,13 @@ placement_wait_seconds: 120
 lease_timeout_seconds: 900
 # Per-inspection cap and per-round reconciliation budget; every probe is read-only.
 lease_probe_seconds: 1
+
+# Optional UI-only source relay into the existing /v1/events stream.
+# Requires collectors.swap_url and an explicit collectors.models allowlist.
+# Does not enable placement/actions or make data-plane events trusted for quiet.
+data_plane_events_enabled: false
+data_plane_event_capacity: 256
+data_plane_event_batch_size: 128
+data_plane_event_interval_seconds: 0.2
+data_plane_event_timeout_seconds: 2
+data_plane_event_reconnect_seconds: 1
