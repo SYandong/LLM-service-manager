@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.1.0-alpha.2 — 2026-09-08
+
+Incremental preview after alpha.1; Python distribution `0.1.0a2`.
+Includes #80, #81, #82, #84, #85, #86, #87, #88, #89, #91, #92, #96, #97 and #99.
+
+### Added and corrected
+
+- Standalone and TUI pin/unpin, free and wake commands with authoritative owner
+  display, explicit partial/failed outcomes, separate response waits, measured
+  release versus estimates, and cancel-focused RAM-free confirmation.
+- TUI f/p/w shortcuts prefill commands for explicit submission; pin duration
+  stays required and focused input/drafts are preserved.
+- Separately opt-in guarded free/wake execution with observed completion and
+  fresh memory measurements; late older samples cannot replace newer activity.
+- Separately opt-in direct-fit placement, durable model-unique leases,
+  confirm/release endpoints, restart reconciliation and bounded admission waits.
+- Placement can stop one policy-selected, durably accounted victim, confirm
+  observed exit/account release and replan before a grant when both placement
+  and model-action opt-ins are enabled (#99). Unknown or unleased daemons remain
+  protected; the overall wait stays bounded.
+- Retained leases with missing or changed trusted model identities emit a
+  diagnostic, preserving budget and pin. Restoring verified original identity
+  and reopening the same ledger enables existing reconciliation (#96).
+- Bounded cached-base lifecycle tooling and measured isolated evidence (#80);
+  current directory/partial-acceptance guidance (#86).
+- Pinned v252 watcher-only native-generation fixture and measured records (#91),
+  plus single-trigger adoption/settlement design wording (#87). These do not
+  enable a notifier: generation visibility and generic completion logs do not
+  establish old-server settlement.
+- Bounded sanitized data-plane event relay adapter (#92), with explicit local
+  discard reporting. Scheduler bridging and dual-source/live-latency acceptance
+  remain pending; this adapter alone starts no subscription.
+- RAM-confirmation regression assertions tolerate background state polls while
+  proving exactly one confirmed write and a subsequent refresh (#97).
+- Release cadence now follows batches of five merged non-release-only PRs,
+  without a daily cap or complete-feature-group prerequisite (#90).
+
+### Upgrade and rollback
+
+Writable intent-store opens migrate schema v1 to v2 while preserving pins and
+reservations. Read-only v1 opens do not migrate. Older binaries reject v2:
+back up the database before upgrade and reconcile live allocations before any
+rollback; never delete an active allocation ledger to downgrade. Keep allocated
+models in the trusted collector configuration until their accounts can be
+safely reconciled. Removing one can block admission with an unobserved lease;
+restore the verified original mapping and reconcile the same ledger. The full
+operational runbook remains under review in #98; this release authorizes no
+restart or live recovery.
+
+### Experimental and incomplete
+
+Read-only remains the default. Model actions and placement have separate,
+default-off opt-ins; installation or publication enables neither. Placement of durably accounted victims is available for evaluation; unleased
+daemon handling, orphan cleanup, reserve evacuation and proven fault cleanup
+remain incomplete. Live launcher/latency/release acceptance is still pending.
+
+Dual-source event relay, native reload adoption/old-server settlement, reliable
+quiet evidence and LoRA acceptance remain incomplete. Automatic reload stays
+disabled. The isolated base-model result does not certify these requirements.
+Required day/week observations, administrator/threshold decisions, production
+rollout and owner-approved legacy retirement remain separate gates. No milestone
+is completed by this alpha and no production observer is started.
+
 ## 0.1.0-alpha.1 — 2026-09-08
 
 First preview of the llama-swap control plane. Python distribution version:
