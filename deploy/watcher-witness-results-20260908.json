@@ -1,0 +1,2066 @@
+{
+  "_comment": "Generated-By: Codex / gpt-6-astra",
+  "scope": "Actual unchanged pinned v252, owned CPU dummy processes and mock upstream; no GPU, production, notifier or settlement certification",
+  "upstream_commit": "e31a1adee494bb7a578e2a97ec891b3e809899dc",
+  "binary_sha256": "32aea60b5c1be987c27dde6ea4aaa84f9be7ad93eaede011295fad1e276e80ea",
+  "provenance": {
+    "_comment": "Generated-By: Codex / gpt-6-astra",
+    "measured_harness_sha256": "51127ee70e692c55ac349344d573d4c0c4fa1492bee04d53b639ff834d8d9d84",
+    "reused_cleanup_sha256": "439c12b5060dc4059212d9324f14850927bc46fc9dddb6d69bb53de5615cde85",
+    "post_measurement_delta": "Only failed/truncated HTTP body diagnostics hardened after these successful actual native responses; offline regressions cover that error path."
+  },
+  "sanitization": "Private argv/paths and repetitive samples omitted. Selected exact native envelopes, binding digests, process identities and timestamps preserved. Full original JSON SHA256 references identify private raw files.",
+  "cases": [
+    {
+      "scenario": "deadline",
+      "status": "ok",
+      "started_at": "2026-09-08T10:48:44.648885Z",
+      "ended_at": "2026-09-08T10:48:51.915693Z",
+      "elapsed_seconds": 7.455015324987471,
+      "single_trigger": {
+        "mode": "watcher_only",
+        "atomic_replacements": 1,
+        "reload_signals": 0,
+        "fallback_writes": 0
+      },
+      "binding": {
+        "old_generation": "gen_a9caa8088e0d4914bc1c2325aa961125",
+        "new_generation": "gen_e114f50df7b947be90d8f020fd7d049b",
+        "old_file_sha256": "803f2a1fbf0f69b7d5d723044bb2c22abe359e4f4d20eada24caf0a4a90d3f16",
+        "candidate_sha256": "15354af0ece4f855e660ffef6c7a272b88d3f47d11ca6c524d493d0a6402ed3d",
+        "service_identity": {
+          "pid": 135345,
+          "start_ticks": "16502931",
+          "state": "R"
+        }
+      },
+      "replacement": {
+        "at": "2026-09-08T10:48:47.893837Z",
+        "monotonic": 165032.554562487,
+        "prior_mtime_ns": 1788864524643652643,
+        "prior_size": 757,
+        "candidate_sha256": "15354af0ece4f855e660ffef6c7a272b88d3f47d11ca6c524d493d0a6402ed3d",
+        "candidate_mtime_ns": 1788864527887628617,
+        "candidate_size": 757
+      },
+      "classification": {
+        "candidate_generation_visible": false,
+        "settlement_confirmed": false,
+        "reconciliation_required": true,
+        "reasons": [
+          "native_generation_not_confirmed",
+          "deadline_expired",
+          "independent_old_server_settlement_unavailable"
+        ],
+        "barrier_must_remain": true
+      },
+      "outcome": "reconciliation_required",
+      "last_fixture_zero": {
+        "at": "2026-09-08T10:48:47.620734Z",
+        "monotonic": 165032.281481246,
+        "active": 0,
+        "certified_quiet": false
+      },
+      "active_at_replace": 2,
+      "generic_completion_observed": {
+        "at": "2026-09-08T10:48:49.588036Z",
+        "monotonic": 165034.248762444,
+        "old_model_process": {
+          "recorded": true,
+          "identity": {
+            "pid": 135679,
+            "start_ticks": "16503228",
+            "state": "R"
+          },
+          "alive": false
+        },
+        "old_stop_command": {
+          "recorded": true,
+          "identity": {
+            "pid": 135773,
+            "start_ticks": "16503416",
+            "state": "R",
+            "at": "2026-09-08T10:48:49.538801Z",
+            "monotonic": 165034.199517891
+          },
+          "alive": false
+        },
+        "is_independent_settlement_witness": false
+      },
+      "request_summary": {
+        "completed": 2,
+        "http_5xx": 0,
+        "truncated_stream": 0,
+        "timeout": 0,
+        "http_error": 0
+      },
+      "request_results": [
+        {
+          "id": "req-0",
+          "started_at": "2026-09-08T10:48:47.621139Z",
+          "started_mono": 165032.281834704,
+          "http_status": 200,
+          "status": "completed",
+          "ended_mono": 165036.575880929,
+          "ended_at": "2026-09-08T10:48:51.915179Z",
+          "duration_seconds": 4.294046
+        },
+        {
+          "id": "req-1",
+          "started_at": "2026-09-08T10:48:47.622306Z",
+          "started_mono": 165032.282999276,
+          "http_status": 200,
+          "status": "completed",
+          "ended_mono": 165036.575677581,
+          "ended_at": "2026-09-08T10:48:51.914983Z",
+          "duration_seconds": 4.292678
+        }
+      ],
+      "observed_reload_log_count": 1,
+      "stop_exit": {
+        "exit_code": 0,
+        "at": "2026-09-08T10:48:49.538964Z"
+      },
+      "independent_settlement_witness": null,
+      "retained_recovery_state": {
+        "old_generation": "gen_a9caa8088e0d4914bc1c2325aa961125",
+        "new_generation": "gen_e114f50df7b947be90d8f020fd7d049b",
+        "old_file_sha256": "803f2a1fbf0f69b7d5d723044bb2c22abe359e4f4d20eada24caf0a4a90d3f16",
+        "candidate_sha256": "15354af0ece4f855e660ffef6c7a272b88d3f47d11ca6c524d493d0a6402ed3d",
+        "service_identity": {
+          "pid": 135345,
+          "start_ticks": "16502931",
+          "state": "R"
+        },
+        "config_committed": true,
+        "barrier_must_remain": true
+      },
+      "final_file_sha256": "15354af0ece4f855e660ffef6c7a272b88d3f47d11ca6c524d493d0a6402ed3d",
+      "cleanup": {
+        "owned_session_empty": true,
+        "owned_temp_removed": true
+      },
+      "verification_deadline_mono": 165032.604679427,
+      "diagnostic_phase_started_mono": 165032.612736259,
+      "raw_evidence_file": "watcher-witness-deadline-941f778b4762433d9081dffa55421050.json",
+      "raw_evidence_sha256": "0d67449803c935c9fd3f8e5932c0b2fc32f9921618d52db56e08a906351e7cbb",
+      "old_native_after_candidate_write_observed": true,
+      "selected_native_samples": [
+        {
+          "at": "2026-09-08T10:48:45.513038Z",
+          "monotonic": 165030.173749619,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "5e2afb89f94542dcbdb03053e10571e8",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "5e2afb89f94542dcbdb03053e10571e8",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_a9caa8088e0d4914bc1c2325aa961125\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_a9caa8088e0d4914bc1c2325aa961125",
+          "response_received_at": "2026-09-08T10:48:45.516248Z",
+          "response_received_mono": 165030.176965457
+        },
+        {
+          "at": "2026-09-08T10:48:47.894000Z",
+          "monotonic": 165032.554706897,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "2eca5dbb7ea84097bc7b7b67ffa9d93d",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "2eca5dbb7ea84097bc7b7b67ffa9d93d",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_a9caa8088e0d4914bc1c2325aa961125\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_a9caa8088e0d4914bc1c2325aa961125",
+          "response_received_at": "2026-09-08T10:48:47.897904Z",
+          "response_received_mono": 165032.55861632,
+          "file_sha256": "15354af0ece4f855e660ffef6c7a272b88d3f47d11ca6c524d493d0a6402ed3d",
+          "service_identity": {
+            "pid": 135345,
+            "start_ticks": "16502931",
+            "state": "S"
+          },
+          "old_model_process": {
+            "recorded": true,
+            "identity": {
+              "pid": 135679,
+              "start_ticks": "16503228",
+              "state": "R"
+            },
+            "alive": true
+          },
+          "old_stop_command": {
+            "recorded": false,
+            "alive": null
+          }
+        },
+        {
+          "at": "2026-09-08T10:48:47.951387Z",
+          "monotonic": 165032.612116624,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "00696b65f3f74e5e997905e9195c7b6b",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "error": "hard deadline exceeded",
+          "response_received_at": "2026-09-08T10:48:47.951688Z",
+          "response_received_mono": 165032.612395082,
+          "file_sha256": "15354af0ece4f855e660ffef6c7a272b88d3f47d11ca6c524d493d0a6402ed3d",
+          "service_identity": {
+            "pid": 135345,
+            "start_ticks": "16502931",
+            "state": "S"
+          },
+          "old_model_process": {
+            "recorded": true,
+            "identity": {
+              "pid": 135679,
+              "start_ticks": "16503228",
+              "state": "R"
+            },
+            "alive": true
+          },
+          "old_stop_command": {
+            "recorded": false,
+            "alive": null
+          }
+        }
+      ],
+      "total_native_samples": 3,
+      "relevant_log_lines": [
+        "[INFO] reloading configuration",
+        "[INFO] configuration reloaded"
+      ]
+    },
+    {
+      "scenario": "delayed-stop",
+      "status": "ok",
+      "started_at": "2026-09-08T10:48:24.233674Z",
+      "ended_at": "2026-09-08T10:48:31.905102Z",
+      "elapsed_seconds": 7.902891559991986,
+      "single_trigger": {
+        "mode": "watcher_only",
+        "atomic_replacements": 1,
+        "reload_signals": 0,
+        "fallback_writes": 0
+      },
+      "binding": {
+        "old_generation": "gen_117d179631144634a7168277a5a8848d",
+        "new_generation": "gen_8b976c5d22d64f17b78492c5b3781271",
+        "old_file_sha256": "180e851e55c9f0c2e538ea5712759a871c85cba0b30519c405af166917a00862",
+        "candidate_sha256": "4c80d23e932c045eeca9a630b450cd0a2c0b3a038474cabef8783b6805ccd034",
+        "service_identity": {
+          "pid": 134093,
+          "start_ticks": "16500890",
+          "state": "R"
+        }
+      },
+      "replacement": {
+        "at": "2026-09-08T10:48:27.879718Z",
+        "monotonic": 165012.540450398,
+        "prior_mtime_ns": 1788864504227803814,
+        "prior_size": 765,
+        "candidate_sha256": "4c80d23e932c045eeca9a630b450cd0a2c0b3a038474cabef8783b6805ccd034",
+        "candidate_mtime_ns": 1788864507871776836,
+        "candidate_size": 765
+      },
+      "classification": {
+        "candidate_generation_visible": true,
+        "settlement_confirmed": false,
+        "reconciliation_required": true,
+        "reasons": [
+          "independent_old_server_settlement_unavailable"
+        ],
+        "barrier_must_remain": true
+      },
+      "outcome": "candidate_visible_settlement_unproven",
+      "last_fixture_zero": {
+        "at": "2026-09-08T10:48:27.614454Z",
+        "monotonic": 165012.275202192,
+        "active": 0,
+        "certified_quiet": false
+      },
+      "active_at_replace": 2,
+      "generic_completion_observed": {
+        "at": "2026-09-08T10:48:31.529384Z",
+        "monotonic": 165016.190120041,
+        "old_model_process": {
+          "recorded": true,
+          "identity": {
+            "pid": 134274,
+            "start_ticks": "16501227",
+            "state": "R"
+          },
+          "alive": false
+        },
+        "old_stop_command": {
+          "recorded": true,
+          "identity": {
+            "pid": 134320,
+            "start_ticks": "16501413",
+            "state": "R",
+            "at": "2026-09-08T10:48:29.510421Z",
+            "monotonic": 165014.171135703
+          },
+          "alive": false
+        },
+        "is_independent_settlement_witness": false
+      },
+      "request_summary": {
+        "completed": 2,
+        "http_5xx": 0,
+        "truncated_stream": 0,
+        "timeout": 0,
+        "http_error": 0
+      },
+      "request_results": [
+        {
+          "id": "req-0",
+          "started_at": "2026-09-08T10:48:27.614834Z",
+          "started_mono": 165012.27553073,
+          "http_status": 200,
+          "status": "completed",
+          "ended_mono": 165016.565525503,
+          "ended_at": "2026-09-08T10:48:31.904827Z",
+          "duration_seconds": 4.289995
+        },
+        {
+          "id": "req-1",
+          "started_at": "2026-09-08T10:48:27.615698Z",
+          "started_mono": 165012.276393814,
+          "http_status": 200,
+          "status": "completed",
+          "ended_mono": 165016.565241345,
+          "ended_at": "2026-09-08T10:48:31.904547Z",
+          "duration_seconds": 4.288848
+        }
+      ],
+      "observed_reload_log_count": 1,
+      "stop_exit": {
+        "exit_code": 0,
+        "at": "2026-09-08T10:48:31.510978Z"
+      },
+      "independent_settlement_witness": null,
+      "retained_recovery_state": {
+        "old_generation": "gen_117d179631144634a7168277a5a8848d",
+        "new_generation": "gen_8b976c5d22d64f17b78492c5b3781271",
+        "old_file_sha256": "180e851e55c9f0c2e538ea5712759a871c85cba0b30519c405af166917a00862",
+        "candidate_sha256": "4c80d23e932c045eeca9a630b450cd0a2c0b3a038474cabef8783b6805ccd034",
+        "service_identity": {
+          "pid": 134093,
+          "start_ticks": "16500890",
+          "state": "R"
+        },
+        "config_committed": true,
+        "barrier_must_remain": true
+      },
+      "final_file_sha256": "4c80d23e932c045eeca9a630b450cd0a2c0b3a038474cabef8783b6805ccd034",
+      "cleanup": {
+        "owned_session_empty": true,
+        "owned_temp_removed": true
+      },
+      "verification_deadline_mono": 165018.540806245,
+      "diagnostic_phase_started_mono": 165014.232845591,
+      "raw_evidence_file": "watcher-witness-delayed-stop-ff41e01efe0248afa361169aa4766219.json",
+      "raw_evidence_sha256": "67200c03b4ac6e18f5296e6b2180a12d7230fa0cb049a93b246de54f4e7efc2c",
+      "first_new_response_seconds_after_replace": 1.691924,
+      "old_native_after_candidate_write_observed": true,
+      "selected_native_samples": [
+        {
+          "at": "2026-09-08T10:48:25.508834Z",
+          "monotonic": 165010.169550995,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "f335b74146b346c28200448b6b884732",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "f335b74146b346c28200448b6b884732",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_117d179631144634a7168277a5a8848d\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_117d179631144634a7168277a5a8848d",
+          "response_received_at": "2026-09-08T10:48:25.511479Z",
+          "response_received_mono": 165010.172187827
+        },
+        {
+          "at": "2026-09-08T10:48:27.880144Z",
+          "monotonic": 165012.540857365,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "15b6f127e2b549e9bc818ab7b6d0cedd",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "15b6f127e2b549e9bc818ab7b6d0cedd",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_117d179631144634a7168277a5a8848d\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_117d179631144634a7168277a5a8848d",
+          "response_received_at": "2026-09-08T10:48:27.884518Z",
+          "response_received_mono": 165012.545236925,
+          "file_sha256": "4c80d23e932c045eeca9a630b450cd0a2c0b3a038474cabef8783b6805ccd034",
+          "service_identity": {
+            "pid": 134093,
+            "start_ticks": "16500890",
+            "state": "S"
+          },
+          "old_model_process": {
+            "recorded": true,
+            "identity": {
+              "pid": 134274,
+              "start_ticks": "16501227",
+              "state": "R"
+            },
+            "alive": true
+          },
+          "old_stop_command": {
+            "recorded": false,
+            "alive": null
+          }
+        },
+        {
+          "at": "2026-09-08T10:48:29.568033Z",
+          "monotonic": 165014.228753649,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "cc7432d7f93d415d83ec78e2eb151833",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "cc7432d7f93d415d83ec78e2eb151833",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_8b976c5d22d64f17b78492c5b3781271\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_8b976c5d22d64f17b78492c5b3781271",
+          "response_received_at": "2026-09-08T10:48:29.571658Z",
+          "response_received_mono": 165014.232374284,
+          "file_sha256": "4c80d23e932c045eeca9a630b450cd0a2c0b3a038474cabef8783b6805ccd034",
+          "service_identity": {
+            "pid": 134093,
+            "start_ticks": "16500890",
+            "state": "S"
+          },
+          "old_model_process": {
+            "recorded": true,
+            "identity": {
+              "pid": 134274,
+              "start_ticks": "16501227",
+              "state": "R"
+            },
+            "alive": true
+          },
+          "old_stop_command": {
+            "recorded": true,
+            "identity": {
+              "pid": 134320,
+              "start_ticks": "16501413",
+              "state": "R",
+              "at": "2026-09-08T10:48:29.510421Z",
+              "monotonic": 165014.171135703
+            },
+            "alive": true
+          }
+        }
+      ],
+      "total_native_samples": 18,
+      "relevant_log_lines": [
+        "[INFO] reloading configuration",
+        "[INFO] configuration reloaded"
+      ]
+    },
+    {
+      "scenario": "failed-stop",
+      "status": "ok",
+      "started_at": "2026-09-08T10:47:48.712752Z",
+      "ended_at": "2026-09-08T10:48:24.025716Z",
+      "elapsed_seconds": 35.536776274006115,
+      "single_trigger": {
+        "mode": "watcher_only",
+        "atomic_replacements": 1,
+        "reload_signals": 0,
+        "fallback_writes": 0
+      },
+      "binding": {
+        "old_generation": "gen_4bb678aef9d145b6a6797c69a4eb8e64",
+        "new_generation": "gen_72882b478fe242619d99c50fb8eed202",
+        "old_file_sha256": "9020e8e06b9977f3f30c3ba1200db2cc9730a97eb4f464540e395232360c68d9",
+        "candidate_sha256": "9c0cd3ae74c3ca9269ac00a2d988dab2bb6b3791d08b4607707b196c9f35c94f",
+        "service_identity": {
+          "pid": 132150,
+          "start_ticks": "16497337",
+          "state": "R"
+        }
+      },
+      "replacement": {
+        "at": "2026-09-08T10:47:52.403130Z",
+        "monotonic": 164977.063860137,
+        "prior_mtime_ns": 1788864468708066704,
+        "prior_size": 760,
+        "candidate_sha256": "9c0cd3ae74c3ca9269ac00a2d988dab2bb6b3791d08b4607707b196c9f35c94f",
+        "candidate_mtime_ns": 1788864472396039416,
+        "candidate_size": 760
+      },
+      "classification": {
+        "candidate_generation_visible": true,
+        "settlement_confirmed": false,
+        "reconciliation_required": true,
+        "reasons": [
+          "independent_old_server_settlement_unavailable"
+        ],
+        "barrier_must_remain": true
+      },
+      "outcome": "candidate_visible_settlement_unproven",
+      "last_fixture_zero": {
+        "at": "2026-09-08T10:47:52.137649Z",
+        "monotonic": 164976.798397092,
+        "active": 0,
+        "certified_quiet": false
+      },
+      "active_at_replace": 2,
+      "generic_completion_observed": {
+        "at": "2026-09-08T10:48:24.025236Z",
+        "monotonic": 165008.685970513,
+        "old_model_process": {
+          "recorded": true,
+          "identity": {
+            "pid": 132405,
+            "start_ticks": "16497680",
+            "state": "R"
+          },
+          "alive": false
+        },
+        "old_stop_command": {
+          "recorded": true,
+          "identity": {
+            "pid": 132582,
+            "start_ticks": "16497866",
+            "state": "R",
+            "at": "2026-09-08T10:47:54.044459Z",
+            "monotonic": 164978.705173676
+          },
+          "alive": false
+        },
+        "is_independent_settlement_witness": false
+      },
+      "request_summary": {
+        "completed": 2,
+        "http_5xx": 0,
+        "truncated_stream": 0,
+        "timeout": 0,
+        "http_error": 0
+      },
+      "request_results": [
+        {
+          "id": "req-0",
+          "started_at": "2026-09-08T10:47:52.138136Z",
+          "started_mono": 164976.798830659,
+          "http_status": 200,
+          "status": "completed",
+          "ended_mono": 164981.10507884,
+          "ended_at": "2026-09-08T10:47:56.444379Z",
+          "duration_seconds": 4.306248
+        },
+        {
+          "id": "req-1",
+          "started_at": "2026-09-08T10:47:52.139552Z",
+          "started_mono": 164976.800246999,
+          "http_status": 200,
+          "status": "completed",
+          "ended_mono": 164981.085113166,
+          "ended_at": "2026-09-08T10:47:56.424416Z",
+          "duration_seconds": 4.284866
+        }
+      ],
+      "observed_reload_log_count": 1,
+      "stop_exit": {
+        "exit_code": 7,
+        "at": "2026-09-08T10:47:54.044547Z"
+      },
+      "independent_settlement_witness": null,
+      "retained_recovery_state": {
+        "old_generation": "gen_4bb678aef9d145b6a6797c69a4eb8e64",
+        "new_generation": "gen_72882b478fe242619d99c50fb8eed202",
+        "old_file_sha256": "9020e8e06b9977f3f30c3ba1200db2cc9730a97eb4f464540e395232360c68d9",
+        "candidate_sha256": "9c0cd3ae74c3ca9269ac00a2d988dab2bb6b3791d08b4607707b196c9f35c94f",
+        "service_identity": {
+          "pid": 132150,
+          "start_ticks": "16497337",
+          "state": "R"
+        },
+        "config_committed": true,
+        "barrier_must_remain": true
+      },
+      "final_file_sha256": "9c0cd3ae74c3ca9269ac00a2d988dab2bb6b3791d08b4607707b196c9f35c94f",
+      "cleanup": {
+        "owned_session_empty": true,
+        "owned_temp_removed": true
+      },
+      "verification_deadline_mono": 164983.064075186,
+      "diagnostic_phase_started_mono": 164978.736645942,
+      "raw_evidence_file": "watcher-witness-failed-stop-a8404b3a1f83429586715b64885a2afa.json",
+      "raw_evidence_sha256": "7117b82bec15c2272db28bbf87dcfb4111d2237f6120e27a904cc96ce4176f41",
+      "first_new_response_seconds_after_replace": 1.672233,
+      "old_native_after_candidate_write_observed": true,
+      "selected_native_samples": [
+        {
+          "at": "2026-09-08T10:47:50.030856Z",
+          "monotonic": 164974.691565884,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "03a945da0fae4e238de5e96c89e0fcdc",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "03a945da0fae4e238de5e96c89e0fcdc",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_4bb678aef9d145b6a6797c69a4eb8e64\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_4bb678aef9d145b6a6797c69a4eb8e64",
+          "response_received_at": "2026-09-08T10:47:50.034591Z",
+          "response_received_mono": 164974.695299998
+        },
+        {
+          "at": "2026-09-08T10:47:52.403410Z",
+          "monotonic": 164977.064121675,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "c0e872727ac743fa9d16cdcaf7bbbfa6",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "c0e872727ac743fa9d16cdcaf7bbbfa6",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_4bb678aef9d145b6a6797c69a4eb8e64\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_4bb678aef9d145b6a6797c69a4eb8e64",
+          "response_received_at": "2026-09-08T10:47:52.407523Z",
+          "response_received_mono": 164977.068238087,
+          "file_sha256": "9c0cd3ae74c3ca9269ac00a2d988dab2bb6b3791d08b4607707b196c9f35c94f",
+          "service_identity": {
+            "pid": 132150,
+            "start_ticks": "16497337",
+            "state": "S"
+          },
+          "old_model_process": {
+            "recorded": true,
+            "identity": {
+              "pid": 132405,
+              "start_ticks": "16497680",
+              "state": "R"
+            },
+            "alive": true
+          },
+          "old_stop_command": {
+            "recorded": false,
+            "alive": null
+          }
+        },
+        {
+          "at": "2026-09-08T10:47:54.072659Z",
+          "monotonic": 164978.733391594,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "d0c3b58131874a789e5e64ff110fe547",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "d0c3b58131874a789e5e64ff110fe547",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_72882b478fe242619d99c50fb8eed202\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_72882b478fe242619d99c50fb8eed202",
+          "response_received_at": "2026-09-08T10:47:54.075376Z",
+          "response_received_mono": 164978.736092806,
+          "file_sha256": "9c0cd3ae74c3ca9269ac00a2d988dab2bb6b3791d08b4607707b196c9f35c94f",
+          "service_identity": {
+            "pid": 132150,
+            "start_ticks": "16497337",
+            "state": "S"
+          },
+          "old_model_process": {
+            "recorded": true,
+            "identity": {
+              "pid": 132405,
+              "start_ticks": "16497680",
+              "state": "R"
+            },
+            "alive": true
+          },
+          "old_stop_command": {
+            "recorded": true,
+            "identity": {
+              "pid": 132582,
+              "start_ticks": "16497866",
+              "state": "R",
+              "at": "2026-09-08T10:47:54.044459Z",
+              "monotonic": 164978.705173676
+            },
+            "alive": false
+          }
+        }
+      ],
+      "total_native_samples": 18,
+      "relevant_log_lines": [
+        "[INFO] reloading configuration",
+        "[WARN] [fixture] stop signal failed: exit status 7",
+        "[INFO] configuration reloaded"
+      ]
+    },
+    {
+      "scenario": "invalid-candidate",
+      "status": "ok",
+      "started_at": "2026-09-08T10:48:24.297123Z",
+      "ended_at": "2026-09-08T10:48:36.903164Z",
+      "elapsed_seconds": 12.796344183007022,
+      "single_trigger": {
+        "mode": "watcher_only",
+        "atomic_replacements": 1,
+        "reload_signals": 0,
+        "fallback_writes": 0
+      },
+      "binding": {
+        "old_generation": "gen_bf9ec56f74154d1d82faea1a43ff9c4e",
+        "new_generation": "gen_7336eaeee7fe42559b1a3945daca2c45",
+        "old_file_sha256": "4cd8d236ab7c14576bf0c78d86f3a7946c5949629fc1052a5ebe76d9ba8b0b4f",
+        "candidate_sha256": "f48f8a0c82d97294183bb98014c124e187a3747e4d148a8ac098174bbd48ed1d",
+        "service_identity": {
+          "pid": 134140,
+          "start_ticks": "16500896",
+          "state": "R"
+        }
+      },
+      "replacement": {
+        "at": "2026-09-08T10:48:27.890311Z",
+        "monotonic": 165012.551027695,
+        "prior_mtime_ns": 1788864504291803340,
+        "prior_size": 770,
+        "candidate_sha256": "f48f8a0c82d97294183bb98014c124e187a3747e4d148a8ac098174bbd48ed1d",
+        "candidate_mtime_ns": 1788864507883776747,
+        "candidate_size": 22
+      },
+      "classification": {
+        "candidate_generation_visible": false,
+        "settlement_confirmed": false,
+        "reconciliation_required": true,
+        "reasons": [
+          "native_generation_not_confirmed",
+          "deadline_expired",
+          "independent_old_server_settlement_unavailable"
+        ],
+        "barrier_must_remain": true
+      },
+      "outcome": "reconciliation_required",
+      "last_fixture_zero": {
+        "at": "2026-09-08T10:48:27.625682Z",
+        "monotonic": 165012.286418465,
+        "active": 0,
+        "certified_quiet": false
+      },
+      "active_at_replace": 2,
+      "request_summary": {
+        "completed": 2,
+        "http_5xx": 0,
+        "truncated_stream": 0,
+        "timeout": 0,
+        "http_error": 0
+      },
+      "request_results": [
+        {
+          "id": "req-0",
+          "started_at": "2026-09-08T10:48:27.626049Z",
+          "started_mono": 165012.286744593,
+          "http_status": 200,
+          "status": "completed",
+          "ended_mono": 165016.585712865,
+          "ended_at": "2026-09-08T10:48:31.925019Z",
+          "duration_seconds": 4.298968
+        },
+        {
+          "id": "req-1",
+          "started_at": "2026-09-08T10:48:27.627015Z",
+          "started_mono": 165012.287712066,
+          "http_status": 200,
+          "status": "completed",
+          "ended_mono": 165016.683637745,
+          "ended_at": "2026-09-08T10:48:32.022943Z",
+          "duration_seconds": 4.395926
+        }
+      ],
+      "observed_reload_log_count": 1,
+      "stop_exit": null,
+      "independent_settlement_witness": null,
+      "retained_recovery_state": {
+        "old_generation": "gen_bf9ec56f74154d1d82faea1a43ff9c4e",
+        "new_generation": "gen_7336eaeee7fe42559b1a3945daca2c45",
+        "old_file_sha256": "4cd8d236ab7c14576bf0c78d86f3a7946c5949629fc1052a5ebe76d9ba8b0b4f",
+        "candidate_sha256": "f48f8a0c82d97294183bb98014c124e187a3747e4d148a8ac098174bbd48ed1d",
+        "service_identity": {
+          "pid": 134140,
+          "start_ticks": "16500896",
+          "state": "R"
+        },
+        "config_committed": true,
+        "barrier_must_remain": true
+      },
+      "final_file_sha256": "f48f8a0c82d97294183bb98014c124e187a3747e4d148a8ac098174bbd48ed1d",
+      "cleanup": {
+        "owned_session_empty": true,
+        "owned_temp_removed": true
+      },
+      "verification_deadline_mono": 165018.551129325,
+      "diagnostic_phase_started_mono": 165018.552336711,
+      "raw_evidence_file": "watcher-witness-invalid-candidate-b4978d395c47413498f4afae350e32eb.json",
+      "raw_evidence_sha256": "5ad8360ee1a02a0fa132f6499c752f17ef529ddddee2e05de095dab89857b432",
+      "old_native_after_candidate_write_observed": true,
+      "selected_native_samples": [
+        {
+          "at": "2026-09-08T10:48:25.518606Z",
+          "monotonic": 165010.179317328,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "3331566339c049fe8b80a7dc378a0c12",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "3331566339c049fe8b80a7dc378a0c12",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_bf9ec56f74154d1d82faea1a43ff9c4e\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_bf9ec56f74154d1d82faea1a43ff9c4e",
+          "response_received_at": "2026-09-08T10:48:25.522411Z",
+          "response_received_mono": 165010.183120202
+        },
+        {
+          "at": "2026-09-08T10:48:27.890447Z",
+          "monotonic": 165012.551153315,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "dcc3ad1b04be4fe1a2bde2f1450e35b2",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "dcc3ad1b04be4fe1a2bde2f1450e35b2",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_bf9ec56f74154d1d82faea1a43ff9c4e\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_bf9ec56f74154d1d82faea1a43ff9c4e",
+          "response_received_at": "2026-09-08T10:48:27.892633Z",
+          "response_received_mono": 165012.553357609,
+          "file_sha256": "f48f8a0c82d97294183bb98014c124e187a3747e4d148a8ac098174bbd48ed1d",
+          "service_identity": {
+            "pid": 134140,
+            "start_ticks": "16500896",
+            "state": "S"
+          },
+          "old_model_process": {
+            "recorded": true,
+            "identity": {
+              "pid": 134284,
+              "start_ticks": "16501228",
+              "state": "R"
+            },
+            "alive": true
+          },
+          "old_stop_command": {
+            "recorded": false,
+            "alive": null
+          }
+        },
+        {
+          "at": "2026-09-08T10:48:33.890693Z",
+          "monotonic": 165018.551413088,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "1188a5ead86b4718bb5cadff51659a06",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "error": "hard deadline exceeded",
+          "response_received_at": "2026-09-08T10:48:33.891204Z",
+          "response_received_mono": 165018.551916884,
+          "file_sha256": "f48f8a0c82d97294183bb98014c124e187a3747e4d148a8ac098174bbd48ed1d",
+          "service_identity": {
+            "pid": 134140,
+            "start_ticks": "16500896",
+            "state": "S"
+          },
+          "old_model_process": {
+            "recorded": true,
+            "identity": {
+              "pid": 134284,
+              "start_ticks": "16501228",
+              "state": "R"
+            },
+            "alive": true
+          },
+          "old_stop_command": {
+            "recorded": false,
+            "alive": null
+          }
+        }
+      ],
+      "total_native_samples": 59,
+      "relevant_log_lines": [
+        "[INFO] reloading configuration",
+        "[WARN] failed to reload config: failed to parse config /tmp/llmsvc-watcher-witness-ge9i0va_/config.yaml: yaml: line 1: did not find expected ',' or ']'"
+      ]
+    },
+    {
+      "scenario": "missing-witness",
+      "status": "ok",
+      "started_at": "2026-09-08T10:48:37.145736Z",
+      "ended_at": "2026-09-08T10:48:38.070021Z",
+      "elapsed_seconds": 1.1091807910124771,
+      "single_trigger": {
+        "mode": "watcher_only",
+        "atomic_replacements": 0,
+        "reload_signals": 0,
+        "fallback_writes": 0
+      },
+      "outcome": "blocked_before_write_missing_native_generation",
+      "request_results": [],
+      "cleanup": {
+        "owned_session_empty": true,
+        "owned_temp_removed": true
+      },
+      "raw_evidence_file": "watcher-witness-missing-witness-8c346ac75ace4d33add846b48196dcc2.json",
+      "raw_evidence_sha256": "ac474d332f24334acce12162baec9fb461f82c7e47984c145529a470455498f0",
+      "selected_native_samples": [
+        {
+          "at": "2026-09-08T10:48:38.066229Z",
+          "monotonic": 165022.726961811,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "94949ead168b46d59d9c7c8a0a29154d",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "94949ead168b46d59d9c7c8a0a29154d",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Error: no config section at path \"macros.llmsvc_reload_generation\". Top-level keys: apiKeys, captureBuffer, globalTTL, groups, healthCheckTimeout, hooks, includeAliasesInList, logLevel, logRequests, logTimeFormat, logToStdout, macros, matrix, metricsMaxInMemory, models, peers, performance, profiles, routing, selectors, sendLoadingState, startPort, store, ui, unloadTimeout, upstream."
+                }
+              ],
+              "isError": true
+            }
+          },
+          "error": "native tool error",
+          "response_received_at": "2026-09-08T10:48:38.069992Z",
+          "response_received_mono": 165022.730715395
+        }
+      ],
+      "total_native_samples": 1,
+      "relevant_log_lines": []
+    },
+    {
+      "scenario": "restart",
+      "status": "ok",
+      "started_at": "2026-09-08T10:48:38.296953Z",
+      "ended_at": "2026-09-08T10:48:45.297884Z",
+      "elapsed_seconds": 7.206064105004771,
+      "single_trigger": {
+        "mode": "watcher_only",
+        "atomic_replacements": 1,
+        "reload_signals": 0,
+        "fallback_writes": 0
+      },
+      "binding": {
+        "old_generation": "gen_ec6e76d59f7b4afe96a4213882d7e58a",
+        "new_generation": "gen_f59881227c8746ac81d9d5b99b45bcb6",
+        "old_file_sha256": "e2cf264c12ac2b81b89e577365b13aa6c7ca6353c4f5b323a7ad710bd5852296",
+        "candidate_sha256": "ad11457debef718e70172cbf68d8ac11386d84e986968e1cb4b27447adad7286",
+        "service_identity": {
+          "pid": 135031,
+          "start_ticks": "16502296",
+          "state": "R"
+        }
+      },
+      "replacement": {
+        "at": "2026-09-08T10:48:41.434242Z",
+        "monotonic": 165026.094956698,
+        "prior_mtime_ns": 1788864518291699682,
+        "prior_size": 760,
+        "candidate_sha256": "ad11457debef718e70172cbf68d8ac11386d84e986968e1cb4b27447adad7286",
+        "candidate_mtime_ns": 1788864521427676459,
+        "candidate_size": 760
+      },
+      "classification": {
+        "candidate_generation_visible": false,
+        "settlement_confirmed": false,
+        "reconciliation_required": true,
+        "reasons": [
+          "service_identity_changed",
+          "independent_old_server_settlement_unavailable"
+        ],
+        "barrier_must_remain": true
+      },
+      "outcome": "reconciliation_required",
+      "last_fixture_zero": {
+        "at": "2026-09-08T10:48:41.168743Z",
+        "monotonic": 165025.829486184,
+        "active": 0,
+        "certified_quiet": false
+      },
+      "active_at_replace": 2,
+      "request_summary": {
+        "completed": 0,
+        "http_5xx": 0,
+        "truncated_stream": 2,
+        "timeout": 0,
+        "http_error": 0
+      },
+      "request_results": [
+        {
+          "id": "req-0",
+          "started_at": "2026-09-08T10:48:41.169242Z",
+          "started_mono": 165025.829937001,
+          "http_status": 200,
+          "status": "truncated_stream",
+          "ended_mono": 165026.098107096,
+          "ended_at": "2026-09-08T10:48:41.437408Z",
+          "duration_seconds": 0.26817
+        },
+        {
+          "id": "req-1",
+          "started_at": "2026-09-08T10:48:41.170351Z",
+          "started_mono": 165025.831045873,
+          "http_status": 200,
+          "status": "truncated_stream",
+          "ended_mono": 165026.097951407,
+          "ended_at": "2026-09-08T10:48:41.437249Z",
+          "duration_seconds": 0.266906
+        }
+      ],
+      "observed_reload_log_count": 0,
+      "stop_exit": null,
+      "independent_settlement_witness": null,
+      "retained_recovery_state": {
+        "old_generation": "gen_ec6e76d59f7b4afe96a4213882d7e58a",
+        "new_generation": "gen_f59881227c8746ac81d9d5b99b45bcb6",
+        "old_file_sha256": "e2cf264c12ac2b81b89e577365b13aa6c7ca6353c4f5b323a7ad710bd5852296",
+        "candidate_sha256": "ad11457debef718e70172cbf68d8ac11386d84e986968e1cb4b27447adad7286",
+        "service_identity": {
+          "pid": 135031,
+          "start_ticks": "16502296",
+          "state": "R"
+        },
+        "config_committed": true,
+        "barrier_must_remain": true
+      },
+      "final_file_sha256": "ad11457debef718e70172cbf68d8ac11386d84e986968e1cb4b27447adad7286",
+      "cleanup": {
+        "owned_session_empty": true,
+        "owned_temp_removed": true
+      },
+      "verification_deadline_mono": 165032.095104926,
+      "diagnostic_phase_started_mono": 165026.94970453,
+      "raw_evidence_file": "watcher-witness-restart-2bb3ee9bbfec4189993d8aac79b33c20.json",
+      "raw_evidence_sha256": "995c1c6dd4c81189dbb0f849cc4ab1d1960908eb80fa71798df6464faa605c64",
+      "first_new_response_seconds_after_replace": 0.854193,
+      "old_native_after_candidate_write_observed": false,
+      "selected_native_samples": [
+        {
+          "at": "2026-09-08T10:48:39.061795Z",
+          "monotonic": 165023.72251563,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "9d02f05c0ad54bce829b59bf06f5aa52",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "9d02f05c0ad54bce829b59bf06f5aa52",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_ec6e76d59f7b4afe96a4213882d7e58a\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_ec6e76d59f7b4afe96a4213882d7e58a",
+          "response_received_at": "2026-09-08T10:48:39.064646Z",
+          "response_received_mono": 165023.72536193
+        },
+        {
+          "at": "2026-09-08T10:48:42.247306Z",
+          "monotonic": 165026.908017604,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "b7fecc4964104e0c94290ddbcd0853b6",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "b7fecc4964104e0c94290ddbcd0853b6",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_f59881227c8746ac81d9d5b99b45bcb6\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_f59881227c8746ac81d9d5b99b45bcb6",
+          "response_received_at": "2026-09-08T10:48:42.288414Z",
+          "response_received_mono": 165026.949149773,
+          "file_sha256": "ad11457debef718e70172cbf68d8ac11386d84e986968e1cb4b27447adad7286",
+          "service_identity": {
+            "pid": 135142,
+            "start_ticks": "16502609",
+            "state": "S"
+          },
+          "old_model_process": {
+            "recorded": true,
+            "identity": {
+              "pid": 135138,
+              "start_ticks": "16502583",
+              "state": "R"
+            },
+            "alive": true
+          },
+          "old_stop_command": {
+            "recorded": false,
+            "alive": null
+          }
+        }
+      ],
+      "total_native_samples": 10,
+      "relevant_log_lines": []
+    },
+    {
+      "scenario": "same-stat",
+      "status": "ok",
+      "started_at": "2026-09-08T10:48:32.182158Z",
+      "ended_at": "2026-09-08T10:48:44.402636Z",
+      "elapsed_seconds": 12.42053016301361,
+      "single_trigger": {
+        "mode": "watcher_only",
+        "atomic_replacements": 1,
+        "reload_signals": 0,
+        "fallback_writes": 0
+      },
+      "binding": {
+        "old_generation": "gen_6f16511e3aa24f3998a1078d1da716f7",
+        "new_generation": "gen_886eeef1fed144509154a3a572be530e",
+        "old_file_sha256": "a2d16729df77e31b821b5e4551eb7b7868fe6962a3db8aa96ccfd5eb04859b5a",
+        "candidate_sha256": "dd3b032bfeec6ddfc064a8a2a618dffa346226db41b15aa3060974a10b909ae5",
+        "service_identity": {
+          "pid": 134462,
+          "start_ticks": "16501686",
+          "state": "R"
+        }
+      },
+      "replacement": {
+        "at": "2026-09-08T10:48:35.392354Z",
+        "monotonic": 165020.053086984,
+        "prior_mtime_ns": 1788864512191744851,
+        "prior_size": 762,
+        "candidate_sha256": "dd3b032bfeec6ddfc064a8a2a618dffa346226db41b15aa3060974a10b909ae5",
+        "candidate_mtime_ns": 1788864512191744851,
+        "candidate_size": 762
+      },
+      "classification": {
+        "candidate_generation_visible": false,
+        "settlement_confirmed": false,
+        "reconciliation_required": true,
+        "reasons": [
+          "native_generation_not_confirmed",
+          "deadline_expired",
+          "independent_old_server_settlement_unavailable"
+        ],
+        "barrier_must_remain": true
+      },
+      "outcome": "reconciliation_required",
+      "last_fixture_zero": {
+        "at": "2026-09-08T10:48:35.116795Z",
+        "monotonic": 165019.77753856,
+        "active": 0,
+        "certified_quiet": false
+      },
+      "active_at_replace": 2,
+      "request_summary": {
+        "completed": 2,
+        "http_5xx": 0,
+        "truncated_stream": 0,
+        "timeout": 0,
+        "http_error": 0
+      },
+      "request_results": [
+        {
+          "id": "req-0",
+          "started_at": "2026-09-08T10:48:35.117152Z",
+          "started_mono": 165019.777847577,
+          "http_status": 200,
+          "status": "completed",
+          "ended_mono": 165024.085241018,
+          "ended_at": "2026-09-08T10:48:39.424541Z",
+          "duration_seconds": 4.307393
+        },
+        {
+          "id": "req-1",
+          "started_at": "2026-09-08T10:48:35.118218Z",
+          "started_mono": 165019.77891322,
+          "http_status": 200,
+          "status": "completed",
+          "ended_mono": 165024.148620214,
+          "ended_at": "2026-09-08T10:48:39.487920Z",
+          "duration_seconds": 4.369707
+        }
+      ],
+      "observed_reload_log_count": 0,
+      "stop_exit": null,
+      "independent_settlement_witness": null,
+      "retained_recovery_state": {
+        "old_generation": "gen_6f16511e3aa24f3998a1078d1da716f7",
+        "new_generation": "gen_886eeef1fed144509154a3a572be530e",
+        "old_file_sha256": "a2d16729df77e31b821b5e4551eb7b7868fe6962a3db8aa96ccfd5eb04859b5a",
+        "candidate_sha256": "dd3b032bfeec6ddfc064a8a2a618dffa346226db41b15aa3060974a10b909ae5",
+        "service_identity": {
+          "pid": 134462,
+          "start_ticks": "16501686",
+          "state": "R"
+        },
+        "config_committed": true,
+        "barrier_must_remain": true
+      },
+      "final_file_sha256": "dd3b032bfeec6ddfc064a8a2a618dffa346226db41b15aa3060974a10b909ae5",
+      "cleanup": {
+        "owned_session_empty": true,
+        "owned_temp_removed": true
+      },
+      "verification_deadline_mono": 165026.053308922,
+      "diagnostic_phase_started_mono": 165026.054287106,
+      "raw_evidence_file": "watcher-witness-same-stat-32132a9d4bc4445cb301847c903175d4.json",
+      "raw_evidence_sha256": "c6f21f99347b7e5f92712227f3643b7dce73ca199a290413f1da337e8604f91e",
+      "old_native_after_candidate_write_observed": true,
+      "selected_native_samples": [
+        {
+          "at": "2026-09-08T10:48:33.009741Z",
+          "monotonic": 165017.670451504,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "11ea6a6631214c1291da749c8830ce7b",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "11ea6a6631214c1291da749c8830ce7b",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_6f16511e3aa24f3998a1078d1da716f7\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_6f16511e3aa24f3998a1078d1da716f7",
+          "response_received_at": "2026-09-08T10:48:33.013422Z",
+          "response_received_mono": 165017.674130779
+        },
+        {
+          "at": "2026-09-08T10:48:35.392643Z",
+          "monotonic": 165020.053353792,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "8531dff48148469499b95aff20eb1f6c",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "8531dff48148469499b95aff20eb1f6c",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_6f16511e3aa24f3998a1078d1da716f7\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_6f16511e3aa24f3998a1078d1da716f7",
+          "response_received_at": "2026-09-08T10:48:35.396699Z",
+          "response_received_mono": 165020.057414854,
+          "file_sha256": "dd3b032bfeec6ddfc064a8a2a618dffa346226db41b15aa3060974a10b909ae5",
+          "service_identity": {
+            "pid": 134462,
+            "start_ticks": "16501686",
+            "state": "S"
+          },
+          "old_model_process": {
+            "recorded": true,
+            "identity": {
+              "pid": 134758,
+              "start_ticks": "16501977",
+              "state": "R"
+            },
+            "alive": true
+          },
+          "old_stop_command": {
+            "recorded": false,
+            "alive": null
+          }
+        },
+        {
+          "at": "2026-09-08T10:48:41.392731Z",
+          "monotonic": 165026.053449691,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "315d640c9d4a4a4d8f20cebdb162ed4b",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "error": "hard deadline exceeded",
+          "response_received_at": "2026-09-08T10:48:41.393180Z",
+          "response_received_mono": 165026.053889748,
+          "file_sha256": "dd3b032bfeec6ddfc064a8a2a618dffa346226db41b15aa3060974a10b909ae5",
+          "service_identity": {
+            "pid": 134462,
+            "start_ticks": "16501686",
+            "state": "S"
+          },
+          "old_model_process": {
+            "recorded": true,
+            "identity": {
+              "pid": 134758,
+              "start_ticks": "16501977",
+              "state": "R"
+            },
+            "alive": true
+          },
+          "old_stop_command": {
+            "recorded": false,
+            "alive": null
+          }
+        }
+      ],
+      "total_native_samples": 58,
+      "relevant_log_lines": []
+    },
+    {
+      "scenario": "stranded-stop",
+      "status": "ok",
+      "started_at": "2026-09-08T10:47:48.712383Z",
+      "ended_at": "2026-09-08T10:48:23.981246Z",
+      "elapsed_seconds": 35.47170181002002,
+      "single_trigger": {
+        "mode": "watcher_only",
+        "atomic_replacements": 1,
+        "reload_signals": 0,
+        "fallback_writes": 0
+      },
+      "binding": {
+        "old_generation": "gen_0fc0da9ff45249dbbffbf8b325a3cd11",
+        "new_generation": "gen_4c70f7a8cc92470ea3bf891845fa9db6",
+        "old_file_sha256": "42727e7c98818a71f5a6bc521003dd4c3622ee5d33ff64ef3b4cbbd66d6e2f50",
+        "candidate_sha256": "c589102f4816b6903217a4059ebbf78efbd6d13faa54eb3d7c7935132034dc6f",
+        "service_identity": {
+          "pid": 132151,
+          "start_ticks": "16497337",
+          "state": "R"
+        }
+      },
+      "replacement": {
+        "at": "2026-09-08T10:47:52.355727Z",
+        "monotonic": 164977.016447851,
+        "prior_mtime_ns": 1788864468708066704,
+        "prior_size": 766,
+        "candidate_sha256": "c589102f4816b6903217a4059ebbf78efbd6d13faa54eb3d7c7935132034dc6f",
+        "candidate_mtime_ns": 1788864472352039741,
+        "candidate_size": 766
+      },
+      "classification": {
+        "candidate_generation_visible": true,
+        "settlement_confirmed": false,
+        "reconciliation_required": true,
+        "reasons": [
+          "independent_old_server_settlement_unavailable"
+        ],
+        "barrier_must_remain": true
+      },
+      "outcome": "candidate_visible_settlement_unproven",
+      "last_fixture_zero": {
+        "at": "2026-09-08T10:47:52.090328Z",
+        "monotonic": 164976.751072165,
+        "active": 0,
+        "certified_quiet": false
+      },
+      "active_at_replace": 2,
+      "generic_completion_observed": {
+        "at": "2026-09-08T10:48:23.980742Z",
+        "monotonic": 165008.641475287,
+        "old_model_process": {
+          "recorded": true,
+          "identity": {
+            "pid": 132394,
+            "start_ticks": "16497675",
+            "state": "R"
+          },
+          "alive": false
+        },
+        "old_stop_command": {
+          "recorded": true,
+          "identity": {
+            "pid": 132567,
+            "start_ticks": "16497860",
+            "state": "R",
+            "at": "2026-09-08T10:47:53.980677Z",
+            "monotonic": 164978.641391653
+          },
+          "alive": true
+        },
+        "is_independent_settlement_witness": false
+      },
+      "request_summary": {
+        "completed": 2,
+        "http_5xx": 0,
+        "truncated_stream": 0,
+        "timeout": 0,
+        "http_error": 0
+      },
+      "request_results": [
+        {
+          "id": "req-0",
+          "started_at": "2026-09-08T10:47:52.090790Z",
+          "started_mono": 164976.751484312,
+          "http_status": 200,
+          "status": "completed",
+          "ended_mono": 164981.037709511,
+          "ended_at": "2026-09-08T10:47:56.377010Z",
+          "duration_seconds": 4.286225
+        },
+        {
+          "id": "req-1",
+          "started_at": "2026-09-08T10:47:52.091987Z",
+          "started_mono": 164976.752681604,
+          "http_status": 200,
+          "status": "completed",
+          "ended_mono": 164981.048532597,
+          "ended_at": "2026-09-08T10:47:56.387833Z",
+          "duration_seconds": 4.295851
+        }
+      ],
+      "observed_reload_log_count": 1,
+      "stop_exit": null,
+      "independent_settlement_witness": null,
+      "retained_recovery_state": {
+        "old_generation": "gen_0fc0da9ff45249dbbffbf8b325a3cd11",
+        "new_generation": "gen_4c70f7a8cc92470ea3bf891845fa9db6",
+        "old_file_sha256": "42727e7c98818a71f5a6bc521003dd4c3622ee5d33ff64ef3b4cbbd66d6e2f50",
+        "candidate_sha256": "c589102f4816b6903217a4059ebbf78efbd6d13faa54eb3d7c7935132034dc6f",
+        "service_identity": {
+          "pid": 132151,
+          "start_ticks": "16497337",
+          "state": "R"
+        },
+        "config_committed": true,
+        "barrier_must_remain": true
+      },
+      "final_file_sha256": "c589102f4816b6903217a4059ebbf78efbd6d13faa54eb3d7c7935132034dc6f",
+      "cleanup": {
+        "owned_session_empty": true,
+        "owned_temp_removed": true
+      },
+      "verification_deadline_mono": 164983.016645679,
+      "diagnostic_phase_started_mono": 164978.69001348,
+      "raw_evidence_file": "watcher-witness-stranded-stop-997b4a50ade44a9eac289bd886774d01.json",
+      "raw_evidence_sha256": "52109f4cdefa2be3a0b6db10f652b91561f60ac4d54a1e78eacafba895aeed5b",
+      "first_new_response_seconds_after_replace": 1.673015,
+      "old_native_after_candidate_write_observed": true,
+      "selected_native_samples": [
+        {
+          "at": "2026-09-08T10:47:49.983429Z",
+          "monotonic": 164974.644147288,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "382c9a9db449470198ca2a6405bcb928",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "382c9a9db449470198ca2a6405bcb928",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_0fc0da9ff45249dbbffbf8b325a3cd11\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_0fc0da9ff45249dbbffbf8b325a3cd11",
+          "response_received_at": "2026-09-08T10:47:49.986406Z",
+          "response_received_mono": 164974.647122218
+        },
+        {
+          "at": "2026-09-08T10:47:52.355975Z",
+          "monotonic": 164977.016685219,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "b3a3f73c53f04d72a49ef71fbfcf72ed",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "b3a3f73c53f04d72a49ef71fbfcf72ed",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_0fc0da9ff45249dbbffbf8b325a3cd11\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_0fc0da9ff45249dbbffbf8b325a3cd11",
+          "response_received_at": "2026-09-08T10:47:52.360401Z",
+          "response_received_mono": 164977.021115309,
+          "file_sha256": "c589102f4816b6903217a4059ebbf78efbd6d13faa54eb3d7c7935132034dc6f",
+          "service_identity": {
+            "pid": 132151,
+            "start_ticks": "16497337",
+            "state": "S"
+          },
+          "old_model_process": {
+            "recorded": true,
+            "identity": {
+              "pid": 132394,
+              "start_ticks": "16497675",
+              "state": "R"
+            },
+            "alive": true
+          },
+          "old_stop_command": {
+            "recorded": false,
+            "alive": null
+          }
+        },
+        {
+          "at": "2026-09-08T10:47:54.026196Z",
+          "monotonic": 164978.686928301,
+          "endpoint": "/api/mcp",
+          "method": "POST",
+          "headers": {
+            "Content-Type": "application/json",
+            "Mcp-Protocol-Version": "2026-07-28",
+            "Mcp-Method": "tools/call",
+            "Mcp-Name": "config__get_config"
+          },
+          "request": {
+            "jsonrpc": "2.0",
+            "id": "651642171b2147cc809f36da0036c731",
+            "method": "tools/call",
+            "params": {
+              "name": "config__get_config",
+              "arguments": {
+                "path": "macros.llmsvc_reload_generation"
+              }
+            }
+          },
+          "http_status": 200,
+          "response": {
+            "jsonrpc": "2.0",
+            "id": "651642171b2147cc809f36da0036c731",
+            "result": {
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Current llama-swap configuration at \"macros.llmsvc_reload_generation\" (credentials redacted, values resolved):\n\n```yaml\ngen_4c70f7a8cc92470ea3bf891845fa9db6\n```\n"
+                }
+              ]
+            }
+          },
+          "generation": "gen_4c70f7a8cc92470ea3bf891845fa9db6",
+          "response_received_at": "2026-09-08T10:47:54.028745Z",
+          "response_received_mono": 164978.689462954,
+          "file_sha256": "c589102f4816b6903217a4059ebbf78efbd6d13faa54eb3d7c7935132034dc6f",
+          "service_identity": {
+            "pid": 132151,
+            "start_ticks": "16497337",
+            "state": "S"
+          },
+          "old_model_process": {
+            "recorded": true,
+            "identity": {
+              "pid": 132394,
+              "start_ticks": "16497675",
+              "state": "R"
+            },
+            "alive": true
+          },
+          "old_stop_command": {
+            "recorded": true,
+            "identity": {
+              "pid": 132567,
+              "start_ticks": "16497860",
+              "state": "R",
+              "at": "2026-09-08T10:47:53.980677Z",
+              "monotonic": 164978.641391653
+            },
+            "alive": true
+          }
+        }
+      ],
+      "total_native_samples": 18,
+      "relevant_log_lines": [
+        "[INFO] reloading configuration",
+        "[INFO] configuration reloaded"
+      ]
+    }
+  ],
+  "actual_negative_protocol_samples": [
+    {
+      "at": "2026-09-08T10:48:25.511496Z",
+      "monotonic": 165010.172201327,
+      "endpoint": "/api/mcp",
+      "method": "POST",
+      "headers": {
+        "Content-Type": "application/json",
+        "Mcp-Protocol-Version": "wrong",
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "config__get_config"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "7f6045f1509e4821b120c1716d1d6b65",
+        "method": "tools/call",
+        "params": {
+          "name": "config__get_config",
+          "arguments": {
+            "path": "macros.llmsvc_reload_generation"
+          }
+        }
+      },
+      "http_status": 200,
+      "response": {
+        "jsonrpc": "2.0",
+        "id": "7f6045f1509e4821b120c1716d1d6b65",
+        "error": {
+          "code": -32022,
+          "message": "unsupported protocol version; this server speaks MCP 2026-07-28 only",
+          "data": {
+            "requested": "wrong",
+            "supported": [
+              "2026-07-28"
+            ]
+          }
+        }
+      },
+      "error": "invalid or mismatched JSON-RPC response",
+      "response_received_at": "2026-09-08T10:48:25.511916Z",
+      "response_received_mono": 165010.172623614
+    },
+    {
+      "at": "2026-09-08T10:48:25.511927Z",
+      "monotonic": 165010.172632414,
+      "endpoint": "/api/mcp",
+      "method": "POST",
+      "headers": {
+        "Content-Type": "application/json",
+        "Mcp-Protocol-Version": "2026-07-28",
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "config__missing"
+      },
+      "request": {
+        "jsonrpc": "2.0",
+        "id": "062b9da541444b879dc1263d4dd428cd",
+        "method": "tools/call",
+        "params": {
+          "name": "config__missing",
+          "arguments": {
+            "path": "macros.llmsvc_reload_generation"
+          }
+        }
+      },
+      "http_status": 200,
+      "response": {
+        "jsonrpc": "2.0",
+        "id": "062b9da541444b879dc1263d4dd428cd",
+        "error": {
+          "code": -32603,
+          "message": "unknown tool \"missing\""
+        }
+      },
+      "error": "invalid or mismatched JSON-RPC response",
+      "response_received_at": "2026-09-08T10:48:25.512292Z",
+      "response_received_mono": 165010.172998722
+    }
+  ]
+}

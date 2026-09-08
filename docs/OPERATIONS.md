@@ -175,3 +175,14 @@ idle-GPU smoke permission. A one-week absence observation needs actual
 start/end records; it cannot be marked complete immediately.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+
+## Watcher-only native generation evidence (#60)
+
+The isolated CPU fixture and measured active-config/old-resource boundary are in
+[`deploy/WATCHER_WITNESS.md`](../deploy/WATCHER_WITNESS.md). It uses the pinned
+v252 binary, temporary config/processes and native MCP reads; it installs no
+notifier or observer. New generation visibility and generic reload-completion
+logs do not establish old-server settlement. Keep recovery/barrier and #53
+quiet/production gates until an independent settlement contract is verified.
+
+<!-- Generated-By: Codex / gpt-6-astra -->
