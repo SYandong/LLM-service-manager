@@ -62,7 +62,7 @@ def test_usage_command_grouping_and_unknown_source_clear_old_totals(usage_api, u
             await pilot.press("enter")
             await app.workers.wait_for_complete()
             assert app.usage_snapshot["by"] == "model"
-            assert app.usage_snapshot["totals"]["input_tokens"] == 118
+            assert app.usage_snapshot["totals"]["input_tokens"] == 118, app.usage_snapshot
             assert "not grouped" in str(app.query_one("#usage-text", Static).render())
             usage_service.scheduler._usage = None
             await app.refresh_usage().wait()
