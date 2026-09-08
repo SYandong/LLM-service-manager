@@ -294,12 +294,14 @@ class PlacementController:
             while self.monotonic() < deadline and not self.scheduler.stopping.is_set():
                 self.scheduler.request_sample()
                 with self._locked(deadline):
-                    if reconcile_exit and checked_generation != self.scheduler._sample_published:
+                    if reconcile_exit and action.kind == "stop" and checked_generation != self.scheduler._sample_published:
                         checked_generation = self.scheduler._sample_published
                         self._reconcile_action_exit(action, deadline)
                     snapshot = self.scheduler.snapshot()
                     active_account = any(lease.model == action.model and lease.status != "released" for lease in snapshot.leases)
-                    effect = (self._fresh(snapshot) and not active_account
+                    account_ok = (any(lease.model == action.model and lease.status == "confirmed" for lease in snapshot.leases)
+                                  if action.kind == "sleep" else not active_account)
+                    effect = (self._fresh(snapshot) and account_ok
                               and self.scheduler.model_actions._effect(action, snapshot))
                     if effect and effect_seen_at is not None and snapshot.sampled_at > effect_seen_at:
                         return True

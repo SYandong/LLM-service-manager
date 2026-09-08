@@ -44,6 +44,10 @@ class SchedulerConfig:
     lease_timeout_seconds: float = 900.0
     lease_probe_seconds: float = 1.0
     model_actions_enabled: bool = False
+    automation_enabled: bool = False
+    automation_interval_seconds: float = 15.0
+    automation_cycle_timeout_seconds: float = 120.0
+    automation_idle_seconds: float = 600.0
     free_timeout_seconds: float = 120.0
     reserve_timeout_seconds: float = 120.0
     wake_timeout_seconds: float = 900.0
@@ -66,7 +70,8 @@ class SchedulerConfig:
                      "max_snapshot_age_seconds", "free_timeout_seconds", "reserve_timeout_seconds", "wake_timeout_seconds",
                      "action_observe_seconds", "action_poll_seconds", "placement_wait_seconds",
                      "lease_timeout_seconds", "lease_probe_seconds", "data_plane_event_interval_seconds",
-                     "data_plane_event_timeout_seconds", "data_plane_event_reconnect_seconds"):
+                     "data_plane_event_timeout_seconds", "data_plane_event_reconnect_seconds",
+                     "automation_interval_seconds", "automation_cycle_timeout_seconds", "automation_idle_seconds"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (float, int)):
                 raise ValueError(f"{name} must be a finite positive number")
@@ -77,6 +82,10 @@ class SchedulerConfig:
         for name in ("data_plane_event_capacity", "data_plane_event_batch_size"):
             if type(getattr(self, name)) is not int or not 1 <= getattr(self, name) <= 4096:
                 raise ValueError(f"{name} must be an integer in 1..4096")
+        if type(self.automation_enabled) is not bool:
+            raise ValueError("automation_enabled must be a boolean")
+        if self.automation_cycle_timeout_seconds > 120:
+            raise ValueError("automation_cycle_timeout_seconds must not exceed 120")
         if self.reserve_timeout_seconds > 120:
             raise ValueError("reserve_timeout_seconds must not exceed 120")
         if self.placement_wait_seconds > 120:

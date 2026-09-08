@@ -49,3 +49,11 @@ data_plane_event_batch_size: 128
 data_plane_event_interval_seconds: 0.2
 data_plane_event_timeout_seconds: 2
 data_plane_event_reconnect_seconds: 1
+
+# Default-off automatic M2 policy cycle. Real effects additionally require
+# read_only:false and model_actions_enabled:true; this does not change reaper/TTL.
+# --once forces read-only and logs a pure automation preview after its one sample.
+automation_enabled: false
+automation_interval_seconds: 15
+automation_cycle_timeout_seconds: 120
+automation_idle_seconds: 600

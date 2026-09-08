@@ -867,3 +867,200 @@ class ReservationController:
             result["error"] = error
         self.scheduler.emit("reserve_result", detail={"reserve_id": reserve.id, **result, "dry_run": False})
         return result
+
+
+class AutomaticPolicyController:
+    """Default-off M2 idle/memory cycles; no per-GPU TTL or daemon adoption.
+
+    A cycle consumes fresh publications, submits one protected policy action,
+    observes it, then replans. All actual actions need a confirmed managed
+    account. Preview logs a detached plan with no sampling/events/writes/probes.
+    """
+
+    def __init__(self, scheduler, *, accounting=None, monotonic=time.monotonic):
+        self.scheduler = scheduler
+        self.controller = scheduler.model_actions
+        self.monotonic = monotonic
+        self.active = False  # Protected only by the existing action/accounting lock.
+        if accounting is None and self.controller is not None:
+            from llmsvc.leases import PlacementController
+            accounting = PlacementController(scheduler, self.controller.transport, monotonic=monotonic)
+        self.accounting = accounting
+
+    def enabled(self):
+        config = self.scheduler.config
+        return (config.automation_enabled and config.model_actions_enabled and not config.read_only
+                and self.controller is not None and self.accounting is not None
+                and self.scheduler.store is not None and not self.scheduler.store.read_only)
+
+    def plan(self, snapshot):
+        from dataclasses import replace
+        from llmsvc.policy import Decision, plan_idle_sleep, plan_memory_pressure
+        from llmsvc.state import Blocker, Pin
+        controller = self.controller
+        if controller is None or self.accounting is None:
+            return Decision(blocked_by=(Blocker(None, "automation_executor_unavailable"),))
+        if not controller._fresh(snapshot):
+            return Decision(blocked_by=(Blocker(None, "unknown_or_stale_snapshot"),))
+        confirmed = {lease.model for lease in snapshot.leases if lease.status == "confirmed"}
+        guards = {}
+        models = []
+        for model in snapshot.models:
+            if controller.transport.models.get(model.name, {}).get("is_default") is True:
+                model = replace(model, is_default=True)
+            models.append(model)
+            if model.state not in ("awake", "sleeping"):
+                continue
+            unit = controller.transport.units.get(model.name)
+            if unit is None or model.unit != unit or self.accounting.transport.units.get(model.name) != unit:
+                guards[model.name] = "unmanaged_or_changed_unit"
+            elif model.name not in confirmed:
+                guards[model.name] = "unleased_model"
+            elif model.name in controller.pending or controller.free_active:
+                guards[model.name] = "operation_in_progress"
+        until = self.scheduler.clock()+self.scheduler.config.automation_cycle_timeout_seconds+1
+        protected = replace(snapshot, models=tuple(models), pins=snapshot.pins+tuple(
+            Pin(name, until, "automation_guard") for name in guards))
+        settings = replace(controller.settings, fixed_ttl_seconds=self.scheduler.config.automation_idle_seconds)
+        # Do not add sleepers while current memory pressure is unresolved.
+        decision = plan_memory_pressure(protected, settings=settings)
+        if not decision.actions and not decision.blocked_by:
+            decision = plan_idle_sleep(protected, settings=settings)
+        blockers = tuple(replace(blocker, reason=guards[blocker.model])
+                         if blocker.model in guards and blocker.reason == "pinned_until" else blocker
+                         for blocker in decision.blocked_by)
+        return replace(decision, blocked_by=blockers)
+
+    def _fresh_round(self, deadline):
+        with self.controller._locked(deadline):
+            previous = self.scheduler._sample_started
+        self.scheduler.request_sample()
+        while self.monotonic() < deadline and not self.scheduler.stopping.is_set():
+            with self.controller._locked(deadline):
+                if not self.enabled():
+                    raise ActionDispatchError("automation_disabled")
+                if self.scheduler._sample_published > previous:
+                    snapshot = self.controller._snapshot()
+                    if not self.controller._fresh(snapshot):
+                        raise ActionDispatchError("unknown_or_stale_snapshot")
+                    return snapshot
+                self.scheduler.changed.wait(timeout=min(self.scheduler.config.action_poll_seconds,
+                                                       max(0, deadline-self.monotonic())))
+        raise ActionDispatchError("scheduler_stopping" if self.scheduler.stopping.is_set() else "deadline_exceeded")
+
+    @staticmethod
+    def _memory_progress(before, after, action):
+        model = next((m for m in before.models if m.name == action.model), None)
+        if action.kind != "stop" or model is None or model.state != "sleeping":
+            return True
+        old, new = before.memory, after.memory
+        if (old.host_available_gb < old.host_min_available_gb
+                or action.reason == "sleep_memory_admission"):
+            return _known(new.host_available_gb) and new.host_available_gb > old.host_available_gb
+        # The budget is membership accounting, not measured physical release.
+        return (_known(new.sleeping_weights_gb) and _known(old.sleeping_weights_gb)
+                and new.sleeping_weights_gb < old.sleeping_weights_gb)
+
+    def run(self, *, dry_run=False):
+        if dry_run:
+            with self.scheduler.action_lock:
+                decision = self.plan(self.scheduler.snapshot())
+            result = {"would": [asdict(action) for action in decision.actions],
+                      "blocked_by": [asdict(blocker) for blocker in decision.blocked_by]}
+            LOG.info(json.dumps({"kind": "automation_preview", "dry_run": True, **result}, allow_nan=False))
+            return result
+        if not self.enabled():
+            return {"status": "disabled", "actions": [], "blocked_by": []}
+        deadline = self.monotonic()+self.scheduler.config.automation_cycle_timeout_seconds
+        try:
+            with self.controller._locked(deadline):
+                if self.active:
+                    return {"status": "blocked", "actions": [], "blocked_by": [{"model": None, "reason": "cycle_in_progress"}]}
+                if self.scheduler.stopping.is_set():
+                    return {"status": "blocked", "actions": [], "blocked_by": [{"model": None, "reason": "scheduler_stopping"}]}
+                self.active = True
+        except ActionDispatchError as exc:
+            return {"status": "timeout", "actions": [], "blocked_by": [], "error": exc.reason}
+        result = {"status": "complete", "actions": [], "blocked_by": []}
+        attempted = set()
+        pending = None
+        try:
+            self._fresh_round(deadline)
+            while self.monotonic() < deadline:
+                with self.controller._locked(deadline):
+                    if not self.enabled() or self.scheduler.stopping.is_set():
+                        raise ActionDispatchError("scheduler_stopping" if self.scheduler.stopping.is_set() else "automation_disabled")
+                    before = self.controller._snapshot()
+                    decision = self.plan(before)
+                    result["blocked_by"] = [asdict(blocker) for blocker in decision.blocked_by]
+                    if not decision.actions:
+                        if decision.blocked_by:
+                            result["status"] = "partial" if result["actions"] else "blocked"
+                        break
+                    action = decision.actions[0]
+                    if action.kind not in ("sleep", "stop") or (action.kind, action.model) in attempted:
+                        raise ActionDispatchError("repeated_or_unsupported_action")
+                    account = next((lease for lease in before.leases if lease.model == action.model and lease.status == "confirmed"), None)
+                    identity = self.accounting._inspect(action.model, deadline)
+                    if account is None or not identity.active or identity.lease_id != account.lease_id:
+                        raise ActionDispatchError("unit_identity_unconfirmed")
+                    if not self.enabled() or self.scheduler.stopping.is_set():
+                        raise ActionDispatchError("scheduler_stopping" if self.scheduler.stopping.is_set() else "automation_disabled")
+                    # Replan after the probe as well: newer protection, activity or
+                    # RAM admission may have invalidated this exact action.
+                    current = self.plan(self.controller._snapshot())
+                    if not current.actions:
+                        result["blocked_by"] = [asdict(blocker) for blocker in current.blocked_by]
+                        result["status"] = "partial" if result["actions"] else "blocked"
+                        break
+                    if current.actions[0] != action:
+                        continue  # Reconsider the changed plan; never submit the stale action.
+                    if not self.enabled() or self.scheduler.stopping.is_set():
+                        raise ActionDispatchError("scheduler_stopping" if self.scheduler.stopping.is_set() else "automation_disabled")
+                    self.controller.pending.add(action.model)
+                    pending = action.model
+                    attempted.add((action.kind, action.model))
+                    error = None
+                    try:
+                        self.controller.dispatcher.execute(action, dry_run=False, deadline=deadline)
+                    except ActionDispatchError as exc:
+                        error = exc.reason
+                confirmed = self.accounting._observe_victim(action,
+                    min(deadline, self.monotonic()+self.scheduler.config.action_observe_seconds), reconcile_exit=True)
+                with self.scheduler.changed:
+                    after = self.controller._snapshot()
+                    if confirmed:
+                        result["actions"].append(asdict(action))
+                    self.scheduler.emit("automation_action_result", model=action.model,
+                        detail={"action": asdict(action), "confirmed": confirmed, "error": error,
+                                "dry_run": False})
+                    self.controller.pending.discard(pending)
+                    pending = None
+                    if self.scheduler.stopping.is_set() or self.monotonic() >= deadline:
+                        result.update(status="partial" if result["actions"] else "timeout",
+                                      error="scheduler_stopping" if self.scheduler.stopping.is_set() else "deadline_exceeded")
+                        break
+                    if error:
+                        result.update(status="partial" if result["actions"] else "failed", error=error)
+                        break
+                    if not confirmed or not self._memory_progress(before, after, action):
+                        result.update(status="no_progress", error="effect_or_memory_progress_unconfirmed")
+                        break
+                # Observe again rather than executing a retained speculative list.
+                self._fresh_round(deadline)
+            else:
+                result.update(status="timeout", error="deadline_exceeded")
+        except ActionDispatchError as exc:
+            result.update(status="timeout" if exc.reason == "deadline_exceeded" else "partial" if result["actions"] else "blocked",
+                          error=exc.reason)
+        except Exception as exc:
+            LOG.warning(json.dumps({"kind": "automation_error", "error_type": type(exc).__name__}))
+            result.update(status="partial" if result["actions"] else "failed", error="automation_execution_failed")
+        finally:
+            with self.scheduler.changed:
+                if pending is not None:
+                    self.controller.pending.discard(pending)
+                self.active = False
+                self.scheduler.emit("automation_result", detail={**result, "dry_run": False})
+                self.scheduler.changed.notify_all()
+        return result

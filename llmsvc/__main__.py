@@ -11,7 +11,7 @@ from dataclasses import replace
 from urllib.parse import urlsplit
 
 from llmsvc import __version__
-from llmsvc.actions import ManagedModelTransport, ModelActionController
+from llmsvc.actions import AutomaticPolicyController, ManagedModelTransport, ModelActionController
 from llmsvc.config import load_config
 from llmsvc.leases import PlacementController
 from llmsvc.scheduler import Scheduler
@@ -101,6 +101,8 @@ def main():
             scheduler.model_actions = ModelActionController(scheduler, transport)
         if config.placement_enabled:
             scheduler.placement = PlacementController(scheduler, transport)
+        if config.automation_enabled:
+            scheduler.automation = AutomaticPolicyController(scheduler)
     except (OSError, ValueError, TypeError, ImportError, sqlite3.Error) as exc:
         try:
             if event_relay is not None:
@@ -127,6 +129,8 @@ def main():
     if args.once:
         try:
             print(json.dumps(scheduler.sample_once().to_dict(), allow_nan=False))
+            if scheduler.automation is not None:
+                scheduler.automation.run(dry_run=True)  # Plan-only structured log; no extra sample or action.
         finally:
             close_scheduler()
         return 0
