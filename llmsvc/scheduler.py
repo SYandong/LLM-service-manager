@@ -117,7 +117,7 @@ class Scheduler:
                  collect: Optional[Callable[[], StateSnapshot]] = None, *,
                  usage: Optional[Callable[..., dict]] = None,
                  store: Optional[IntentStore] = None, clock: Callable[[], float] = time.time,
-                 event_relay=None):
+                 event_relay=None, monotonic: Callable[[], float] = time.monotonic):
         self.config = config
         self.collect = collect
         self.model_actions = None
@@ -125,12 +125,15 @@ class Scheduler:
         self.reservation_actions = None
         self.automation = None
         self._automation_thread = None
+        self.faults = None
+        self._fault_thread = None
         self._usage = usage
         self._collector_closed = False
         # One lock for action/accounting and publication. Slow read-only probes
         # run outside it; Condition.wait releases it for other handlers.
         self.store = store
         self.clock = clock
+        self.monotonic = monotonic
         self.action_lock = store.action_lock if store is not None else threading.RLock()
         self.changed = threading.Condition(self.action_lock)
         self._snapshot = self._unknown("not_sampled")
@@ -145,6 +148,8 @@ class Scheduler:
         self._thread = None
         self._sample_started = 0
         self._sample_published = 0
+        self._sample_bounds = None  # Private (generation, monotonic start, end).
+        self._sample_source_time_provided = False
 
     def _unknown(self, reason: str) -> StateSnapshot:
         return StateSnapshot(memory=MemoryState(
@@ -161,6 +166,11 @@ class Scheduler:
                     snapshot = replace(snapshot, pins=pins, reserves=reserves)
                     from llmsvc.leases import accounting_snapshot
                     snapshot = accounting_snapshot(snapshot, self.store.leases())
+                    from llmsvc.state import Blocker
+                    pending = tuple(Blocker(claim.model, "fault_recovery_pending", claim.gpu)
+                                    for claim in self.store.faults())
+                    if pending:
+                        snapshot = replace(snapshot, blocked_by=tuple(dict.fromkeys(snapshot.blocked_by + pending)))
                 except Exception:
                     snapshot = replace(snapshot, errors=snapshot.errors + ("intent_store_unavailable",))
             return snapshot
@@ -488,10 +498,13 @@ class Scheduler:
         with self.action_lock:
             self._sample_started += 1
             generation = self._sample_started
+        collection_started = self.monotonic()
+        source_time_provided = False
         try:
             snapshot = self.collect() if self.collect else self._unknown("collectors_not_configured")
             if not isinstance(snapshot, StateSnapshot):
                 raise TypeError("collector must return StateSnapshot")
+            source_time_provided = snapshot.sampled_at is not None
             snapshot = replace(
                 snapshot, sampled_at=snapshot.sampled_at if snapshot.sampled_at is not None else time.time(),
                 read_only=self.config.read_only,
@@ -501,12 +514,16 @@ class Scheduler:
             json.dumps(snapshot.to_dict(), allow_nan=False)
         except Exception as exc:
             # Never serve a stale healthy snapshot as current after probe failure.
+            source_time_provided = False
             snapshot = self._unknown("collection_failed")
             self.emit("collection_error", detail={"error_type": type(exc).__name__})
+        collection_finished = self.monotonic()
         with self.changed:
             if generation < self._sample_published:
                 return self.snapshot()
             self._sample_published = generation
+            self._sample_bounds = (generation, collection_started, collection_finished)
+            self._sample_source_time_provided = source_time_provided
             self._snapshot = snapshot
             self.emit("state", detail={"sampled_at": snapshot.sampled_at,
                                        "errors": list(snapshot.errors)})
@@ -541,6 +558,16 @@ class Scheduler:
             # Cadence follows completion; a slow cycle never creates a backlog.
             self.stopping.wait(self.config.automation_interval_seconds)
 
+    def _run_faults(self):
+        while not self.stopping.is_set():
+            try:
+                result = self.faults.run_once()
+                if result.get("status") == "blocked" and "model" not in result:
+                    LOG.warning(json.dumps({"kind": "fault_observation_blocked", **result}))
+            except Exception as exc:
+                LOG.warning(json.dumps({"kind": "fault_error", "error_type": type(exc).__name__}))
+            self.stopping.wait(self.config.fault_interval_seconds)
+
     def start(self):
         with self.action_lock:
             if self._thread is not None:
@@ -555,6 +582,9 @@ class Scheduler:
             if self.automation is not None and self.automation.enabled():
                 self._automation_thread = threading.Thread(target=self._run_automation, name="llmsvc-automation", daemon=True)
                 self._automation_thread.start()
+            if self.faults is not None and self.faults.enabled():
+                self._fault_thread = threading.Thread(target=self._run_faults, name="llmsvc-faults", daemon=True)
+                self._fault_thread.start()
         except Exception:
             self.stop()
             raise
@@ -568,10 +598,16 @@ class Scheduler:
             self.changed.notify_all()
         try:
             try:
-                if self._automation_thread is not None and self._automation_thread.is_alive():
-                    self._automation_thread.join(timeout=self.config.automation_cycle_timeout_seconds+self.config.request_timeout_seconds)
-                    if self._automation_thread.is_alive():
-                        raise RuntimeError("automation worker did not stop")
+                try:
+                    if self._automation_thread is not None and self._automation_thread.is_alive():
+                        self._automation_thread.join(timeout=self.config.automation_cycle_timeout_seconds+self.config.request_timeout_seconds)
+                        if self._automation_thread.is_alive():
+                            raise RuntimeError("automation worker did not stop")
+                finally:
+                    if self._fault_thread is not None and self._fault_thread.is_alive():
+                        self._fault_thread.join(timeout=self.config.fault_timeout_seconds+self.config.request_timeout_seconds)
+                        if self._fault_thread.is_alive():
+                            raise RuntimeError("fault worker did not stop")
             finally:
                 if self.event_bridge is not None:
                     self.event_bridge.close()

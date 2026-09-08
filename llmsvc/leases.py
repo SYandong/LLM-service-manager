@@ -21,6 +21,8 @@ class UnitObservation:
     exited: bool = False
     active: bool = False
     lease_id: str = ""
+    invocation_id: str = ""
+    inactive: bool = False
 
 
 class LeaseError(IntentWriteError):
@@ -47,7 +49,7 @@ class LeaseUnitProbe:
             return UnitObservation()
         try:
             result = self.transport.run([self.transport.systemctl, "show", unit,
-                "--property=LoadState,ActiveState,MainPID,ControlGroup,Environment"],
+                "--property=LoadState,ActiveState,MainPID,ControlGroup,Environment,InvocationID"],
                 capture_output=True, text=True, check=False, timeout=remaining)
             if result.returncode != 0 or len(result.stdout) > 65536:
                 return UnitObservation()
@@ -68,7 +70,8 @@ class LeaseUnitProbe:
             token = tokens[0] if len(tokens) == 1 else ""
             exited = (values.get("ActiveState") in ("inactive", "failed")
                       and values.get("MainPID") == "0" and values.get("ControlGroup") == "")
-            return UnitObservation(True, exited, values.get("ActiveState") == "active", token)
+            return UnitObservation(True, exited, values.get("ActiveState") == "active", token, values.get("InvocationID", ""),
+                                   values.get("ActiveState") in ("inactive", "failed"))
         except (OSError, ValueError, subprocess.TimeoutExpired):
             return UnitObservation()
 
@@ -132,6 +135,8 @@ class PlacementController:
                           is_default=metadata.get("is_default") is True)
 
     def _decision(self, snapshot, request, *, waiting):
+        if self.scheduler.store is not None and self.scheduler.store.fault(request.name) is not None:
+            return None, (Blocker(request.name, "fault_recovery_pending"),)
         if not self._fresh(snapshot):
             return None, (Blocker(request.name, "unknown_or_stale_snapshot"),)
         # Cold admission needs trusted host headroom even when no eviction is needed.
@@ -167,6 +172,8 @@ class PlacementController:
                     guarded[model.name] = "unleased_model"
                 elif enabled and controller.transport.units.get(model.name) != unit:
                     guarded[model.name] = "action_unit_mismatch"
+                elif enabled and controller._fault_pending(model.name):
+                    guarded[model.name] = "fault_recovery_pending"
                 elif enabled and (model.name in controller.pending or controller.free_active):
                     guarded[model.name] = "operation_in_progress"
             models.append(replace(model, is_default=True)
@@ -317,6 +324,8 @@ class PlacementController:
         """
         if self.scheduler.config.read_only or self.scheduler.store is None or self.scheduler.store.read_only:
             return
+        if self.scheduler.store.fault(action.model) is not None:
+            return
         rows = [(lease, unit) for lease, unit in self.scheduler.store.leases()
                 if lease.model == action.model and lease.status == "confirmed"]
         if len(rows) != 1:
@@ -358,6 +367,8 @@ class PlacementController:
             if row is None:
                 raise LeaseError(404, "unknown_lease")
             lease, unit = row
+            if self.scheduler.store.fault(lease.model) is not None:
+                raise LeaseError(503, "fault_recovery_pending")
             if lease.status == "released":
                 if operation == "confirm":
                     raise LeaseError(409, "lease_revoked")
@@ -399,6 +410,10 @@ class PlacementController:
         for lease, unit in rows:
             if self.monotonic() >= deadline:
                 break
+            with self._locked(deadline):
+                faults = getattr(self.scheduler, "faults", None)
+                if self.scheduler.store.fault(lease.model) is not None or (faults is not None and faults.hold_account(lease)):
+                    continue
             with self._locked(deadline):
                 self._reconcile_cursor += 1
                 if self.scheduler.store.lease(lease.lease_id) != (lease, unit):
