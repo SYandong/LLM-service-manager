@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import llmsvc.activity as activity_module
 from llmsvc.__main__ import build_usage
 from llmsvc.activity import ActivityReader
 from llmsvc.config import SchedulerConfig
@@ -40,7 +41,9 @@ def usage_service(tmp_path):
             (5, now + 86400, "future", 555, 555, None),
         ])
     before = database.read_bytes()
-    reader = ActivityReader(database, {"192.0.2.1": "ctr-a"})
+    # This fixture tests HTTP/rendering semantics, not the 80 ms production
+    # read budget. Keep a bounded 1 s read budget below the UI's 2 s timeout.
+    reader = ActivityReader(database, {"192.0.2.1": "ctr-a"}, deadline_ms=1000)
     # Real request-local reader factory; no collector sampling or external probes.
     usage = build_usage(SimpleNamespace(activity_reader=reader))
     scheduler = Scheduler(SchedulerConfig("127.0.0.1", 1), usage=usage)
@@ -172,3 +175,29 @@ def test_invalid_usage_parameters(usage_api, args):
     with pytest.raises(SystemExit) as error:
         usage_api["build_parser"]().parse_args(["usage", *args])
     assert error.value.code == 2
+
+
+@pytest.mark.parametrize("elapsed,known", [(0.2, True), (1.2, False)])
+def test_fixture_scheduling_delay_preserves_production_deadline(usage_service, monkeypatch, elapsed, known):
+    def delayed_clock():
+        ticks = iter([0.0])
+        return SimpleNamespace(time=time.time, monotonic=lambda: next(ticks, elapsed))
+
+    # Simulate descheduling after connection setup, without sleeping or changing
+    # process-global time. The real production default must still fail closed.
+    with monkeypatch.context() as patch:
+        patch.setattr(activity_module, "time", delayed_clock())
+        production = ActivityReader(usage_service.database).usage(days=30, by="model")
+    assert production["known"] is False
+    assert production["error"] == "interrupted"
+    assert all(value is None for value in production["totals"].values())
+
+    with monkeypatch.context() as patch:
+        patch.setattr(activity_module, "time", delayed_clock())
+        result = usage_service.backend(days=30, by="model")
+    assert result["known"] is known, result
+    if known:
+        assert result["totals"] == {"requests": 3, "input_tokens": 118, "output_tokens": 225}
+    else:
+        assert result["error"] == "interrupted"
+        assert all(value is None for value in result["totals"].values())
