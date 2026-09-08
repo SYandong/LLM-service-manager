@@ -561,6 +561,88 @@ def action_timeout(value):
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
+def reserve_size(value):
+    amount = memory_amount(value)
+    if amount <= 0:
+        raise argparse.ArgumentTypeError("Reservation size must be positive GiB")
+    return amount
+
+
+def intent_expiry(duration, now=None):
+    now = time.time() if now is None else now
+    until = now + duration
+    try:
+        if not math.isfinite(until) or until <= now:
+            raise ValueError
+        datetime.fromtimestamp(until, timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        raise ClientError("Intent expiry is outside the supported future UTC range") from None
+    return until
+
+
+def validate_reserve_result(args, result):
+    def record(item, preview=False):
+        if type(item["gpu"]) is not int or item["gpu"] != args.gpu:
+            raise ValueError
+        if type(item["size_gb"]) not in (int, float) or item["size_gb"] != args.size:
+            raise ValueError
+        if type(item["until"]) not in (int, float) or not math.isfinite(item["until"]) or item["until"] <= 0:
+            raise ValueError
+        datetime.fromtimestamp(item["until"], timezone.utc)
+        if not isinstance(item["by"], str) or not item["by"].strip():
+            raise ValueError
+        if preview:
+            if "id" in item:
+                raise ValueError
+        elif not isinstance(item["id"], str) or not item["id"].strip():
+            raise ValueError
+
+    try:
+        if args.dry_run:
+            if not isinstance(result["would"], list) or not isinstance(result["blocked_by"], list):
+                raise ValueError
+            for item in result["would"]:
+                if item["kind"] == "reserve":
+                    record(item, preview=True)
+                elif item["kind"] != "stop" or not isinstance(item["model"], str):
+                    raise ValueError
+            blockers = result["blocked_by"]
+        else:
+            # A historical write receipt can already have expired or been deleted.
+            record(result)
+            outcome = result["evacuation"]
+            if outcome["status"] not in ("complete", "blocked", "partial"):
+                raise ValueError
+            if not isinstance(outcome["stopped"], list) or not all(isinstance(m, str) for m in outcome["stopped"]):
+                raise ValueError
+            if "error" in outcome and not isinstance(outcome["error"], str):
+                raise ValueError
+            blockers = outcome["skipped"]
+        if not isinstance(blockers, list) or not all(isinstance(b["reason"], str) for b in blockers):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        raise ClientError("Invalid reserve response; the intent may have persisted. Check status before retrying") from None
+    return result
+
+
+def format_reserve_result(args, result):
+    if args.dry_run:
+        return format_action_result(args, result) + "\nPreview owner labels are hypothetical; no reservation ID allocated"
+    outcome = result["evacuation"]
+    lines = ["Reservation saved (write receipt): %s; owner %s" % (result["id"], result["by"]),
+             "GPU%s; requested %s GiB; until %s" % (result["gpu"], result["size_gb"],
+                 datetime.fromtimestamp(result["until"], timezone.utc).isoformat()),
+             "Evacuation status: " + outcome["status"],
+             "Confirmed stopped: " + (", ".join(outcome["stopped"]) or "none")]
+    lines += ["Skipped: " + json.dumps(item, ensure_ascii=False, sort_keys=True) for item in outcome["skipped"]]
+    if outcome.get("error"):
+        lines.append("Error: " + outcome["error"])
+    lines.append("Blocked/partial evacuation does not roll back the saved intent; check status for current expiry/deletion")
+    lines.append("An active reservation excludes the whole GPU from placement; size is an annotation, not measured free capacity")
+    lines.append("Complete does not imply zero GPU use or absence of external processes")
+    return "\n".join(clean_text(line) for line in lines)
+
+
 def validate_action_result(args, result):
     def finite(value, nullable=False):
         return (nullable and value is None) or (type(value) in (int, float) and math.isfinite(value) and value >= 0)
@@ -647,8 +729,10 @@ def format_action_result(args, result):
 def result_exit_code(args, result):
     if args.command == "usage":
         return 0 if result["known"] else 1
-    if args.command in ("pin", "unpin", "free", "wake") and args.dry_run:
+    if args.command in ("pin", "unpin", "free", "wake", "reserve") and args.dry_run:
         return 1 if result["blocked_by"] else 0
+    if args.command == "reserve":
+        return 0 if result["evacuation"]["status"] == "complete" else 1
     if args.command in ("free", "wake"):
         return 0 if result["status"] == ("complete" if args.command == "free" else "ready") else 1
     return 0
@@ -720,7 +804,7 @@ def build_parser(parser_class=argparse.ArgumentParser):
     parser.add_argument("--version", action="version", version="0.1.0a2")
     parser.add_argument("--url", help="Scheduler URL (overrides LLM_URL and config)")
     parser.add_argument("--config", help="Config file (default: ~/.config/llm/config)")
-    parser.add_argument("--timeout", help="HTTP timeout in seconds (free/wake use --wait instead)")
+    parser.add_argument("--timeout", help="HTTP timeout in seconds (free/wake/reserve use --wait instead)")
     commands = parser.add_subparsers(dest="command")
     status = commands.add_parser("status", help="Show GPU, memory and model status")
     status.add_argument("--json", action="store_true", help="Print the complete JSON snapshot")
@@ -748,10 +832,28 @@ def build_parser(parser_class=argparse.ArgumentParser):
                             help="HTTP response wait in seconds (default: %s); does not change server deadline" % wait)
         action.add_argument("--dry-run", action="store_true", help="Preview without model actions or persistent writes")
         action.add_argument("--json", action="store_true", help="Print the full server outcome, including partial failures")
+    reserve = commands.add_parser("reserve", help="Reserve a GPU; inspect the separate evacuation outcome")
+    reserve.add_argument("--gpu", required=True, type=gpu_index)
+    reserve.add_argument("--size", required=True, type=reserve_size, help="Requested positive GiB annotation, e.g. 80G")
+    reserve.add_argument("--for", dest="duration", required=True, type=pin_duration, help="Required positive duration, e.g. 4h")
+    reserve.add_argument("--dry-run", action="store_true", help="Preview without persistence, model actions or ID allocation")
+    reserve.add_argument("--json", action="store_true", help="Print the complete receipt and evacuation result")
+    reserve.add_argument("--wait", type=action_timeout, default=150, help="HTTP response wait seconds (default:150); does not change server deadline")
     return parser
 
 
 def execute_command(args, client, *, now=None):
+    if args.command == "reserve":
+        payload = {"gpu": args.gpu, "size_gb": args.size, "until": intent_expiry(args.duration, now),
+                   "by": PIN_COMPATIBILITY_LABEL}
+        try:
+            result = client.request("POST", "/v1/reserve" + ("?dry_run=1" if args.dry_run else ""),
+                                    payload, timeout=args.wait)
+        except ClientError as exc:
+            if exc.status is not None or args.dry_run:
+                raise
+            raise ClientError(str(exc) + "; reservation may have persisted: check status before retrying; no automatic POST retry") from None
+        return validate_reserve_result(args, result)
     if args.command in ("free", "wake"):
         query = "?dry_run=1" if args.dry_run else ""
         if args.command == "free":
@@ -773,14 +875,7 @@ def execute_command(args, client, *, now=None):
     if args.command in ("pin", "unpin"):
         query = "?dry_run=1" if args.dry_run else ""
         if args.command == "pin":
-            now = time.time() if now is None else now
-            until = now + args.duration
-            try:
-                if not math.isfinite(until) or until <= now:
-                    raise ValueError
-                datetime.fromtimestamp(until, timezone.utc)
-            except (ValueError, OverflowError, OSError):
-                raise ClientError("Pin expiry is outside the supported future UTC range") from None
+            until = intent_expiry(args.duration, now)
             result = client.request("POST", "/v1/pin" + query,
                                     {"model": args.model, "until": until, "by": PIN_COMPATIBILITY_LABEL})
         else:
@@ -806,6 +901,8 @@ def format_result(args, result, width=100):
         return format_pin_result(args, result)
     if args.command in ("free", "wake"):
         return format_action_result(args, result)
+    if args.command == "reserve":
+        return format_reserve_result(args, result)
     return format_status(result, width=width)
 
 
