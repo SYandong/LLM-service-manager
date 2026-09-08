@@ -305,14 +305,15 @@ class Scheduler:
             self.emit(operation, model=model, detail={**result, "dry_run": False})
             return result
 
-    def _reserve_input(self, payload, *, source_ip):
+    def _reserve_input(self, payload, *, source_ip, dry_run=False):
         if not isinstance(payload, dict):
             raise ValueError("request body must be a JSON object")
         self._keys(payload, {"gpu", "size_gb", "until", "by"}, required={"gpu", "size_gb", "until", "by"})
         nonempty(payload["by"], "by")  # Compatibility self-label, never authority.
         self._gpu(payload["gpu"], self.snapshot())
         reserve = Reserve("preview", payload["gpu"], payload["size_gb"],
-                          self._until(payload["until"], self.clock()), self.config.owner_for_ip(source_ip))
+                          self._until(payload["until"], self.clock()),
+                          payload["by"] if dry_run else self.config.owner_for_ip(source_ip))
         validate_reserve(reserve)
         return reserve
 
@@ -335,8 +336,10 @@ class Scheduler:
                     raise IntentWriteError(405, "read_only")
                 if self.store is None or self.store.read_only:
                     raise IntentWriteError(503, "intent_store_unavailable")
-            reserve = self._reserve_input(payload, source_ip=source_ip)
+            reserve = self._reserve_input(payload, source_ip=source_ip, dry_run=dry_run)
             if dry_run:
+                # Match pin/legacy reserve previews: by is a hypothetical label.
+                # Only persisted records use authoritative transport ownership.
                 return reserve  # No ID allocation, writer, collection or event.
             reserve = replace(reserve, id=uuid.uuid4().hex)
             try:
@@ -364,41 +367,32 @@ class Scheduler:
             return {"id": reserve_id, "by": owner}
 
     def run_reserve(self, operation, payload, *, source_ip, dry_run=False):
+        if operation not in ("reserve", "unreserve"):
+            raise IntentWriteError(405, "operation_not_enabled")
+        if dry_run:
+            # Preserve the published pin/reserve preview contract: hypothetical
+            # request labels and pure policy plans, not live execution receipts.
+            return self.preview(operation, payload)
         from llmsvc.actions import ReservationController
         if operation == "unreserve":
             if not isinstance(payload, dict):
                 raise ValueError("request body must be a JSON object")
             self._keys(payload, {"id"}, required={"id"})
-            result = self._delete_reserve(payload["id"], source_ip=source_ip, dry_run=dry_run)
-            if dry_run:
-                result = {"would": [{"kind": "unreserve", "id": result["id"]}], "blocked_by": []}
-        elif operation == "reserve":
-            deadline = time.monotonic()+self.config.reserve_timeout_seconds
-            record = self._save_reserve(payload, source_ip=source_ip, dry_run=dry_run, deadline=deadline)
-            if dry_run:
-                controller = self.reservation_actions or ReservationController(self)
-                plan = controller.evacuate(record, dry_run=True)
-                intent = asdict(record)
-                del intent["id"]
-                result = {"would": [{"kind": "reserve", **intent}] + plan["would"], "blocked_by": plan["blocked_by"]}
-            else:
-                try:
-                    controller = self.reservation_actions or ReservationController(self)
-                    outcome = controller.evacuate(record, deadline=deadline)
-                except Exception as exc:
-                    # Persistence already succeeded: never hide that ID behind a
-                    # generic error or imply rollback. No further model action.
-                    LOG.warning(json.dumps({"kind": "reserve_execution_error", "reserve_id": record.id,
-                                            "error_type": type(exc).__name__}))
-                    outcome = {"status": "blocked", "stopped": [],
-                               "skipped": [{"model": None, "reason": "reserve_execution_failed", "gpu": record.gpu}],
-                               "error": "reserve_execution_failed"}
-                result = {**asdict(record), "evacuation": outcome}
-        else:
-            raise IntentWriteError(405, "operation_not_enabled")
-        if dry_run:
-            LOG.info(json.dumps({"kind": "action_preview", "operation": operation, "dry_run": True, **result}, allow_nan=False))
-        return result
+            return self._delete_reserve(payload["id"], source_ip=source_ip)
+        deadline = time.monotonic()+self.config.reserve_timeout_seconds
+        record = self._save_reserve(payload, source_ip=source_ip, deadline=deadline)
+        try:
+            controller = self.reservation_actions or ReservationController(self)
+            outcome = controller.evacuate(record, deadline=deadline)
+        except Exception as exc:
+            # Persistence already succeeded: never hide that ID behind a generic
+            # error or imply rollback. No further model action is attempted.
+            LOG.warning(json.dumps({"kind": "reserve_execution_error", "reserve_id": record.id,
+                                    "error_type": type(exc).__name__}))
+            outcome = {"status": "blocked", "stopped": [],
+                       "skipped": [{"model": None, "reason": "reserve_execution_failed", "gpu": record.gpu}],
+                       "error": "reserve_execution_failed"}
+        return {**asdict(record), "evacuation": outcome}
 
     @staticmethod
     def _keys(payload, allowed, required=frozenset()):
