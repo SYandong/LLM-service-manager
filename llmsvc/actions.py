@@ -703,7 +703,7 @@ class ReservationController:
     def _plan(self, snapshot, reserve, *, stopped=()):
         from dataclasses import replace
         from llmsvc.policy import Decision, plan_reserve
-        from llmsvc.state import Blocker, Pin
+        from llmsvc.state import Blocker
         sampled = snapshot.sampled_at
         if not _known(sampled) or not 0 <= self.scheduler.clock()-sampled <= self.scheduler.config.max_snapshot_age_seconds:
             return Decision(blocked_by=(Blocker(None, "unknown_or_stale_snapshot", reserve.gpu),))
@@ -737,14 +737,9 @@ class ReservationController:
         for lease in snapshot.leases:
             if lease.gpu == reserve.gpu and lease.status in ("pending", "stale"):
                 extra.append(Blocker(lease.model, "outstanding_lease", reserve.gpu))
-        # Detached exclusions reuse the existing pure policy; no synthetic pin
-        # is saved or published as user intent.
-        pins = snapshot.pins + tuple(Pin(name, self.scheduler.clock()+self.scheduler.config.reserve_timeout_seconds+1,
-                                        "reserve_guard") for name in guarded)
-        decision = plan_reserve(replace(snapshot, models=tuple(models), pins=pins), gpu=reserve.gpu)
-        blockers = tuple(replace(blocker, reason=guarded[blocker.model])
-                         if blocker.model in guarded and blocker.reason == "pinned_until" else blocker
-                         for blocker in decision.blocked_by) + tuple(extra)
+        decision = plan_reserve(replace(snapshot, models=tuple(models)), gpu=reserve.gpu,
+                                exclusions=guarded)
+        blockers = decision.blocked_by + tuple(extra)
         if not enabled:
             blockers += tuple(Blocker(action.model, "model_actions_not_enabled", reserve.gpu) for action in decision.actions)
             return replace(decision, actions=(), blocked_by=blockers)
@@ -896,7 +891,7 @@ class AutomaticPolicyController:
     def plan(self, snapshot):
         from dataclasses import replace
         from llmsvc.policy import Decision, plan_idle_sleep, plan_memory_pressure
-        from llmsvc.state import Blocker, Pin
+        from llmsvc.state import Blocker
         controller = self.controller
         if controller is None or self.accounting is None:
             return Decision(blocked_by=(Blocker(None, "automation_executor_unavailable"),))
@@ -918,18 +913,13 @@ class AutomaticPolicyController:
                 guards[model.name] = "unleased_model"
             elif model.name in controller.pending or controller.free_active:
                 guards[model.name] = "operation_in_progress"
-        until = self.scheduler.clock()+self.scheduler.config.automation_cycle_timeout_seconds+1
-        protected = replace(snapshot, models=tuple(models), pins=snapshot.pins+tuple(
-            Pin(name, until, "automation_guard") for name in guards))
+        protected = replace(snapshot, models=tuple(models))
         settings = replace(controller.settings, fixed_ttl_seconds=self.scheduler.config.automation_idle_seconds)
         # Do not add sleepers while current memory pressure is unresolved.
-        decision = plan_memory_pressure(protected, settings=settings)
+        decision = plan_memory_pressure(protected, settings=settings, exclusions=guards)
         if not decision.actions and not decision.blocked_by:
-            decision = plan_idle_sleep(protected, settings=settings)
-        blockers = tuple(replace(blocker, reason=guards[blocker.model])
-                         if blocker.model in guards and blocker.reason == "pinned_until" else blocker
-                         for blocker in decision.blocked_by)
-        return replace(decision, blocked_by=blockers)
+            decision = plan_idle_sleep(protected, settings=settings, exclusions=guards)
+        return decision
 
     def _fresh_round(self, deadline):
         with self.controller._locked(deadline):

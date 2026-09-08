@@ -4,7 +4,7 @@
 from dataclasses import dataclass
 from itertools import combinations
 from math import isfinite
-from typing import Optional
+from typing import Mapping, Optional
 
 from llmsvc.state import Action, Blocker, ModelState, StateSnapshot
 from .common import Decision, PolicySettings, Projection, known_number, snapshot_blockers
@@ -86,6 +86,7 @@ def _accounting(snapshot):
 def plan_placement(
     snapshot: StateSnapshot, request: ModelState, *, waiting: bool = False,
     settings: PolicySettings = PolicySettings(),
+    exclusions: Optional[Mapping[str, str]] = None,
 ) -> PlacementDecision:
     """Choose one GPU, then emit its complete eviction plan and final place.
 
@@ -110,7 +111,7 @@ def plan_placement(
     if any(b.gpu is None for b in accounting_blockers):
         return PlacementDecision(blocked_by=tuple(blockers))
     default = request.is_default or (current is not None and current.is_default)
-    projection = Projection(snapshot, settings)
+    projection = Projection(snapshot, settings, exclusions=exclusions)
     feasible = []
     candidate_cards = []
     for gpu in sorted(snapshot.gpus, key=lambda g: g.index):
@@ -170,7 +171,7 @@ def plan_placement(
         blockers.append(Blocker(request.name, "no_feasible_gpu"))
         return PlacementDecision(blocked_by=tuple(blockers))
     key, gpu, budget, selected = min(options, key=lambda item: item[0])
-    plan = Projection(snapshot, settings)
+    plan = Projection(snapshot, settings, exclusions=projection.exclusions)
     # Stop selected sleepers first to release RAM. Admission never evicts a model
     # outside the priced set. Projection.stop coalesces each local sleep/stop
     # pair after its admission bookkeeping, avoiding an intermediate transfer.
