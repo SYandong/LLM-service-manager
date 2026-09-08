@@ -33,6 +33,11 @@ class SchedulerConfig:
     collectors: dict[str, Any] = field(default_factory=dict)
     state_db_path: str = ""
     max_snapshot_age_seconds: float = 30.0
+    model_actions_enabled: bool = False
+    free_timeout_seconds: float = 120.0
+    wake_timeout_seconds: float = 900.0
+    action_observe_seconds: float = 10.0
+    action_poll_seconds: float = 0.2
 
     def __post_init__(self):
         try:
@@ -47,12 +52,15 @@ class SchedulerConfig:
             raise ValueError("event_history_size must be a positive integer")
         for name in ("sample_interval_seconds", "event_heartbeat_seconds",
                      "request_timeout_seconds", "memory_budget_gb", "host_min_available_gb",
-                     "max_snapshot_age_seconds"):
+                     "max_snapshot_age_seconds", "free_timeout_seconds", "wake_timeout_seconds",
+                     "action_observe_seconds", "action_poll_seconds"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (float, int)):
                 raise ValueError(f"{name} must be a finite positive number")
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be a finite positive number")
+        if type(self.model_actions_enabled) is not bool:
+            raise ValueError("model_actions_enabled must be a boolean")
         if type(self.read_only) is not bool:
             raise ValueError("read_only must be a boolean")
         if not isinstance(self.state_db_path, str):

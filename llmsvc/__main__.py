@@ -10,6 +10,7 @@ import threading
 from dataclasses import replace
 
 from llmsvc import __version__
+from llmsvc.actions import ManagedModelTransport, ModelActionController
 from llmsvc.config import load_config
 from llmsvc.scheduler import Scheduler
 from llmsvc.server import SchedulerHTTPServer
@@ -64,9 +65,15 @@ def main():
         if args.dry_run or args.check_config or args.once:
             config = replace(config, read_only=True)
         collector = build_collector(config)
+        transport = None
+        if config.model_actions_enabled:
+            transport = ManagedModelTransport(swap_url=config.collectors.get("swap_url", ""),
+                models=config.collectors.get("models", {}), systemctl=config.collectors.get("systemctl", "systemctl"))
         if config.state_db_path:
             store = IntentStore(config.state_db_path, action_lock=threading.RLock(), read_only=config.read_only)
         scheduler = Scheduler(config, collect=collector, store=store, usage=build_usage(collector))
+        if transport is not None:
+            scheduler.model_actions = ModelActionController(scheduler, transport)
     except (OSError, ValueError, TypeError, ImportError, sqlite3.Error) as exc:
         if store is not None:
             store.close()

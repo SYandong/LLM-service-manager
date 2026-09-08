@@ -34,6 +34,7 @@ class Scheduler:
                  store: Optional[IntentStore] = None, clock: Callable[[], float] = time.time):
         self.config = config
         self.collect = collect
+        self.model_actions = None
         self._usage = usage
         self._collector_closed = False
         # One lock for action/accounting and publication. Slow read-only probes
@@ -90,9 +91,21 @@ class Scheduler:
                     need = payload["need_gb"]
                     if isinstance(need, bool) or not isinstance(need, (int, float)) or not math.isfinite(need) or need < 0:
                         raise ValueError("need_gb must be finite and nonnegative")
-                decision = plan_free(snapshot, **payload)
+                decision = self.model_actions.plan_free(snapshot, **payload) if self.model_actions else plan_free(snapshot, **payload)
                 result = {"would": [asdict(a) for a in decision.actions],
                           "estimated_freed_gb": decision.estimated_freed_gb}
+            elif operation == "wake":
+                self._keys(payload, {"model"}, required={"model"})
+                nonempty(payload["model"], "model")
+                if self.model_actions is None:
+                    return {"would": [], "blocked_by": [{"model": payload["model"], "reason": "operation_not_enabled"}]}
+                from llmsvc.actions import ActionDispatchError
+                try:
+                    model = self.model_actions.wake_model(snapshot, payload["model"])
+                    result = {"would": [] if self.model_actions._ready(model) else [
+                        {"kind": "wake", "model": model.name, "reason": "user_wake", "gpu": model.gpu}]}
+                except ActionDispatchError as exc:
+                    return {"would": [], "blocked_by": [{"model": payload["model"], "reason": exc.reason}]}
             elif operation == "pin":
                 self._keys(payload, {"model", "until", "by"}, required={"model", "until", "by"})
                 pin = Pin(payload["model"], self._until(payload["until"], now), payload["by"])
@@ -122,6 +135,25 @@ class Scheduler:
                 result = {"would": [], "blocked_by": [{"model": None, "reason": error} for error in snapshot.errors]}
             LOG.info(json.dumps({"kind": "action_preview", "operation": operation, "dry_run": True, **result}, allow_nan=False))
             return result
+
+    def run_model_action(self, operation: str, payload: dict, *, source_ip: str) -> dict:
+        from llmsvc.actions import ActionDispatchError
+        if self.config.read_only:
+            raise IntentWriteError(405, "read_only")
+        if not self.config.model_actions_enabled or self.model_actions is None:
+            raise IntentWriteError(405, "operation_not_enabled")
+        owner = self.config.owner_for_ip(source_ip)
+        try:
+            if operation == "free":
+                return self.model_actions.free(payload, by=owner)
+            if operation == "wake":
+                self._keys(payload, {"model"}, required={"model"})
+                nonempty(payload["model"], "model")
+                return self.model_actions.wake(payload["model"], by=owner)
+            raise IntentWriteError(405, "operation_not_enabled")
+        except ActionDispatchError as exc:
+            status = 409 if exc.reason in ("free_in_progress", "operation_in_progress") else 503
+            raise IntentWriteError(status, exc.reason) from exc
 
     def write_pin(self, operation: str, payload: dict, *, source_ip: str) -> dict:
         """Persist pin intent only; model lifecycle actions remain disabled."""
