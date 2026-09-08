@@ -123,6 +123,8 @@ class Scheduler:
         self.model_actions = None
         self.placement = None
         self.reservation_actions = None
+        self.automation = None
+        self._automation_thread = None
         self._usage = usage
         self._collector_closed = False
         # One lock for action/accounting and publication. Slow read-only probes
@@ -530,6 +532,15 @@ class Scheduler:
             delay = max(0.0, self.config.sample_interval_seconds - (time.monotonic() - started))
             self.sample_requested.wait(delay)
 
+    def _run_automation(self):
+        while not self.stopping.is_set():
+            try:
+                self.automation.run()
+            except Exception as exc:
+                LOG.warning(json.dumps({"kind": "automation_error", "error_type": type(exc).__name__}))
+            # Cadence follows completion; a slow cycle never creates a backlog.
+            self.stopping.wait(self.config.automation_interval_seconds)
+
     def start(self):
         with self.action_lock:
             if self._thread is not None:
@@ -541,16 +552,29 @@ class Scheduler:
             if self.event_bridge is not None:
                 self.event_bridge.start()
             self._thread.start()
+            if self.automation is not None and self.automation.enabled():
+                self._automation_thread = threading.Thread(target=self._run_automation, name="llmsvc-automation", daemon=True)
+                self._automation_thread.start()
         except Exception:
             self.stop()
             raise
 
     def stop(self):
-        self.stopping.set()
-        self.sample_requested.set()
+        # Serialize shutdown intent with the final automatic admission/dispatch
+        # section. An already submitted action may finish; no later one starts.
+        with self.changed:
+            self.stopping.set()
+            self.sample_requested.set()
+            self.changed.notify_all()
         try:
-            if self.event_bridge is not None:
-                self.event_bridge.close()
+            try:
+                if self._automation_thread is not None and self._automation_thread.is_alive():
+                    self._automation_thread.join(timeout=self.config.automation_cycle_timeout_seconds+self.config.request_timeout_seconds)
+                    if self._automation_thread.is_alive():
+                        raise RuntimeError("automation worker did not stop")
+            finally:
+                if self.event_bridge is not None:
+                    self.event_bridge.close()
         finally:
             try:
                 if self._thread is not None and self._thread.is_alive():
