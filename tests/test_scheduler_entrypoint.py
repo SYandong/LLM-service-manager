@@ -70,3 +70,31 @@ def test_sigterm_stops_daemon_cleanly_with_sse_subscriber(tmp_path):
         if process.poll() is None:
             process.kill()
             process.communicate(timeout=2)
+
+
+def test_daemon_dry_run_reads_existing_intent_without_writing(tmp_path):
+    from llmsvc.state import Pin
+    from llmsvc.store import IntentStore
+    import threading
+    database = tmp_path / "state.sqlite"
+    store = IntentStore(database, action_lock=threading.RLock())
+    store.put_pin(Pin("retained", 4102444800, "owner"))
+    store.close()
+    before = database.read_bytes()
+    config = tmp_path / "scheduler.yaml"
+    config.write_text(f"listen_host: 127.0.0.1\nlisten_port: 8011\nstate_db_path: {database}\n")
+    result = subprocess.run([sys.executable, "-m", "llmsvc", "--config", str(config), "--dry-run", "--once"],
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["pins"] == [{"model": "retained", "until": 4102444800.0, "by": "owner"}]
+    assert database.read_bytes() == before
+
+
+def test_daemon_missing_store_fails_without_creating_it(tmp_path):
+    database = tmp_path / "missing.sqlite"
+    config = tmp_path / "scheduler.yaml"
+    config.write_text(f"listen_host: 127.0.0.1\nlisten_port: 8011\nstate_db_path: {database}\n")
+    result = subprocess.run([sys.executable, "-m", "llmsvc", "--config", str(config), "--dry-run", "--once"],
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 2
+    assert not database.exists()

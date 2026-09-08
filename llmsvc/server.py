@@ -6,7 +6,7 @@ import logging
 import socket
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from llmsvc.scheduler import Scheduler
 
@@ -52,6 +52,8 @@ class SchedulerHandler(BaseHTTPRequestHandler):
             target = urlsplit(self.path)
             if target.path == "/v1/state":
                 self._json(200, self.server.scheduler.snapshot().to_dict())
+            elif target.path == "/v1/usage":
+                self._usage(target.query)
             elif target.path == "/v1/events":
                 query = parse_qs(target.query, keep_blank_values=True)
                 values = query.get("since", [self.headers.get("Last-Event-ID", "0")])
@@ -68,6 +70,22 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "not_found"})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             self.close_connection = True
+
+    def _usage(self, raw_query):
+        query = parse_qs(raw_query, keep_blank_values=True)
+        if set(query) - {"days", "by"} or any(len(values) != 1 for values in query.values()):
+            self._json(400, {"error": "invalid_usage_query"})
+            return
+        days = query.get("days", ["7"])[0]
+        by = query.get("by", ["container"])[0]
+        try:
+            if not days.isascii() or not days.isdigit():
+                raise ValueError("invalid days")
+            result = self.server.scheduler.usage(days=int(days), by=by)
+        except ValueError:
+            self._json(400, {"error": "invalid_usage_query"})
+            return
+        self._json(200 if result["known"] else 503, result)
 
     def _events(self, cursor):
         scheduler = self.server.scheduler
@@ -92,7 +110,52 @@ class SchedulerHandler(BaseHTTPRequestHandler):
     def _read_only(self):
         self._json(405, {"error": "read_only", "message": "M1 does not execute actions"})
 
-    do_POST = _read_only
-    do_DELETE = _read_only
+    def _preview_request(self):
+        try:
+            target = urlsplit(self.path)
+            query = parse_qs(target.query, keep_blank_values=True)
+            if "dry_run" not in query:
+                self._read_only()
+                return
+            if query != {"dry_run": ["1"]}:
+                raise ValueError("expected dry_run=1")
+            operation = None
+            payload = {}
+            if self.command == "POST":
+                operation = {"/v1/free": "free", "/v1/pin": "pin", "/v1/reserve": "reserve"}.get(target.path)
+            elif self.command == "DELETE":
+                for prefix, op, key in (("/v1/pin/", "unpin", "model"), ("/v1/reserve/", "unreserve", "id")):
+                    if target.path.startswith(prefix):
+                        operation = op
+                        payload[key] = unquote(target.path[len(prefix):])
+            if operation is None:
+                self._read_only()
+                return
+            if self.headers.get("Transfer-Encoding") is not None:
+                raise ValueError("transfer encoding is not supported")
+            lengths = self.headers.get_all("Content-Length", ["0"])
+            if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit():
+                raise ValueError("invalid Content-Length")
+            length = int(lengths[0])
+            if length > 65536:
+                self._json(413, {"error": "request_too_large"})
+                return
+            if self.command == "DELETE" and length:
+                raise ValueError("DELETE preview does not accept a body")
+            if length:
+                data = self.rfile.read(length)
+                if len(data) != length:
+                    raise ValueError("incomplete request body")
+                def reject_constant(value):
+                    raise ValueError("non-finite JSON number")
+                payload = json.loads(data, parse_constant=reject_constant)
+            self._json(200, self.server.scheduler.preview(operation, payload))
+        except (ValueError, TypeError, UnicodeError):
+            self._json(400, {"error": "invalid_request"})
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            self.close_connection = True
+
+    do_POST = _preview_request
+    do_DELETE = _preview_request
     do_PUT = _read_only
     do_PATCH = _read_only
