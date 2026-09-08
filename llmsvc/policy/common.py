@@ -135,6 +135,9 @@ class Projection:
         )
 
     def stop(self, model, reason):
+        # A later stop makes this decision's earlier sleep unnecessary. Keep the
+        # stop position and virtual sleep/release accounting below unchanged.
+        self.actions = [a for a in self.actions if not (a.kind == "sleep" and a.model == model.name)]
         self.actions.append(Action("stop", model.name, reason, model.gpu))
         if model.state == "sleeping":
             if known_number(self.available) and known_number(model.weights_gb):
