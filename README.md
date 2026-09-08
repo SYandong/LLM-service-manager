@@ -4,7 +4,37 @@
 > 路线图见 [`docs/ROADMAP.md`](docs/ROADMAP.md)，设计见 [`docs/DESIGN.md`](docs/DESIGN.md)，协作规范见 [`AGENTS.md`](AGENTS.md)。
 > `vllm_service/`、`tools/dashboard.py`、`config/server.yaml` 是冻结的 legacy，只修明确 issue 指定的 bug，满足 M6 门槛后下线。
 
-新控制面使用 Python 3.10+，包名 `llmsvc`。当前骨架可用 `python -m pip install .` 安装，运行 `python -m llmsvc --help` 或 `llm --help`。`cli/llm` 也可单独复制运行，仅使用标准库。M1 开始提供只读状态；此骨架不会操作 GPU 或现有服务。可选 TUI 依赖通过 `pip install ".[tui]"` 声明，应用实现见 M5。
+新控制面使用 Python 3.10+，包名 `llmsvc`，可用 `python -m pip install .` 安装。当前提供只读 scheduler 与 `llm status`；`cli/llm` 也可单独复制运行，仅使用标准库。查看参数可运行 `python -m llmsvc --help` 或 `llm --help`。可选 TUI 的应用实现见 M5。
+
+## 查看调度器状态
+
+将 `LLM_URL` 换成部署方提供的 **scheduler 地址**；下面的主机和端口仅为示例，不是 llama-swap 的 OpenAI API 地址。脚本没有内置服务地址。
+
+```sh
+LLM_URL=http://scheduler:8011 python3 cli/llm status
+LLM_URL=http://scheduler:8011 python3 cli/llm status --json
+```
+
+只复制 `cli/llm` 时，将上面的脚本路径换成复制后的路径即可，无需安装仓库、`rich` 或 `textual`。配置文件、参数优先级与窄屏行为见 [CLI 使用说明](docs/CLI.md)。
+
+以下复用 CLI 文档的合成快照示例，**不是服务器实时测量**：
+
+```text
+GPU0  87/144 GiB  llmsvc 77  external 10  free 57
+GPU1  ?/? GiB  llmsvc ?  external ?  free ?
+RAM   llmsvc 86/200 GiB budget  host available 823 GiB
+
+MODEL                       STATE    GPU MEM    USED   10m  FROM       PIN (UTC)
+default-model *             sleeping 0   1.6G   25m    0    ctr-a      -
+research-model              awake    0   73G    1m     12   ctr-b      01-15 09:00Z (ctr-b)
+cold-model                  stopped  -   ?G     ?      ?    -          -
+  cold start estimate: 3.5m
+unknown-model               unknown  -   ?G     ?      ?    -          -
+WARNING GPU1 probe unavailable
+* default model | ? unknown | sampled 01-15 08:00Z | read-only
+```
+
+`*` 表示默认模型，`?` 表示探测未知；未知不会当成零占用或 stopped。`MEM` 是实际驻留显存，GPU/RAM 数值以 GiB 计，PIN 到期时间使用 UTC。`--json` 保留完整字段。
 
 ---
 
