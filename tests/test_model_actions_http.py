@@ -256,3 +256,24 @@ def test_contradictory_sleeping_unit_observation_blocks_wake(system, active):
     status, result = request(address, "POST", "/v1/wake/model")
     assert status == 200 and result["status"] == "blocked" and result["error"] == "model_state_changed"
     assert not state["http_calls"]
+
+
+@pytest.mark.parametrize("guard", ["operation_in_progress", "unmanaged_model", "configured_unit_mismatch"])
+def test_http_free_keeps_real_pin_and_operational_exclusion_reasons(system, guard):
+    scheduler, address, transport, state = system
+    state["model"] = replace(state["model"], state="awake", unit_active=True, health_ok=True,
+                             is_sleeping=False, swap_state="ready", gpu=0, resident_gb=80)
+    pin = Pin("model", time.time()+100, "real-owner")
+    state["pins"] = (pin,)
+    if guard == "operation_in_progress":
+        scheduler.model_actions.pending.add("model")
+    elif guard == "unmanaged_model":
+        del transport.models["model"]
+    else:
+        state["model"] = replace(state["model"], unit="vllm-other.service")
+    status, result = request(address, "POST", "/v1/free", {"need_gb": 10})
+    assert status == 200 and result["status"] == "blocked"
+    assert [b["reason"] for b in result["skipped"] if b["model"] == "model"] == ["pinned_until", guard]
+    assert result["slept"] == [] and result["stopped"] == [] and result["freed_gb"] == 0
+    assert state["http_calls"] == [] and state["stop_calls"] == []
+    assert scheduler.snapshot().pins == (pin,) and scheduler.snapshot().models[0].budget_gb == 80

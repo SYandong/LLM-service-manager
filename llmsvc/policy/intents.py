@@ -10,6 +10,7 @@ from .common import Decision, PolicySettings, Projection, known_number
 def plan_free(
     snapshot: StateSnapshot, *, gpu: Optional[int] = None, ram: bool = False,
     need_gb: Optional[float] = None, settings: PolicySettings = PolicySettings(),
+    exclusions: Optional[Mapping[str, str]] = None,
 ) -> Decision:
     """Plan releases; ``need_gb`` is additional memory to release, in GiB.
 
@@ -19,7 +20,7 @@ def plan_free(
     """
     if need_gb is not None and not known_number(need_gb):
         raise ValueError("need_gb must be finite and non-negative")
-    p = Projection(snapshot, settings)
+    p = Projection(snapshot, settings, exclusions=exclusions)
     if p.blockers or need_gb == 0:
         return p.result()
     state = "sleeping" if ram else "awake"
