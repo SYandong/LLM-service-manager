@@ -144,12 +144,18 @@ def test_lost_actual_http_reply_keeps_one_persisted_intent_without_retry(pin_api
     assert service.state['calls'] == []
 
 
-def test_unleased_preview_remains_blocked_without_inventing_executable_stops(pin_api, mounted_reserve):
+def test_pure_policy_preview_does_not_guarantee_unleased_live_evacuation(pin_api, mounted_reserve):
     service = mounted_reserve
     for lease_id in service.leases.values():
         service.scheduler.store.transition_lease(lease_id, 'released')
-    result = pin_api['execute_command'](reserve_args(pin_api, '--dry-run'), service.client)
-    assert [item['kind'] for item in result['would']] == ['reserve']
-    assert {item['model'] for item in result['blocked_by'] if item['reason'] == 'unleased_model'} == {'a','b'}
-    assert pin_api['result_exit_code'](reserve_args(pin_api, '--dry-run'), result) == 1
+    args = reserve_args(pin_api, '--dry-run')
+    preview = pin_api['execute_command'](args, service.client)
+    assert [item['kind'] for item in preview['would']] == ['reserve','stop','stop']
+    assert preview['blocked_by'] == [] and pin_api['result_exit_code'](args, preview) == 0
     assert not service.scheduler.snapshot().reserves and not service.state['calls']
+    args = reserve_args(pin_api)
+    result = pin_api['execute_command'](args, service.client)
+    assert result['evacuation']['status'] == 'blocked' and result['evacuation']['stopped'] == []
+    assert {item['model'] for item in result['evacuation']['skipped'] if item['reason'] == 'unleased_model'} == {'a','b'}
+    assert pin_api['result_exit_code'](args, result) == 1
+    assert service.scheduler.store.reserve(result['id']) is not None and not service.state['calls']

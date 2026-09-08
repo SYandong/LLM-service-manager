@@ -119,7 +119,7 @@ LLM_URL=http://scheduler:8011 python3 llm reserve --gpu 0 --size 80G --for 4h --
 
 `--gpu`、`--size`、`--for` 都是必填项。GPU 为非负整数，size 是正 GiB（`80G` / `80GiB` / `80`），时长复用 pin 的正数 `s/m/h/d` 规则。不提供默认或永久预约；零大小、零时长、非有限数与无法表示的到期时间在请求前被拒绝。
 
-- 当前已挂载的 `?dry_run=1` 返回 would/blocked_by：只预览预约和符合条件的 sleeping 模型清理，不持久化、不调用模型 transport、不分配预约 ID。`by` 是兼容请求标签，预览中标为假设值；实际保存时才按连接来源确定权威 owner。阻塞预览返回退出码 1；`--json` 保留完整内容。
+- 当前已挂载的 `?dry_run=1` 返回 would/blocked_by：只预览预约和符合条件的 sleeping 模型清理，不持久化、不调用模型 transport、不分配预约 ID。`by` 是兼容请求标签，预览中标为假设值；实际保存时才按连接来源确定权威 owner。预览是纯策略计划，不代替实际执行前的租约、unit 身份和保护重验；预览成功也不保证实际 evacuation 完成。阻塞预览返回退出码 1；`--json` 保留完整内容。
 - 采用 #112 接口的 scheduler 在 `read_only: false` 且有可写状态库时接受实际预约；默认只读仍返回 405。意图写入与 `model_actions_enabled` 分开：关闭模型动作也可保存意图，但不能据此认为清理完成。客户端显示服务器的 `read_only` / 旧版本 `operation_not_enabled`，不会自动改走预览、重试或更改服务器配置。
 - 去掉 `--dry-run` 才发送实际预约。成功保存返回 `{id,gpu,size_gb,until,by,evacuation:{status,stopped,skipped,error?}}`。客户端显示服务端权威 owner 和保存回执，单独显示 evacuation 的 complete/blocked/partial 及全部确认停止、阻塞与错误详情。
 - **HTTP 200、保存成功与清理完成是不同结果。** blocked/partial 返回退出码 1，但不撤销或隐藏已保存的 ID/意图，也不重发 POST。`size_gb` 只是请求的预约注记；有效预约从调度器放置中排除整张 GPU，不代表实测释放容量。complete 也不保证 GPU 物理使用为零或没有其他用户进程。
@@ -196,6 +196,6 @@ Free/wake 验证使用实际 core HTTP、临时 SQLite 和显式模拟的模型�
 
 快捷键测试通过 headless Pilot 实际按键，覆盖输入焦点、草稿保留、所选模型/失效目标、引号与前导连字符、空/零 pin 时长拒绝、显式提交与刷新、RAM 确认/取消，以及现有 usage/help/quit。它们复用上述临时服务，不进行实机模型操作。
 
-Reserve 测试直接请求当前 SchedulerHTTPServer 的预览/默认只读 405 路径，并以临时 SQLite 字节、状态、事件和采集次数及写入陷阱验证零副作用。实际挂载的 POST/DELETE 通过 core 的临时 HTTP/SQLite 与模拟受管 unit 夹具验证：complete/blocked/partial、伪造标签后的权威 owner、保存 ID、不完整 evacuation 后保留意图、幂等删除、响应前删除/到期及真实保存后丢失回复不重试。TUI 也使用此实际 API 刷新预约；额外的响应夹具仅保留为无效响应/格式化单测，不代替实际链路。未登记租约的 sleeping 模型明确以 `unleased_model` 阻塞，不把纯策略估计当可执行动作。单文件 `-I -S`、非法参数、丢失响应无重试、线程屏障和退出回调也纳入检查。
+Reserve 测试直接请求当前 SchedulerHTTPServer 的预览/默认只读 405 路径，并以临时 SQLite 字节、状态、事件和采集次数及写入陷阱验证零副作用。实际挂载的 POST/DELETE 通过 core 的临时 HTTP/SQLite 与模拟受管 unit 夹具验证：complete/blocked/partial、伪造标签后的权威 owner、保存 ID、不完整 evacuation 后保留意图、幂等删除、响应前删除/到期及真实保存后丢失回复不重试。TUI 也使用此实际 API 刷新预约；额外的响应夹具仅保留为无效响应/格式化单测，不代替实际链路。预览保留纯策略计划；它不是执行保证。实际执行时，未登记租约的 sleeping 模型会以 `unleased_model` 阻塞；即使此前预览成功，也不能跳过实际回执的 evacuation 状态。单文件 `-I -S`、非法参数、丢失响应无重试、线程屏障和退出回调也纳入检查。
 
 <!-- Generated-By: Codex / gpt-6-astra -->
