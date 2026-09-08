@@ -89,25 +89,9 @@ def test_scheduler_closes_owned_collector_once():
 
 
 def test_multiple_inflight_observations_never_wait_for_action_lock():
-    class Quiet:
-        def __init__(self):
-            self.mutex = threading.Lock()
-            self.count = None
-            self.connected = False
-            self.heartbeats = 0
-            self.observations = []
-        def observe(self, count, connected=True):
-            with self.mutex:
-                self.count, self.connected = count, connected
-                self.observations.append(count)
-        def heartbeat(self):
-            with self.mutex:
-                self.heartbeats += 1
-        def blockers(self):
-            with self.mutex:
-                return [] if self.connected and self.count == 0 else ["inflight_or_unknown"]
+    from llmsvc.reload import QuietPeriod
     service = Scheduler(SchedulerConfig("127.0.0.1", 8011))
-    quiet = Quiet()
+    quiet = QuietPeriod()
     observe, heartbeat = service.quiet_callbacks(quiet)
     done = threading.Event()
     def read_stream():
@@ -123,11 +107,54 @@ def test_multiple_inflight_observations_never_wait_for_action_lock():
         blocked = quiet.blockers()
     thread.join(1)
     assert completed_while_locked
-    assert quiet.observations == [0, 2, 3]
-    assert quiet.heartbeats == 1
-    assert blocked == ["inflight_or_unknown"]
+    assert blocked == [{"reason": "in_flight"}]
     observe(None, connected=False)
-    assert quiet.blockers()
+    assert quiet.blockers() == [{"reason": "inflight_stream_unknown"}]
+
+
+def test_arrivals_during_registry_validation_block_final_apply(tmp_path):
+    from llmsvc.reload import QuietPeriod, ReloadQueue
+    from llmsvc.state import MemoryState
+    service = Scheduler(SchedulerConfig("127.0.0.1", 8011))
+    clock = [0.0]
+    quiet = QuietPeriod(clock=lambda: clock[0])
+    observe, heartbeat = service.quiet_callbacks(quiet)
+    observe(0)
+    for second in range(1, 6):
+        clock[0] = float(second)
+        heartbeat()
+    assert not quiet.blockers()
+    path = tmp_path / "config.yaml"
+    original = b"models: {}\n"
+    path.write_bytes(original)
+    during_apply = [False]
+    workers = []
+    done = threading.Event()
+    def validate(staged):
+        if during_apply[0]:
+            def arrivals():
+                observe(0)
+                observe(1)
+                observe(2)
+                done.set()
+            worker = threading.Thread(target=arrivals)
+            workers.append(worker)
+            worker.start()
+            assert done.wait(1), "stream reader waited for the action lock"
+    adopted = []
+    queue = ReloadQueue(path, action_lock=service.action_lock, quiet=quiet,
+        snapshot=lambda: StateSnapshot(sampled_at=1000, read_only=False, memory=MemoryState(500, 0)),
+        validate=validate, notify_reload=lambda **kwargs: adopted.append(True), log=lambda event: None,
+        clock=lambda: clock[0], wall_clock=lambda: 1000)
+    queue.enqueue(lambda data: data + b"# change\n", description={"kind": "test"})
+    during_apply[0] = True
+    result = queue.process_once()
+    for worker in workers:
+        worker.join(1)
+    assert result["status"] == "queued"
+    assert {"reason": "in_flight"} in result["blocked_by"]
+    assert path.read_bytes() == original
+    assert not adopted
 
 
 def test_entrypoint_closes_collector_for_check_once_and_bind_failure(monkeypatch):
