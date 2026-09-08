@@ -65,17 +65,21 @@ permission to enable the path in production.
 | HTTP503 `placement_action_blocked` | Current unit/lease identity did not authorize the proposed victim stop. |
 | HTTP503 `placement_action_failed` | The action attempt reported a sanitized failure; inspect its blocker reason. |
 | HTTP503 `placement_no_progress` | Victim exit and durable account release could not be confirmed. |
+| HTTP409 `placement_timeout` | The bounded placement deadline expired; report the final blockers. |
+| HTTP409 `outstanding_lease` | The same model already has an outstanding allocation; no second lease is granted. |
 | `blockers[].reason: unit_identity_unconfirmed` | The victim's currently observed unit/lease identity was not verified. |
 | `blockers[].reason: unleased_model` | The model has no eligible confirmed durable account; this path cannot adopt or stop it speculatively. |
 | `blockers[].reason: operation_in_progress` | Another pending model operation or free operation protects the model from a duplicate stop. |
 
 Blocker reasons can also appear in previews or the final HTTP409
 `placement_timeout`; they are not separate stop commands. On a placement-stage
-failure the launcher logs the response and exits unsuccessfully, without starting
-or stopping a unit. None of these errors/reasons authorizes the launcher to stop
-its own unit, a named victim or another workload, or to clear/revoke a lease.
-They must not be handled as the later **confirm** HTTP409, whose existing cleanup
-is restricted to this invocation's exact matching lease token.
+failure from `POST /v1/place`, no lease was granted to this launch attempt.
+Report the error/blockers and abort: do not `systemd-run`, choose another GPU or
+stop an existing unit. None of these errors/reasons authorizes clearing or
+revoking a lease. Only HTTP409 from
+`POST /v1/place/{owned-lease-id}/confirm`, after starting the caller's own unit,
+invokes the existing `stop_owned_unit` safeguard, and only when that unit still
+has this invocation's exact matching lease token.
 
 An action error may follow a positively observed exit: the current placement
 still fails without granting a new lease. Consult `placement_action_result` and
