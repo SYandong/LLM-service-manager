@@ -1,5 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
-"""Actual current reserve preview/405 UI; live envelope uses a seeded intent fixture."""
+"""Reserve preview/default405 and actual mounted persisted-outcome UI compatibility."""
 
 import asyncio
 import threading
@@ -10,9 +10,9 @@ import pytest
 pytest.importorskip("textual")
 
 from textual.widgets import Static
-from llmsvc.state import Reserve
-from test_llm_reserve import ARGS, reserve_args, reserve_service, live_receipt
+from test_llm_reserve import ARGS, reserve_args, reserve_service
 from test_llm_actions import action_service, pin_api, pin_service
+from test_llm_reserve_http import mounted_reserve, core_reserve_api, evacuation, system, configure_outcome
 from test_tui_actions import app_for, output
 from test_tui_pin import submit
 from test_tui_teardown import TeardownApp
@@ -60,32 +60,32 @@ def test_current_405_and_invalid_input_leave_no_reservation(pin_api, reserve_ser
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('status', ['blocked', 'partial'])
-def test_proposed_receipt_fixture_preserves_seeded_intent_and_refreshes_gpu(pin_api, reserve_service, status):
+@pytest.mark.parametrize('status', ['complete', 'blocked', 'partial'])
+def test_actual_mounted_receipt_keeps_intent_and_refreshes_gpu(pin_api, mounted_reserve, monkeypatch, status):
     async def scenario():
-        app = app_for(pin_api, reserve_service)
-        reply = live_receipt(status)
-        original = app.client.request
-        writes = []
-        def reply_fixture(method, path, payload=None, **kwargs):
-            if method == 'POST':
-                writes.append((path, payload, kwargs))
-                # Explicit seeded persisted-state fixture; NOT current core live HTTP.
-                reserve_service.store.put_reserve(Reserve(reply['id'], reply['gpu'], reply['size_gb'], reply['until'], reply['by']))
-                return reply
-            return original(method, path, payload, **kwargs)
+        service = mounted_reserve
+        configure_outcome(service, status)
+        app = app_for(pin_api, service)
+        app.client = service.client
+        displayed = []
+        show_result = app.show_result
+        def recorded(text):
+            displayed.append(text)
+            show_result(text)
+        monkeypatch.setattr(app, 'show_result', recorded)
         async with app.run_test(size=(40, 24)) as pilot:
             await app.workers.wait_for_complete()
-            app.client.request = reply_fixture
             await submit(app, pilot, ' '.join(ARGS))
-            assert len(writes) == 1 and writes[0][2]['timeout'] == 150
-            assert app.snapshot['reserves'][0]['id'] == reply['id']
-            assert reserve_service.store.active(pin_api['time'].time())[1][0].id == reply['id']
-            text = output(app)
-            for expected in ['Reservation saved', 'owner server-owner', 'Evacuation status: '+status, 'evacuation_incomplete']:
-                assert expected in text
+            assert [r for r in service.requests if r[0] == 'POST'] == [('POST', '/v1/reserve')]
+            post = service.requests.index(('POST', '/v1/reserve'))
+            assert ('GET', '/v1/state') in service.requests[post+1:]
+            saved = app.snapshot['reserves'][0]
+            assert saved['by'] == 'actual-owner'
+            assert service.scheduler.store.reserve(saved['id']).by == 'actual-owner'
+            assert any('Reservation saved' in text and 'owner actual-owner' in text
+                       and 'Evacuation status: '+status in text for text in displayed)
             assert 'reserved for placement' in str(app.dashboard.query_one('#gpus', Static).render())
-            assert not reserve_service.effects['calls']
+            assert service.state['calls'] == {'complete':['a','b'], 'blocked':[], 'partial':['a']}[status]
     asyncio.run(scenario())
 
 
