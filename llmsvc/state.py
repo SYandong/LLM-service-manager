@@ -143,3 +143,21 @@ class StateSnapshot:
     def to_dict(self) -> dict[str, Any]:
         """Return a detached JSON-ready mapping (tuples encode as arrays)."""
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class FaultClaim:
+    """Internal durable cleanup fence; not part of the public state schema."""
+
+    lease_id: str
+    model: str
+    unit: str
+    invocation_id: str
+    gpu: int
+    reason: str
+    proved_at: float
+    stage: Literal["claimed", "released", "complete"] = "claimed"
+    error: Optional[str] = None
+    proxy_origin_hash: str = ""
+    proxy_submitted: bool = False
+    proxy_acknowledged: bool = False

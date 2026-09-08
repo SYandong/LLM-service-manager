@@ -53,6 +53,10 @@ class SchedulerConfig:
     automation_shared_ttl_seconds: float = 300.0
     automation_shared_external_threshold_gb: float = 1.0
     automation_shared_free_threshold_gb: float = 10.0
+    fault_recovery_enabled: bool = False
+    fault_interval_seconds: float = 1.0
+    fault_timeout_seconds: float = 30.0
+    fault_health_failures: int = 3
     free_timeout_seconds: float = 120.0
     reserve_timeout_seconds: float = 120.0
     wake_timeout_seconds: float = 900.0
@@ -77,7 +81,8 @@ class SchedulerConfig:
                      "lease_timeout_seconds", "lease_probe_seconds", "data_plane_event_interval_seconds",
                      "data_plane_event_timeout_seconds", "data_plane_event_reconnect_seconds",
                      "automation_interval_seconds", "automation_cycle_timeout_seconds", "automation_idle_seconds",
-                     "automation_exclusive_ttl_seconds", "automation_shared_ttl_seconds"):
+                     "automation_exclusive_ttl_seconds", "automation_shared_ttl_seconds",
+                     "fault_interval_seconds", "fault_timeout_seconds"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (float, int)):
                 raise ValueError(f"{name} must be a finite positive number")
@@ -95,6 +100,12 @@ class SchedulerConfig:
             if (isinstance(value, bool) or not isinstance(value, (int, float))
                     or not math.isfinite(value) or value < 0):
                 raise ValueError(f"{name} must be a finite non-negative number")
+        if type(self.fault_recovery_enabled) is not bool:
+            raise ValueError("fault_recovery_enabled must be a boolean")
+        if self.fault_interval_seconds > 1 or self.fault_timeout_seconds > 120:
+            raise ValueError("fault intervals must be <=1s and fault timeouts <=120s")
+        if type(self.fault_health_failures) is not int or not 3 <= self.fault_health_failures <= 100:
+            raise ValueError("fault_health_failures must be an integer in 3..100")
         if type(self.automation_enabled) is not bool:
             raise ValueError("automation_enabled must be a boolean")
         if self.automation_cycle_timeout_seconds > 120:

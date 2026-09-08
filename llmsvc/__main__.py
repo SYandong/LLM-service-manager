@@ -103,6 +103,9 @@ def main():
             scheduler.placement = PlacementController(scheduler, transport)
         if config.automation_enabled:
             scheduler.automation = AutomaticPolicyController(scheduler)
+        if config.fault_recovery_enabled:
+            from llmsvc.faults import FaultRecoveryController
+            scheduler.faults = FaultRecoveryController(scheduler)
     except (OSError, ValueError, TypeError, ImportError, sqlite3.Error) as exc:
         try:
             if event_relay is not None:
@@ -131,6 +134,8 @@ def main():
             print(json.dumps(scheduler.sample_once().to_dict(), allow_nan=False))
             if scheduler.automation is not None:
                 scheduler.automation.run(dry_run=True)  # Plan-only structured log; no extra sample or action.
+            if scheduler.faults is not None:
+                scheduler.faults.run_once(dry_run=True)  # One sample cannot prove a fresh fault sequence.
         finally:
             close_scheduler()
         return 0

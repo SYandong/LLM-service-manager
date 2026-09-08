@@ -64,11 +64,13 @@ class ModelActionDispatcher:
     def __init__(self, *, action_lock, snapshot: Callable[[], StateSnapshot],
                  http_request: Callable[..., int], stop_unit: Callable[..., int],
                  timeout_seconds: float, max_snapshot_age_seconds: float,
-                 enabled: bool = False, monotonic=time.monotonic, wall_clock=time.time):
+                 enabled: bool = False, monotonic=time.monotonic, wall_clock=time.time, before_action=None):
         if not isinstance(action_lock, type(threading.RLock())):
             raise ValueError("action_lock must be the scheduler RLock")
         if type(enabled) is not bool:
             raise ValueError("enabled must be a boolean")
+        if before_action is not None and not callable(before_action):
+            raise ValueError("before_action must be callable")
         for value in (timeout_seconds, max_snapshot_age_seconds):
             if not _known(value) or value <= 0:
                 raise ValueError("timeouts must be finite positive numbers")
@@ -83,6 +85,7 @@ class ModelActionDispatcher:
         self.enabled = enabled
         self.monotonic = monotonic
         self.wall_clock = wall_clock
+        self.before_action = before_action
 
     def _validate(self, action, snapshot, dry_run):
         if not isinstance(action, Action) or action.kind not in ("sleep", "stop"):
@@ -166,6 +169,8 @@ class ModelActionDispatcher:
             if dry_run:
                 result = {"would": [asdict(action)]}
             else:
+                if self.before_action is not None:
+                    self.before_action(action)
                 attempted = True
                 try:
                     if action.kind == "sleep":
@@ -286,7 +291,17 @@ class ModelActionController:
             http_request=transport.http_request, stop_unit=transport.stop_unit,
             timeout_seconds=scheduler.config.request_timeout_seconds,
             max_snapshot_age_seconds=scheduler.config.max_snapshot_age_seconds,
-            enabled=True, monotonic=monotonic, wall_clock=scheduler.clock)
+            enabled=True, monotonic=monotonic, wall_clock=scheduler.clock, before_action=self._before_action)
+
+    def _fault_pending(self, name):
+        return self.scheduler.store is not None and self.scheduler.store.fault(name) is not None
+
+    def _before_action(self, action):
+        if self._fault_pending(action.model):
+            raise ActionDispatchError("fault_recovery_pending")
+        faults = getattr(self.scheduler, "faults", None)
+        if faults is not None:
+            faults.note_expected(action)
 
     def _snapshot(self):
         from dataclasses import replace
@@ -329,6 +344,8 @@ class ModelActionController:
                 and not snapshot.errors)
 
     def _model(self, snapshot, name):
+        if self._fault_pending(name):
+            raise ActionDispatchError("fault_recovery_pending")
         unit = self.transport.unit_for_model(name)
         models = [model for model in snapshot.models if model.name == name]
         if len(models) != 1:
@@ -346,6 +363,8 @@ class ModelActionController:
                 protected[model.name] = "unmanaged_model"
             elif model.unit != self.transport.unit_for_model(model.name):
                 protected[model.name] = "configured_unit_mismatch"
+            elif self._fault_pending(model.name):
+                protected[model.name] = "fault_recovery_pending"
             elif model.name in self.pending:
                 protected[model.name] = "operation_in_progress"
         return plan_free(snapshot, settings=self.settings, exclusions=protected, **payload)
@@ -621,6 +640,9 @@ class ModelActionController:
                     return result
                 self.pending.add(name)
                 owned = True
+                faults = getattr(self.scheduler, "faults", None)
+                if faults is not None and model.state == "sleeping":
+                    faults.note_wake(name)
                 self.scheduler.emit("wake_requested", model=name, detail={"by": by, "cold_start": result["cold_start"]})
             # No action lock during this request: it may synchronously reenter
             # /v1/place through the data-plane launcher before returning.
@@ -670,6 +692,9 @@ class ModelActionController:
             with self.scheduler.changed:
                 if owned:
                     self.pending.discard(name)
+                    faults = getattr(self.scheduler, "faults", None)
+                    if faults is not None:
+                        faults.waking.discard(name)
                 self.scheduler.emit("wake_result", model=name, detail={"by": by, **result})
                 self.scheduler.changed.notify_all()
         return result
@@ -723,6 +748,8 @@ class ReservationController:
                     guarded[model.name] = "unmanaged_or_changed_unit"
                 elif model.name not in confirmed:
                     guarded[model.name] = "unleased_model"
+                elif controller._fault_pending(model.name):
+                    guarded[model.name] = "fault_recovery_pending"
                 elif model.name in controller.pending or controller.free_active:
                     guarded[model.name] = "operation_in_progress"
         for lease in snapshot.leases:
@@ -902,6 +929,8 @@ class AutomaticPolicyController:
                 guards[model.name] = "unmanaged_or_changed_unit"
             elif model.name not in confirmed:
                 guards[model.name] = "unleased_model"
+            elif controller._fault_pending(model.name):
+                guards[model.name] = "fault_recovery_pending"
             elif model.name in controller.pending or controller.free_active:
                 guards[model.name] = "operation_in_progress"
         protected = replace(snapshot, models=tuple(models))
