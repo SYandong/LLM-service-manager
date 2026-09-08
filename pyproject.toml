@@ -18,7 +18,7 @@ tui = ["textual>=0.70"]
 test = ["pytest", "huggingface_hub", "openai"]
 
 [tool.setuptools.packages.find]
-include = ["llmsvc", "llmsvc.*"]
+include = ["llmsvc", "llmsvc.*", "tui", "tui.*"]
 
 [tool.setuptools]
 script-files = ["cli/llm"]
