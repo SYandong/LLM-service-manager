@@ -16,13 +16,39 @@ from llmsvc.state import Lease, ModelState, Pin, Reserve
 from test_placement_leases import grant, ready, request, system
 
 
+def initialize_victim(scheduler, state):
+    # Configure functional headroom BEFORE the first grant. The shared lease
+    # fixture deliberately keeps an 80ms default for its negative deadline cases.
+    scheduler.config = replace(scheduler.config, placement_wait_seconds=2.0)
+    snapshot = scheduler.snapshot()
+    started = scheduler.placement.monotonic()
+    proof = {"phase": "initial_victim_grant", "budget_seconds": scheduler.config.placement_wait_seconds,
+             "sampled_at": snapshot.sampled_at, "sample_age_seconds": scheduler.clock()-snapshot.sampled_at,
+             "snapshot_errors": list(snapshot.errors), "models": {m.name: m.state for m in snapshot.models},
+             "leases_before": [asdict(lease) for lease in snapshot.leases]}
+    state["setup_proof"] = proof
+    error = None
+    try:
+        lease_id = grant(scheduler)["lease_id"]
+    except LeaseError as exc:
+        error = exc
+        proof.update(error=exc.error, blockers=[asdict(b) for b in exc.blockers])
+    finally:
+        proof.update(elapsed_seconds=scheduler.placement.monotonic()-started,
+                     probes=list(state["probes"]),
+                     leases_after=[asdict(lease) for lease, _ in scheduler.store.leases()])
+    if error is not None:
+        raise AssertionError(f"Victim setup grant failed: {proof}") from error
+    ready(scheduler, state, lease_id)
+    scheduler.sample_once()
+    assert scheduler.store.lease(lease_id)[0].status == "confirmed", proof
+    return lease_id
+
+
 @pytest.fixture
 def victims(system):
     scheduler, state, transport = system
-    lease_id = grant(scheduler)["lease_id"]
-    ready(scheduler, state, lease_id)
-    scheduler.sample_once()
-    assert scheduler.store.lease(lease_id)[0].status == "confirmed"
+    lease_id = initialize_victim(scheduler, state)
     state.update(calls=[], mode="exit", inflight=0, idle=1000, after_stop=None, timeline=[])
     started = time.monotonic()
     def record(phase, **detail):
@@ -76,7 +102,7 @@ def victims(system):
 
 def diagnostic(scheduler, state, response=None):
     """Keep CI's actual response and last observation/account steps on failure."""
-    return {"response": response, "timeline": state["timeline"][-40:],
+    return {"response": response, "setup": state["setup_proof"], "timeline": state["timeline"][-40:],
             "leases": [asdict(lease) for lease, _ in scheduler.store.leases(include_released=True)],
             "action_results": [event.detail for event in scheduler.events_since(0) if event.kind == "placement_action_result"]}
 
@@ -174,29 +200,40 @@ def test_dispatcher_revalidates_pin_added_after_policy_decision(victims):
 
 def test_waiting_busy_victim_becomes_idle_before_action(victims):
     scheduler, state, _, _ = victims
-    scheduler.config = replace(scheduler.config, placement_wait_seconds=0.7)
     state["inflight"] = 1
     scheduler.sample_once()
-    waited = threading.Event()
-    old_wait = scheduler.changed.wait
-    def wait(timeout=None):
-        waited.set()
-        return old_wait(timeout)
-    scheduler.changed.wait = wait
-    with ThreadPoolExecutor(1) as pool:
-        pending = pool.submit(grant, scheduler, "b")
-        assert waited.wait(0.3)
-        with scheduler.changed:
-            state["inflight"] = 0
-            state["idle"] = 5
-        scheduler.sample_once()
-        time.sleep(0.03)
-        assert state["calls"] == []  # waiting policy requires idle >30s
-        with scheduler.changed:
-            state["idle"] = 31
-        scheduler.sample_once()
-        assert pending.result(timeout=1)["gpu"] == 0
-    assert len(state["calls"]) == 1
+    busy_seen, recent_seen = threading.Event(), threading.Event()
+    decide = scheduler.placement._decision
+    def observed_decision(snapshot, request, *, waiting):
+        decision, blockers = decide(snapshot, request, waiting=waiting)
+        if request.name == "b":
+            reasons = [blocker.reason for blocker in blockers]
+            state["record"]("waiting_decision", waiting=waiting, reasons=reasons)
+            if "in_flight" in reasons:
+                busy_seen.set()
+            if waiting and "recently_active" in reasons:
+                recent_seen.set()
+        return decision, blockers
+    scheduler.placement._decision = observed_decision
+    try:
+        with ThreadPoolExecutor(1) as pool:
+            pending = pool.submit(grant, scheduler, "b")
+            assert busy_seen.wait(2), diagnostic(scheduler, state)
+            with scheduler.changed:
+                state["inflight"] = 0
+                state["idle"] = 5
+            scheduler.sample_once()
+            # Wait for the actual waiting-policy rejection of the five-second
+            # observation, not an assumed scheduling interval after publication.
+            assert recent_seen.wait(2), diagnostic(scheduler, state)
+            with scheduler.changed:
+                assert state["calls"] == [] and not pending.done(), diagnostic(scheduler, state)
+                state["idle"] = 31
+            scheduler.sample_once()
+            assert pending.result(timeout=3)["gpu"] == 0
+    finally:
+        scheduler.placement._decision = decide
+    assert len(state["calls"]) == 1, diagnostic(scheduler, state)
 
 
 def test_dry_run_reports_policy_actions_without_executor_or_sampling(victims):
