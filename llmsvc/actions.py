@@ -339,9 +339,7 @@ class ModelActionController:
         return model
 
     def plan_free(self, snapshot, **payload):
-        from dataclasses import replace
         from llmsvc.policy import plan_free
-        from llmsvc.state import Pin
         protected = {}
         for model in snapshot.models:
             if model.name not in self.transport.models:
@@ -350,14 +348,7 @@ class ModelActionController:
                 protected[model.name] = "configured_unit_mismatch"
             elif model.name in self.pending:
                 protected[model.name] = "operation_in_progress"
-        # Detached policy-only protection, never published or persisted as user pins.
-        until = self.scheduler.clock() + self.scheduler.config.free_timeout_seconds + 1
-        pins = snapshot.pins + tuple(Pin(name, until, "operation_guard") for name in protected)
-        decision = plan_free(replace(snapshot, pins=pins), settings=self.settings, **payload)
-        blockers = tuple(replace(blocker, reason=protected[blocker.model])
-                         if blocker.model in protected and blocker.reason == "pinned_until" else blocker
-                         for blocker in decision.blocked_by)
-        return replace(decision, blocked_by=blockers)
+        return plan_free(snapshot, settings=self.settings, exclusions=protected, **payload)
 
     @staticmethod
     def _metric(snapshot, *, ram, gpu_ids):
