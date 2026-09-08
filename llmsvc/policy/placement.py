@@ -172,7 +172,8 @@ def plan_placement(
     key, gpu, budget, selected = min(options, key=lambda item: item[0])
     plan = Projection(snapshot, settings)
     # Stop selected sleepers first to release RAM. Admission never evicts a model
-    # outside the priced set: an awake victim can directly stop if RAM is tight.
+    # outside the priced set. Projection.stop coalesces each local sleep/stop
+    # pair after its admission bookkeeping, avoiding an intermediate transfer.
     for model in sorted(selected, key=lambda m: (m.state != "sleeping", projection.score(m), m.name)):
         if model.state == "awake":
             if not plan.sleep(model, "placement_eviction", reclaim=False):

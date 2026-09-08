@@ -1,6 +1,6 @@
 # CLI 使用说明
 
-`cli/llm` 是 Python 3.10+ 标准库脚本。只复制这一个文件即可运行，无需安装仓库、`rich` 或 `textual`。当前提供只读 `status` 和可选全屏面板，只请求 scheduler 的 `GET /v1/state` 与 `GET /v1/events`。
+`cli/llm` 是 Python 3.10+ 标准库脚本。只复制这一个文件即可运行，无需安装仓库、`rich` 或 `textual`。当前提供只读 `status`、`usage` 和可选全屏面板，只请求 scheduler 的 `GET /v1/state`、`GET /v1/events` 与 `GET /v1/usage`。
 
 ```sh
 python3 llm --help
@@ -57,6 +57,21 @@ WARNING GPU1 probe unavailable
 - 小于 100 列时收窄模型表，将活动与 pin 详情放在模型下一行；超长标识符以 `~` 标出截断。更窄的输出会折行。`--json` 保留完整字段，适用于脚本与排查长名称。
 - 无参数且 stdout 是 TTY、可选 TUI 可导入时启动全屏面板；否则输出 `status`，末尾提示 `pip install 'llmsvc[tui]'`。非 TTY 不导入或启动 TUI。显式 `status` / `status --json` 不附加提示，便于脚本读取。
 
+## 用量统计
+
+```sh
+LLM_URL=http://scheduler:8011 python3 llm usage
+LLM_URL=http://scheduler:8011 python3 llm usage --days 30
+LLM_URL=http://scheduler:8011 python3 llm usage --days 7 --by model --json
+```
+
+窗口为最近 7 或 30 天，默认 7 天；分组支持 `container`（默认）、`ip`、`model`。输出请求数、输入 token、输出 token 的整数总量，保留完整精度。窄屏按分组分行显示，`--json` 保留后端完整响应。
+
+- 总量已知但历史来源缺失时，`unknown` 分组保留这些请求与 token，归属列明确标记未知。
+- `IP only` 表示有来源 IP、没有容器映射；不会推测容器名。按 model 分组时，归属信息标为未按来源分组。
+- 后端返回不可用响应（503、`known: false`）时显示原因与 `?`；`--json` 保留 null 总量，退出码为 1。来源可用且窗口确实为空时，零总量才是有效结果。连接或协议错误沿用前述非零退出码与 stderr 说明。
+- 客户端核对行计数与总计一致，并拒绝缺失、负数、非整数或窗口不匹配的响应。
+
 ## 可选只读 TUI
 
 包含 TUI 的发布包使用 `pip install 'llmsvc[tui]'` 安装。也可将仓库中的实际 `tui/` 目录复制到独立 `llm` 脚本旁，再安装 `textual>=0.70`。仅复制 `llm` 仍可使用所有只读 CLI 功能。
@@ -70,10 +85,11 @@ LLM_URL=http://scheduler:8011 python cli/llm
 
 状态面板每 5 秒刷新，显示 GPU 占用条、内存预算和可选择的模型表。100×30 时事件流在模型表右侧；小于 100 列时上方改为单列、事件流移到模型表下方。空间不足时模型表保留名称、状态、GPU 和显存，选中模型的来源与 pin 在下方显示。鼠标可滚动较长的详情、命令结果和事件。
 
-- `↑` / `↓` 选择模型，`r` 刷新，`/` 聚焦命令框，`?` 帮助，`q` 退出。用 `Tab` 聚焦详情或结果滚动区后，可用方向键翻动长内容；长错误不会限制在可见的两行内。
-- 输入框复用 CLI 解析器，支持 `status`、`status --json` 和 `--help`。连接参数固定为启动时的配置；修改地址需退出后重新运行。
+- `↑` / `↓` 选择模型，`r` 刷新当前视图，`/` 聚焦命令框，`u` 在状态与 usage 之间切换，`?` 帮助，`q` 退出。用 `Tab` 聚焦详情或结果滚动区后，可用方向键翻动长内容；长错误不会限制在可见的两行内。
+- 输入框复用 CLI 解析器，支持 `status`、`usage --days 7|30 --by container|ip|model`、各自的 `--json` 选项和 `--help`。连接参数固定为启动时的配置；修改地址需退出后重新运行。
+- usage 视图提供 7 天、30 天和返回状态按钮，每 5 秒刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
 - 请求在后台线程执行，慢请求不会叠加轮询或阻塞按键。连接失败保留上一份快照，并显示错误；新快照到达后保留选中模型。
-- 当前是只读界面。`free`、`pin`、`wake`、`reserve` 操作与对应快捷键，以及 usage 视图在各自 issue 中接入；当前不会发送写请求。
+- 当前是只读界面。`free`、`pin`、`wake`、`reserve` 操作与对应快捷键在各自 issue 中接入；当前不会发送写请求。
 
 ### Scheduler 事件流
 
@@ -91,6 +107,7 @@ LLM_URL=http://scheduler:8011 python cli/llm
 python -m pytest -q tests/test_llm.py
 python -m pytest -q tests/test_llm_tui.py tests/test_tui.py
 python -m pytest -q tests/test_llm_events.py tests/test_tui_events.py
+python -m pytest -q tests/test_llm_usage.py tests/test_tui_usage.py
 ```
 
 测试使用核心包的状态结构生成 JSON，并在临时 loopback HTTP 服务上验证单文件复制、无 site-packages 的 Python 启动、JSON 保真与窄屏。Python 3.10 可用时直接执行该解释器的复制测试；CI 使用 Python 3.10。客户端测试不访问生产服务或 GPU。
@@ -98,5 +115,7 @@ python -m pytest -q tests/test_llm_events.py tests/test_tui_events.py
 没有安装 Textual 时，headless UI 测试明确跳过；CLI 降级测试仍运行。界面测试使用 Textual 的 [headless Pilot](https://textual.textualize.io/guide/testing/) 检查尺寸、选择、定时刷新、输入与错误恢复。
 
 SSE 解码按 [事件流格式](https://html.spec.whatwg.org/dev/server-sent-events.html#the-event-stream-format) 处理 UTF-8、BOM、注释、换行和空行提交，并按 scheduler 契约要求每个事件带匹配的数字 ID 与 JSON 记录。单行和单帧上限分别为 64 KiB、256 KiB；不完整尾帧不会提交游标。loopback 测试覆盖重连、明确重启后归零与退出清理。
+
+Usage 测试使用临时 SQLite、实际 `ActivityReader` / `build_usage` 和 scheduler HTTP 服务，核对 CLI/TUI 显示与后端计数，并确认数据库字节不变。独立的历史线上对账证据保存在 [telemetry/live-final.json](../tests/fixtures/telemetry/live-final.json)：该快照记录的 31,605 请求、40,480,504 输入 token、4,847,906 输出 token 与当时的数据面 metrics 总数一致。这是 telemetry 的采样时刻证据；当前客户端测试证明显示与后端协议一致，完整 #25 的集成与来源对账验收仍需相应实机证据。
 
 <!-- Generated-By: Codex / gpt-6-astra -->
