@@ -27,6 +27,11 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 class ClientError(Exception):
     """An actionable configuration, connection or protocol error."""
 
+    def __init__(self, message, *, status=None, payload=None):
+        super().__init__(message)
+        self.status = status
+        self.payload = payload
+
 
 def clean_text(value):
     """Keep untrusted model names/errors from controlling the user's terminal."""
@@ -127,12 +132,15 @@ class SchedulerClient:
         except HTTPError as exc:
             with exc:
                 detail = exc.read(8192).decode("utf-8", errors="replace")
+            payload = None
             try:
                 parsed = json.loads(detail)
+                payload = parsed if isinstance(parsed, dict) else None
                 detail = parsed.get("error", parsed) if isinstance(parsed, dict) else parsed
             except ValueError:
                 pass
-            raise ClientError("HTTP %s: %s" % (exc.code, clean_text(detail))) from None
+            raise ClientError("HTTP %s: %s" % (exc.code, clean_text(detail)),
+                              status=exc.code, payload=payload) from None
         except (URLError, OSError, HTTPException) as exc:
             raise ClientError("Cannot reach scheduler: " + clean_text(getattr(exc, "reason", exc))) from None
         except (ValueError, UnicodeError):
@@ -451,6 +459,84 @@ def format_status(snapshot, width=100, now=None):
     return "\n".join(part for line in lines for part in wrap_line(line, width))
 
 
+USAGE_COUNTS = ("requests", "input_tokens", "output_tokens")
+
+
+def validate_usage(result, *, days=None, by=None):
+    """Reject incomplete/inconsistent counts instead of manufacturing a total."""
+    try:
+        valid = (type(result.get("known")) is bool and type(result.get("days")) is int
+                 and result["days"] > 0 and result.get("by") in ("container", "ip", "model")
+                 and isinstance(result.get("rows"), (list, tuple))
+                 and isinstance(result.get("totals"), dict))
+        if not valid or (days is not None and result["days"] != days) or (by is not None and result["by"] != by):
+            raise ValueError
+        totals = result["totals"]
+        if not result["known"]:
+            if result["rows"] or any(key not in totals or totals[key] is not None for key in USAGE_COUNTS):
+                raise ValueError
+            return result
+        for counts in [totals, *result["rows"]]:
+            if any(type(counts.get(key)) is not int or counts[key] < 0 for key in USAGE_COUNTS):
+                raise ValueError
+        for row in result["rows"]:
+            if not isinstance(row.get(result["by"]), str) or type(row.get("source_known")) is not bool:
+                raise ValueError
+        if any(sum(row[key] for row in result["rows"]) != totals[key] for key in USAGE_COUNTS):
+            raise ValueError
+    except (AttributeError, KeyError, TypeError, ValueError):
+        raise ClientError("Invalid usage response: counts, grouping or totals are inconsistent") from None
+    return result
+
+
+def usage_attribution(row, by):
+    if by == "model":
+        return "not grouped"
+    if not row["source_known"]:
+        return "unknown"
+    if by == "container" and row[by].startswith("ip:"):
+        return "IP only"
+    return "known"
+
+
+def format_usage(result, width=100):
+    validate_usage(result)
+    width = max(1, width)
+    lines = ["Usage: last %s days by %s" % (result["days"], result["by"])]
+    if not result["known"]:
+        lines.extend(["Unavailable: " + clean_text(result.get("error") or "source unavailable"),
+                      "Requests ?  Input tokens ?  Output tokens ?"])
+    else:
+        rows, totals, by = result["rows"], result["totals"], result["by"]
+        labels = ("REQUESTS", "INPUT TOKENS", "OUTPUT TOKENS")
+        sizes = [max(len(label), *(len(str(item[key])) for item in [totals, *rows]))
+                 for key, label in zip(USAGE_COUNTS, labels)]
+        source_width = width - sum(sizes) - 11 - 8
+        if source_width >= 12:
+            lines.append("  ".join([fit(by.upper(), source_width),
+                                    *(label.rjust(size) for label, size in zip(labels, sizes)), "ATTRIBUTION"]))
+            for row in rows:
+                lines.append("  ".join([fit(row[by], source_width),
+                                        *(str(row[key]).rjust(size) for key, size in zip(USAGE_COUNTS, sizes)),
+                                        usage_attribution(row, by)]))
+            lines.append("  ".join([fit("TOTAL", source_width),
+                                    *(str(totals[key]).rjust(size) for key, size in zip(USAGE_COUNTS, sizes))]))
+        else:
+            for row in rows:
+                lines.extend(["%s (%s)" % (row[by], usage_attribution(row, by)),
+                              "  Requests: %s" % row["requests"],
+                              "  Input tokens: %s" % row["input_tokens"],
+                              "  Output tokens: %s" % row["output_tokens"]])
+            lines.extend(["TOTAL", "Requests: %s" % totals["requests"],
+                          "Input tokens: %s" % totals["input_tokens"],
+                          "Output tokens: %s" % totals["output_tokens"]])
+        if not rows:
+            lines.append("No requests in this window (source available)")
+        lines.append("Attribution: not grouped by source" if by == "model" else
+                     "Attribution: unknown = origin absent; IP only = container mapping unavailable")
+    return "\n".join(part for line in lines for part in wrap_line(line, width))
+
+
 def build_parser(parser_class=argparse.ArgumentParser):
     parser = parser_class(prog="llm", description="Inspect the LLM scheduler")
     parser.add_argument("--version", action="version", version="0.1.0")
@@ -460,11 +546,31 @@ def build_parser(parser_class=argparse.ArgumentParser):
     commands = parser.add_subparsers(dest="command")
     status = commands.add_parser("status", help="Show GPU, memory and model status")
     status.add_argument("--json", action="store_true", help="Print the complete JSON snapshot")
+    usage = commands.add_parser("usage", help="Show request and token usage totals")
+    usage.add_argument("--days", type=int, choices=(7, 30), default=7, help="Usage window (default: 7)")
+    usage.add_argument("--by", choices=("container", "ip", "model"), default="container")
+    usage.add_argument("--json", action="store_true", help="Print the complete usage response")
     return parser
 
 
 def execute_command(args, client):
+    if args.command == "usage":
+        try:
+            result = client.request("GET", "/v1/usage?days=%s&by=%s" % (args.days, args.by))
+        except ClientError as exc:
+            if exc.status != 503 or not isinstance(exc.payload, dict) or exc.payload.get("known") is not False:
+                raise
+            result = exc.payload
+        return validate_usage(result, days=args.days, by=args.by)
     return client.request("GET", "/v1/state")
+
+
+def format_result(args, result, width=100):
+    if getattr(args, "json", False):
+        return json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
+    if args.command == "usage":
+        return format_usage(result, width=width)
+    return format_status(result, width=width)
 
 
 def tui_app():
@@ -486,13 +592,10 @@ def main(argv=None):
                 app(client=client, api=SimpleNamespace(**globals())).run()
                 return 0
         result = execute_command(args, client)
-        if getattr(args, "json", False):
-            print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
-        else:
-            print(format_status(result, width=shutil.get_terminal_size((100, 30)).columns))
+        print(format_result(args, result, width=shutil.get_terminal_size((100, 30)).columns))
         if args.command is None:
             print("TUI: install with pip install 'llmsvc[tui]' and run llm in a terminal.")
-        return 0
+        return 1 if args.command == "usage" and not result["known"] else 0
     except ClientError as exc:
         print("llm: " + clean_text(exc), file=sys.stderr)
         return 1
