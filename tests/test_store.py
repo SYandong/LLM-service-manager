@@ -92,3 +92,16 @@ def test_concurrent_pin_updates_have_one_durable_model_record(tmp_path):
             future.result()
     assert len(store.active(100)[0]) == 1
     store.close()
+
+
+def test_intent_operation_logs_are_structured_and_label_dry_run(tmp_path, caplog):
+    import json
+    import logging
+    store = IntentStore(tmp_path / "state.sqlite", action_lock=threading.RLock())
+    with caplog.at_level(logging.INFO, logger="llmsvc.store"):
+        store.put_pin(Pin("model", 200, "owner"), dry_run=True)
+        store.put_pin(Pin("model", 200, "owner"))
+    records = [json.loads(record.message) for record in caplog.records]
+    assert [record["dry_run"] for record in records] == [True, False]
+    assert all(record["intent"]["kind"] == "pin" for record in records)
+    store.close()

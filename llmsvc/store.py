@@ -5,12 +5,22 @@ Opening read_only mode and every dry-run method perform zero database writes.
 Expiry is a read filter, so observation never deletes protection records.
 """
 
+import json
+import logging
 import math
 import sqlite3
 from dataclasses import asdict
 from pathlib import Path
 
 from llmsvc.state import Pin, Reserve
+
+LOG = logging.getLogger("llmsvc.store")
+
+
+def intent_result(kind, record, dry_run):
+    action = {"kind": kind, **record}
+    LOG.info(json.dumps({"kind": "intent_operation", "dry_run": dry_run, "intent": action}, allow_nan=False))
+    return {"would": [action]} if dry_run else record
 
 
 def nonempty(value, name):
@@ -77,26 +87,26 @@ class IntentStore:
         if not dry_run:
             self._write("INSERT INTO llmsvc_pins VALUES (?, ?, ?) ON CONFLICT(model) DO UPDATE SET until=excluded.until, owner=excluded.owner",
                         (pin.model, pin.until, pin.by))
-        return {"would": [{"kind": "pin", **asdict(pin)}]} if dry_run else asdict(pin)
+        return intent_result("pin", asdict(pin), dry_run)
 
     def remove_pin(self, model: str, *, dry_run=False):
         nonempty(model, "model")
         if not dry_run:
             self._write("DELETE FROM llmsvc_pins WHERE model = ?", (model,))
-        return {"would": [{"kind": "unpin", "model": model}]} if dry_run else {"model": model}
+        return intent_result("unpin", {"model": model}, dry_run)
 
     def put_reserve(self, reserve: Reserve, *, dry_run=False):
         validate_reserve(reserve)
         if not dry_run:
             self._write("INSERT INTO llmsvc_reserves VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET gpu=excluded.gpu, size_gb=excluded.size_gb, until=excluded.until, owner=excluded.owner",
                         (reserve.id, reserve.gpu, reserve.size_gb, reserve.until, reserve.by))
-        return {"would": [{"kind": "reserve", **asdict(reserve)}]} if dry_run else asdict(reserve)
+        return intent_result("reserve", asdict(reserve), dry_run)
 
     def remove_reserve(self, reserve_id: str, *, dry_run=False):
         nonempty(reserve_id, "id")
         if not dry_run:
             self._write("DELETE FROM llmsvc_reserves WHERE id = ?", (reserve_id,))
-        return {"would": [{"kind": "unreserve", "id": reserve_id}]} if dry_run else {"id": reserve_id}
+        return intent_result("unreserve", {"id": reserve_id}, dry_run)
 
     def active(self, now):
         finite_positive(now, "now")
