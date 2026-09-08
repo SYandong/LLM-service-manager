@@ -22,8 +22,14 @@ versions `0.1.0aN`. Advance N only for a new immutable release. The first alpha
 covers the read-only scheduler/CLI/TUI evaluation path. Later alphas describe
 newly included behavior and remaining acceptance without implying completion.
 The first stable `v0.1.0` requires the planned product and environment acceptance
-through M6, including observation periods and deployment/retirement gates.
+through M6, including bounded validation and deployment/retirement gates.
 An alpha does not close incomplete milestone issues.
+
+Per the user's #108 instruction, validation uses bounded minutes-scale checks
+and deterministic regression/replay rather than mandatory day/week soak waits.
+Record the measured window and unmeasured long-term behavior explicitly; do not
+use elapsed calendar time as a release gate or claim short tests prove long-term
+stability. Existing correctness, Fable/CI and relevant operational gates remain.
 
 Integration owns subsequent release coordination. A single release owner
 prepares the version bump, changelog and artifacts in an isolated worktree.
