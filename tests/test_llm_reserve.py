@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from llmsvc.state import Pin
+from llmsvc.state import Lease, Pin
 from test_llm_actions import action_service, pin_api, pin_service
 from test_llm_pin import command
 
@@ -29,6 +29,11 @@ def reserve_args(api, *extra):
 def reserve_service(action_service):
     action_service.effects["model"] = replace(action_service.effects["model"],
         state="sleeping", is_sleeping=True, resident_gb=2)
+    # The successful preview fixture must represent an eligible managed daemon,
+    # not an unleased model that the actual controller correctly protects.
+    lease = Lease("reserve-preview-lease", "model", 0, 0.4, time.time()+3600, 80)
+    action_service.store.create_lease(lease, "vllm-0.service")
+    action_service.store.transition_lease(lease.lease_id, "confirmed")
     action_service.scheduler.sample_once()
     return action_service
 
