@@ -3,7 +3,7 @@
 ## 0.1.0-alpha.2 — 2026-09-08
 
 Incremental preview after alpha.1; Python distribution `0.1.0a2`.
-Includes #80, #81, #82, #84, #85, #86, #87, #88, #89, #91 and #97.
+Includes #80, #81, #82, #84, #85, #86, #87, #88, #89, #91, #92 and #97.
 
 ### Added and corrected
 
@@ -22,6 +22,9 @@ Includes #80, #81, #82, #84, #85, #86, #87, #88, #89, #91 and #97.
   plus single-trigger adoption/settlement design wording (#87). These do not
   enable a notifier: generation visibility and generic completion logs do not
   establish old-server settlement.
+- Bounded sanitized data-plane event relay adapter (#92), with explicit local
+  discard reporting. Scheduler bridging and dual-source/live-latency acceptance
+  remain pending; this adapter alone starts no subscription.
 - RAM-confirmation regression assertions tolerate background state polls while
   proving exactly one confirmed write and a subsequent refresh (#97).
 - Release cadence now follows batches of five merged non-release-only PRs,
