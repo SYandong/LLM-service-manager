@@ -1,3 +1,4 @@
+# Generated-By: Codex / gpt-6-astra
 import importlib.util
 import json
 import os
@@ -136,7 +137,8 @@ def test_preexisting_unit_exits_before_place_without_stop(tmp_path, monkeypatch)
 
     def fake_run(command):
         commands.append(command)
-        return launcher.subprocess.CompletedProcess(command, 0, "loaded\n", "")
+        state = "loaded\n" if command[1] == "show" else "active\n"
+        return launcher.subprocess.CompletedProcess(command, 0, state, "")
 
     monkeypatch.setattr(launcher, "request_json", http)
     monkeypatch.setattr(launcher, "run_checked", fake_run)
@@ -144,7 +146,10 @@ def test_preexisting_unit_exits_before_place_without_stop(tmp_path, monkeypatch)
     assert launcher.main(argv(config_path)) == 0
 
     assert http.requests == []
-    assert commands == [["systemctl", "show", "-p", "LoadState", "--value", "vllm-qwen.service"]]
+    assert commands == [
+        ["systemctl", "show", "-p", "LoadState", "--value", "vllm-qwen.service"],
+        ["systemctl", "is-active", "vllm-qwen.service"],
+    ]
 
 
 def test_systemd_run_failure_releases_lease(tmp_path, monkeypatch):
@@ -529,3 +534,41 @@ def test_release_proof_is_keyed_and_missing_evidence_fails_closed(monkeypatch):
     ):
         monkeypatch.setattr(launcher, "run_checked", lambda command: launcher.subprocess.CompletedProcess(command, 0, stdout, ""))
         assert launcher.release_safe("vllm-qwen.service") is expected
+
+
+def test_loaded_inactive_failed_or_unknown_unit_never_reports_success(tmp_path, monkeypatch, capsys):
+    launcher = load_launcher()
+    config_path = write_config(tmp_path)
+    http = FakeHTTP([])
+    monkeypatch.setattr(launcher, "request_json", http)
+    for state, code in (("inactive", 3), ("failed", 3), ("unknown", 4)):
+        commands = []
+        def fake_run(command):
+            commands.append(command)
+            if command[1] == "show":
+                return launcher.subprocess.CompletedProcess(command, 0, "loaded\n", "")
+            assert command[:2] == ["systemctl", "is-active"]
+            return launcher.subprocess.CompletedProcess(command, code, state + "\n", "")
+        monkeypatch.setattr(launcher, "run_checked", fake_run)
+        assert launcher.main(argv(config_path)) == 75
+        assert http.requests == []
+        assert len(commands) == 2  # Observation only: no start/stop/reset-failed.
+        assert "scheduler_cleanup" in capsys.readouterr().err
+
+
+def test_loaded_activating_unit_is_reused_without_duplicate_launch(tmp_path, monkeypatch):
+    launcher = load_launcher()
+    config_path = write_config(tmp_path)
+    http = FakeHTTP([])
+    commands = []
+    def fake_run(command):
+        commands.append(command)
+        if command[1] == "show":
+            return launcher.subprocess.CompletedProcess(command, 0, "loaded\n", "")
+        assert command[:2] == ["systemctl", "is-active"]
+        return launcher.subprocess.CompletedProcess(command, 3, "activating\n", "")
+    monkeypatch.setattr(launcher, "request_json", http)
+    monkeypatch.setattr(launcher, "run_checked", fake_run)
+    assert launcher.main(argv(config_path)) == 0
+    assert http.requests == []
+    assert len(commands) == 2

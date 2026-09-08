@@ -19,13 +19,15 @@ because the placement policy is not integrated yet; this is not a successful
 placement preview.
 
 A live invocation serializes same-model launchers with a bounded local flock,
-checks for an existing unit, requests placement, starts only the assigned unit,
+reuses an existing active/activating unit, requests placement, starts only the assigned unit,
 and confirms after readiness. The scheduler remains responsible for atomic
 budget reservations, protected-model checks, expiry and restart reconciliation.
 The default HTTP timeout of 130 seconds accommodates the scheduler's maximum
 120-second placement wait; startup follows the 900-second lease/window setting.
 
-Unknown systemd state or ambiguous startup failure retains the lease budget and
+An existing inactive/failed unit returns an error requesting scheduler cleanup
+instead of reporting a successful launch; no reset-failed or stop is issued by
+that branch. Unknown systemd state or ambiguous startup failure retains the lease budget and
 returns an error. A release requires named systemd properties showing the unit
 absent, or inactive with no main PID/control group. Property output ordering is
 not assumed. A late-confirm 409 stops only the unit whose exact lease token

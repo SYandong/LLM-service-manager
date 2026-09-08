@@ -276,6 +276,8 @@ def unit_exists(unit_service: str) -> bool:
 def unit_runtime_state(unit_service: str) -> str:
     result = run_checked(["systemctl", "is-active", unit_service])
     state = result.stdout.strip()
+    if state == "activating" and result.returncode in (0, 3):
+        return "activating"
     if result.returncode == 0:
         return "active"
     if state in {"inactive", "failed"}:
@@ -443,8 +445,14 @@ def main(argv: list[str] | None = None) -> int:
         unit_service = unit_service_name(args.unit, config)
         with model_lock(config, model, args.dry_run):
             if not args.dry_run and unit_exists(unit_service):
-                log("preexisting_unit", unit=unit_service, model=model)
-                return 0
+                state = unit_runtime_state(unit_service)
+                if state in {"active", "activating"}:
+                    log("preexisting_unit", unit=unit_service, model=model, state=state)
+                    return 0
+                log("preexisting_unit_unusable", unit=unit_service, model=model,
+                    state=state, action_required="scheduler_cleanup",
+                    error="Existing unit is not active/activating; scheduler cleanup or reviewed reset-failed is required")
+                return 75
             placement = request_placement(config, model, args.util, args.dry_run)
             if args.dry_run:
                 return 0
