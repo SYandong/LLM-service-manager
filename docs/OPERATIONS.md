@@ -186,6 +186,11 @@ Absence of the new event is not proof that identity or accounting is safe.
    new revoke API is part of this recovery. The implementation does not repair
    or hot-reload the configuration automatically. Preflight configuration checks
    and previews remain read-only; they do not perform the recovery transition.
+   While `globalTTL` is zero, scheduler downtime also suspends scheduler-driven
+   idle sleep; the data plane does not take over that idle policy. Keep the
+   separately authorized restart window short and bounded, and verify scheduler
+   readiness before leaving maintenance. A prolonged outage requires the reviewed
+   rollback plan, not an unplanned TTL/reaper change.
 4. Check fresh collector and configured-unit observations. A healthy active unit
    with matching `LLMSVC_LEASE_ID` and GPU confirms the same allocation. A
    loading, mismatched-token or unknown unit retains its budget (stale on
