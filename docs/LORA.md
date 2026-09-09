@@ -247,6 +247,20 @@ timed_out/终态，以及 `recorded_status`；读取不会出队、执行动作�
 `removable` 或 would 不代表全局 quiet/RAM/recovery 准入；未完成恢复仍拒绝
 候选预览，库存仍可显示该 fence。core 后续拥有 HTTP/UI 接入，本片不新增路由。
 
+### 单次配置捕获的列表响应（#158）
+
+`ModelRegistry.inventory(include_records=True)` 可在现有 inventory 结果中附带
+内部 `records` 字段；它与配置行、`config_sha256` 来自同一次安全有界读取和
+解析。默认调用不增加字段。core 取出这些 records 组成原有 `GET /v1/models`
+响应，公开 inventory 结构不变，不再分别调用 `records()` 和 `inventory()`。
+外部进程即使在捕获后原子替换文件，响应中的这三部分仍对应同一份捕获字节；
+后续请求可看到新文件。这不证明捕获仍是当前配置，也不证明上游采用。
+
+运行时状态、队列 precheck 和恢复诊断仍各自观测。它们可能读取当前文件，
+但不为配置行/records 重新选取来源。尤其恢复诊断仍核对当前文件与 marker，
+不能把已捕获的旧字节当作当前候选匹配；fence、unknown 和错误语义保持不变。
+此修复不更改候选、目录、元数据账本或任何运行状态。
+
 ### 只读配置与模型元数据的读取边界（#19 / #137）
 
 `ReloadQueue(config_max_bytes=1048576)` 限制配置 YAML 的源字节数；
