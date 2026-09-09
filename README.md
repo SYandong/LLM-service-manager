@@ -4,7 +4,7 @@ llama-swap 之上的多 GPU 控制面：查看模型与用量、请求释放/唤
 pin 与 GPU reserve，并提供可选终端面板。llama-swap 和 vllm-wrapper
 负责推理路由、排队及后端 sleep/wake；scheduler 负责资源记账、保护和调度。
 
-当前文档面向 [v0.1.0-alpha.5 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.5)。
+当前文档面向 [v0.1.0-alpha.6 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.6)。
 发布功能不等于所在部署已启用它们：scheduler 默认只读，模型动作、放置、
 自动策略及故障恢复各有独立开关。实现与现场验收进度见 [ROADMAP](docs/ROADMAP.md)。
 
@@ -57,7 +57,7 @@ PYREQUEST
 
 ## 用户：CLI、状态与可选 TUI
 
-从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.5)
+从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.6)
 下载 `llm` 和 `SHA256SUMS`，核对对应 SHA-256 后，将脚本放在当前目录：
 
 ```sh
@@ -90,7 +90,7 @@ RAM   llmsvc 86/200 GiB budget  host available 823 GiB
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install './llmsvc-0.1.0a5-py3-none-any.whl[tui]'
+.venv/bin/python -m pip install './llmsvc-0.1.0a6-py3-none-any.whl[tui]'
 .venv/bin/llm
 ```
 
@@ -125,7 +125,9 @@ HTTP 200 不等于动作成功；阻塞/部分结果返回非零退出码，`--j
 free/reserve 默认客户端等待 150 秒，wake 为 930 秒，可用 `--wait` 调整，
 不会改变服务端期限。断线后先查 `status`，客户端不会重试写操作。
 客户端不切换服务端开关，也不绕过 `read_only` / `operation_not_enabled`。
-当前 CLI 没有 unreserve、add/rm 或 reload 命令；不要据设计草案调用未挂载 API。
+`unreserve ID [--dry-run]` 通过现有 DELETE API 幂等解除预约，TUI 使用同一命令；
+它不唤醒模型，丢失响应时不自动重试。当前发布 CLI 尚无 add/rm 或 reload 命令；
+不要据设计草案调用未挂载 API。
 
 ## 管理员：架构、部署与回滚
 
@@ -180,7 +182,7 @@ SIGHUP。生产策略、TTL/reaper、宿主来源及其他用户服务的变更�
 
 ## 验证范围与贡献
 
-本入口已用 alpha.5 单文件 CLI 和隔离假端点核对模型列表、流式请求、状态/用量
+本入口命令先前已用 alpha.5 单文件 CLI 和隔离假端点核对模型列表、流式请求、状态/用量
 及六条 dry-run 示例；假端点仅返回合成 JSON/SSE，没有运行推理后端。发布包的
 配置校验和 TUI 导入也已核对。这不等于真实新成员已在 10 分钟内完成首次推理，
 #26 的该项验收仍待实际记录。

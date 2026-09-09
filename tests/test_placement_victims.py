@@ -17,8 +17,8 @@ from test_placement_leases import grant, ready, request, system
 
 
 def initialize_victim(scheduler, state):
-    # Configure functional headroom BEFORE the first grant. The shared lease
-    # fixture deliberately keeps an 80ms default for its negative deadline cases.
+    # Keep functional headroom explicit BEFORE the first grant. Dedicated
+    # negative deadline cases override this later, after successful setup.
     scheduler.config = replace(scheduler.config, placement_wait_seconds=2.0)
     snapshot = scheduler.snapshot()
     started = scheduler.placement.monotonic()

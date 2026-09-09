@@ -296,3 +296,42 @@ def test_copied_stdlib_cli_uses_actual_mounted_registry_without_effects(mounted,
         assert body["would"] and body["config_committed"] is False and body["dry_run"] is True
     assert any(b["reason"] == "inflight_stream_unknown" for b in body["blocked_by"])
     assert_readonly(mounted, before)
+
+
+@pytest.mark.parametrize("key", ["config_max_bytes", "model_config_max_bytes", "weight_index_max_bytes"])
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, None, "1024", 16777217])
+def test_registry_config_rejects_invalid_or_unlimited_source_caps(key, value):
+    with pytest.raises(ValueError, match=key):
+        SchedulerConfig("127.0.0.1", 19001, registry={"config_path": "/tmp/config.yaml",
+            "shared_roots": ["/tmp/models"], "daemon_port_range": [19002, 19003], key: value})
+
+
+@pytest.mark.parametrize("key", ["config_max_bytes", "model_config_max_bytes", "weight_index_max_bytes"])
+def test_configured_source_cap_reaches_actual_http_preview(key, mounted):
+    target = mounted.path if key == "config_max_bytes" else mounted.weights / "config.json"
+    if key == "weight_index_max_bytes":
+        target = mounted.weights / "model.safetensors.index.json"
+        target.write_text('{"weight_map":{"layer":"model.safetensors"}}')
+    before = mounted.files(), mounted.scheduler.events_since(0)
+    body = {"name": "new", "path": str(mounted.weights), "base": "base"}
+    for cap, expected in [(target.stat().st_size, 200), (target.stat().st_size - 1, 503 if key == "config_max_bytes" else 400)]:
+        config = replace(mounted.scheduler.config, registry={**mounted.scheduler.config.registry, key: cap})
+        mounted.scheduler.config = config
+        mounted.registry = mounted.scheduler.registry = build_registry(config, mounted.scheduler)
+        status, result = request(mounted.address, "POST", "/v1/models?dry_run=1", body)
+        assert status == expected, result
+        if expected == 200:
+            assert result["config_committed"] is False and result["would"]
+        else:
+            assert result["error"] == ("registry_unavailable" if key == "config_max_bytes" else "registry_invalid_request")
+        assert_readonly(mounted, before)
+
+
+def test_unreadable_list_source_with_pending_marker_is_still_503(mounted):
+    mounted.registry.queue.config_max_bytes = 1
+    mounted.registry.queue.marker.write_text("pending fixture")
+    before = mounted.files(), mounted.scheduler.events_since(0)
+    assert request(mounted.address, "GET", "/v1/models") == (503, {"error": "registry_unavailable"})
+    assert request(mounted.address, "POST", "/v1/models?dry_run=1",
+                   {"name": "new", "path": str(mounted.weights), "base": "base"}) == (409, {"error": "registry_reconciliation_required"})
+    assert_readonly(mounted, before)

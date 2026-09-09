@@ -209,6 +209,45 @@ timed_out/终态，以及 `recorded_status`；读取不会出队、执行动作�
 的完整断言，不生成新的收尾/重启证明；目前只有显式 fixture 可以提供这些模拟
 事实。core 后续负责 HTTP/config/main 接入，此处未挂载诊断或恢复写接口。
 
+### 只读库存与变更预览
+
+`ModelRegistry.inventory()` 返回当前配置中的模型元数据、独立的 runtime_state、
+到期/移除保护信息，以及 `pending_changes` 和恢复 fence。`source=config`
+不表示数据面已采用；探测缺失、错误或过期时运行态为 unknown。`expires_at`
+仅是已知最后使用时间对应的七天空闲阈值，pin/活动等仍可能阻止注销；缺失历史
+不伪造到期时间。输出不含 cmd/cmdStop 或配置全量内容。
+
+`preview_add(body)` / `preview_remove(name)` 复用现有 dry-run 和局部候选生成，
+按 pending FIFO 的投影计算候选摘要；add 提供计划端口、base 和原始 util_macro。
+它们不入队、不写配置、不执行 cleanup，不预留所选端口；后续提交必须重算。
+受保护的 remove 返回空 would 与 blocked_by，不能视为操作已完成。模型级
+`removable` 或 would 不代表全局 quiet/RAM/recovery 准入；未完成恢复仍拒绝
+候选预览，库存仍可显示该 fence。core 后续拥有 HTTP/UI 接入，本片不新增路由。
+
+### 只读配置与模型元数据的读取边界（#19 / #137）
+
+`ReloadQueue(config_max_bytes=1048576)` 限制配置 YAML 的源字节数；
+`ModelRegistry(model_config_max_bytes=1048576, weight_index_max_bytes=8388608)`
+分别限制 `config.json` 和 safetensors 分片索引。纯路径/添加函数接受相同的
+两个元数据参数。参数只接受 1 到 16777216 的整数，不能用 bool、0 或无限值
+取消上限。core 拥有调度器配置项的暴露与传参；旧调用方自动使用有限默认值。
+
+读取逐级打开目录和文件，使用 no-follow/nonblocking 标志，先检查常规文件及
+大小，再最多读取上限加一字节，并核对读取前后与当前路径的身份/大小/时间戳。
+配置路径各级不能是符号链接。模型目录和文件仍可先解析为共享根内的目标，
+再以相同方式读取；越界、循环链接、FIFO、目录冒充文件及可检测替换均拒绝。
+实际权重仅采样一字节检查可读/非空，不受元数据文件大小上限限制。
+
+配置源错误为 `ReloadError`/`OSError`，现有 HTTP 挂载映射为 503；请求中的
+模型元数据错误保持 `RegistryError` / 400。读取和失败均不暂存、不排队、不写
+配置/元数据，也不触发 native reader、unit、validator 或 reload。常规文件所在
+文件系统若失去响应，nonblocking 并不提供墙钟截止保证；这些限制不能证明
+原子文件系统快照、连续安静或旧 server 收尾。
+
+配置及恢复标记保留单硬链接约束；使用硬链接创建备份会令源读取或恢复检查
+失败并保留 fence，应使用独立副本备份。不要为了检查成功删除未知恢复标记。
+模型缓存允许共享根内常规文件的硬链接，与配置/恢复标记约束不同。
+
 ## 交给 ops 的有界实测计划
 
 只有 ops 持有 `gpu-test.lock` 后执行。每次目标不超过 5 分钟；没有缓存的

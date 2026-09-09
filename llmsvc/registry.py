@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import re
@@ -15,13 +16,15 @@ from typing import Any, Callable, Mapping, Sequence
 
 import yaml
 
-from llmsvc.reload import ReloadQueue
+from llmsvc.reload import ReloadError, ReloadQueue, _read_regular_file, _source_byte_limit
 from urllib.parse import urlsplit, urlunsplit
 
 from llmsvc.state import Action, Activity, Blocker, ModelState, StateSnapshot
 
 
 SAFE_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+DEFAULT_MODEL_CONFIG_MAX_BYTES = 1024 * 1024
+DEFAULT_WEIGHT_INDEX_MAX_BYTES = 8 * 1024 * 1024
 DEFAULT_EXPIRY_SECONDS = 7 * 24 * 60 * 60
 WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt")
 LORA_WEIGHT_NAMES = {"adapter_model.bin", "adapter_model.safetensors"}
@@ -72,8 +75,12 @@ def validate_safe_model_name(name: str) -> str:
     return name
 
 
-def validate_full_weight_model_dir(path: str | Path, shared_roots: Sequence[str | Path]) -> ModelPathInfo:
+def validate_full_weight_model_dir(path: str | Path, shared_roots: Sequence[str | Path], *,
+                                   model_config_max_bytes: int = DEFAULT_MODEL_CONFIG_MAX_BYTES,
+                                   weight_index_max_bytes: int = DEFAULT_WEIGHT_INDEX_MAX_BYTES) -> ModelPathInfo:
     """Validate a readable full-weight model directory confined to shared roots."""
+    _source_byte_limit(model_config_max_bytes, "model_config_max_bytes")
+    _source_byte_limit(weight_index_max_bytes, "weight_index_max_bytes")
     try:
         model_path = Path(path).expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
@@ -96,17 +103,11 @@ def validate_full_weight_model_dir(path: str | Path, shared_roots: Sequence[str 
         raise RegistryError("model directory must contain config.json")
     _reject_symlink_escapes(model_path, roots)
 
-    try:
-        with config_path.open("r", encoding="utf-8") as handle:
-            model_config = json.load(handle)
-    except OSError as exc:
-        raise RegistryError("config.json is not readable") from exc
-    except json.JSONDecodeError as exc:
-        raise RegistryError("config.json is not valid JSON") from exc
+    model_config = _read_model_json(config_path, roots, model_config_max_bytes, "config.json")
     if not isinstance(model_config, dict):
         raise RegistryError("config.json must contain a JSON object")
 
-    weight_files = _find_weight_files(model_path)
+    weight_files = _find_weight_files(model_path, roots, weight_index_max_bytes)
     if not weight_files:
         if (model_path / "adapter_config.json").exists() or any((model_path / name).exists() for name in LORA_WEIGHT_NAMES):
             raise RegistryError("LoRA adapter directories are not full-weight models")
@@ -129,12 +130,15 @@ def add_full_weight_model(
     daemon_port_range: tuple[int, int],
     reserved_ports: Sequence[int] = (),
     created_at: float,
+    model_config_max_bytes: int = DEFAULT_MODEL_CONFIG_MAX_BYTES,
+    weight_index_max_bytes: int = DEFAULT_WEIGHT_INDEX_MAX_BYTES,
 ) -> RegistryAddResult:
     """Return detached config and temporary records with one full-weight model added."""
     name = validate_safe_model_name(name)
     base_model = validate_safe_model_name(base_model)
     created_at = _finite_float(created_at, "created_at")
-    path_info = validate_full_weight_model_dir(model_path, shared_roots)
+    path_info = validate_full_weight_model_dir(model_path, shared_roots,
+        model_config_max_bytes=model_config_max_bytes, weight_index_max_bytes=weight_index_max_bytes)
 
     new_config = copy.deepcopy(dict(config))
     new_records = copy.deepcopy({key: dict(value) for key, value in temporary_records.items()})
@@ -608,36 +612,50 @@ def _reject_symlink_escapes(model_path: Path, roots: Sequence[Path]) -> None:
     for child in model_path.rglob("*"):
         try:
             resolved = child.resolve(strict=True)
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:
             raise RegistryError(f"path under model directory is not readable: {child.name}") from exc
         if not _is_under_any(resolved, roots):
             raise RegistryError("model directory contains a symlink escape")
 
 
-def _find_weight_files(model_path: Path) -> tuple[str, ...]:
-    index_files = sorted(child for child in model_path.iterdir() if child.is_file() and child.name.endswith(".safetensors.index.json"))
+def _read_model_file(path: Path, roots: Sequence[Path], max_bytes: int, *,
+                     prefix_only: bool = False) -> bytes:
+    try:
+        resolved = path.resolve(strict=True)
+        if not _is_under_any(resolved, roots):
+            raise RegistryError("model file is outside configured shared roots")
+        return _read_regular_file(resolved, max_bytes, single_link=False, prefix_only=prefix_only)[0]
+    except (OSError, RuntimeError, ReloadError) as exc:
+        raise RegistryError("model file is unreadable, unsafe, oversized or changed while reading") from exc
+
+
+def _read_model_json(path: Path, roots: Sequence[Path], max_bytes: int, label: str) -> Any:
+    raw = _read_model_file(path, roots, max_bytes)
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError) as exc:
+        raise RegistryError(f"{label} is not valid JSON") from exc
+
+
+def _find_weight_files(model_path: Path, roots: Sequence[Path], max_bytes: int) -> tuple[str, ...]:
+    index_files = sorted(child for child in model_path.iterdir() if child.name.endswith(".safetensors.index.json"))
     if len(index_files) > 1:
         raise RegistryError("model directory contains multiple shard index files")
     if index_files:
-        return _weights_from_index(model_path, index_files[0])
+        return _weights_from_index(model_path, index_files[0], roots, max_bytes)
 
     files: list[str] = []
     for child in model_path.iterdir():
-        if child.is_file() and child.name.endswith(WEIGHT_SUFFIXES):
-            _check_readable_nonempty(child)
+        if child.name.endswith(WEIGHT_SUFFIXES):
+            _check_readable_nonempty(child, roots)
             files.append(child.name)
     _validate_shard_sequence(files)
     return tuple(sorted(files))
 
 
-def _weights_from_index(model_path: Path, index_path: Path) -> tuple[str, ...]:
-    try:
-        with index_path.open("r", encoding="utf-8") as handle:
-            index = json.load(handle)
-    except OSError as exc:
-        raise RegistryError("shard index is not readable") from exc
-    except json.JSONDecodeError as exc:
-        raise RegistryError("shard index is not valid JSON") from exc
+def _weights_from_index(model_path: Path, index_path: Path, roots: Sequence[Path],
+                        max_bytes: int) -> tuple[str, ...]:
+    index = _read_model_json(index_path, roots, max_bytes, "shard index")
     if not isinstance(index, dict) or not isinstance(index.get("weight_map"), dict):
         raise RegistryError("shard index must contain a weight_map object")
     values = list(index["weight_map"].values())
@@ -650,7 +668,7 @@ def _weights_from_index(model_path: Path, index_path: Path) -> tuple[str, ...]:
         path = model_path / name
         if not path.is_file():
             raise RegistryError("shard index references a missing weight file")
-        _check_readable_nonempty(path)
+        _check_readable_nonempty(path, roots)
     return tuple(files)
 
 
@@ -669,13 +687,9 @@ def _validate_shard_sequence(files: Sequence[str]) -> None:
         raise RegistryError("model directory is missing shard files")
 
 
-def _check_readable_nonempty(path: Path) -> None:
-    try:
-        with path.open("rb") as handle:
-            if handle.read(1) == b"":
-                raise RegistryError("weight files must be non-empty")
-    except OSError as exc:
-        raise RegistryError("weight file is not readable") from exc
+def _check_readable_nonempty(path: Path, roots: Sequence[Path]) -> None:
+    if _read_model_file(path, roots, 1, prefix_only=True) == b"":
+        raise RegistryError("weight files must be non-empty")
 
 
 def _reserved_model_ids(config: Mapping[str, Any], temporary_records: Mapping[str, Mapping[str, Any]]) -> set[str]:
@@ -911,9 +925,13 @@ class ModelRegistry:
                  daemon_port_range: tuple[int, int], reserved_ports: Callable[[], Sequence[int]] = lambda: (),
                  stop_model: Callable[..., None] | None = None,
                  unit_absent: Callable[..., bool] | None = None,
-                 now: Callable[[], float] = time.time):
+                 now: Callable[[], float] = time.time,
+                 model_config_max_bytes: int = DEFAULT_MODEL_CONFIG_MAX_BYTES,
+                 weight_index_max_bytes: int = DEFAULT_WEIGHT_INDEX_MAX_BYTES):
         self.queue, self.shared_roots, self.daemon_port_range = queue, tuple(shared_roots), daemon_port_range
         self.reserved_ports, self.stop_model, self.unit_absent, self.now = reserved_ports, stop_model, unit_absent, now
+        self.model_config_max_bytes = _source_byte_limit(model_config_max_bytes, "model_config_max_bytes")
+        self.weight_index_max_bytes = _source_byte_limit(weight_index_max_bytes, "weight_index_max_bytes")
         self._removals: dict[str, str] = {}
 
     @staticmethod
@@ -969,6 +987,15 @@ class ModelRegistry:
         return self.queue.inspect_recovery(**evidence)
 
     def add(self, body: Mapping[str, Any], *, dry_run: bool = False) -> dict:
+        return self._add(body, dry_run=dry_run)
+
+    def preview_add(self, body: Mapping[str, Any]) -> dict:
+        """Plan against pending FIFO changes; no port reservation or config write."""
+        report: dict = {}
+        result = self._add(body, dry_run=True, report=report)
+        return {**result, **report, "port_reserved": False, "config_written": False}
+
+    def _add(self, body: Mapping[str, Any], *, dry_run: bool, report: dict | None = None) -> dict:
         if "lora" in body:
             raise RegistryError("LoRA registration is disabled pending issue #21 measurements")
         if set(body) != {"name", "path", "base"} or not all(isinstance(v, str) and v for v in body.values()):
@@ -979,11 +1006,37 @@ class ModelRegistry:
             config, records = self._decode(data)
             result = add_full_weight_model(config, records, name=name, model_path=path, base_model=base,
                                            shared_roots=self.shared_roots, daemon_port_range=self.daemon_port_range,
-                                           reserved_ports=self.reserved_ports(), created_at=created_at)
-            return self._encode(data, result.config, result.records)
+                                           reserved_ports=self.reserved_ports(), created_at=created_at,
+                                           model_config_max_bytes=self.model_config_max_bytes,
+                                           weight_index_max_bytes=self.weight_index_max_bytes)
+            candidate = self._encode(data, result.config, result.records)
+            if report is not None:
+                macros = result.config["models"][name].get("macros")
+                report.update(model={"name": name, "base": base,
+                                     "daemon_port": result.record["daemon_port"],
+                                     "util_macro": copy.deepcopy(macros.get("util") if isinstance(macros, Mapping) else None)},
+                              projected_base_sha256=hashlib.sha256(data).hexdigest(),
+                              candidate_sha256=hashlib.sha256(candidate).hexdigest(), blocked_by=[])
+            return candidate
         return self.queue.enqueue(transform, description={"kind": "add_model", "model": name, "base": base}, dry_run=dry_run)
 
     def remove(self, name: str, *, dry_run: bool = False, require_expired: bool = False) -> dict:
+        return self._remove(name, dry_run=dry_run, require_expired=require_expired)
+
+    def preview_remove(self, name: str) -> dict:
+        """Show model-level protection or the projected removal without cleanup."""
+        with self.queue.action_lock:
+            plan = plan_temporary_model_removal(name, self.records(), self.queue.snapshot(), now=self.now(),
+                                                max_snapshot_age_seconds=self.queue.max_snapshot_age)
+            if not plan.allowed:
+                return {"would": [], "blocked_by": [asdict(item) for item in plan.blockers],
+                        "candidate_sha256": None, "projected_base_sha256": None, "config_written": False}
+            report: dict = {}
+            result = self._remove(name, dry_run=True, report=report)
+            return {**result, **report, "config_written": False}
+
+    def _remove(self, name: str, *, dry_run: bool, require_expired: bool = False,
+                report: dict | None = None) -> dict:
         validate_safe_model_name(name)
         with self.queue.action_lock:
             existing = self._removals.get(name)
@@ -1005,7 +1058,11 @@ class ModelRegistry:
             def transform(data: bytes) -> bytes:
                 config, records = self._decode(data)
                 result = remove_temporary_model(config, records, name=name, snapshot=self.queue.snapshot(), now=self.now())
-                return self._encode(data, result.config, result.records)
+                candidate = self._encode(data, result.config, result.records)
+                if report is not None:
+                    report.update(projected_base_sha256=hashlib.sha256(data).hexdigest(),
+                                  candidate_sha256=hashlib.sha256(candidate).hexdigest(), blocked_by=[])
+                return candidate
             def cleanup(*, deadline: float) -> None:
                 # The routing entry is gone before cleanup. Core must recheck protection
                 # against late data-plane activity before touching the target unit.
@@ -1023,6 +1080,45 @@ class ModelRegistry:
             if not dry_run:
                 self._removals[name] = result["id"]
             return result
+
+    def inventory(self) -> dict:
+        """Detached configuration inventory, not a data-plane registration ACK.
+
+        Runtime state is separately observed; unknown/stale probes remain unknown.
+        `removable` means model-level eligibility, not reload admission. No command
+        strings, model-file reads, queue advancement or native probes are included.
+        """
+        with self.queue.action_lock:
+            data, _ = self.queue._read()
+            config, records = self._decode(data)
+            now = self.now()
+            try:
+                state = self.queue.snapshot()
+            except Exception:
+                state = StateSnapshot(errors=("snapshot_unavailable",))
+            fresh = (type(state.sampled_at) in (int, float) and math.isfinite(state.sampled_at)
+                     and 0 <= now - state.sampled_at <= self.queue.max_snapshot_age and not state.errors)
+            rows = []
+            for name in sorted(config["models"]):
+                model = _model_by_name(state, name) if fresh else None
+                record = records.get(name)
+                plan = (plan_temporary_model_removal(name, records, state, now=now,
+                                                     max_snapshot_age_seconds=self.queue.max_snapshot_age)
+                        if record is not None else RemovalPlan(False, (Blocker(name, "not_temporary"),)))
+                rows.append({"name": name, "source": "config", "temporary": record is not None,
+                             "base": record.get("base") if record is not None else None,
+                             "daemon_port": record["daemon_port"] if record is not None else (model.port if model else None),
+                             "created_at": record["created_at"] if record is not None else None,
+                             "last_used_at": plan.last_used_at,
+                             "expires_at": (plan.last_used_at + DEFAULT_EXPIRY_SECONDS
+                                            if plan.last_used_at is not None else None),
+                             "runtime_state": model.state if model else "unknown",
+                             "removable": plan.allowed,
+                             "blocked_by": [asdict(item) for item in plan.blockers]})
+            queue = self.queue.queue_snapshot()
+            return {"models": rows, "config_sha256": hashlib.sha256(data).hexdigest(),
+                    "pending_changes": [job for job in queue["jobs"] if job["pending"]],
+                    "fenced": queue["fenced"], "recovery": queue["recovery"]}
 
     def expire(self, *, dry_run: bool = False) -> list[dict]:
         with self.queue.action_lock:

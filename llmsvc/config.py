@@ -131,8 +131,13 @@ class SchedulerConfig:
             raise ValueError("registry must be a mapping")
         if self.registry:
             required = {"config_path", "shared_roots", "daemon_port_range"}
-            if not required <= set(self.registry) or set(self.registry)-required-{"reserved_ports"}:
-                raise ValueError("registry requires config_path/shared_roots/daemon_port_range and optional reserved_ports")
+            limits = {"config_max_bytes", "model_config_max_bytes", "weight_index_max_bytes"}
+            if not required <= set(self.registry) or set(self.registry)-required-{"reserved_ports"}-limits:
+                raise ValueError("registry requires config_path/shared_roots/daemon_port_range and known optional keys")
+            for key in limits & self.registry.keys():
+                value = self.registry[key]
+                if type(value) is not int or not 1 <= value <= 16777216:
+                    raise ValueError(f"registry.{key} must be an integer within 1..16777216")
             path = self.registry["config_path"]
             roots = self.registry["shared_roots"]
             if not isinstance(path, str) or not Path(path).is_absolute():

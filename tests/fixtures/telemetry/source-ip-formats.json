@@ -1,0 +1,194 @@
+{
+  "generated_by": "Codex / gpt-6-astra",
+  "provenance": {
+    "kind": "source-derived formats with synthetic documentation addresses; NOT live traffic or executed upstream producer",
+    "upstream_commit": "8fa85899e424d47b81fa60aff08b238a793e2e2b",
+    "source_url": "https://github.com/mostlygeek/llama-swap/blob/8fa85899e424d47b81fa60aff08b238a793e2e2b/internal/server/metrics.go#L118-L129",
+    "source_sha256": "d09b3c47cadb909daf1fe2ca937302b4c423add6ed5881b8945f1dfa6a259d3b",
+    "rule": "Connection context takes precedence; otherwise ip: plus SplitHostPort(RemoteAddr) host, ignoring forwarding headers. Invalid and legacy metadata examples are synthetic negative/compatibility cases, not emitted-source assertions."
+  },
+  "cases": [
+    {
+      "name": "ipv4_mapped",
+      "src": "ip:192.0.2.10",
+      "source_ip": "192.0.2.10",
+      "source_container": "fixture-a",
+      "mapping": {
+        "192.0.2.10": "fixture-a"
+      },
+      "metadata": null
+    },
+    {
+      "name": "ipv6_compressed",
+      "src": "ip:2001:db8::10",
+      "source_ip": "2001:db8::10",
+      "source_container": "fixture-v6",
+      "mapping": {
+        "2001:0DB8:0000:0:0:0:0:0010": "fixture-v6"
+      },
+      "metadata": null
+    },
+    {
+      "name": "ipv6_expanded",
+      "src": "ip:2001:0db8:0:0:0:0:0:10",
+      "source_ip": "2001:db8::10",
+      "source_container": "fixture-v6",
+      "mapping": {
+        "2001:db8::10": "fixture-v6"
+      },
+      "metadata": null
+    },
+    {
+      "name": "ipv4_mapped_ipv6",
+      "src": "ip:::ffff:192.0.2.10",
+      "source_ip": "192.0.2.10",
+      "source_container": "fixture-a",
+      "mapping": {
+        "192.0.2.10": "fixture-a"
+      },
+      "metadata": null
+    },
+    {
+      "name": "mapped_ipv6_config",
+      "src": "ip:192.0.2.10",
+      "source_ip": "192.0.2.10",
+      "source_container": "fixture-a",
+      "mapping": {
+        "::ffff:c000:20a": "fixture-a"
+      },
+      "metadata": null
+    },
+    {
+      "name": "ipv6_unmapped",
+      "src": "ip:2001:db8::20",
+      "source_ip": "2001:db8::20",
+      "source_container": "ip:2001:db8::20",
+      "mapping": {},
+      "metadata": null
+    },
+    {
+      "name": "ipv6_scope",
+      "src": "ip:fe80::10%zone0",
+      "source_ip": "fe80::10%zone0",
+      "source_container": "fixture-link",
+      "mapping": {
+        "fe80:0:0:0:0:0:0:10%zone0": "fixture-link"
+      },
+      "metadata": null
+    },
+    {
+      "name": "old_absent",
+      "src": null,
+      "source_ip": null,
+      "source_container": "unknown",
+      "mapping": {},
+      "metadata": {
+        "fifo_priority": 1
+      }
+    },
+    {
+      "name": "old_empty",
+      "src": "",
+      "source_ip": null,
+      "source_container": "unknown",
+      "mapping": {},
+      "metadata": {
+        "fifo_priority": 1
+      }
+    },
+    {
+      "name": "unsupported_context",
+      "src": "ts:fixture-user",
+      "source_ip": null,
+      "source_container": "unknown",
+      "mapping": {},
+      "metadata": null
+    },
+    {
+      "name": "leading_zero",
+      "src": "ip:192.000.2.10",
+      "source_ip": null,
+      "source_container": "unknown",
+      "mapping": {},
+      "metadata": null
+    },
+    {
+      "name": "unicode_superscript",
+      "src": "ip:¹.2.3.4",
+      "source_ip": null,
+      "source_container": "unknown",
+      "mapping": {},
+      "metadata": null
+    },
+    {
+      "name": "unicode_decimal",
+      "src": "ip:１９２.0.2.10",
+      "source_ip": null,
+      "source_container": "unknown",
+      "mapping": {},
+      "metadata": null
+    },
+    {
+      "name": "host_and_port",
+      "src": "ip:192.0.2.10:1234",
+      "source_ip": null,
+      "source_container": "unknown",
+      "mapping": {},
+      "metadata": null
+    },
+    {
+      "name": "ipv6_host_and_port",
+      "src": "ip:[2001:db8::10]:1234",
+      "source_ip": null,
+      "source_container": "unknown",
+      "mapping": {},
+      "metadata": null
+    },
+    {
+      "name": "hostname",
+      "src": "ip:fixture.invalid",
+      "source_ip": null,
+      "source_container": "unknown",
+      "mapping": {},
+      "metadata": null
+    },
+    {
+      "name": "invalid_v6",
+      "src": "ip:2001:db8:::10",
+      "source_ip": null,
+      "source_container": "unknown",
+      "mapping": {},
+      "metadata": null
+    },
+    {
+      "name": "column_precedes_metadata",
+      "src": "ip:2001:db8::10",
+      "source_ip": "2001:db8::10",
+      "source_container": "ip:2001:db8::10",
+      "mapping": {},
+      "metadata": {
+        "src": "ip:192.0.2.99"
+      }
+    },
+    {
+      "name": "invalid_column_no_fallback",
+      "src": "ip:bad-address",
+      "source_ip": null,
+      "source_container": "unknown",
+      "mapping": {},
+      "metadata": {
+        "src": "ip:192.0.2.99"
+      }
+    },
+    {
+      "name": "legacy_metadata_ipv6",
+      "src": null,
+      "source_ip": "2001:db8::10",
+      "source_container": "ip:2001:db8::10",
+      "mapping": {},
+      "metadata": {
+        "source_ip": "2001:db8::10"
+      }
+    }
+  ]
+}

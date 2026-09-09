@@ -118,6 +118,17 @@ are NOT MEASURED. No production activation is implied. Comment-preserving YAML, 
 and executable production rollback must be resolved before the first #19 write
 or #11 TTL transition.
 
+The optional, default-omitted `registry` block in
+[scheduler.example.yaml](../deploy/scheduler.example.yaml) mounts temporary-model
+list and dry-run previews only; see [the registry API contract](../llmsvc/REGISTRY_API.md).
+It enables no actual configuration writes or reload worker, and a valid preview
+is not commit readiness. The configured source paths are not provisioned.
+
+Recovery-marker inspection requires a regular file with exactly one hardlink
+(`st_nlink == 1`). A backup that hardlinks the live marker keeps the queue fenced;
+use separate backup copies. Do not remove the marker or treat native generation
+visibility as proof of old-server settlement or permission to clear a fence.
+
 ## Production transitions and rollback (#11–#14)
 
 These are pending runbook gates, not changes applied by this PR:
