@@ -9,12 +9,25 @@ registry:
   shared_roots: [/srv/models]
   daemon_port_range: [8101, 8199]
   reserved_ports: []
+  config_max_bytes: 1048576
+  model_config_max_bytes: 1048576
+  weight_index_max_bytes: 8388608
 ```
 
 Paths must be absolute, roots nonempty, and port values valid integers. Core
 also reserves its configured listen port and collector model `port` values.
 This does not provision any path or enable configuration writes. No reload
 worker, validator process, unit action or adoption notifier is started.
+
+The three optional byte limits bound configuration YAML, model `config.json`
+and weight-index JSON respectively. Each is an integer in 1..16777216; omitting
+them retains the finite registry defaults shown above. There is no unlimited
+mode. Configured YAML paths must be canonical, without symlink components;
+model links may resolve within the configured shared roots. No-follow,
+nonblocking regular-file reads reject special files, excess bytes and detected
+identity changes. Actual weights are only sampled for readability, not read in
+full. These are allocation and special-file guards, not wall-clock guarantees
+for an unresponsive regular filesystem.
 
 `GET /v1/models` (no query) returns:
 

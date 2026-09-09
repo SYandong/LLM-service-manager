@@ -468,7 +468,7 @@ class Scheduler:
             raise error from exc
         except ReloadError as exc:
             marker = self.registry.queue.marker
-            if marker.exists() or marker.is_symlink():
+            if method != "GET" and (marker.exists() or marker.is_symlink()):
                 raise IntentWriteError(409, "registry_reconciliation_required") from exc
             raise IntentWriteError(503, "registry_unavailable") from exc
         except (OSError, ValueError, TypeError, RecursionError) as exc:
