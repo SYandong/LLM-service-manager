@@ -71,7 +71,7 @@ def run(api, service, *words):
     ["free", "--need", "-1G"], ["free", "--need", "nan"], ["free", "--need", "inf"],
     ["free", "--gpu", "-1"], ["free", "--gpu", "1.5"], ["free", "--wait", "0"],
     ["wake"], ["wake", ""], ["wake", "model\nheader"], ["wake", "model", "--wait", "nan"],
-    ["reserve"], ["add", "x"], ["rm", "x"],
+    ["reserve"], ["add", "x"], ["rm"],
 ])
 def test_invalid_arguments_reject_before_request(pin_api, words):
     with pytest.raises(SystemExit):
