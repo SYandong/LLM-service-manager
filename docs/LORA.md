@@ -209,6 +209,21 @@ timed_out/终态，以及 `recorded_status`；读取不会出队、执行动作�
 的完整断言，不生成新的收尾/重启证明；目前只有显式 fixture 可以提供这些模拟
 事实。core 后续负责 HTTP/config/main 接入，此处未挂载诊断或恢复写接口。
 
+### 只读库存与变更预览
+
+`ModelRegistry.inventory()` 返回当前配置中的模型元数据、独立的 runtime_state、
+到期/移除保护信息，以及 `pending_changes` 和恢复 fence。`source=config`
+不表示数据面已采用；探测缺失、错误或过期时运行态为 unknown。`expires_at`
+仅是已知最后使用时间对应的七天空闲阈值，pin/活动等仍可能阻止注销；缺失历史
+不伪造到期时间。输出不含 cmd/cmdStop 或配置全量内容。
+
+`preview_add(body)` / `preview_remove(name)` 复用现有 dry-run 和局部候选生成，
+按 pending FIFO 的投影计算候选摘要；add 提供计划端口、base 和原始 util_macro。
+它们不入队、不写配置、不执行 cleanup，不预留所选端口；后续提交必须重算。
+受保护的 remove 返回空 would 与 blocked_by，不能视为操作已完成。模型级
+`removable` 或 would 不代表全局 quiet/RAM/recovery 准入；未完成恢复仍拒绝
+候选预览，库存仍可显示该 fence。core 后续拥有 HTTP/UI 接入，本片不新增路由。
+
 ## 交给 ops 的有界实测计划
 
 只有 ops 持有 `gpu-test.lock` 后执行。每次目标不超过 5 分钟；没有缓存的
