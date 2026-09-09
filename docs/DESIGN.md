@@ -212,6 +212,56 @@ pinned 或有在途请求 → 不可睡、不可驱逐
 
 **sleep 前的内存准入**（§4.1 的每一次 sleep 都先过这一关）：sleep 会把权重搬进 pinned 内存，所以执行前检查 `宿主可用内存 − 该模型权重 ≥ 下限` 且 `sleeping 总量 + 该模型权重 ≤ 预算`。不满足时先按 keep_value 从低到高 stop 已经睡着的、不受保护的模型腾出内存；仍不满足则：普通模型直接 stop 而不是 sleep（下次请求走冷启动）；**默认模型或 pin 住的模型保持 awake 并回报阻塞**（保护规则）。这样硬停永远发生在内存被占用**之前**，不会先 OOM 再补救，也不会为了腾内存违反保护规则。
 
+
+### 受保护的 sleeping 恢复执行（#160）
+
+现有 `plan_sleeping_recovery/plan_relocation` 的执行接入是普通策略恢复，
+不是故障清理权限。使用独立、默认关闭的恢复开关；自动副作用还要求
+`automation_enabled`、`model_actions_enabled` 与非只读模式。已知近一小时
+零使用走退役，近期使用才走迁移；近期迁移须在源 stop 前确认放置链已接入且
+有可行目标。无可行计划时源和目标都零动作，未知活动不补成零。
+
+源与目标候选都沿用 pin/default/inflight、未知状态、配置/profile、已确认
+lease/unit incarnation、活跃 reserve 和 fault fence 等保护。持久化、按
+model 唯一的普通恢复 claim 必须先于源 stop，绑定源 lease/unit 身份、源 GPU、
+可信预算/profile 下限、proxy origin/config 身份与阶段；它独立于 fault claim，
+不豁免任何普通保护。停用或重启不能令未结清 claim 消失或释放未证实的预算。
+
+执行顺序为：保护重验及 claim → stop 源 → 正面退出观测与源记账对账 →
+旧 proxy 清理 → 现有 cold-wake → 重入既有 place/confirm → readiness 确认。
+必要目标驱逐仍由现有放置策略逐步重验，不用第二套分配器或估算资源已释放。
+源预算在正面退出证明前完整保留；每个副作用与记账提交前重验当前保护、
+reserve、claim 和资源身份，已完成部分与未确认效果分别报告。
+
+普通 `POST /v1/place` 的载荷/回执不增加恢复 token 或用户可选绕过参数。
+内部只在 live claim 的允许阶段接纳该 model 的重入，将候选限制在源 GPU
+之外，并保持 claim 已验证的预算/profile 下限。目的 lease 的创建与 claim
+绑定在同一原子事务中完成，只有一份当前 model 记账；不得预建一个会让正常
+launcher 重入得到 outstanding_lease 的孤立 lease。并发重入、迟到 confirm、
+身份/profile 改变和资源不足均保留既有安全语义，不以再次 wake 重试解决。
+
+policy 的模型 `exclusions` 贯穿恢复与嵌套放置，保留真实 pin 元数据及重叠
+原因；重入放置的 `gpu_exclusions` 仅排除直放/驱逐目标候选。所有 GPU、model
+和 lease 仍参与完整记账，core 不删除源 GPU 数据或伪造用户 pin/reserve；
+其余候选的排序/阈值/预算不变。恢复自身的资格也必须明确校验，不能把自己的
+claim 当作无条件通行证，亦不能把它当作永远阻止合法重入的普通冲突。
+
+proxy unload 提交前持久化 submitted 阶段；只接受期限内、身份/配置/开关
+仍一致的确认，并经后续新鲜 stopped/退出证明才允许 cold replacement。
+crash、未知或迟到提交不重发，也不凭时间或另一实例的成功清 fence。cold-wake
+提交同样须有持久化阶段；完成需要按既有 wake 契约认可的及时结果、绑定的
+目的 lease 已确认及当前 readiness，不能仅凭一次 HTTP 状态或旁路请求已就绪。
+全部 place/HTTP/观测等待共享有限剩余期限，放置部分仍最多 120 秒；等待释放
+全局锁，不在重入/唤醒时重置预算。重启不重放旧 stop/unload/wake；源或目的
+身份、未确认请求、仍占资源的 stale unit 保留 claim/记账并明确处于 partial/
+恢复阻塞状态。没有公开强制撤销/清除入口。
+
+若新增账本格式，首次真实 claim 时原子惰性迁移，完整保留 pin、accounts、
+fault claim；旧读取器必须拒绝未知屏障格式。dry-run/read-only/default-off
+不创建 claim/ID、迁移账本或触发 transport。具体阶段、结果/日志与重启/回滚
+兼容性随同一代码 PR 记录和测试；本路径不改 registry 配置，不以 #157 目录
+更新或 #53 quiet 来源为人为前置依赖，也不授权生产 TTL/reaper 替换。
+
 ### 4.4 用户意图
 
 | 命令 | 语义 | 到期 |
