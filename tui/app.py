@@ -106,6 +106,7 @@ class SchedulerApp(App):
         self.fetching = False
         self._write_busy = False
         self._shortcut_target = None
+        self._registry_generation = 0
         self._state_generation = 0
         self.model_names = []
         self.terminal_width = 100
@@ -214,6 +215,21 @@ class SchedulerApp(App):
 
     def action_refresh_state(self):
         self.refresh_current()
+
+    @work
+    async def show_models(self, args):
+        if not self.is_running:
+            return
+        self._registry_generation += 1
+        generation, state_generation = self._registry_generation, self._state_generation
+        try:
+            result = await asyncio.to_thread(self.api.execute_command, args, self.client)
+            message = self.api.format_result(args, result, width=self.terminal_width)
+        except Exception as exc:
+            message = "Registry listing failed: " + str(exc)
+        if (self.is_running and generation == self._registry_generation
+                and state_generation == self._state_generation and not self._write_busy):
+            self.show_result(message)
 
     @work
     async def run_write(self, args):
@@ -572,7 +588,9 @@ class SchedulerApp(App):
                     raise CommandMessage("Shortcut model is no longer in the snapshot; refresh and select it again")
             if args.command == "usage":
                 self.show_usage(args)
-            elif args.command in ("pin", "unpin", "free", "wake", "reserve"):
+            elif args.command == "models":
+                self.show_models(args)
+            elif args.command in ("pin", "unpin", "free", "wake", "reserve", "add", "rm"):
                 if self._write_busy:
                     self.show_result("An operation is already running; wait for its result (no request queued)")
                 elif args.command == "free" and args.ram and not args.dry_run:
