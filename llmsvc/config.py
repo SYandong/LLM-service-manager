@@ -54,6 +54,8 @@ class SchedulerConfig:
     automation_shared_ttl_seconds: float = 300.0
     automation_shared_external_threshold_gb: float = 1.0
     automation_shared_free_threshold_gb: float = 10.0
+    sleeping_recovery_enabled: bool = False
+    sleeping_recovery_timeout_seconds: float = 900.0
     fault_recovery_enabled: bool = False
     fault_interval_seconds: float = 1.0
     fault_timeout_seconds: float = 30.0
@@ -83,7 +85,7 @@ class SchedulerConfig:
                      "data_plane_event_timeout_seconds", "data_plane_event_reconnect_seconds",
                      "automation_interval_seconds", "automation_cycle_timeout_seconds", "automation_idle_seconds",
                      "automation_exclusive_ttl_seconds", "automation_shared_ttl_seconds",
-                     "fault_interval_seconds", "fault_timeout_seconds"):
+                     "fault_interval_seconds", "fault_timeout_seconds", "sleeping_recovery_timeout_seconds"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (float, int)):
                 raise ValueError(f"{name} must be a finite positive number")
@@ -109,6 +111,10 @@ class SchedulerConfig:
             raise ValueError("fault_health_failures must be an integer in 3..100")
         if type(self.automation_enabled) is not bool:
             raise ValueError("automation_enabled must be a boolean")
+        if type(self.sleeping_recovery_enabled) is not bool:
+            raise ValueError("sleeping_recovery_enabled must be a boolean")
+        if self.sleeping_recovery_timeout_seconds > 900:
+            raise ValueError("sleeping_recovery_timeout_seconds must be <=900")
         if self.automation_cycle_timeout_seconds > 120:
             raise ValueError("automation_cycle_timeout_seconds must not exceed 120")
         if self.reserve_timeout_seconds > 120:

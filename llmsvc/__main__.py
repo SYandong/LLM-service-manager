@@ -131,6 +131,9 @@ def main():
             scheduler.placement = PlacementController(scheduler, transport)
         if config.automation_enabled:
             scheduler.automation = AutomaticPolicyController(scheduler)
+        if config.sleeping_recovery_enabled:
+            from llmsvc.recovery import SleepingRecoveryController
+            scheduler.sleeping_recovery = SleepingRecoveryController(scheduler)
         if config.fault_recovery_enabled:
             from llmsvc.faults import FaultRecoveryController
             scheduler.faults = FaultRecoveryController(scheduler)

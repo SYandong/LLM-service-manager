@@ -8,11 +8,12 @@ Expiry is a read filter, so observation never deletes protection records.
 import json
 import logging
 import math
+import re
 import sqlite3
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from llmsvc.state import FaultClaim, Lease, Pin, Reserve
+from llmsvc.state import FaultClaim, Lease, Pin, RecoveryClaim, Reserve
 
 LOG = logging.getLogger("llmsvc.store")
 
@@ -59,7 +60,7 @@ class IntentStore:
         try:
             with self.action_lock, self._db:
                 version = self._db.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1, 2, 3):
+                if version not in (0, 1, 2, 3, 4):
                     raise ValueError("unsupported intent database version")
                 if read_only:
                     self._db.execute("SELECT model, until, owner FROM llmsvc_pins LIMIT 0")
@@ -71,11 +72,15 @@ class IntentStore:
                     self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS llmsvc_one_allocation ON llmsvc_leases(model) WHERE status != 'released'")
                     self._db.execute("PRAGMA user_version = " + str(max(version, 2)))
                 self._has_leases = not read_only or version >= 2
-                self._has_faults = version == 3
+                self._has_faults = version >= 3
+                self._has_recoveries = version >= 4
                 if self._has_faults:
                     self._db.execute("SELECT lease_id, model, stage, record FROM llmsvc_faults LIMIT 0")
                 if self._has_leases:
                     self._db.execute("SELECT lease_id, model, gpu, util, expires_at, budget_gb, status, unit FROM llmsvc_leases LIMIT 0")
+                if self._has_recoveries:
+                    self._db.execute("SELECT id, model, stage, record FROM llmsvc_recoveries LIMIT 0")
+                    self.recoveries()  # Reject unsupported/corrupt active fences.
         except Exception:
             self._db.close()
             raise
@@ -87,6 +92,159 @@ class IntentStore:
                 return ()
             return tuple(FaultClaim(**json.loads(row[0])) for row in self._db.execute(
                 "SELECT record FROM llmsvc_faults WHERE stage != 'complete' ORDER BY lease_id"))
+
+    @staticmethod
+    def _validate_recovery(claim):
+        for key in ("id", "model", "source_lease_id", "unit", "invocation_id", "profile_hash"):
+            nonempty(getattr(claim, key), key)
+        if (not re.fullmatch(r"[0-9a-f]{32}", claim.id)
+                or not re.fullmatch(r"[0-9a-f]{32}", claim.invocation_id)
+                or not re.fullmatch(r"[0-9a-f]{64}", claim.profile_hash)
+                or type(claim.source_gpu) is not int or claim.source_gpu < 0
+                or type(claim.relocate) is not bool or claim.reason not in ("reserve", "cannot_wake")):
+            raise ValueError("invalid recovery identity")
+        finite_positive(claim.created_at, "created_at")
+        if finite_positive(claim.util_floor, "util_floor") > 1:
+            raise ValueError("invalid recovery util floor")
+        finite_positive(claim.budget_floor_gb, "budget_floor_gb")
+        for key in ("stop_submitted", "stop_acknowledged", "proxy_submitted", "proxy_acknowledged",
+                    "wake_submitted", "wake_acknowledged"):
+            if type(getattr(claim, key)) is not bool:
+                raise ValueError("invalid recovery progress")
+        for prefix in ("stop", "proxy", "wake"):
+            if getattr(claim, prefix+"_acknowledged") and not getattr(claim, prefix+"_submitted"):
+                raise ValueError("unsubmitted recovery acknowledgment")
+        if claim.stage not in ("claimed", "released", "settled", "waking", "destination", "complete"):
+            raise ValueError("unsupported recovery stage")
+        if claim.stage == "claimed" and (claim.proxy_submitted or claim.wake_submitted or claim.destination_lease_id):
+            raise ValueError("invalid claimed recovery")
+        if claim.stage not in ("claimed", "complete") and not claim.stop_submitted:
+            raise ValueError("source stop unsubmitted")
+        if claim.proxy_submitted and not claim.stop_acknowledged:
+            raise ValueError("source stop unacknowledged")
+        if claim.wake_submitted and (not claim.proxy_acknowledged or claim.stage not in ("waking", "destination", "complete")):
+            raise ValueError("proxy cleanup unsettled")
+        if claim.stage in ("settled", "waking", "destination") and not claim.proxy_acknowledged:
+            raise ValueError("proxy cleanup unacknowledged")
+        if claim.stage in ("waking", "destination") and (not claim.relocate or not claim.wake_submitted):
+            raise ValueError("cold wake unsubmitted")
+        if (claim.stage == "destination") != bool(claim.destination_lease_id) and claim.stage != "complete":
+            raise ValueError("invalid recovery destination binding")
+        if claim.destination_lease_id is not None:
+            nonempty(claim.destination_lease_id, "destination_lease_id")
+        if claim.destination_invocation_id and (not claim.destination_lease_id
+                or not re.fullmatch(r"[0-9a-f]{32}", claim.destination_invocation_id)
+                or claim.destination_invocation_id == claim.invocation_id):
+            raise ValueError("invalid destination incarnation")
+        if claim.wake_acknowledged and not claim.destination_invocation_id:
+            raise ValueError("destination incarnation unconfirmed")
+        if claim.error is not None and not isinstance(claim.error, str):
+            raise ValueError("invalid recovery error")
+
+    def recoveries(self):
+        """Read active ordinary fences even when their worker is disabled."""
+        with self.action_lock:
+            if not self._has_recoveries:
+                return ()
+            claims = []
+            for id_, model, stage, raw in self._db.execute(
+                    "SELECT id, model, stage, record FROM llmsvc_recoveries WHERE stage != 'complete' ORDER BY id"):
+                claim = RecoveryClaim(**json.loads(raw))
+                self._validate_recovery(claim)
+                if (claim.id, claim.model, claim.stage) != (id_, model, stage):
+                    raise ValueError("recovery fence metadata mismatch")
+                claims.append(claim)
+            return tuple(claims)
+
+    def recovery(self, model):
+        return next((claim for claim in self.recoveries() if claim.model == model), None)
+
+    def claim_recovery(self, claim, *, dry_run=False):
+        self._validate_recovery(claim)
+        if (claim.stage != "claimed" or claim.stop_submitted or claim.stop_acknowledged
+                or claim.proxy_submitted or claim.wake_submitted or claim.destination_lease_id):
+            raise ValueError("invalid initial recovery")
+        with self.action_lock:
+            source = self.lease(claim.source_lease_id)
+            if (source is None or (source[0].model, source[0].gpu, source[0].status, source[1]) !=
+                    (claim.model, claim.source_gpu, "confirmed", claim.unit)
+                    or claim.util_floor < source[0].util or claim.budget_floor_gb < source[0].budget_gb
+                    or self.fault(claim.model) is not None or self.recovery(claim.model) is not None):
+                raise ValueError("recovery source account unavailable")
+            if dry_run:
+                return intent_result("sleeping_recovery_claim", asdict(claim), True)
+            if self.read_only:
+                raise PermissionError("intent store is read-only")
+            try:
+                with self._db:
+                    self._db.execute("BEGIN IMMEDIATE")
+                    self._db.execute("CREATE TABLE IF NOT EXISTS llmsvc_faults (lease_id TEXT PRIMARY KEY, model TEXT NOT NULL, stage TEXT NOT NULL CHECK(stage IN ('claimed','released','complete')), record TEXT NOT NULL)")
+                    self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS llmsvc_one_fault ON llmsvc_faults(model) WHERE stage != 'complete'")
+                    self._db.execute("CREATE TABLE IF NOT EXISTS llmsvc_recoveries (id TEXT PRIMARY KEY, model TEXT NOT NULL, stage TEXT NOT NULL, record TEXT NOT NULL)")
+                    self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS llmsvc_one_recovery ON llmsvc_recoveries(model) WHERE stage != 'complete'")
+                    if self.lease(claim.source_lease_id) != source or self._db.execute(
+                            "SELECT 1 FROM llmsvc_faults WHERE model=? AND stage != 'complete'", (claim.model,)).fetchone():
+                        raise ValueError("recovery source changed")
+                    self._db.execute("INSERT INTO llmsvc_recoveries VALUES (?, ?, ?, ?)",
+                                     (claim.id, claim.model, claim.stage, json.dumps(asdict(claim), allow_nan=False)))
+                    self._db.execute("PRAGMA user_version = 4")
+            finally:
+                version = self._db.execute("PRAGMA user_version").fetchone()[0]
+                self._has_faults, self._has_recoveries = version >= 3, version >= 4
+        intent_result("sleeping_recovery_claim", asdict(claim), False)
+        return claim
+
+    def advance_recovery(self, claim, *, stage=None, error=None, dry_run=False,
+                         destination_invocation_id=None, **progress):
+        allowed = {"stop_submitted", "stop_acknowledged", "proxy_submitted", "proxy_acknowledged",
+                   "wake_submitted", "wake_acknowledged"}
+        if set(progress)-allowed or any(type(value) is not bool or (getattr(claim, key) and not value)
+                                       for key, value in progress.items()):
+            raise ValueError("invalid recovery progress update")
+        for prefix in ("stop", "proxy", "wake"):
+            if progress.get(prefix+"_acknowledged") and not getattr(claim, prefix+"_submitted"):
+                raise ValueError("acknowledgment needs prior durable submission")
+        stage = stage or claim.stage
+        next_stage = {"claimed": "released", "released": "settled", "settled": "waking"}
+        if stage != claim.stage and stage != next_stage.get(claim.stage) and stage != "complete":
+            raise ValueError("invalid recovery stage transition")
+        if destination_invocation_id is not None:
+            if claim.destination_invocation_id and destination_invocation_id != claim.destination_invocation_id:
+                raise ValueError("destination incarnation changed")
+            progress["destination_invocation_id"] = destination_invocation_id
+        updated = replace(claim, stage=stage, error=error, **progress)
+        self._validate_recovery(updated)
+        with self.action_lock:
+            if self.recovery(claim.model) != claim or self.fault(claim.model) is not None:
+                raise ValueError("recovery claim changed")
+            source = self.lease(claim.source_lease_id)
+            expected = "confirmed" if claim.stage == "claimed" else "released"
+            if source is None or (source[0].model, source[0].gpu, source[0].status, source[1]) != (
+                    claim.model, claim.source_gpu, expected, claim.unit):
+                raise ValueError("recovery source account changed")
+            if stage == "complete":
+                abort = claim.stage == "claimed" and not claim.stop_submitted
+                retired = (claim.stage == "settled" and claim.proxy_acknowledged and not claim.wake_submitted
+                           and (not claim.relocate or error is not None))
+                destination = self.lease(claim.destination_lease_id) if claim.destination_lease_id else None
+                ready = (claim.stage == "destination" and claim.wake_acknowledged and destination is not None
+                         and (destination[0].model, destination[0].status, destination[1]) ==
+                         (claim.model, "confirmed", claim.unit) and destination[0].gpu != claim.source_gpu)
+                if not (abort or retired or ready):
+                    raise ValueError("recovery completion unconfirmed")
+            if not dry_run:
+                if self.read_only:
+                    raise PermissionError("intent store is read-only")
+                with self._db:
+                    self._db.execute("BEGIN IMMEDIATE")
+                    if self.recovery(claim.model) != claim or self.lease(claim.source_lease_id) != source:
+                        raise ValueError("recovery changed before commit")
+                    if claim.stage == "claimed" and stage == "released":
+                        self._db.execute("UPDATE llmsvc_leases SET status='released' WHERE lease_id=?", (claim.source_lease_id,))
+                    self._db.execute("UPDATE llmsvc_recoveries SET stage=?, record=? WHERE id=?",
+                                     (stage, json.dumps(asdict(updated), allow_nan=False), claim.id))
+        intent_result("sleeping_recovery_"+stage, asdict(updated), dry_run)
+        return updated
 
     def fault(self, model):
         return next((claim for claim in self.faults() if claim.model == model), None)
@@ -100,6 +258,8 @@ class IntentStore:
             raise ValueError("invalid initial fault claim")
         record = asdict(claim)
         with self.action_lock:
+            if self.recovery(claim.model) is not None:
+                raise ValueError("sleeping recovery pending")
             row = self.lease(claim.lease_id)
             if row is None or (row[0].model, row[0].gpu, row[0].status, row[1]) != (
                     claim.model, claim.gpu, "confirmed", claim.unit):
@@ -116,7 +276,8 @@ class IntentStore:
                 self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS llmsvc_one_fault ON llmsvc_faults(model) WHERE stage != 'complete'")
                 self._db.execute("INSERT INTO llmsvc_faults VALUES (?, ?, ?, ?)",
                                  (claim.lease_id, claim.model, claim.stage, json.dumps(record, allow_nan=False)))
-                self._db.execute("PRAGMA user_version = 3")
+                version = self._db.execute("PRAGMA user_version").fetchone()[0]
+                self._db.execute("PRAGMA user_version = " + str(max(version, 3)))
             self._has_faults = True
         return intent_result("fault_claim", record, False)
 
@@ -238,7 +399,7 @@ class IntentStore:
             row = self._db.execute("SELECT lease_id, model, gpu, util, expires_at, budget_gb, status, unit FROM llmsvc_leases WHERE lease_id = ?", (lease_id,)).fetchone()
             return (Lease(*row[:7]), row[7]) if row else None
 
-    def create_lease(self, lease, unit, *, dry_run=False):
+    def create_lease(self, lease, unit, *, dry_run=False, recovery_claim=None):
         nonempty(lease.lease_id, "lease_id")
         nonempty(lease.model, "model")
         nonempty(unit, "unit")
@@ -249,6 +410,28 @@ class IntentStore:
         with self.action_lock:
             if self.fault(lease.model) is not None:
                 raise ValueError("fault recovery pending")
+            active = self.recovery(lease.model)
+            if active is not None or recovery_claim is not None:
+                source = self.lease(active.source_lease_id) if active is not None else None
+                if (active is None or active != recovery_claim or active.stage != "waking"
+                        or not active.relocate or not active.wake_submitted
+                        or active.destination_lease_id is not None or lease.gpu == active.source_gpu
+                        or lease.budget_gb < active.budget_floor_gb or unit != active.unit
+                        or source is None or source[0].status != "released"):
+                    raise ValueError("sleeping recovery placement is not authorized")
+                if not dry_run:
+                    if self.read_only:
+                        raise PermissionError("intent store is read-only")
+                    bound = replace(active, stage="destination", destination_lease_id=lease.lease_id)
+                    with self._db:
+                        self._db.execute("BEGIN IMMEDIATE")
+                        if self.recovery(lease.model) != active:
+                            raise ValueError("sleeping recovery changed")
+                        self._db.execute("INSERT INTO llmsvc_leases VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                         (*asdict(lease).values(), unit))
+                        self._db.execute("UPDATE llmsvc_recoveries SET stage=?, record=? WHERE id=?",
+                                         (bound.stage, json.dumps(asdict(bound), allow_nan=False), bound.id))
+                return intent_result("place", asdict(lease), dry_run)
             if not dry_run:
                 self._write("INSERT INTO llmsvc_leases VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                             (*asdict(lease).values(), unit))
@@ -263,6 +446,9 @@ class IntentStore:
                 raise ValueError("lease is absent or revoked")
             if self.fault(row[0].model) is not None:
                 raise ValueError("fault recovery pending")
+            recovery = self.recovery(row[0].model)
+            if recovery is not None and lease_id != recovery.destination_lease_id:
+                raise ValueError("sleeping recovery pending")
             if not dry_run:
                 self._write("UPDATE llmsvc_leases SET status = ? WHERE lease_id = ?", (status, lease_id))
         return intent_result("lease_" + status, {"lease_id": lease_id, "status": status}, dry_run)

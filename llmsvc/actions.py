@@ -248,18 +248,88 @@ class ManagedModelTransport:
         return self.units[model]
 
     def http_request(self, method, path, *, deadline):
+        return self.prepare_http(method, path)(deadline=deadline)
+
+    def bounded_origin(self):
+        """No resolver may outlive an automatic recovery's finite deadline."""
+        import ipaddress
+        from urllib.parse import urlsplit
+        parts = urlsplit(self.swap_url)
+        address = ipaddress.ip_address(parts.hostname)
+        if (parts.scheme not in ("http", "https") or parts.username or parts.password
+                or parts.query or parts.fragment or parts.path not in ("", "/")
+                or getattr(address, "scope_id", None) or parts.port == 0):
+            raise ValueError("recovery requires a direct IP HTTP(S) origin")
+        return str(address), parts.port or (443 if parts.scheme == "https" else 80), address.version, parts.scheme == "https"
+
+    def prepare_http(self, method, path, *, bounded=False):
+        """Capture one approved origin/path without submitting any request."""
         from urllib.error import HTTPError
         from urllib.request import Request
         if (method, path) not in self.paths:
             raise ActionDispatchError("unapproved_model_path")
+        if bounded:
+            import http.client
+            import socket
+            import ssl
+            host, port, version, secure = self.bounded_origin()
+            context = ssl.create_default_context() if secure else None
+            def submit_bounded(*, deadline):
+                remaining = self._remaining(deadline)
+                connection = http.client.HTTPConnection(host, port, timeout=remaining)
+                sock = socket.socket(socket.AF_INET6 if version == 6 else socket.AF_INET, socket.SOCK_STREAM)
+                owned = [sock]
+                expired = threading.Event()
+                def expire():
+                    expired.set()
+                    try:
+                        owned[0].shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    owned[0].close()
+                timer = threading.Timer(remaining, expire)
+                timer.daemon = True
+                timer.start()
+                response = None
+                try:
+                    sock.settimeout(self._remaining(deadline))
+                    sock.connect((host, port))
+                    if secure:
+                        sock = context.wrap_socket(sock, server_hostname=host, do_handshake_on_connect=False)
+                        owned[0] = sock
+                        if expired.is_set():
+                            raise TimeoutError("model action deadline exceeded")
+                        sock.settimeout(self._remaining(deadline))
+                        sock.do_handshake()
+                    if expired.is_set():
+                        raise TimeoutError("model action deadline exceeded")
+                    connection.sock = sock
+                    sock.settimeout(self._remaining(deadline))
+                    connection.request(method, path)
+                    response = connection.getresponse()
+                    if expired.is_set():
+                        raise TimeoutError("model action deadline exceeded")
+                    self._remaining(deadline)  # A late status is not an acknowledgement.
+                    return response.status
+                finally:
+                    timer.cancel()
+                    if response is not None:
+                        response.close()
+                    connection.close()
+                    owned[0].close()
+                    timer.join(timeout=1)
+            return submit_bounded
         request = Request(self.swap_url + path, method=method)
-        try:
-            with self.opener.open(request, timeout=self._remaining(deadline)) as response:
-                return response.status
-        except HTTPError as exc:
-            status = exc.code
-            exc.close()
-            return status
+        opener = self.opener
+        def submit(*, deadline):
+            try:
+                with opener.open(request, timeout=self._remaining(deadline)) as response:
+                    return response.status
+            except HTTPError as exc:
+                status = exc.code
+                exc.close()
+                return status
+        return submit
 
     def stop_unit(self, unit, *, deadline):
         if unit not in self.units.values():
@@ -296,9 +366,19 @@ class ModelActionController:
     def _fault_pending(self, name):
         return self.scheduler.store is not None and self.scheduler.store.fault(name) is not None
 
+    def _recovery_pending(self, name, *, action=False):
+        claim = self.scheduler.store.recovery(name) if self.scheduler.store is not None else None
+        recovery = getattr(self.scheduler, "sleeping_recovery", None)
+        return claim is not None and not (recovery is not None and recovery.authorized(name, action=action))
+
     def _before_action(self, action):
         if self._fault_pending(action.model):
             raise ActionDispatchError("fault_recovery_pending")
+        if self._recovery_pending(action.model, action=True):
+            raise ActionDispatchError("sleeping_recovery_pending")
+        recovery = getattr(self.scheduler, "sleeping_recovery", None)
+        if recovery is not None and recovery.authorized(action.model, action=True):
+            recovery.before_source_action(action)
         faults = getattr(self.scheduler, "faults", None)
         if faults is not None:
             faults.note_expected(action)
@@ -346,6 +426,8 @@ class ModelActionController:
     def _model(self, snapshot, name):
         if self._fault_pending(name):
             raise ActionDispatchError("fault_recovery_pending")
+        if self._recovery_pending(name):
+            raise ActionDispatchError("sleeping_recovery_pending")
         unit = self.transport.unit_for_model(name)
         models = [model for model in snapshot.models if model.name == name]
         if len(models) != 1:
@@ -365,6 +447,8 @@ class ModelActionController:
                 protected[model.name] = "configured_unit_mismatch"
             elif self._fault_pending(model.name):
                 protected[model.name] = "fault_recovery_pending"
+            elif self._recovery_pending(model.name):
+                protected[model.name] = "sleeping_recovery_pending"
             elif model.name in self.pending:
                 protected[model.name] = "operation_in_progress"
         return plan_free(snapshot, settings=self.settings, exclusions=protected, **payload)
@@ -620,16 +704,24 @@ class ModelActionController:
                 raise ActionDispatchError("insufficient_gpu_memory")
         return model
 
-    def wake(self, name, *, by, dry_run=False):
+    def wake(self, name, *, by, dry_run=False, _recovery=None, _deadline=None):
         if dry_run:
             return self.scheduler.preview("wake", {"model": name})
         started = self.monotonic()
         deadline = started + self.scheduler.config.wake_timeout_seconds
+        if _deadline is not None:
+            if not _known(_deadline):
+                raise ValueError("wake deadline must be finite")
+            deadline = min(deadline, _deadline)
         result = {"model": name, "status": "blocked", "ready": False, "elapsed_seconds": 0.0, "cold_start": False}
         owned = False
         try:
             self._enabled()
-            self._refresh(deadline)
+            if _recovery is not None and (_recovery is not getattr(self.scheduler, "sleeping_recovery", None)
+                                          or not _recovery.authorized(name)):
+                raise ActionDispatchError("sleeping_recovery_pending")
+            refresh = (lambda: _recovery.refresh_for_wake(deadline)) if _recovery is not None else (lambda: self._refresh(deadline))
+            refresh()
             with self._locked(deadline):
                 self._enabled()
                 initial = self._snapshot()
@@ -646,13 +738,17 @@ class ModelActionController:
                 self.scheduler.emit("wake_requested", model=name, detail={"by": by, "cold_start": result["cold_start"]})
             # No action lock during this request: it may synchronously reenter
             # /v1/place through the data-plane launcher before returning.
+            prepared = _recovery.before_wake_request(name, deadline) if _recovery is not None else None
             try:
-                status = self.transport.http_request("GET", "/upstream/" + quote(name, safe="") + "/", deadline=deadline)
+                status = (prepared(deadline=deadline) if prepared is not None else
+                          self.transport.http_request("GET", "/upstream/" + quote(name, safe="") + "/", deadline=deadline))
                 error = None if type(status) is int and (200 <= status < 300 or status == 404) else "upstream_rejected"
             except Exception:
                 error = "upstream_error"
+            if _recovery is not None:
+                _recovery.after_wake_request(name, error, deadline)
             if error:
-                observed = self._refresh(deadline)
+                observed = refresh()
                 candidates = [model for model in observed.models if model.name == name]
                 ready = (self._fresh(observed) and observed.sampled_at > initial.sampled_at
                          and len(candidates) == 1 and self._ready(candidates[0])
@@ -662,7 +758,7 @@ class ModelActionController:
                 return result
             progress = None
             while self.monotonic() < deadline and not self.scheduler.stopping.is_set():
-                observed = self._refresh(deadline)
+                observed = refresh()
                 with self._locked(deadline):
                     candidates = [model for model in observed.models if model.name == name]
                     model = candidates[0] if len(candidates) == 1 else None
@@ -750,6 +846,8 @@ class ReservationController:
                     guarded[model.name] = "unleased_model"
                 elif controller._fault_pending(model.name):
                     guarded[model.name] = "fault_recovery_pending"
+                elif controller._recovery_pending(model.name):
+                    guarded[model.name] = "sleeping_recovery_pending"
                 elif model.name in controller.pending or controller.free_active:
                     guarded[model.name] = "operation_in_progress"
         for lease in snapshot.leases:
@@ -931,6 +1029,8 @@ class AutomaticPolicyController:
                 guards[model.name] = "unleased_model"
             elif controller._fault_pending(model.name):
                 guards[model.name] = "fault_recovery_pending"
+            elif controller._recovery_pending(model.name):
+                guards[model.name] = "sleeping_recovery_pending"
             elif model.name in controller.pending or controller.free_active:
                 guards[model.name] = "operation_in_progress"
         protected = replace(snapshot, models=tuple(models))
@@ -991,7 +1091,7 @@ class AutomaticPolicyController:
         deadline = self.monotonic()+self.scheduler.config.automation_cycle_timeout_seconds
         try:
             with self.controller._locked(deadline):
-                if self.active:
+                if self.active or (self.scheduler.sleeping_recovery is not None and self.scheduler.sleeping_recovery.active):
                     return {"status": "blocked", "actions": [], "blocked_by": [{"model": None, "reason": "cycle_in_progress"}]}
                 if self.scheduler.stopping.is_set():
                     return {"status": "blocked", "actions": [], "blocked_by": [{"model": None, "reason": "scheduler_stopping"}]}
