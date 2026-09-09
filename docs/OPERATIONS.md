@@ -186,8 +186,9 @@ report it again. This event requires the separately reviewed
 merged #88 baseline can retain the allocation without this actionable notice.
 Absence of the new event is not proof that identity or accounting is safe.
 
-1. Retain the complete current SQLite ledger and its backup (schema v2, or v3
-   after an actual fault claim; see the fault-fence restrictions below). Record
+1. Retain the complete current SQLite ledger and its backup (v2, v3 after an
+   actual fault claim, or v4 after an ordinary recovery claim; see both recovery
+   restrictions below). Record
    the event or observed blocker, lease ID, current state and last verified model
    configuration. Do not delete an active ledger, remove SQL rows, fabricate a
    tombstone, rename the unit to bypass checks or infer stop authority from the
@@ -279,6 +280,36 @@ These are recovery limits, not authority to upgrade/migrate/restart/stop a
 service or activate an observer, production policy, TTL/reaper or host source.
 Live recovery latency and long-term stability/calibration are **NOT MEASURED**;
 bounded checks and deterministic replay carry no calendar-wait requirement.
+
+## Ordinary sleeping recovery and schema-v4 rollback (#160)
+
+`sleeping_recovery_enabled` defaults to false. When explicitly enabled, it runs
+sequentially after the existing automation cycle; effects additionally require
+`automation_enabled`, `model_actions_enabled` and non-read-only operation.
+Recent-use relocation also requires `placement_enabled` **before source stop**.
+`sleeping_recovery_timeout_seconds` defaults to 900 and must be finite, greater
+than zero and at most 900: source cleanup, cold wake and destination confirmation
+share this one budget. Waits release the action lock; manual wake/reserve APIs
+are unchanged. Ordinary pin/default/identity/account protections still apply.
+
+The first **actual ordinary recovery claim** atomically migrates a v2/v3 ledger
+to schema v4. Ordinary claims are separate from fault claims; existing pins,
+reserves, accounts and fault records are preserved. Default-off, read-only and
+dry-run do not perform this migration. Older schema-v3 readers reject v4;
+disabling this option is not a schema downgrade or a way to clear a stored fence.
+Preserve a consistent whole-ledger backup and reconcile current resources and
+all pending claims before any separately approved rollback. Do not delete
+claims/rows, edit `user_version` or overwrite active accounting with a stale
+backup. No executable downgrade or manual SQL recovery is provided here.
+
+An uncertain stop, unload or wake remains fenced across restart/disable. A new
+process may reconcile fresh evidence and close already-acknowledged completed
+work; it cannot replay old transport or resend an unknown submission. There is
+no force-clear path. Positive exit precedes source-account release, and partial
+progress stays explicit; policy estimates are not measured freed bytes.
+This note authorizes no rollout, restart, production schema migration or
+TTL/reaper change. Live recovery latency and long-term calibration remain
+**NOT MEASURED**; no calendar wait substitutes for those measurements.
 
 ## GPU smoke ownership
 
