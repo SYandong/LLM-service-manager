@@ -255,6 +255,14 @@ policy 的模型 `exclusions` 贯穿恢复与嵌套放置，保留真实 pin 元
 其余候选的排序/阈值/预算不变。恢复自身的资格也必须明确校验，不能把自己的
 claim 当作无条件通行证，亦不能把它当作永远阻止合法重入的普通冲突。
 
+此自动恢复路径只支持 literal-IP 的 HTTP(S) origin；hostname、无效端口等
+不支持的配置在任何源动作前拒绝。请求使用预先验证且不可变的 origin/path，
+不走 DNS、环境 proxy 或 redirect；现有手动 free/wake 的 transport 兼容性
+不受此专用路径限制影响。unload/cold-wake 的 socket watchdog 使用同一个
+绝对剩余期限，不能靠持续滴流 headers/body 延长操作或把迟到响应当作成功。
+就绪观测复用现有 sampler，不同步调用可能无界等待的 collector；任意回调、
+OS/存储等待仍不能被神奇抢占，不能把此 I/O 防护宣称为所有步骤的硬实时保证。
+
 proxy unload 提交前持久化 submitted 阶段；只接受期限内、身份/配置/开关
 仍一致的确认，并经后续新鲜 stopped/退出证明才允许 cold replacement。
 crash、未知或迟到提交不重发，也不凭时间或另一实例的成功清 fence。cold-wake
