@@ -138,6 +138,26 @@ ID 来自 reserve 回执或 `status --json` 中的 reserves。命令发送 URL �
 
 TUI 使用相同的 `unreserve ID` 命令；确认回复后立即刷新，并移除服务器已不再报告的预约标记。`--dry-run` 保留标记和预约。缺失/空/控制字符 ID 在请求前拒绝，`--json` 保留完整回执。
 
+## 完整权重模型列表与预览
+
+```sh
+LLM_URL=http://scheduler:8011 python3 llm models --json
+LLM_URL=http://scheduler:8011 python3 llm add /shared/weights/ft --name ft --base base --dry-run
+LLM_URL=http://scheduler:8011 python3 llm rm ft --dry-run --json
+```
+
+`add <path> --name X --base BASE` 发送 `{name,path,base}`，路径由 scheduler 按其配置的 shared_roots 验证；客户端不在自己的容器里解析、检查或改写路径。只支持完整权重，`--lora` 未开放。`rm NAME` 使用编码后的单次解码路径段、空 DELETE body。服务器继续验证名称、base、端口、路径、临时记录与保护条件；不由 CLI 猜测或放宽。
+
+- `models` 读取同一个 scheduler 的 `/v1/models`，返回配置文件中的 **temporary registry records**，不是全部常驻模型发现，也不是当前 proxy 已采用配置的证明。常驻/运行状态看 `status`。输出保留 records、writes_enabled 和 blocked_by；空 records 是可用列表中的空集合，503 unavailable 不会被显示为空集合。
+- 当前 #137 list/preview 接口的写操作始终关闭。预览返回 would、dry_run=true、config_committed=false 和真实阻塞原因，包括 registry_writes_disabled、unknown quiet 与当前保护/故障条件。合法编辑不表示可提交；没有 job ID、排队项、staging、落盘或 model action。阻塞预览返回退出码 1，正常列表读取返回 0。
+- 未配置 registry 返回 503 registry_not_configured；路径/模型等校验失败为 400 registry_invalid_request（保留 message）；配置不可安全读取为 503 registry_unavailable；待核对事务使预览返回 409 registry_reconciliation_required。`--json` 保留结构化错误 body 并返回非零；普通输出与 TUI 同样保留详情。
+- 不带 `--dry-run` 的 add/rm 仍可被服务器以 405 read_only/operation_not_enabled 拒绝；CLI 不启用写操作、不自动切换成预览，也不重试不确定的 POST/DELETE。未知结果先核对状态与事件。
+- 结果呈现支持既有 registry job 的 queued/blocked/applied/failed/timed_out/reconciliation_required 字段，明确分开排队、config_committed 和最终应用。queued 返回非零并显示“not applied”；不会把 HTTP 200 或文件提交当完整应用。当前安全接口不创建这些 job，也没有新增 job 轮询端点；实际作业/写入需要后续已审核 core 接入。
+
+实际临时 HTTP/配置/完整权重结构夹具已验证单文件 `-I -S` 的列表、add/rm 预览、结构化错误，以及 100×30/窄终端 TUI；所有配置文件、队列、事件和 unit/transport 回调保持不变。权重内容和状态为 CPU 测试夹具，没有冷启动推理或实际 reload。
+
+TUI 输入框使用相同的 `models`、`add`、`rm` 命令。列表结果不会替换运行时模型快照；迟到列表不会覆盖之后的写请求或退出界面。预览/操作回复后照常刷新 state，保留结构化阻塞与提交状态。列表、预览以及 CPU 夹具都不提供可靠 quiet、采用/收尾或生产授权，完整 #19/#20 验收仍继续。
+
 ## 可选 TUI
 
 包含 TUI 的发布包使用 `pip install 'llmsvc[tui]'` 安装。也可将仓库中的实际 `tui/` 目录复制到独立 `llm` 脚本旁，再安装 `textual>=0.70`。仅复制 `llm` 仍可使用全部 CLI 命令。
@@ -155,12 +175,12 @@ LLM_URL=http://scheduler:8011 python cli/llm
 - `f` 聚焦命令框并预填 `free`，可补充 `--gpu` / `--need` / `--ram`；`p` 预填所选模型的 pin 命令，把光标放在空的 `--for` 参数处；`w` 预填所选模型的 wake 命令。**三者都不发请求，编辑/核对后按 Enter 才提交。** Pin 必须手动填入正时长（例如 `1h`），快捷键不提供默认或永久 pin；空时长/零时长沿用共享解析器报错。
 - p/w 固定预填时的模型名，不因后续光标移动而改成另一模型；名称按 shell 引号规则保留并使用 `--` 分隔，支持空格、引号、Unicode、百分号和前导 `-`。没有选择、目标已从最新快照消失或选择失效时提示刷新/重新选择，不发送旧目标命令。服务器仍负责执行前的最新保护与状态检查。
 - 命令框获得焦点时，`f` / `p` / `w` / `u` / `?` / `q` 等可打印按键都是输入文字；用 Tab 将焦点移出输入框后才能使用快捷键。已有非空草稿不会被快捷键覆盖；正在执行写请求时不会预填或排队另一个操作。RAM 确认框打开期间 f/p/w 不修改下面的命令，Esc 仍取消且不发请求。
-- 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL`、`unreserve ID`、`free`、`wake MODEL`、`reserve --gpu N --size 80G --for 4h` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。
-- Pin/unpin 成功后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态。结果保留服务端 owner/actor；刷新失败会单独说明，已成功的写入不会因此重试。同一时刻只执行一个写请求（pin/unpin/free/wake/reserve/unreserve），不会把重复提交排队。
+- 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL`、`unreserve ID`、`models`、`add PATH --name X --base BASE`、`rm NAME`、`free`、`wake MODEL`、`reserve --gpu N --size 80G --for 4h` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。
+- Pin/unpin 成功后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态。结果保留服务端 owner/actor；刷新失败会单独说明，已成功的写入不会因此重试。同一时刻只执行一个写请求（pin/unpin/free/wake/reserve/unreserve/add/rm），不会把重复提交排队。
 - usage 视图提供 7 天、30 天和返回状态按钮，每 5 秒刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
 - 请求在后台线程执行，慢请求不会叠加轮询或阻塞按键。连接失败保留上一份快照，并显示错误；新快照到达后保留选中模型。
 - 实际 `free --ram` 先弹出二次确认，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。Free/wake 完成后立即刷新，部分结果与错误仍保留；后台执行期间 UI 与事件面板继续响应。
-- Reserve 的预览、只读拒绝与实际回执语义见上节；模型登记/删除尚未开放。不能用本客户端命令启用生产调度。
+- Reserve 的预览、只读拒绝与实际回执语义见上节；模型实际写入尚未开放；可使用 models/add/rm 的安全列表和预览。不能用本客户端命令启用生产调度。
 
 ### Scheduler 与数据面事件流
 
@@ -192,6 +212,7 @@ python -m pytest -q tests/test_llm_reserve.py tests/test_llm_reserve_http.py tes
 python -m pytest -q tests/test_llm_unreserve.py tests/test_tui_unreserve.py
 python -m pytest -q tests/test_llm_actions.py tests/test_tui_actions.py
 python -m pytest -q tests/test_tui_shortcuts.py
+python -m pytest -q tests/test_llm_models.py tests/test_llm_models_http.py tests/test_tui_models.py
 ```
 
 测试使用核心包的状态结构生成 JSON，并在临时 loopback HTTP 服务上验证单文件复制、无 site-packages 的 Python 启动、JSON 保真与窄屏。Python 3.10 可用时直接执行该解释器的复制测试；CI 使用 Python 3.10。客户端测试不访问生产服务或 GPU。

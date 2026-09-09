@@ -52,6 +52,11 @@ class SchedulerHandler(BaseHTTPRequestHandler):
             target = urlsplit(self.path)
             if target.path == "/v1/state":
                 self._json(200, self.server.scheduler.snapshot().to_dict())
+            elif target.path == "/v1/models":
+                if target.query:
+                    self._json(400, {"error": "invalid_request"})
+                else:
+                    self._json(200, self.server.scheduler.registry_request("GET", target.path))
             elif target.path == "/v1/usage":
                 self._usage(target.query)
             elif target.path == "/v1/events":
@@ -68,6 +73,8 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 self._events(cursor)
             else:
                 self._json(404, {"error": "not_found"})
+        except IntentWriteError as exc:
+            self._json(exc.status, {"error": exc.error, **({"message": exc.message} if hasattr(exc, "message") else {})})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             self.close_connection = True
 
@@ -128,12 +135,19 @@ class SchedulerHandler(BaseHTTPRequestHandler):
             if not dry_run and self.server.scheduler.config.read_only:
                 self._read_only()
                 return
-            operation = None
+            registry_path = None
+            if ((self.command == "POST" and target.path == "/v1/models")
+                    or (self.command == "DELETE" and target.path.startswith("/v1/models/"))):
+                if not dry_run:
+                    self._reject_write()
+                    return
+                registry_path = "/v1/models" if self.command == "POST" else "/v1/models/" + unquote(target.path[len("/v1/models/"):])
+            operation = "registry" if registry_path is not None else None
             payload = {}
             wake_model = None
             lease_id = None
             if self.command == "POST":
-                operation = {"/v1/free": "free", "/v1/pin": "pin", "/v1/reserve": "reserve", "/v1/place": "place"}.get(target.path)
+                operation = {"/v1/free": "free", "/v1/pin": "pin", "/v1/reserve": "reserve", "/v1/place": "place"}.get(target.path, operation)
                 if target.path.startswith("/v1/wake/"):
                     operation = "wake"
                     wake_model = unquote(target.path[len("/v1/wake/"):])
@@ -183,7 +197,9 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 if payload != {}:
                     raise ValueError("lease transition accepts an empty body")
                 payload = {"lease_id": lease_id}
-            if operation in ("reserve", "unreserve"):
+            if operation == "registry":
+                result = self.server.scheduler.registry_request(self.command, registry_path, payload, dry_run=True)
+            elif operation in ("reserve", "unreserve"):
                 result = self.server.scheduler.run_reserve(operation, payload, source_ip=self.client_address[0], dry_run=dry_run)
             elif dry_run:
                 result = self.server.scheduler.preview(operation, payload)
@@ -196,6 +212,8 @@ class SchedulerHandler(BaseHTTPRequestHandler):
             self._json(200, result)
         except IntentWriteError as exc:
             error = {"error": exc.error}
+            if hasattr(exc, "message"):
+                error["message"] = exc.message
             if hasattr(exc, "blockers"):
                 error["blockers"] = [asdict(blocker) for blocker in exc.blockers]
             self._json(exc.status, error)

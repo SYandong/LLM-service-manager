@@ -123,6 +123,7 @@ class Scheduler:
         self.model_actions = None
         self.placement = None
         self.reservation_actions = None
+        self.registry = None
         self.automation = None
         self._automation_thread = None
         self.faults = None
@@ -429,6 +430,49 @@ class Scheduler:
         if value <= now:
             raise ValueError("until must be in the future")
         return value
+
+    def registry_blockers(self):
+        from llmsvc.reload import reload_blockers
+        snapshot = self.snapshot()
+        marker = self.registry.queue.marker
+        reconciliation = [{"reason": "registry_reconciliation_required"}] if marker.exists() or marker.is_symlink() else []
+        return ([{"reason": "registry_writes_disabled"}] + reconciliation + self.registry.queue.quiet.blockers()
+                + reload_blockers(snapshot, self.clock(), self.config.max_snapshot_age_seconds)
+                + [asdict(blocker) for blocker in snapshot.blocked_by])
+
+    def registry_request(self, method, path, body=None, *, dry_run=False):
+        from llmsvc.registry import RegistryError
+        from llmsvc.reload import ReloadError
+        if method != "GET" and not dry_run:
+            raise IntentWriteError(405, "read_only" if self.config.read_only else "operation_not_enabled")
+        if self.registry is None:
+            raise IntentWriteError(503, "registry_not_configured")
+        try:
+            with self.action_lock:
+                if method == "GET" and path == "/v1/models":
+                    result = {"records": self.registry.records(), "writes_enabled": False,
+                              "blocked_by": self.registry_blockers()}
+                else:
+                    if not isinstance(body, dict):
+                        raise RegistryError("registry body must be an object")
+                    preview = self.registry.handle(method, path, body, dry_run=True)
+                    result = {**preview, "dry_run": True, "config_committed": False,
+                              "blocked_by": self.registry_blockers()}
+                json.dumps(result, allow_nan=False)
+                return result
+        except RegistryError as exc:
+            if method == "GET":
+                raise IntentWriteError(503, "registry_unavailable") from exc
+            error = IntentWriteError(400, "registry_invalid_request")
+            error.message = str(exc)
+            raise error from exc
+        except ReloadError as exc:
+            marker = self.registry.queue.marker
+            if method != "GET" and (marker.exists() or marker.is_symlink()):
+                raise IntentWriteError(409, "registry_reconciliation_required") from exc
+            raise IntentWriteError(503, "registry_unavailable") from exc
+        except (OSError, ValueError, TypeError, RecursionError) as exc:
+            raise IntentWriteError(503, "registry_unavailable") from exc
 
     def usage(self, *, days: int = 7, by: str = "container") -> dict:
         """Read usage outside action_lock; unknown origins remain unknown."""
