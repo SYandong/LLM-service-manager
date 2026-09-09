@@ -456,6 +456,9 @@ class Scheduler:
                 elif method == "GET" and path == "/v1/registry":
                     result = {"queue": self.registry.queue_snapshot(), "writes_enabled": False,
                               "blocked_by": self.registry_blockers()}
+                elif method == "GET" and path == "/v1/registry":
+                    result = {"queue": self.registry.queue_snapshot(), "writes_enabled": False,
+                              "blocked_by": self.registry_blockers()}
                 else:
                     if not isinstance(body, dict):
                         raise RegistryError("registry body must be an object")
