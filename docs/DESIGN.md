@@ -297,6 +297,7 @@ ID、不持久化、不追加动作事件、不启动清退传输，也不因预
 | `DELETE /v1/reserve/{id}` | 幂等移除意图 → `{id, by}`；不唤醒模型，取消未提交的清退步骤（§4.4） |
 | `POST /v1/wake/{model}` | |
 | `GET /v1/models` | 临时登记元数据与提交阻塞原因；见下方只读列表/预览约定 |
+| `GET /v1/registry` | 只读队列及持久化恢复诊断；不验证或清除恢复屏障 |
 | `POST /v1/models` `DELETE /v1/models/{name}` | 临时模型登记，走安静时刻协议（§3） |
 | `GET /v1/usage?days=7&by=container` | 按来源汇总 |
 
@@ -327,6 +328,29 @@ quiet、配置采用及旧资源结清证明。列表与预览可用不代表提
   `read_only` 或 `operation_not_enabled`；切换其他动作开关也不能启用它。
   不启动 reload worker，不借助空成功回调伪造验证、采用或资源结清。
   后续 job 查询与真实提交按对应实现另行接入，不在本约定中生成占位 job。
+
+
+### 登记队列与恢复诊断（#141）
+
+配置过登记模块后，`GET /v1/registry`（无 query/body）返回
+`200 {writes_enabled:false, blocked_by, queue}`。`queue` 直接使用
+`ModelRegistry.queue_snapshot()` 的独立快照，包含 `schema_version:1`、
+`observed_at_monotonic`、`jobs`、`pending_ids`、`fenced`、`recovery`；
+保留 owner 定义的 job ID、status/recorded_status/source、描述、计时、
+`config_committed` 与阻塞/错误字段，不另建生命周期或逐 ID 操作接口。
+顶层阻塞原因沿用列表/预览的禁写、quiet 未知、当前准入、故障与事务标记限制。
+
+内存队列不会跨重启恢复；持久化标记的投影可具有未知/null 的耗时、剩余时间
+或提交状态。缺少 job 不表示已应用；`observed_at_monotonic` 仅对当前进程
+有意义，不是 wall time、来源时间戳或可跨重启比较的持续时间。
+存在、损坏或不能验证的标记继续 fenced，并通过恢复状态呈现；候选摘要匹配
+或 generation 可见均不等于旧资源结清。诊断 HTTP 200 不是提交成功。
+
+未配置返回 `503 registry_not_configured`；无法取得或序列化诊断返回
+`503 registry_unavailable`；query/body 使用错误返回 `400 invalid_request`。
+该读取不触发 native 网络探测、worker、验证器、队列消费、文件/账本写入、
+事件或模型动作。HTTP 不接受任意路径、URL 或证明；不提供 proof 提交、
+reconcile、重试或强制清除接口。真实登记提交仍受 §3 完整协议约束。
 
 ## 6. CLI 与 TUI
 

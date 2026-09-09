@@ -727,6 +727,8 @@ def format_action_result(args, result):
 
 
 def result_exit_code(args, result):
+    if args.command == "registry":
+        return 0  # Successful inspection is not application/recovery success.
     if args.command == "models":
         return 1 if result.get("known") is False or result.get("error") else 0
     if args.command in ("add", "rm"):
@@ -762,7 +764,20 @@ def model_name(value):
 
 def validate_registry_result(args, result):
     try:
-        if args.command == "models":
+        if args.command == "registry":
+            queue = result["queue"]
+            if type(result["writes_enabled"]) is not bool or type(queue["schema_version"]) is not int or queue["schema_version"] != 1:
+                raise ValueError
+            observed = queue["observed_at_monotonic"]
+            if type(observed) not in (int, float) or not math.isfinite(observed):
+                raise ValueError
+            if not isinstance(queue["jobs"], list) or not all(isinstance(job, dict) for job in queue["jobs"]):
+                raise ValueError
+            if not isinstance(queue["pending_ids"], list) or not all(isinstance(value, str) for value in queue["pending_ids"]):
+                raise ValueError
+            if type(queue["fenced"]) is not bool or not isinstance(queue["recovery"], dict):
+                raise ValueError
+        elif args.command == "models":
             if not isinstance(result["records"], dict) or type(result["writes_enabled"]) is not bool:
                 raise ValueError
             if not all(isinstance(name, str) and isinstance(record, dict) for name, record in result["records"].items()):
@@ -788,12 +803,18 @@ def validate_registry_result(args, result):
         if not isinstance(blockers, list) or not all(isinstance(item["reason"], str) for item in blockers):
             raise ValueError
     except (KeyError, TypeError, ValueError):
-        raise ClientError("Invalid model registry response; check state/events before retrying an uncertain write") from None
+        message = ("Invalid registry read response" if args.command in ("models", "registry") else
+                   "Invalid model registry response; check state/events before retrying an uncertain write")
+        raise ClientError(message) from None
     return result
 
 
 def format_registry_result(args, result):
-    if args.command == "models":
+    if args.command == "registry":
+        label = "Registry queue/recovery inspection; no apply or recovery action"
+        label += "\nFenced: " + ("yes (retained)" if result["queue"]["fenced"] else "no")
+        label += "\nTimes are process-local monotonic; missing jobs do not prove application"
+    elif args.command == "models":
         label = "Temporary model registry (configured file, not active adoption)"
         label += "\nRegistry writes enabled: " + ("yes" if result["writes_enabled"] else "no")
     elif args.dry_run:
@@ -916,6 +937,8 @@ def build_parser(parser_class=argparse.ArgumentParser):
     reserve.add_argument("--wait", type=action_timeout, default=150, help="HTTP response wait seconds (default:150); does not change server deadline")
     models = commands.add_parser("models", help="List configured registry models through scheduler")
     models.add_argument("--json", action="store_true")
+    registry = commands.add_parser("registry", help="Inspect read-only queue/recovery status; never apply or clear a fence")
+    registry.add_argument("--json", action="store_true")
     for name in ("add", "rm"):
         model = commands.add_parser(name, help="Register full weights" if name == "add" else "Remove a temporary model")
         if name == "add":
@@ -934,6 +957,8 @@ def build_parser(parser_class=argparse.ArgumentParser):
 
 
 def execute_command(args, client, *, now=None):
+    if args.command == "registry":
+        return validate_registry_result(args, client.request("GET", "/v1/registry"))
     if args.command == "models":
         return validate_registry_result(args, client.request("GET", "/v1/models"))
     if args.command in ("add", "rm"):
@@ -1018,7 +1043,7 @@ def format_result(args, result, width=100):
         return format_action_result(args, result)
     if args.command == "reserve":
         return format_reserve_result(args, result)
-    if args.command in ("models", "add", "rm"):
+    if args.command in ("models", "registry", "add", "rm"):
         return format_registry_result(args, result)
     if args.command == "unreserve":
         if args.dry_run:
@@ -1051,7 +1076,7 @@ def main(argv=None):
             print("TUI: install with pip install 'llmsvc[tui]' and run llm in a terminal.")
         return result_exit_code(args, result)
     except ClientError as exc:
-        if args.command in ("models", "add", "rm"):
+        if args.command in ("models", "registry", "add", "rm"):
             if getattr(args, "json", False) and isinstance(exc.payload, dict):
                 print(json.dumps(exc.payload, ensure_ascii=False, indent=2, allow_nan=False))
             else:
