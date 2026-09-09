@@ -1,7 +1,8 @@
 # Internal policy exclusions
 
-`plan_free`, `plan_placement`, `plan_reserve`, `plan_memory_pressure`, `plan_idle_sleep` and
-`plan_pressure_sleep` accept the optional keyword `exclusions: Optional[Mapping[str, str]] = None`.
+`plan_free`, `plan_placement`, `plan_reserve`, `plan_memory_pressure`,
+`plan_idle_sleep`, `plan_pressure_sleep`, `plan_relocation` and
+`plan_sleeping_recovery` accept the optional keyword `exclusions: Optional[Mapping[str, str]] = None`.
 Keys are model names; values are existing nonempty operational blocker reasons.
 The pure planner copies the mapping. `None` and `{}` retain existing behavior.
 Invalid names/reasons raise `ValueError` when the exclusion input is consumed.
@@ -39,5 +40,62 @@ assigned #121 follow-up to #120.
 Duplicate controllers, alerts, shutdown cleanup, version/release and production
 activation are also outside this refactor. Runtime defaults and opt-ins do not
 change. Long-term stability/calibration remain NOT MEASURED.
+
+## Ordinary recovery and destination exclusions
+
+Recovery forwards the copied model exclusions through source selection,
+`plan_relocation` and nested `plan_placement`. An excluded source cannot stop;
+a caller's ordinary ownership claim is not a policy pin/default/fault bypass.
+The original pure relocation preflight already excludes its source locally;
+that behavior and its default results remain unchanged.
+
+`plan_placement` additionally accepts
+`gpu_exclusions: Optional[Mapping[int, str]] = None` for ordinary placement
+reentry. Keys must be nonnegative integer GPU IDs (not bool); reasons are
+nonempty strings. The mapping is copied. None/empty preserves current callers;
+absent GPU IDs have no effect. Existing default/accounting errors retain their
+precedence. Otherwise an excluded card gets `Blocker(None, reason, gpu)` and
+cannot enter direct-fit or eviction-candidate sets. All GPU/model/lease records
+still go through full accounting; filtering must not hide unknown locations or
+cross-GPU accounting conflicts. No data or budget is released by this argument.
+Ranking and protection on allowed GPUs remain unchanged, and excluding the
+default's exclusive GPU never permits it on a shared card.
+
+Core derives `{source_gpu: "relocation_source"}` from its durable ordinary
+recovery claim for reentrant placement after confirmed source exit. It is not a
+public payload or a synthetic core Reserve record. Claim/lease binding, proxy
+fences, finite shared deadlines, restart/no-replay rules and final runtime/DESIGN
+validation belong to the combined #160 feature, not these pure input additions.
+
+## Destination replacement profiles for ordinary recovery
+
+Both recovery entrypoints additionally accept
+`replacement_requests: Optional[Mapping[str, ModelState]] = None`. When supplied,
+a recent-use candidate requires its matching stopped destination request, with
+valid util/budget, known nonnegative weights, compatible default role and no
+active-unit claim. Core supplies the real configured/lease floor; policy applies
+it only to the destination request. Source protection, accounting and the trigger
+use the unchanged observed source. The hypothetical stopped source record also
+keeps its observed metadata, distinct from the replacement request.
+
+The same map supplies known `weights_gb` for every pending/stale start model.
+Their weights are charged per lease record, as in normal core placement; expired
+pending/stale entries are not ignored. Confirmed/released history is not charged.
+Before any returned source action, projected host availability after releasing
+only the source snapshot's sleeping weight must cover replacement weight, those
+pending weights and the existing host floor. Equality is admitted; shortage is
+`host_memory_floor`. Destination-victim releases are not borrowed for admission.
+Missing/invalid required source profiles return `missing_replacement_request` /
+`invalid_replacement_request`; unavailable pending weights return `unknown_memory`.
+All failures return zero source/victim actions for that candidate.
+
+Unused retirement needs no replacement profile. None preserves prior pure
+callers, including their legacy preflight behavior; it must not be used as a
+fallback for an unavailable runtime profile. The effects-enabled core recovery
+controller must supply the map and validate its floors, even when it is empty
+because required data is unavailable. Actual stop/reentry still needs fresh
+observed release/admission proof; a projected release is not a measurement.
+These inputs belong in the same #160 runtime/DESIGN feature, with no public HTTP
+field, new threshold, schema or ranking change.
 
 <!-- Generated-By: Codex / gpt-6-astra -->

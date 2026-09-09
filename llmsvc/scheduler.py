@@ -127,6 +127,7 @@ class Scheduler:
         self.automation = None
         self._automation_thread = None
         self.faults = None
+        self.sleeping_recovery = None
         self._fault_thread = None
         self._usage = usage
         self._collector_closed = False
@@ -170,6 +171,8 @@ class Scheduler:
                     from llmsvc.state import Blocker
                     pending = tuple(Blocker(claim.model, "fault_recovery_pending", claim.gpu)
                                     for claim in self.store.faults())
+                    pending += tuple(Blocker(claim.model, "sleeping_recovery_pending", claim.source_gpu)
+                                     for claim in self.store.recoveries())
                     if pending:
                         snapshot = replace(snapshot, blocked_by=tuple(dict.fromkeys(snapshot.blocked_by + pending)))
                 except Exception:
@@ -616,6 +619,10 @@ class Scheduler:
         while not self.stopping.is_set():
             try:
                 self.automation.run()
+                if self.sleeping_recovery is not None and self.sleeping_recovery.enabled():
+                    # One automation thread: memory/idle work completes first;
+                    # a recovery never overlaps another automatic cycle.
+                    self.sleeping_recovery.run_once()
             except Exception as exc:
                 LOG.warning(json.dumps({"kind": "automation_error", "error_type": type(exc).__name__}))
             # Cadence follows completion; a slow cycle never creates a backlog.
@@ -663,7 +670,10 @@ class Scheduler:
             try:
                 try:
                     if self._automation_thread is not None and self._automation_thread.is_alive():
-                        self._automation_thread.join(timeout=self.config.automation_cycle_timeout_seconds+self.config.request_timeout_seconds)
+                        budget = self.config.automation_cycle_timeout_seconds
+                        if self.sleeping_recovery is not None and self.sleeping_recovery.active:
+                            budget = max(budget, max(0, self.sleeping_recovery.deadline-self.sleeping_recovery.monotonic()))
+                        self._automation_thread.join(timeout=budget+self.config.request_timeout_seconds)
                         if self._automation_thread.is_alive():
                             raise RuntimeError("automation worker did not stop")
                 finally:

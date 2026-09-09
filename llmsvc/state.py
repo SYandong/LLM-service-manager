@@ -161,3 +161,31 @@ class FaultClaim:
     proxy_origin_hash: str = ""
     proxy_submitted: bool = False
     proxy_acknowledged: bool = False
+
+
+@dataclass(frozen=True)
+class RecoveryClaim:
+    """Internal ordinary recovery fence; never fault-cleanup authority."""
+
+    id: str
+    model: str
+    source_lease_id: str
+    unit: str
+    invocation_id: str
+    source_gpu: int
+    reason: str
+    created_at: float
+    util_floor: float
+    budget_floor_gb: float
+    profile_hash: str
+    relocate: bool
+    stage: str = "claimed"
+    stop_submitted: bool = False
+    stop_acknowledged: bool = False
+    proxy_submitted: bool = False
+    proxy_acknowledged: bool = False
+    wake_submitted: bool = False
+    wake_acknowledged: bool = False
+    destination_lease_id: Optional[str] = None
+    destination_invocation_id: str = ""
+    error: Optional[str] = None

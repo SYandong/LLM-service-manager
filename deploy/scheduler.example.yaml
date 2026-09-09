@@ -15,6 +15,13 @@ host_min_available_gb: 150
 # adapter settings before bounded observation/preview checks; unknown is not zero.
 collectors: {}
 
+# Optional ordinary sleeping recovery: disabled by default; runs sequentially
+# after the existing automation cycle. Effects also require automation_enabled,
+# model_actions_enabled and read_only: false. These comments enable nothing.
+# Recent-use relocation additionally needs placement_enabled before source stop.
+# sleeping_recovery_enabled: false
+# sleeping_recovery_timeout_seconds: 900 # Finite seconds >0 and <=900; one budget.
+
 # Optional registry mount: omitted by default. Uncomment only after configuring
 # the reviewed absolute paths. This enables temporary-model list/dry-run preview
 # only; it neither provisions files nor enables actual writes or a reload worker.
