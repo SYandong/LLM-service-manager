@@ -88,3 +88,78 @@ def test_host_capacity_guard_rejects_unknown_small_ram_and_large_weights():
     smoke.check_host_capacity(100,15*1024**3)
     for available, weights in ((float('nan'),15*1024**3),(32,15*1024**3),(1000,21*1024**3)):
         with pytest.raises(smoke.SmokeError):smoke.check_host_capacity(available,weights)
+
+
+def test_default_hooks_are_inert():
+    run = smoke.Run.__new__(smoke.Run)
+    assert smoke.Run.scope == 'cached-base collector lifecycle only'
+    assert smoke.Run.lora_measured is False
+    assert run.prepare_fixture() is None
+    assert run.extra_env() == {}
+    assert run.extra_args() == []
+
+
+def test_execute_calls_default_hooks_before_launch(monkeypatch):
+    events = []
+
+    class HookedRun(smoke.Run):
+        def __init__(self):
+            self.config = {'gpu': 0, 'vllm_binary': '/test/vllm', 'model_path': '/cached/model', 'wall_seconds': 300}
+            self.token = 'tok'
+            self.model = 'ops-life-test'
+            self.unit = 'vllm-ops-life-test.service'
+            self.deadline = 1000
+            self.work_deadline = 900
+            self.temp = '/tmp/ops-life-test'
+            self.records = []
+            self.attempted = False
+            self.temp_created = False
+            self.port = 12345
+            self.source_hash = 'source'
+            self.argv = None
+
+        def log(self, kind, **detail):
+            events.append(('log', kind, detail))
+
+        def inventory(self, *, allow_own=False):
+            events.append(('inventory', allow_own))
+
+        def prepare_fixture(self):
+            assert self.temp_created is True
+            events.append(('prepare_fixture',))
+
+        def extra_env(self):
+            events.append(('extra_env',))
+            return {'EXTRA_SMOKE_ENV': '1'}
+
+        def extra_args(self):
+            events.append(('extra_args',))
+            return ['--extra-smoke-arg']
+
+        def container(self, argv, **kwargs):
+            events.append(('container', argv))
+            if argv[:4] == ['systemctl', 'show', self.unit, '-p']:
+                return subprocess.CompletedProcess(argv, 0, 'not-found\n', '')
+            if argv and argv[0] == 'systemd-run':
+                self.argv = argv
+                raise smoke.SmokeError('stop before runtime launch')
+            return subprocess.CompletedProcess(argv, 0, '{}', '')
+
+        def python(self, code, data, **kwargs):
+            events.append(('python', data))
+            return {}
+
+        def cleanup(self):
+            events.append(('cleanup',))
+
+    monkeypatch.setattr(smoke.time, 'monotonic', lambda: 100)
+    run = HookedRun()
+    assert run.execute() == 'failed'
+    assert ('prepare_fixture',) in events
+    assert events.index(('prepare_fixture',)) < events.index(('extra_env',))
+    assert events.index(('extra_env',)) < events.index(('extra_args',))
+    assert any(item == '--setenv=EXTRA_SMOKE_ENV=1' for item in run.argv)
+    assert run.argv[-1] == '--extra-smoke-arg'
+    complete = [event for event in events if event[0] == 'log' and event[1] == 'complete'][0]
+    assert complete[2]['scope'] == smoke.Run.scope
+    assert complete[2]['lora_measured'] is False
