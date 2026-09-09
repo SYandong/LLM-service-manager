@@ -127,6 +127,7 @@ class Scheduler:
         self.automation = None
         self._automation_thread = None
         self.faults = None
+        self.sleeping_recovery = None
         self._fault_thread = None
         self._usage = usage
         self._collector_closed = False
@@ -170,6 +171,8 @@ class Scheduler:
                     from llmsvc.state import Blocker
                     pending = tuple(Blocker(claim.model, "fault_recovery_pending", claim.gpu)
                                     for claim in self.store.faults())
+                    pending += tuple(Blocker(claim.model, "sleeping_recovery_pending", claim.source_gpu)
+                                     for claim in self.store.recoveries())
                     if pending:
                         snapshot = replace(snapshot, blocked_by=tuple(dict.fromkeys(snapshot.blocked_by + pending)))
                 except Exception:
@@ -450,7 +453,10 @@ class Scheduler:
         try:
             with self.action_lock:
                 if method == "GET" and path == "/v1/models":
-                    result = {"records": self.registry.records(), "writes_enabled": False,
+                    inventory = self.registry.inventory(include_records=True)
+                    records = inventory.pop("records")
+                    result = {"records": records, "writes_enabled": False,
+                              "inventory": inventory,
                               "blocked_by": self.registry_blockers()}
                 elif method == "GET" and path == "/v1/registry":
                     result = {"queue": self.registry.queue_snapshot(), "writes_enabled": False,
@@ -458,8 +464,21 @@ class Scheduler:
                 else:
                     if not isinstance(body, dict):
                         raise RegistryError("registry body must be an object")
-                    preview = self.registry.handle(method, path, body, dry_run=True)
-                    result = {**preview, "dry_run": True, "config_committed": False,
+                    if method == "POST" and path == "/v1/models":
+                        preview = self.registry.preview_add(body)
+                    elif method == "DELETE" and path.startswith("/v1/models/"):
+                        if body:
+                            raise RegistryError("remove does not accept a request body")
+                        preview = self.registry.preview_remove(path[len("/v1/models/"):])
+                        if preview["blocked_by"]:
+                            raise RegistryError("model cannot be removed: " + ", ".join(
+                                item["reason"] for item in preview["blocked_by"]))
+                    else:
+                        raise RegistryError("unsupported registry endpoint")
+                    plan = {key: preview[key] for key in ("model", "projected_base_sha256",
+                            "candidate_sha256", "port_reserved", "config_written") if key in preview}
+                    result = {"would": preview["would"], "plan": plan,
+                              "dry_run": True, "config_committed": False,
                               "blocked_by": self.registry_blockers()}
                 json.dumps(result, allow_nan=False)
                 return result
@@ -474,7 +493,7 @@ class Scheduler:
             if method != "GET" and (marker.exists() or marker.is_symlink()):
                 raise IntentWriteError(409, "registry_reconciliation_required") from exc
             raise IntentWriteError(503, "registry_unavailable") from exc
-        except (OSError, ValueError, TypeError, RecursionError) as exc:
+        except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
             raise IntentWriteError(503, "registry_unavailable") from exc
 
     def usage(self, *, days: int = 7, by: str = "container") -> dict:
@@ -600,6 +619,10 @@ class Scheduler:
         while not self.stopping.is_set():
             try:
                 self.automation.run()
+                if self.sleeping_recovery is not None and self.sleeping_recovery.enabled():
+                    # One automation thread: memory/idle work completes first;
+                    # a recovery never overlaps another automatic cycle.
+                    self.sleeping_recovery.run_once()
             except Exception as exc:
                 LOG.warning(json.dumps({"kind": "automation_error", "error_type": type(exc).__name__}))
             # Cadence follows completion; a slow cycle never creates a backlog.
@@ -647,7 +670,10 @@ class Scheduler:
             try:
                 try:
                     if self._automation_thread is not None and self._automation_thread.is_alive():
-                        self._automation_thread.join(timeout=self.config.automation_cycle_timeout_seconds+self.config.request_timeout_seconds)
+                        budget = self.config.automation_cycle_timeout_seconds
+                        if self.sleeping_recovery is not None and self.sleeping_recovery.active:
+                            budget = max(budget, max(0, self.sleeping_recovery.deadline-self.sleeping_recovery.monotonic()))
+                        self._automation_thread.join(timeout=budget+self.config.request_timeout_seconds)
                         if self._automation_thread.is_alive():
                             raise RuntimeError("automation worker did not stop")
                 finally:

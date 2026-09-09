@@ -139,6 +139,15 @@ class PlacementController:
             return None, (Blocker(request.name, "fault_recovery_pending"),)
         if not self._fresh(snapshot):
             return None, (Blocker(request.name, "unknown_or_stale_snapshot"),)
+        try:
+            recovery_claim = self._recovery_context(request.name)
+        except LeaseError as exc:
+            return None, (Blocker(request.name, exc.error),)
+        gpu_exclusions = None
+        if recovery_claim is not None:
+            request = replace(request, util=max(request.util or 0, recovery_claim.util_floor),
+                              budget_gb=max(request.budget_gb or 0, recovery_claim.budget_floor_gb))
+            gpu_exclusions = {recovery_claim.source_gpu: "relocation_source"}
         # Cold admission needs trusted host headroom even when no eviction is needed.
         available = snapshot.memory.host_available_gb
         weight = request.weights_gb
@@ -174,16 +183,34 @@ class PlacementController:
                     guarded[model.name] = "action_unit_mismatch"
                 elif enabled and controller._fault_pending(model.name):
                     guarded[model.name] = "fault_recovery_pending"
+                elif self.scheduler.store is not None and self.scheduler.store.recovery(model.name) is not None:
+                    guarded[model.name] = "sleeping_recovery_pending"
                 elif enabled and (model.name in controller.pending or controller.free_active):
                     guarded[model.name] = "operation_in_progress"
             models.append(replace(model, is_default=True)
                           if self.transport.models.get(model.name, {}).get("is_default") is True else model)
         protected = replace(snapshot, models=tuple(models))
-        decision = plan_placement(protected, request, waiting=waiting, exclusions=guarded)
+        recovery_options = ({"gpu_exclusions": gpu_exclusions,
+                             "settings": self.scheduler.sleeping_recovery.controller.settings}
+                            if recovery_claim is not None else {})
+        decision = plan_placement(protected, request, waiting=waiting, exclusions=guarded, **recovery_options)
         blockers = decision.blocked_by
         if any(action.kind != "place" for action in decision.actions) and not enabled:
             return None, blockers + (Blocker(request.name, "eviction_required", decision.gpu),)
         return decision, blockers
+
+    def _recovery_context(self, model):
+        claim = self.scheduler.store.recovery(model) if self.scheduler.store is not None else None
+        if claim is None:
+            return None
+        recovery = getattr(self.scheduler, "sleeping_recovery", None)
+        if recovery is None:
+            raise LeaseError(503, "sleeping_recovery_pending")
+        from llmsvc.actions import ActionDispatchError
+        try:
+            return recovery.placement_claim(model)
+        except ActionDispatchError as exc:
+            raise LeaseError(503, exc.reason) from exc
 
     def preview(self, operation, payload):
         # Deliberately no collector, process probe, ID allocation, event or writer.
@@ -207,6 +234,9 @@ class PlacementController:
         self._enabled()
         request = self._request(payload)
         deadline = self.monotonic() + self.scheduler.config.placement_wait_seconds
+        with self._locked(deadline):
+            if self._recovery_context(request.name) is not None:
+                deadline = min(deadline, self.scheduler.sleeping_recovery.deadline)
         waiting = False
         blockers = ()
         try:
@@ -223,11 +253,28 @@ class PlacementController:
                     action = decision.actions[0] if decision and decision.actions else None
                     if action is not None and action.kind == "place":
                         observation = self._inspect(request.name, deadline)
+                        self._enabled()
+                        latest, latest_blockers = self._decision(self.scheduler.snapshot(), request, waiting=waiting)
+                        if latest is None or not latest.actions or latest.actions[0] != action:
+                            blockers = latest_blockers or (Blocker(request.name, "placement_changed"),)
+                            self.scheduler.changed.wait(timeout=min(self.scheduler.config.action_poll_seconds,
+                                                                   max(0, deadline-self.monotonic())))
+                            waiting = True
+                            continue
+                        decision = latest
                         if observation.exists is False and self.monotonic() < deadline:
                             lease = Lease(uuid.uuid4().hex, request.name, decision.gpu, payload["util"],
                                           self.scheduler.clock() + self.scheduler.config.lease_timeout_seconds,
                                           decision.budget_gb)
-                            self.scheduler.store.create_lease(lease, self.transport.unit_for_model(request.name))
+                            recovery_claim = self._recovery_context(request.name)
+                            if recovery_claim is None:
+                                self.scheduler.store.create_lease(lease, self.transport.unit_for_model(request.name))
+                            else:
+                                try:
+                                    self.scheduler.store.create_lease(lease, self.transport.unit_for_model(request.name),
+                                                                     recovery_claim=recovery_claim)
+                                except ValueError as exc:
+                                    raise LeaseError(503, "sleeping_recovery_changed") from exc
                             self.scheduler.emit("place", model=request.name, detail={**asdict(lease), "dry_run": False})
                             return {"gpu": lease.gpu, "lease_id": lease.lease_id}
                         blockers = (Blocker(request.name, "unit_exists" if observation.exists else "unit_state_unknown"),)
@@ -242,7 +289,15 @@ class PlacementController:
                         identity = self._inspect(action.model, deadline)
                         if account is None or not identity.active or identity.lease_id != account.lease_id:
                             raise LeaseError(503, "placement_action_blocked",
-                                             (Blocker(action.model, "unit_identity_unconfirmed", action.gpu),))
+                                                (Blocker(action.model, "unit_identity_unconfirmed", action.gpu),))
+                        self._enabled()
+                        latest, latest_blockers = self._decision(self.scheduler.snapshot(), request, waiting=waiting)
+                        if latest is None or not latest.actions or latest.actions[0] != action:
+                            blockers = latest_blockers or (Blocker(request.name, "placement_changed"),)
+                            self.scheduler.changed.wait(timeout=min(self.scheduler.config.action_poll_seconds,
+                                                                   max(0, deadline-self.monotonic())))
+                            waiting = True
+                            continue
                         controller.pending.add(action.model)
                         failure = None
                         from llmsvc.actions import ActionDispatchError
@@ -326,6 +381,8 @@ class PlacementController:
             return
         if self.scheduler.store.fault(action.model) is not None:
             return
+        if self.scheduler.store.recovery(action.model) is not None:
+            return
         rows = [(lease, unit) for lease, unit in self.scheduler.store.leases()
                 if lease.model == action.model and lease.status == "confirmed"]
         if len(rows) != 1:
@@ -373,6 +430,9 @@ class PlacementController:
                 if operation == "confirm":
                     raise LeaseError(409, "lease_revoked")
                 return {"lease_id": lease_id, "status": "released"}
+            recovery = self.scheduler.store.recovery(lease.model)
+            if recovery is not None and lease.lease_id != recovery.destination_lease_id:
+                raise LeaseError(503, "sleeping_recovery_pending")
             if operation == "confirm" and lease.status == "confirmed":
                 return {"lease_id": lease_id, "status": "confirmed"}
             if unit != self.transport.units.get(lease.model):
@@ -413,6 +473,9 @@ class PlacementController:
             with self._locked(deadline):
                 faults = getattr(self.scheduler, "faults", None)
                 if self.scheduler.store.fault(lease.model) is not None or (faults is not None and faults.hold_account(lease)):
+                    continue
+                recovery = self.scheduler.store.recovery(lease.model)
+                if recovery is not None and lease.lease_id != recovery.destination_lease_id:
                     continue
             with self._locked(deadline):
                 self._reconcile_cursor += 1

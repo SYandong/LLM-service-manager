@@ -212,6 +212,73 @@ pinned 或有在途请求 → 不可睡、不可驱逐
 
 **sleep 前的内存准入**（§4.1 的每一次 sleep 都先过这一关）：sleep 会把权重搬进 pinned 内存，所以执行前检查 `宿主可用内存 − 该模型权重 ≥ 下限` 且 `sleeping 总量 + 该模型权重 ≤ 预算`。不满足时先按 keep_value 从低到高 stop 已经睡着的、不受保护的模型腾出内存；仍不满足则：普通模型直接 stop 而不是 sleep（下次请求走冷启动）；**默认模型或 pin 住的模型保持 awake 并回报阻塞**（保护规则）。这样硬停永远发生在内存被占用**之前**，不会先 OOM 再补救，也不会为了腾内存违反保护规则。
 
+
+### 受保护的 sleeping 恢复执行（#160）
+
+现有 `plan_sleeping_recovery/plan_relocation` 的执行接入是普通策略恢复，
+不是故障清理权限。使用独立、默认关闭的恢复开关；自动副作用还要求
+`automation_enabled`、`model_actions_enabled` 与非只读模式。已知近一小时
+零使用走退役，近期使用才走迁移；近期迁移须在源 stop 前确认放置链已接入且
+有可行目标。无可行计划时源和目标都零动作，未知活动不补成零。
+迁移预检保留原始源观测用于触发、保护和记账；目标请求单独使用 core 校验的
+配置/租约预算下限与权重，按目标 GPU 容量计算真实需求，不能提高源 util
+来伪造 wake 压力。近期迁移在假设源退出的独立投影中，还须按既有冷启动
+规则扣除目标权重和 pending/stale starts 的已知权重后满足宿主可用内存下限。
+显式提供的替换 profile 缺失或无效时零动作；未知待启动权重不补零。
+该投影不是已释放资源证明，真实执行仍须先观察源退出。已知零使用的退役
+不要求目标 profile；旧纯策略调用未提供新参数时保持兼容，实际恢复执行器
+必须提供真实约束，不能以旧默认预检替代真实重入准入。
+
+
+源与目标候选都沿用 pin/default/inflight、未知状态、配置/profile、已确认
+lease/unit incarnation、活跃 reserve 和 fault fence 等保护。持久化、按
+model 唯一的普通恢复 claim 必须先于源 stop，绑定源 lease/unit 身份、源 GPU、
+可信预算/profile 下限、proxy origin/config 身份与阶段；它独立于 fault claim，
+不豁免任何普通保护。停用或重启不能令未结清 claim 消失或释放未证实的预算。
+
+执行顺序为：保护重验及 claim → stop 源 → 正面退出观测与源记账对账 →
+旧 proxy 清理 → 现有 cold-wake → 重入既有 place/confirm → readiness 确认。
+必要目标驱逐仍由现有放置策略逐步重验，不用第二套分配器或估算资源已释放。
+源预算在正面退出证明前完整保留；每个副作用与记账提交前重验当前保护、
+reserve、claim 和资源身份，已完成部分与未确认效果分别报告。
+
+普通 `POST /v1/place` 的载荷/回执不增加恢复 token 或用户可选绕过参数。
+内部只在 live claim 的允许阶段接纳该 model 的重入，将候选限制在源 GPU
+之外，并保持 claim 已验证的预算/profile 下限。目的 lease 的创建与 claim
+绑定在同一原子事务中完成，只有一份当前 model 记账；不得预建一个会让正常
+launcher 重入得到 outstanding_lease 的孤立 lease。并发重入、迟到 confirm、
+身份/profile 改变和资源不足均保留既有安全语义，不以再次 wake 重试解决。
+
+policy 的模型 `exclusions` 贯穿恢复与嵌套放置，保留真实 pin 元数据及重叠
+原因；重入放置的 `gpu_exclusions` 仅排除直放/驱逐目标候选。所有 GPU、model
+和 lease 仍参与完整记账，core 不删除源 GPU 数据或伪造用户 pin/reserve；
+其余候选的排序/阈值/预算不变。恢复自身的资格也必须明确校验，不能把自己的
+claim 当作无条件通行证，亦不能把它当作永远阻止合法重入的普通冲突。
+
+此自动恢复路径只支持 literal-IP 的 HTTP(S) origin；hostname、无效端口等
+不支持的配置在任何源动作前拒绝。请求使用预先验证且不可变的 origin/path，
+不走 DNS、环境 proxy 或 redirect；现有手动 free/wake 的 transport 兼容性
+不受此专用路径限制影响。unload/cold-wake 的 socket watchdog 使用同一个
+绝对剩余期限，不能靠持续滴流 headers/body 延长操作或把迟到响应当作成功。
+就绪观测复用现有 sampler，不同步调用可能无界等待的 collector；任意回调、
+OS/存储等待仍不能被神奇抢占，不能把此 I/O 防护宣称为所有步骤的硬实时保证。
+
+proxy unload 提交前持久化 submitted 阶段；只接受期限内、身份/配置/开关
+仍一致的确认，并经后续新鲜 stopped/退出证明才允许 cold replacement。
+crash、未知或迟到提交不重发，也不凭时间或另一实例的成功清 fence。cold-wake
+提交同样须有持久化阶段；完成需要按既有 wake 契约认可的及时结果、绑定的
+目的 lease 已确认及当前 readiness，不能仅凭一次 HTTP 状态或旁路请求已就绪。
+全部 place/HTTP/观测等待共享有限剩余期限，放置部分仍最多 120 秒；等待释放
+全局锁，不在重入/唤醒时重置预算。重启不重放旧 stop/unload/wake；源或目的
+身份、未确认请求、仍占资源的 stale unit 保留 claim/记账并明确处于 partial/
+恢复阻塞状态。没有公开强制撤销/清除入口。
+
+若新增账本格式，首次真实 claim 时原子惰性迁移，完整保留 pin、accounts、
+fault claim；旧读取器必须拒绝未知屏障格式。dry-run/read-only/default-off
+不创建 claim/ID、迁移账本或触发 transport。具体阶段、结果/日志与重启/回滚
+兼容性随同一代码 PR 记录和测试；本路径不改 registry 配置，不以 #157 目录
+更新或 #53 quiet 来源为人为前置依赖，也不授权生产 TTL/reaper 替换。
+
 ### 4.4 用户意图
 
 | 命令 | 语义 | 到期 |
@@ -351,6 +418,30 @@ quiet、配置采用及旧资源结清证明。列表与预览可用不代表提
 该读取不触发 native 网络探测、worker、验证器、队列消费、文件/账本写入、
 事件或模型动作。HTTP 不接受任意路径、URL 或证明；不提供 proof 提交、
 reconcile、重试或强制清除接口。真实登记提交仍受 §3 完整协议约束。
+
+### 登记列表与预览详情（#152）
+
+后续详情接入复用现有 registry 方法，在原有响应中增加以下字段；它不改变
+列表/预览的只读边界，也不要求修改已就绪的前置功能提交。
+
+- `GET /v1/models` 保留 `records/writes_enabled/blocked_by`，增加
+  `inventory`，直接采用 `ModelRegistry.inventory()` 的独立快照。
+  `records` 仍仅列临时记录；`inventory.models` 可列常驻配置名，并明确
+  `source:config` 与 `temporary`。配置存在不代表已采用，过期或缺少运行态
+  观测保持 unknown；idle 到期时间不承诺已执行注销。
+- add/rm 预览保留 `would/dry_run/config_committed/blocked_by`，增加 `plan`，
+  从 `preview_add/preview_remove` 返回的元数据选取 `model`（add）、
+  `projected_base_sha256`、`candidate_sha256`、`port_reserved:false`
+  （适用时）及 `config_written:false`；不返回候选全文或命令配置。
+  `util_macro` 是配置值，不是实测内存；计划端口不预留，摘要不证明采用，
+  未来提交须基于当时来源重新计算。
+- model 的 `removable` 与局部阻塞不替代全局 `blocked_by`。禁写、quiet
+  未知、内存/保护、故障与恢复标记限制继续显示。内部 protected remove
+  的空动作/阻塞结果在 HTTP 层保持原有 `400` 拒绝语义；marker 预览 `409`、
+  来源不可用 `503`、请求无效 `400`、真实写入 `405` 均不改变。
+- 详情读取/预览不生成 job、不变更队列、意图或记账，不做 native 探测、
+  worker、验证器、文件提交或模型动作。兼容原基本字段，详情中的未知值
+  不补零；§3 的真实提交证明仍是独立要求。
 
 ## 6. CLI 与 TUI
 

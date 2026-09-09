@@ -1166,9 +1166,11 @@ class ModelRegistry:
                 self._removals[name] = result["id"]
             return result
 
-    def inventory(self) -> dict:
+    def inventory(self, *, include_records: bool = False) -> dict:
         """Detached configuration inventory, not a data-plane registration ACK.
 
+        include_records returns temporary records from the same captured bytes
+        as the configured rows and config_sha256, for the core list response.
         Runtime state is separately observed; unknown/stale probes remain unknown.
         `removable` means model-level eligibility, not reload admission. No command
         strings, model-file reads, queue advancement or native probes are included.
@@ -1201,9 +1203,12 @@ class ModelRegistry:
                              "removable": plan.allowed,
                              "blocked_by": [asdict(item) for item in plan.blockers]})
             queue = self.queue.queue_snapshot()
-            return {"models": rows, "config_sha256": hashlib.sha256(data).hexdigest(),
-                    "pending_changes": [job for job in queue["jobs"] if job["pending"]],
-                    "fenced": queue["fenced"], "recovery": queue["recovery"]}
+            result = {"models": rows, "config_sha256": hashlib.sha256(data).hexdigest(),
+                      "pending_changes": [job for job in queue["jobs"] if job["pending"]],
+                      "fenced": queue["fenced"], "recovery": queue["recovery"]}
+            if include_records:
+                result["records"] = records
+            return result
 
     def expire(self, *, dry_run: bool = False) -> list[dict]:
         with self.queue.action_lock:
