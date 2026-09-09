@@ -138,6 +138,9 @@ def check_host_capacity(available_gb, weight_bytes):
 
 
 class Run:
+    scope = 'cached-base collector lifecycle only'
+    lora_measured = False
+
     def __init__(self, config):
         self.config = config
         self.token, self.model, self.unit = identity()
@@ -150,6 +153,15 @@ class Run:
         self.port = None
         self.source = sources(Path(config['source']))
         self.source_hash = hashlib.sha256(json.dumps(self.source, sort_keys=True).encode()).hexdigest()
+
+    def prepare_fixture(self):
+        return None
+
+    def extra_env(self):
+        return {}
+
+    def extra_args(self):
+        return []
 
     def log(self, kind, **detail):
         record = {'at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'kind': kind, **detail}
@@ -231,6 +243,17 @@ with urllib.request.urlopen(req,timeout=x['timeout']) as r: print(json.dumps({'s
         if row['state'] != expected:
             raise SmokeError('actual collector lifecycle mismatch: ' + row['state'])
 
+    def exercise(self):
+        self.collect('awake')
+        self.check_endpoint()
+        answer = self.http('/v1/chat/completions', {'model': self.model, 'messages': [{'role': 'user', 'content': 'Reply with OK.'}], 'max_tokens': 8, 'temperature': 0}, limit=10)
+        self.log('base_inference', status=answer['status'], response=answer['body'])
+        self.inventory(allow_own=True); self.check_endpoint()
+        self.http('/sleep?level=1&mode=wait', {}, limit=15)
+        self.collect('sleeping'); self.inventory(allow_own=True)
+        self.check_endpoint(); self.http('/wake_up', {}, limit=15)
+        self.collect('awake')
+
     def cleanup(self):
         if self.attempted and self.verify_owner(cleanup=True):
             self.container(['systemctl', 'stop', self.unit], limit=25, cleanup=True)
@@ -252,13 +275,14 @@ shutil.rmtree(p);print('{}')
     def execute(self):
         result = 'failed'
         try:
-            self.log('scope', scope='cached-base lifecycle only', lora_measured=False, source_hash=self.source_hash, flashinfer_sampler=self.config.get('flashinfer_sampler', False))
+            self.log('scope', scope=self.scope, lora_measured=False, source_hash=self.source_hash, flashinfer_sampler=self.config.get('flashinfer_sampler', False))
             self.inventory()
             absent = self.container(['systemctl', 'show', self.unit, '-p', 'LoadState', '--value'])
             if absent.stdout.strip() != 'not-found':
                 raise SmokeError('generated unit name already exists')
             self.python("from pathlib import Path;import json,sys;x=json.load(sys.stdin);p=Path(x['path']);p.mkdir(mode=0o700);(p/'owner').write_text(x['token']);print('{}')", {'path': self.temp, 'token': self.token})
             self.temp_created = True
+            self.prepare_fixture()
             self.inventory()  # Fresh immediately before startup.
             env = {'CUDA_VISIBLE_DEVICES': str(self.config['gpu']), 'LLMSVC_OPS_RUN_ID': self.token,
                    'VLLM_SERVER_DEV_MODE': '1', 'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1',
@@ -267,6 +291,7 @@ shutil.rmtree(p);print('{}')
                    'HF_HOME': self.temp + '/hf', 'VLLM_CACHE_ROOT': self.temp + '/vllm-cache',
                    'TRITON_CACHE_DIR': self.temp + '/triton', 'TORCHINDUCTOR_CACHE_DIR': self.temp + '/inductor',
                    'CUDA_CACHE_PATH': self.temp + '/cuda', 'XDG_CACHE_HOME': self.temp + '/xdg'}
+            env.update(self.extra_env())
             argv = ['systemd-run', '--unit=' + self.unit, '--collect', '--property=Restart=no',
                     '--property=RuntimeMaxSec=' + str(max(1, int(self.work_deadline-time.monotonic()))),
                     '--property=TimeoutStopSec=20']
@@ -275,6 +300,7 @@ shutil.rmtree(p);print('{}')
                      '--host', '127.0.0.1', '--port', str(self.port), '--served-model-name', self.model,
                      '--gpu-memory-utilization', str(self.config.get('util', .2)), '--dtype', 'bfloat16',
                      '--max-model-len', '512', '--max-num-seqs', '1', '--enforce-eager', '--enable-sleep-mode']
+            argv += self.extra_args()
             self.attempted = True
             began = time.monotonic()
             self.container(argv, limit=8)
@@ -292,15 +318,7 @@ shutil.rmtree(p);print('{}')
             else:
                 raise SmokeError('bounded startup deadline reached')
             self.log('ready', cold_start_seconds=time.monotonic()-began)
-            self.collect('awake')
-            self.check_endpoint()
-            answer = self.http('/v1/chat/completions', {'model': self.model, 'messages': [{'role': 'user', 'content': 'Reply with OK.'}], 'max_tokens': 8, 'temperature': 0}, limit=10)
-            self.log('base_inference', status=answer['status'], response=answer['body'])
-            self.inventory(allow_own=True); self.check_endpoint()
-            self.http('/sleep?level=1&mode=wait', {}, limit=15)
-            self.collect('sleeping'); self.inventory(allow_own=True)
-            self.check_endpoint(); self.http('/wake_up', {}, limit=15)
-            self.collect('awake')
+            self.exercise()
             result = 'passed'
         except Exception as exc:
             self.log('failure', error=type(exc).__name__ + ': ' + str(exc))
@@ -321,7 +339,7 @@ shutil.rmtree(p);print('{}')
                 self.log('post_test', gpus=gpu, processes=processes, production_quiet=quiet(final))
             except Exception as exc:
                 result = 'failed'; self.log('cleanup_failure', error=str(exc))
-        self.log('complete', result=result, scope='cached-base collector lifecycle only', lora_measured=False)
+        self.log('complete', result=result, scope=self.scope, lora_measured=result == 'passed' and self.lora_measured)
         return result
 
 
