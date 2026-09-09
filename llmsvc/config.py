@@ -31,6 +31,7 @@ class SchedulerConfig:
     host_min_available_gb: float = 150.0
     read_only: bool = True
     collectors: dict[str, Any] = field(default_factory=dict)
+    registry: dict[str, Any] = field(default_factory=dict)
     state_db_path: str = ""
     data_plane_events_enabled: bool = False
     data_plane_event_capacity: int = 256
@@ -126,6 +127,25 @@ class SchedulerConfig:
             raise ValueError("writable pin intent mode requires state_db_path")
         if not isinstance(self.collectors, dict):
             raise ValueError("collectors must be a mapping")
+        if not isinstance(self.registry, dict):
+            raise ValueError("registry must be a mapping")
+        if self.registry:
+            required = {"config_path", "shared_roots", "daemon_port_range"}
+            if not required <= set(self.registry) or set(self.registry)-required-{"reserved_ports"}:
+                raise ValueError("registry requires config_path/shared_roots/daemon_port_range and optional reserved_ports")
+            path = self.registry["config_path"]
+            roots = self.registry["shared_roots"]
+            if not isinstance(path, str) or not Path(path).is_absolute():
+                raise ValueError("registry.config_path must be an absolute path")
+            if (not isinstance(roots, list) or not roots or any(not isinstance(root, str) or not Path(root).is_absolute() for root in roots)):
+                raise ValueError("registry.shared_roots must be nonempty absolute paths")
+            ports = self.registry["daemon_port_range"]
+            reserved = self.registry.get("reserved_ports", [])
+            if (not isinstance(ports, list) or len(ports) != 2
+                    or any(type(port) is not int or not 1 <= port <= 65535 for port in ports) or ports[0] > ports[1]):
+                raise ValueError("registry.daemon_port_range must be [first,last] within 1..65535")
+            if not isinstance(reserved, list) or any(type(port) is not int or not 1 <= port <= 65535 for port in reserved):
+                raise ValueError("registry.reserved_ports must contain valid integer ports")
         owners = self.collectors.get("ip_containers", {})
         if not isinstance(owners, dict):
             raise ValueError("collectors.ip_containers must be a mapping")
