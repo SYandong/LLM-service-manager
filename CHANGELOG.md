@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.1.0-alpha.7 — 2026-09-09
+
+Incremental preview; Python distribution `0.1.0a7`.
+Includes #148, #146, #150, #142 and #151 since the immutable alpha.6 tag.
+
+### Added and corrected
+
+- Configured temporary-model listing and add/rm previews now connect the actual
+  registry to scheduler HTTP and the standalone CLI/TUI (#142). Lists return
+  temporary metadata; previews retain global disabled-write, unknown-quiet,
+  admission and fault blockers. Unconfigured registry reports 503, unsafe sources
+  503, invalid requests 400 and pending-marker previews 409. Actual registration
+  writes remain 405 in every mode; no reload worker or placeholder success is
+  activated. The default example leaves registry configuration commented out.
+- Registry source reads have finite allocation caps, regular-file/no-follow
+  descriptor checks and identity revalidation (#142). Default YAML/model-config
+  caps are 1 MiB and the weight-index cap is 8 MiB; each configured limit must be
+  an integer from 1 byte through 16 MiB. Canonical configured paths are required;
+  confined model-cache links retain their documented resolution behavior. These
+  are allocation/special-file guards, not a wall-clock bound on stalled storage.
+- Source IP parsing shares the core canonicalization contract (#148): IPv6 and
+  IPv4-mapped addresses map consistently; malformed or absent origins remain
+  unknown while valid request/token totals survive. Conflicting equivalent owner
+  mappings are rejected. Historical origins are never reconstructed.
+- Python registry inventory/projected-preview methods report configuration and
+  observed state separately (#146). Planned ports/digests are not reservations
+  or adoption proofs; the richer HTTP/UI detail envelope remains future work.
+- Pure generation-candidate planning preserves unrelated YAML bytes and binds
+  the planned candidate digest to supplied identity data (#151). Caller-supplied
+  nonce/identity is not proof of historical uniqueness or current process identity.
+  No file, queue, network, validator or notifier effect occurs.
+- Shared lease tests give positive grants functional headroom and explicitly
+  retain short negative deadlines (#150). Deterministic pre-decision delay proves
+  the fixture failure boundary; production timeouts/protection/accounting are
+  unchanged and the historical host delay is not claimed as measured.
+
+### Compatibility and limits
+
+No new dependency or database migration. Existing opt-ins, lazy fault schema-v3
+and unknown-unload fences remain. The temporary registry list is not the
+OpenAI data-plane model list or proof a configuration was adopted. Add/rm
+previews do not create jobs, stage files, emit scheduler events or perform model
+actions. The closed stacked #147 status feature and #152 detail expansion are
+not included in this release; there is no HTTP proof/reconcile/force-clear path.
+
+The source-reader fix supports source-bearing data, but installing it cannot
+supply origins absent from the deployed v252 producer. Candidate producer tests
+and any future source/service/store transition remain separate from publication.
+Reliable quiet, native adoption and independent old-resource settlement still
+require their actual evidence. No production source upgrade, routing, TTL/reaper,
+host bind, observer, model action or legacy retirement is performed here.
+Unmeasured live behavior and long-term stability/calibration remain explicitly
+**NOT MEASURED**; no day/week calendar wait is a development gate.
+
 ## 0.1.0-alpha.6 — 2026-09-09
 
 Incremental preview; Python distribution `0.1.0a6`.
