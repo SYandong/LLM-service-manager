@@ -158,6 +158,20 @@ LLM_URL=http://scheduler:8011 python3 llm rm ft --dry-run --json
 
 TUI 输入框使用相同的 `models`、`add`、`rm` 命令。列表结果不会替换运行时模型快照；迟到列表不会覆盖之后的写请求或退出界面。预览/操作回复后照常刷新 state，保留结构化阻塞与提交状态。列表、预览以及 CPU 夹具都不提供可靠 quiet、采用/收尾或生产授权，完整 #19/#20 验收仍继续。
 
+### 只读队列与恢复状态
+
+```sh
+LLM_URL=http://scheduler:8011 python3 llm registry --json
+```
+
+`registry` 从已配置 scheduler 的单个 `GET /v1/registry` 读取队列/恢复聚合，也可在 TUI 命令框使用。读取成功返回 0，只表示取得快照，不表示 job 应用、恢复完成或允许写入。未配置/不可用返回结构化 503 和非零退出码；没有 proof、reconcile、retry 或 clear 参数/请求。
+
+完整保留 owner 的 status、recorded_status、source、pending、config_committed、blocked_by、error 和 recovery。内存 job 的 blocked/timed_out 是当前只读投影，recorded_status 可仍为 queued，读取不会消费任务。observed_at_monotonic 和 elapsed 是进程内单调时间，不转成墙钟，不与上一次进程比较。
+
+重启后来源为 recovery_marker 的 job 可带 null elapsed/remaining/config_committed；缺失的内存 job 不意味着 applied。损坏或无法确认的 marker 仍显示 fenced/reconciliation_required；候选文件摘要匹配或 generation 可见也不证明 settlement。客户端显示并保留 fence，不会尝试清除或调用 native probe。默认 writes_enabled=false 与未知 quiet 阻塞保持可见。
+
+实际 HTTP/队列/临时 marker 的 CPU 测试覆盖超时投影、重启 null、损坏 marker、复制 CLI 与窄终端，使用写/探针/worker 陷阱证明读取无副作用；不代表生产恢复或长期稳定性测量。
+
 ## 可选 TUI
 
 包含 TUI 的发布包使用 `pip install 'llmsvc[tui]'` 安装。也可将仓库中的实际 `tui/` 目录复制到独立 `llm` 脚本旁，再安装 `textual>=0.70`。仅复制 `llm` 仍可使用全部 CLI 命令。
@@ -175,7 +189,7 @@ LLM_URL=http://scheduler:8011 python cli/llm
 - `f` 聚焦命令框并预填 `free`，可补充 `--gpu` / `--need` / `--ram`；`p` 预填所选模型的 pin 命令，把光标放在空的 `--for` 参数处；`w` 预填所选模型的 wake 命令。**三者都不发请求，编辑/核对后按 Enter 才提交。** Pin 必须手动填入正时长（例如 `1h`），快捷键不提供默认或永久 pin；空时长/零时长沿用共享解析器报错。
 - p/w 固定预填时的模型名，不因后续光标移动而改成另一模型；名称按 shell 引号规则保留并使用 `--` 分隔，支持空格、引号、Unicode、百分号和前导 `-`。没有选择、目标已从最新快照消失或选择失效时提示刷新/重新选择，不发送旧目标命令。服务器仍负责执行前的最新保护与状态检查。
 - 命令框获得焦点时，`f` / `p` / `w` / `u` / `?` / `q` 等可打印按键都是输入文字；用 Tab 将焦点移出输入框后才能使用快捷键。已有非空草稿不会被快捷键覆盖；正在执行写请求时不会预填或排队另一个操作。RAM 确认框打开期间 f/p/w 不修改下面的命令，Esc 仍取消且不发请求。
-- 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL`、`unreserve ID`、`models`、`add PATH --name X --base BASE`、`rm NAME`、`free`、`wake MODEL`、`reserve --gpu N --size 80G --for 4h` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。
+- 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL`、`unreserve ID`、`models`、`registry`、`add PATH --name X --base BASE`、`rm NAME`、`free`、`wake MODEL`、`reserve --gpu N --size 80G --for 4h` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。
 - Pin/unpin 成功后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态。结果保留服务端 owner/actor；刷新失败会单独说明，已成功的写入不会因此重试。同一时刻只执行一个写请求（pin/unpin/free/wake/reserve/unreserve/add/rm），不会把重复提交排队。
 - usage 视图提供 7 天、30 天和返回状态按钮，每 5 秒刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
 - 请求在后台线程执行，慢请求不会叠加轮询或阻塞按键。连接失败保留上一份快照，并显示错误；新快照到达后保留选中模型。
@@ -213,6 +227,7 @@ python -m pytest -q tests/test_llm_unreserve.py tests/test_tui_unreserve.py
 python -m pytest -q tests/test_llm_actions.py tests/test_tui_actions.py
 python -m pytest -q tests/test_tui_shortcuts.py
 python -m pytest -q tests/test_llm_models.py tests/test_llm_models_http.py tests/test_tui_models.py
+python -m pytest -q tests/test_llm_registry_status.py tests/test_tui_registry_status.py
 ```
 
 测试使用核心包的状态结构生成 JSON，并在临时 loopback HTTP 服务上验证单文件复制、无 site-packages 的 Python 启动、JSON 保真与窄屏。Python 3.10 可用时直接执行该解释器的复制测试；CI 使用 Python 3.10。客户端测试不访问生产服务或 GPU。
