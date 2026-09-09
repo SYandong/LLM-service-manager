@@ -68,13 +68,26 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
             assert inflight["detail"]["count"] == 1 and inflight["detail"]["operation"] == "snapshot"
             outgoing.put(model_frame(model="not-allowlisted-PRIVATE_MARKER"))
             await visible(app, pilot, lambda events: any(e["kind"] == "data_plane_dropped" for e in events))
+            # Deterministically reproduce an earlier unrelated error without
+            # waiting for a socket timeout or changing the shared fixture budget.
+            relay.buffer.error("timeout")
+            await visible(app, pilot, lambda events: any(e["kind"] == "data_plane_error"
+                          and e["detail"]["reason"] == "timeout" for e in events))
+            timeout = next(e for e in app.event_history if e["kind"] == "data_plane_error"
+                           and e["detail"]["reason"] == "timeout")
             outgoing.put({"type": "modelStatus", "data": "PRIVATE_MARKER invalid JSON"})
-            await visible(app, pilot, lambda events: any(e["kind"] == "data_plane_error" for e in events))
-            assert event_of(app, "data_plane_error")["detail"]["reason"] == "invalid_event"
+            def intended_error(event):
+                return (event["kind"] == "data_plane_error" and event["id"] > timeout["id"]
+                        and event["detail"]["reason"] == "invalid_event")
+
+            await visible(app, pilot, lambda events: any(intended_error(e) for e in events))
+            invalid = next(e for e in app.event_history if intended_error(e))
+            assert timeout in app.event_history  # Unrelated errors are retained, not filtered away.
+            assert event_of(app, "data_plane_error")["detail"]["reason"] == "timeout"
             plane = event_of(app, "data_plane_state")
             dropped = event_of(app, "data_plane_dropped")
             assert plane["model"] == "m" and plane["detail"]["state"] == "stopped"
-            for event in [plane, dropped, inflight]:
+            for event in [plane, dropped, inflight, timeout, invalid]:
                 assert event["detail"]["source"] == "llama-swap"
                 assert event["detail"]["trusted_for_quiet"] is False
                 assert isinstance(event["detail"]["received_at"], (int, float))
@@ -90,6 +103,7 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
             log_text = " ".join(line.text for line in app.dashboard.query_one("#events", RichLog).lines)
             assert "[llama-swap]" in log_text and "[scheduler]" in log_text
             assert "unlisted_model" in log_text and "intentional filtering" in log_text
+            assert "timeout" in log_text and "invalid_event" in log_text
             assert "upstream loss unknown" in log_text
             assert "PRIVATE_MARKER" not in log_text + json.dumps(app.event_history)
             assert "not a daemon stop" in app.format_event(plane).plain
