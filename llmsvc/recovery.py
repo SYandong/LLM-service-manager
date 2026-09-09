@@ -280,6 +280,7 @@ class SleepingRecoveryController:
             self._ordinary_protection(claim)
             if not self._source_absent(claim, self.deadline):
                 raise ActionDispatchError("source_exit_unconfirmed")
+            self._ordinary_protection(claim)
             submit = self.controller.transport.prepare_http("POST", "/api/models/unload/"+quote(claim.model, safe=""), bounded=True)
             claim = self.scheduler.store.advance_recovery(claim, proxy_submitted=True)
             self._guard()
@@ -344,6 +345,7 @@ class SleepingRecoveryController:
                 raise ActionDispatchError("recovery_wake_not_authorized")
             if not self._source_absent(claim, deadline):
                 raise ActionDispatchError("source_exit_unconfirmed")
+            self._ordinary_protection(claim)
             submit = self.controller.transport.prepare_http("GET", "/upstream/"+quote(model, safe="")+"/", bounded=True)
             self.scheduler.store.advance_recovery(claim, stage="waking", wake_submitted=True)
             self._guard()

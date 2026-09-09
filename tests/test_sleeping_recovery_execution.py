@@ -98,11 +98,25 @@ def execution(tmp_path, request):
             current = state["model"]
             from llmsvc.state import StateSnapshot
             return StateSnapshot(sampled_at=state["now"] if state["source_time"] else None, models=(current,)+state["extra_models"],gpus=state["gpus"],
-                memory=MemoryState(state["available"],40 if current.state=="sleeping" else 0),
-                activity=(Activity("source",state["now"]-1000,state["recent"],0,state["inflight"]),))
+                memory=MemoryState(state["available"],sum(m.weights_gb for m in (current,)+state["extra_models"] if m.state=="sleeping")),
+                activity=(Activity("source",state["now"]-1000,state["recent"],0,state["inflight"]),)+
+                    tuple(Activity(m.name,state["now"]-1000,0,0,0) for m in state["extra_models"]))
     scheduler = Scheduler(cfg,collect,store=store,clock=lambda:state["now"])
     def run(argv, **kwargs):
-        assert argv == ["fake-systemctl", "stop", "vllm-source.service"] and kwargs["timeout"] > 0
+        assert argv[:2] == ["fake-systemctl", "stop"] and kwargs["timeout"] > 0
+        if argv[2] == "vllm-victim.service":
+            with lock:
+                state["calls"].append(("stop","victim"))
+                if state.get("victim_no_effect"):
+                    state["offset"] = 10.
+                else:
+                    old = next(m for m in state["extra_models"] if m.name == "victim")
+                    state["extra_models"] = tuple(replace(m,state="stopped",unit_active=False,resident_gb=0)
+                                                   if m.name=="victim" else m for m in state["extra_models"])
+                    state["other_observations"]["victim"] = UnitObservation(False,True)
+                    state["available"] += old.weights_gb
+            return SimpleNamespace(returncode=0)
+        assert argv[2] == "vllm-source.service"
         with lock:
             state["calls"].append(("stop","source"))
             if state["stop_mode"] in ("exit", "error-after-exit"):
@@ -575,3 +589,62 @@ def test_hostname_only_recovery_origin_is_blocked_before_source_stop(execution):
     result=e.controller.run_once()
     assert result["status"]=="blocked" and e.state["calls"]==[] and e.store.recoveries()==()
     assert result["blocked_by"][0]["reason"]=="unsupported_recovery_origin"
+
+
+def add_destination_victim(e):
+    with e.scheduler.action_lock,e.lock:
+        e.state["extra_models"]=(ModelState("victim",state="sleeping",gpu=1,unit="vllm-victim.service",
+            unit_active=True,health_ok=True,is_sleeping=True,swap_state="stopped",util=.6,budget_gb=60,
+            resident_gb=2,weights_gb=20,cold_start_seconds=2),)
+        e.transport.models["victim"]={"unit":"vllm-victim.service","util":.6,"weights_gb":20}
+        e.transport.units["victim"]="vllm-victim.service"
+        e.transport.paths.update((("POST","/api/models/unload/victim"),("GET","/upstream/victim/")))
+        e.state["other_observations"]["victim"]=UnitObservation(True,False,True,"victim-lease","3"*32)
+        e.store.create_lease(Lease("victim-lease","victim",1,.6,20000,60),"vllm-victim.service")
+        e.store.transition_lease("victim-lease","confirmed")
+        e.state["gpus"]=tuple(replace(g,free_gb=98) if g.index==1 else g for g in e.state["gpus"])
+
+
+def test_reentry_reuses_existing_protected_destination_victim_executor(execution):
+    e=execution;add_destination_victim(e)
+    result=e.controller.run_once()
+    assert result["status"]=="relocated" and result["ready"] is True, result
+    kinds=[call[:2] for call in e.state["calls"]]
+    assert kinds[:4]==[("stop","source"),("unload","source"),("wake","source"),("stop","victim")]
+    assert e.store.lease("victim-lease")[0].status=="released"
+    assert len(e.store.leases())==1 and e.store.lease(result["lease_id"])[0].budget_gb==80
+
+
+def test_unconfirmed_destination_victim_keeps_its_account_and_stops_recovery(execution):
+    e=execution;add_destination_victim(e);e.state["victim_no_effect"]=True
+    result=e.controller.run_once()
+    assert result["status"]=="partial" and result["ready"] is False
+    assert e.store.lease("victim-lease")[0].status=="confirmed"
+    assert e.store.recovery("source").destination_lease_id is None
+    assert not any(call[0]=="launch" for call in e.state["calls"])
+    before=list(e.state["calls"])
+    e.controller.run_once()
+    assert e.state["calls"]==before
+
+
+@pytest.mark.parametrize("phase", ["proxy", "wake"])
+def test_protection_changed_by_final_probe_prevents_next_submission(execution, monkeypatch, phase):
+    e = execution
+    method = "_cleanup_proxy" if phase == "proxy" else "before_wake_request"
+    original = getattr(e.controller, method)
+    def enter(*args, **kwargs):
+        def protect(_count):
+            e.state["probe_hook"] = None
+            e.store.put_pin(Pin("source", 20000, "new-owner"))
+        e.state["probe_hook"] = protect
+        return original(*args, **kwargs)
+    monkeypatch.setattr(e.controller, method, enter)
+    result = e.controller.run_once()
+    assert result["status"] == "partial" and result["error"] == "pinned", result
+    expected = [("stop", "source")]
+    if phase == "wake":
+        expected.append(("unload", "source"))
+    assert e.state["calls"] == expected
+    claim = e.store.recovery("source")
+    assert claim is not None and not claim.wake_submitted
+    assert claim.proxy_submitted is (phase == "wake")

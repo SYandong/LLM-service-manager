@@ -66,7 +66,7 @@ active model index. This is not part of public state schema 1. Each claim binds:
 - source GPU, reason, creation time and validated util/budget floors;
 - a fingerprint of model settings, unit, systemctl command, proxy origin and
   policy settings;
-- phase, monotonic submission/acknowledgement flags, destination lease and
+- phase, submission/acknowledgement flags that never reset, destination lease and
   acknowledged destination InvocationID.
 
 The first real ordinary claim atomically creates the schema-4 structures and

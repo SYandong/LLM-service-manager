@@ -128,3 +128,13 @@ def test_normal_unconstrained_reentry_can_choose_former_source_after_pressure_cl
     assert status == 200 and result["gpu"] == 1  # Legal for an ordinary request; insufficient for relocation.
     assert system.store.lease(result["lease_id"])[0].budget_gb == 80
     assert system.state["calls"] == []
+
+
+@pytest.mark.parametrize("field,value", [("sleeping_recovery_enabled",1),
+    ("sleeping_recovery_timeout_seconds",0), ("sleeping_recovery_timeout_seconds",-1),
+    ("sleeping_recovery_timeout_seconds",True), ("sleeping_recovery_timeout_seconds",float("nan")),
+    ("sleeping_recovery_timeout_seconds",float("inf")), ("sleeping_recovery_timeout_seconds",901),
+    ("sleeping_recovery_timeout_seconds","900")])
+def test_recovery_options_are_explicit_and_finitely_bounded(field,value):
+    with pytest.raises(ValueError,match=field):
+        SchedulerConfig("127.0.0.1",8011,**{field:value})
