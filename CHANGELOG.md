@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.1.0-alpha.6 — 2026-09-09
+
+Incremental preview; Python distribution `0.1.0a6`.
+Includes #134, #136, #138, #139 and #140 since the immutable alpha.5 tag.
+
+### Added and corrected
+
+- `unreserve ID` is available in the standalone CLI and TUI (#138), using the
+  existing idempotent reservation DELETE API. IDs are encoded, preview is
+  write-free, and a lost reply is never automatically retried. Successful removal
+  refreshes the reservation markers without waking or restarting a model.
+- The README now leads with released user/admin workflows and distinguishes the
+  scheduler from the inference endpoint, keeping legacy instructions in a
+  historical appendix (#134). The legacy client example requires an explicit
+  environment-provided endpoint and fails before SDK import when absent (#136).
+- Ops can generate a synthetic zero-delta LoRA fixture and run a bounded
+  mechanics harness (#139). The installed vLLM CPU loader accepted the fixture;
+  no GPU model was started because the recorded preflight was busy. Adapter-name
+  requests after sleep/wake are required by the harness; list visibility alone
+  is insufficient. Synthetic fixtures make no tuning-quality claim.
+- Python registry APIs expose detached queue snapshots and bounded persisted
+  recovery inspection (#140). Restarted objects retain marker diagnostics while
+  vanished in-memory queues/timing stay unknown. Native generation visibility
+  alone never establishes settlement or removes a fence.
+
+### Compatibility and limits
+
+No new dependency or database migration. The experimental reload verifier now
+requires an explicit marker-bound `RecoveryProof`; a bool or partial/truthy
+inspection result cannot clear recovery state. There is no current production
+caller and no new proof source, HTTP job/reconcile endpoint or reload worker.
+Marker reads reject multiple hardlinks; hardlink-based backup tooling can leave
+inspection fenced. Preserve the authoritative marker and accounting; this is
+not permission to remove evidence or force recovery.
+
+Existing lazy fault-claim schema-v3 and unknown-unload fence restrictions from
+alpha.5 remain. All default read-only and separate intent/action/automation/fault
+opt-ins are unchanged; publishing does not activate any of them. The LoRA GPU
+load/sleep/wake retention, memory increment and request latency are **NOT
+MEASURED**; CPU loading is not serving or llama-swap alias-routing proof.
+
+Configured registry list/add/rm HTTP/CLI integration is still under development
+and is not included in this batch. Reliable quiet, adoption and old-resource
+settlement remain requirements for real configuration changes. Real newcomer
+onboarding, production rollout/retirement and owner consent remain separately
+tracked. No production migration, routing, TTL/reaper, host bind, observer or
+model action is performed by this release. Long-term stability/calibration are
+**NOT MEASURED**, with no mandatory day/week calendar waits.
+
 ## 0.1.0-alpha.5 — 2026-09-09
 
 Incremental preview; Python distribution `0.1.0a5`.
