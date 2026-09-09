@@ -760,7 +760,102 @@ def model_name(value):
     return value
 
 
+def validate_registry_details(args, result):
+    """Validate optional owner metadata; never synthesize plans or observations."""
+    def digest(value, nullable=False):
+        return (nullable and value is None) or (isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value))
+
+    def port(value):
+        return value is None or (type(value) is int and 1 <= value <= 65535)
+
+    def blockers(value):
+        return isinstance(value, list) and all(isinstance(item, dict) and isinstance(item.get("reason"), str) for item in value)
+
+    field = "inventory" if args.command == "models" else "plan"
+    if field not in result:
+        return  # Older basic list/preview responses remain compatible.
+    try:
+        detail = result[field]
+        if not isinstance(detail, dict):
+            raise ValueError
+        if field == "inventory":
+            if not digest(detail["config_sha256"]) or type(detail["fenced"]) is not bool:
+                raise ValueError
+            if not isinstance(detail["recovery"], dict) or not isinstance(detail["pending_changes"], list):
+                raise ValueError
+            if not all(isinstance(job, dict) for job in detail["pending_changes"]) or not isinstance(detail["models"], list):
+                raise ValueError
+            row_keys = {"name", "source", "temporary", "base", "daemon_port", "created_at", "last_used_at",
+                        "expires_at", "runtime_state", "removable", "blocked_by"}
+            for row in detail["models"]:
+                if not isinstance(row, dict) or set(row) - row_keys:
+                    raise ValueError
+                if not isinstance(row["name"], str) or not row["name"].strip() or row["source"] != "config":
+                    raise ValueError
+                if type(row["temporary"]) is not bool or type(row["removable"]) is not bool:
+                    raise ValueError
+                if row["base"] is not None and not isinstance(row["base"], str):
+                    raise ValueError
+                if not port(row["daemon_port"]) or not isinstance(row["runtime_state"], str) or not blockers(row["blocked_by"]):
+                    raise ValueError
+                for key in ("created_at", "last_used_at", "expires_at"):
+                    value = row[key]
+                    if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
+                        raise ValueError
+        else:
+            allowed = {"model", "projected_base_sha256", "candidate_sha256", "port_reserved", "config_written"}
+            if set(detail) - allowed or detail["config_written"] is not False:
+                raise ValueError
+            if "port_reserved" in detail and detail["port_reserved"] is not False:
+                raise ValueError
+            if not digest(detail["projected_base_sha256"], True) or not digest(detail["candidate_sha256"], True):
+                raise ValueError
+            if args.command == "add" and "model" not in detail:
+                raise ValueError
+            if "model" in detail:
+                model = detail["model"]
+                if not isinstance(model, dict) or set(model) != {"name", "base", "daemon_port", "util_macro"}:
+                    raise ValueError
+                if args.command != "add" or model["name"] != args.name or model["base"] != args.base or not port(model["daemon_port"]):
+                    raise ValueError
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise ClientError("Invalid optional registry %s details; no values inferred" % field) from None
+
+
+def format_registry_details(args, result):
+    def value(item):
+        return "unknown" if item is None else clean_text(item)
+
+    lines = []
+    if args.command == "models" and "inventory" in result:
+        inventory = result["inventory"]
+        lines.append("Configuration inventory; observations are separate, not adoption proof")
+        for row in inventory["models"]:
+            lines.append("%s [%s; source=config] base=%s port=%s; observed=%s" % (
+                value(row["name"]), "temporary" if row["temporary"] else "permanent",
+                value(row["base"]), value(row["daemon_port"]), value(row["runtime_state"])))
+            lines.append("  last use=%s; idle expiry=%s (Unix seconds, not scheduled removal)" % (
+                value(row["last_used_at"]), value(row["expires_at"])))
+            reasons = ", ".join(item["reason"] for item in row["blocked_by"]) or "none"
+            lines.append("  model-level removable=%s; protection=%s" % ("yes" if row["removable"] else "no", reasons))
+        lines.append("Pending FIFO changes: %s; fenced=%s; model eligibility is not global commit readiness" % (
+            len(inventory["pending_changes"]), "yes" if inventory["fenced"] else "no"))
+    if args.command in ("add", "rm") and args.dry_run and "plan" in result:
+        plan = result["plan"]
+        if "model" in plan:
+            model = plan["model"]
+            lines.append("Planned model %s; base=%s; daemon port=%s (not reserved)" % (
+                value(model["name"]), value(model["base"]), value(model["daemon_port"])))
+            lines.append("util_macro=%s (configured metadata, not measured memory or allocated budget)" % value(model["util_macro"]))
+        lines.append("Projected base SHA256: %s; candidate SHA256: %s" % (
+            value(plan["projected_base_sha256"]), value(plan["candidate_sha256"])))
+        lines.append("Recompute before submission; hashes are not adoption/settlement; config written=no")
+    return "\n".join(clean_text(line) for line in lines)
+
+
 def validate_registry_result(args, result):
+    if args.command == "models" or (args.command in ("add", "rm") and args.dry_run):
+        validate_registry_details(args, result)
     try:
         if args.command == "models":
             if not isinstance(result["records"], dict) or type(result["writes_enabled"]) is not bool:
@@ -802,7 +897,8 @@ def format_registry_result(args, result):
         label = "Model change queued; not applied" if result["status"] == "queued" else "Model change: " + result["status"]
         committed = result.get("config_committed")
         label += "\nConfig committed: " + ("yes" if committed is True else "no" if committed is False else "unknown")
-    return label + "\n" + json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
+    details = format_registry_details(args, result)
+    return label + ("\n" + details if details else "") + "\n" + json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
 
 
 def format_registry_error(error):
