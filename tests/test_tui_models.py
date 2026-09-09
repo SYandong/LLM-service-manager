@@ -93,3 +93,27 @@ def test_late_registry_list_is_ignored_after_write_and_during_teardown(api,snaps
                 assert output(app)==before
             app.at_teardown=boundary
     asyncio.run(scenario())
+
+
+from test_registry_http_preview import mounted, registry_fixture, assert_readonly
+
+
+@pytest.mark.parametrize('size',[(100,30),(40,24)])
+def test_actual_core_list_preview_and_errors_in_tui(api,mounted,size):
+    async def scenario():
+        app=SchedulerApp(api['SchedulerClient']('http://%s:%s'%mounted.address),SimpleNamespace(**api),event_reader=IdleEvents())
+        before=mounted.files(),mounted.scheduler.events_since(0)
+        async with app.run_test(size=size) as pilot:
+            await app.workers.wait_for_complete()
+            await submit(app,pilot,'models')
+            assert 'Temporary model registry' in output(app) and 'saved' in output(app)
+            assert 'writes enabled: no' in output(app)
+            import shlex
+            await submit(app,pilot,'add '+shlex.quote(str(mounted.weights))+' --name ft --base base --dry-run')
+            assert 'nothing queued or applied' in output(app) and 'inflight_stream_unknown' in output(app)
+            await submit(app,pilot,'rm saved --dry-run')
+            assert 'remove_model' in output(app) and 'config_committed' in output(app)
+            await submit(app,pilot,'rm saved')
+            assert 'read_only' in output(app)
+            assert app.snapshot['models'][0]['name']=='base'
+        assert_readonly(mounted,before)
