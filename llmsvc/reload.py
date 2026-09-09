@@ -183,6 +183,57 @@ class RecoveryProof:
     instance: InstanceIdentity | None = None
 
 
+# Source caps bound allocation, not filesystem latency on a stalled mount.
+DEFAULT_CONFIG_MAX_BYTES = 1024 * 1024
+MAX_SOURCE_BYTES = 16 * 1024 * 1024
+
+
+def _source_byte_limit(value: int, label: str) -> int:
+    if type(value) is not int or not 0 < value <= MAX_SOURCE_BYTES:
+        raise ValueError(f"{label} must be an integer from 1 to {MAX_SOURCE_BYTES}")
+    return value
+
+
+def _read_regular_file(path: Path, max_bytes: int, *, single_link: bool = True,
+                       prefix_only: bool = False) -> tuple[bytes, os.stat_result]:
+    """Read a bounded regular source without following any path component.
+
+    Callers may resolve a confined model symlink before entering this helper.
+    prefix_only samples weights without imposing a metadata-sized file limit.
+    Detectable replacement/modification is rejected; this is not a filesystem
+    snapshot or a wall-clock deadline for an unresponsive regular filesystem.
+    """
+    _source_byte_limit(max_bytes, "max_bytes")
+    path = path.absolute()
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    directory = os.open(path.anchor, flags | os.O_DIRECTORY)
+    try:
+        for part in path.parts[1:-1]:
+            child = os.open(part, flags | os.O_DIRECTORY, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        fd = os.open(path.name, flags, dir_fd=directory)
+    finally:
+        os.close(directory)
+    with os.fdopen(fd, "rb", buffering=0) as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or (single_link and before.st_nlink != 1):
+            raise ReloadError("source must be a regular non-hardlinked file" if single_link
+                              else "source must be a regular file")
+        if not prefix_only and before.st_size > max_bytes:
+            raise ReloadError("source exceeds configured byte limit")
+        raw = stream.read(max_bytes if prefix_only else max_bytes + 1)
+        after = os.fstat(stream.fileno())
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    if identity(before) != identity(after) or identity(before) != identity(path.lstat()):
+        raise ReloadError("source changed while reading")
+    if not prefix_only and (len(raw) > max_bytes or len(raw) != before.st_size):
+        raise ReloadError("source exceeds byte limit or changed while reading")
+    return raw, before
+
+
 class ReloadQueue:
     """FIFO queue. Call process_once on scheduler ticks; it never sleeps.
 
@@ -200,7 +251,8 @@ class ReloadQueue:
                  notify_reload: Callable[..., None], log: Callable[[dict], None],
                  clock: Callable[[], float] = time.monotonic,
                  wall_clock: Callable[[], float] = time.time, timeout: float = 600,
-                 max_snapshot_age: float = 30, operation_timeout: float = 10):
+                 max_snapshot_age: float = 30, operation_timeout: float = 10,
+                 config_max_bytes: int = DEFAULT_CONFIG_MAX_BYTES):
         if not _number(timeout) or not 0 < timeout <= 600:
             raise ValueError("timeout must be positive and at most 600 seconds")
         if not isinstance(action_lock, type(threading.RLock())):
@@ -208,6 +260,7 @@ class ReloadQueue:
         if not _number(operation_timeout) or not 0 < operation_timeout <= 60:
             raise ValueError("operation_timeout must be positive and at most 60 seconds")
         self.operation_timeout = operation_timeout
+        self.config_max_bytes = _source_byte_limit(config_max_bytes, "config_max_bytes")
         self.path = Path(config_path)
         self.marker = self.path.with_name(self.path.name + ".llmsvc-pending")
         self.action_lock, self.quiet, self.snapshot = action_lock, quiet, snapshot
@@ -218,12 +271,7 @@ class ReloadQueue:
         self._jobs: dict[str, ReloadJob] = {}
 
     def _read(self) -> tuple[bytes, os.stat_result]:
-        fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
-        with os.fdopen(fd, "rb") as stream:
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                raise ReloadError("config must be a regular non-hardlinked file")
-            return stream.read(), info
+        return _read_regular_file(self.path, self.config_max_bytes)
 
     def _sync_directory(self) -> None:
         fd = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
