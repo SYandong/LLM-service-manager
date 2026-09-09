@@ -34,3 +34,31 @@ def test_owner_inventory_and_plan_render_without_replacing_runtime_state(api,reg
             assert app.snapshot==snapshot
         assert (queue.path.read_bytes(),queue.queue_snapshot())==before
     asyncio.run(scenario())
+
+
+from types import SimpleNamespace
+from tui.app import SchedulerApp
+from test_registry_http_preview import mounted,registry_fixture,assert_readonly
+from test_tui import IdleEvents
+
+
+@pytest.mark.parametrize('size',[(100,30),(40,24)])
+def test_actual_http_inventory_and_plan_details_in_tui(api,mounted,size):
+    async def scenario():
+        app=SchedulerApp(api['SchedulerClient']('http://%s:%s'%mounted.address),SimpleNamespace(**api),event_reader=IdleEvents())
+        before=mounted.files(),mounted.scheduler.events_since(0)
+        async with app.run_test(size=size) as pilot:
+            await app.workers.wait_for_complete()
+            await submit(app,pilot,'models')
+            text=output(app)
+            assert '[permanent; source=config]' in text and '[temporary; source=config]' in text
+            assert 'not global commit readiness' in text
+            import shlex
+            await submit(app,pilot,'add '+shlex.quote(str(mounted.weights))+' --name ft --base base --dry-run')
+            text=output(app)
+            assert 'daemon port=8105 (not reserved)' in text
+            assert 'configured metadata, not measured memory' in text
+            assert 'hashes are not adoption/settlement' in text and 'config written=no' in text
+            assert app.snapshot['models'][0]['name']=='base'
+        assert_readonly(mounted,before)
+    asyncio.run(scenario())
