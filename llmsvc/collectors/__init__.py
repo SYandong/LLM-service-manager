@@ -32,13 +32,20 @@ class Collector:
         self.pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="telemetry")
         self.pending = {}
         self.lock = threading.Lock()
+        self._closed = threading.Event()
 
     def close(self):
+        # Retirement does not wait for already running bounded probes. Their
+        # results are discarded if retirement is observed at round completion;
+        # core still owns the generation fence at snapshot publication.
+        self._closed.set()
         self.pool.shutdown(wait=False, cancel_futures=True)
 
     def _read(self, jobs, deadline, errors):
         current = {}
         for name, fn in jobs.items():
+            if self._closed.is_set():
+                break
             if time.monotonic() >= deadline:
                 errors.append(name + ": deadline exceeded")
                 continue
@@ -46,7 +53,13 @@ class Collector:
             if previous is not None and not previous.done():
                 errors.append(name + ": previous probe still running")
                 continue
-            current[name] = self.pool.submit(fn)
+            try:
+                current[name] = self.pool.submit(fn)
+            except RuntimeError as exc:
+                # close() can shut down the executor between the check and
+                # submit. A broken executor also makes this source unknown.
+                errors.append(name + ": " + type(exc).__name__)
+                continue
             self.pending[name] = current[name]
         if current:
             wait(current.values(), timeout=max(0, deadline - time.monotonic()))
@@ -64,10 +77,15 @@ class Collector:
         return result
 
     def collect(self):
+        if self._closed.is_set():
+            return StateSnapshot(errors=("collector: closed",))
         if not self.lock.acquire(blocking=False):
             return StateSnapshot(errors=("collector: concurrent round",))
         try:
-            return self._collect()
+            snapshot = self._collect()
+            if self._closed.is_set():
+                return StateSnapshot(errors=("collector: closed",))
+            return snapshot
         finally:
             self.lock.release()
 
