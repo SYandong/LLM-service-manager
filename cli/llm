@@ -729,7 +729,7 @@ def format_action_result(args, result):
 def result_exit_code(args, result):
     if args.command == "usage":
         return 0 if result["known"] else 1
-    if args.command in ("pin", "unpin", "free", "wake", "reserve") and args.dry_run:
+    if args.command in ("pin", "unpin", "free", "wake", "reserve", "unreserve") and args.dry_run:
         return 1 if result["blocked_by"] else 0
     if args.command == "reserve":
         return 0 if result["evacuation"]["status"] == "complete" else 1
@@ -752,6 +752,23 @@ def model_name(value):
     if not value.strip() or any(unicodedata.category(ch).startswith("C") for ch in value):
         raise argparse.ArgumentTypeError("Model name must be nonempty and contain no control characters")
     return value
+
+
+def validate_unreserve_result(args, result):
+    try:
+        if args.dry_run:
+            if not isinstance(result["would"], list) or not isinstance(result["blocked_by"], list):
+                raise ValueError
+            for item in result["would"]:
+                if item["kind"] != "unreserve" or item["id"] != args.id:
+                    raise ValueError
+            if not all(isinstance(item["reason"], str) for item in result["blocked_by"]):
+                raise ValueError
+        elif result["id"] != args.id or not isinstance(result["by"], str) or not result["by"].strip():
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        raise ClientError("Invalid unreserve response; inspect current reservations before retrying") from None
+    return result
 
 
 def validate_pin_result(args, result):
@@ -839,10 +856,23 @@ def build_parser(parser_class=argparse.ArgumentParser):
     reserve.add_argument("--dry-run", action="store_true", help="Preview without persistence, model actions or ID allocation")
     reserve.add_argument("--json", action="store_true", help="Print the complete receipt and evacuation result")
     reserve.add_argument("--wait", type=action_timeout, default=150, help="HTTP response wait seconds (default:150); does not change server deadline")
+    unreserve = commands.add_parser("unreserve", help="Remove a reservation without waking models")
+    unreserve.add_argument("id", type=model_name, help="Reservation ID from status/reserve response")
+    unreserve.add_argument("--dry-run", action="store_true")
+    unreserve.add_argument("--json", action="store_true")
     return parser
 
 
 def execute_command(args, client, *, now=None):
+    if args.command == "unreserve":
+        path = "/v1/reserve/" + quote(args.id, safe="") + ("?dry_run=1" if args.dry_run else "")
+        try:
+            result = client.request("DELETE", path)
+        except ClientError as exc:
+            if exc.status is not None or args.dry_run:
+                raise
+            raise ClientError(str(exc) + "; deletion outcome unknown: inspect reservations; no automatic write retry") from None
+        return validate_unreserve_result(args, result)
     if args.command == "reserve":
         payload = {"gpu": args.gpu, "size_gb": args.size, "until": intent_expiry(args.duration, now),
                    "by": PIN_COMPATIBILITY_LABEL}
@@ -903,6 +933,10 @@ def format_result(args, result, width=100):
         return format_action_result(args, result)
     if args.command == "reserve":
         return format_reserve_result(args, result)
+    if args.command == "unreserve":
+        if args.dry_run:
+            return format_action_result(args, result)
+        return clean_text("Unreserve acknowledged: %s; actor %s; no model wake/restart" % (result["id"], result["by"]))
     return format_status(result, width=width)
 
 

@@ -125,7 +125,18 @@ LLM_URL=http://scheduler:8011 python3 llm reserve --gpu 0 --size 80G --for 4h --
 - **HTTP 200、保存成功与清理完成是不同结果。** blocked/partial 返回退出码 1，但不撤销或隐藏已保存的 ID/意图，也不重发 POST。`size_gb` 只是请求的预约注记；有效预约从调度器放置中排除整张 GPU，不代表实测释放容量。complete 也不保证 GPU 物理使用为零或没有其他用户进程。
 - 回执说明保存时的事实；到达客户端前可能已过期或被其他调用删除。用 `status` 查询当前状态。客户端采用 150 秒的独立 `--wait` 响应等待，覆盖服务端默认/上限 120 秒的 reserve 期限并留出返回余量，可显式调整；它不改变后端期限。超时或丢失响应时意图可能已保存，先核对状态，不能以自动重试解决歧义。
 
-TUI 输入框支持同一 reserve 命令与选项，沿用单写请求、迟到响应保护和执行后即时 GET 状态。有效预约的 GPU 标记为 `reserved for placement`；blocked/partial 回执仍显示并刷新当前预约。此切片未增加 unreserve、模型登记/删除接口或快捷键；完整 #11 的 live 预约/清理、TTL/reaper 与运行期验收继续单独跟进。
+TUI 输入框支持同一 reserve 命令与选项，沿用单写请求、迟到响应保护和执行后即时 GET 状态。有效预约的 GPU 标记为 `reserved for placement`；blocked/partial 回执仍显示并刷新当前预约。模型登记/删除接口和相关快捷键另行交付；完整 #11 的 live 预约/清理、TTL/reaper 与运行期验收继续单独跟进。
+
+### 解除预约
+
+```sh
+LLM_URL=http://scheduler:8011 python3 llm unreserve RESERVATION_ID --dry-run
+LLM_URL=http://scheduler:8011 python3 llm unreserve RESERVATION_ID --json
+```
+
+ID 来自 reserve 回执或 `status --json` 中的 reserves。命令发送 URL 编码 ID 的空 body `DELETE /v1/reserve/{id}`；重复解除不存在的 ID 也可成功。返回 actor 使用服务器对连接来源的判断，不是预约最初的 owner。解除不唤醒、重启或停止模型；已提交的清理动作不会因解除而被声称撤销。默认只读服务拒绝实际删除，dry-run 不写数据库或调用 transport。连接丢失不自动重试，先检查当前预约状态。
+
+TUI 使用相同的 `unreserve ID` 命令；确认回复后立即刷新，并移除服务器已不再报告的预约标记。`--dry-run` 保留标记和预约。缺失/空/控制字符 ID 在请求前拒绝，`--json` 保留完整回执。
 
 ## 可选 TUI
 
@@ -144,12 +155,12 @@ LLM_URL=http://scheduler:8011 python cli/llm
 - `f` 聚焦命令框并预填 `free`，可补充 `--gpu` / `--need` / `--ram`；`p` 预填所选模型的 pin 命令，把光标放在空的 `--for` 参数处；`w` 预填所选模型的 wake 命令。**三者都不发请求，编辑/核对后按 Enter 才提交。** Pin 必须手动填入正时长（例如 `1h`），快捷键不提供默认或永久 pin；空时长/零时长沿用共享解析器报错。
 - p/w 固定预填时的模型名，不因后续光标移动而改成另一模型；名称按 shell 引号规则保留并使用 `--` 分隔，支持空格、引号、Unicode、百分号和前导 `-`。没有选择、目标已从最新快照消失或选择失效时提示刷新/重新选择，不发送旧目标命令。服务器仍负责执行前的最新保护与状态检查。
 - 命令框获得焦点时，`f` / `p` / `w` / `u` / `?` / `q` 等可打印按键都是输入文字；用 Tab 将焦点移出输入框后才能使用快捷键。已有非空草稿不会被快捷键覆盖；正在执行写请求时不会预填或排队另一个操作。RAM 确认框打开期间 f/p/w 不修改下面的命令，Esc 仍取消且不发请求。
-- 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL`、`free`、`wake MODEL`、`reserve --gpu N --size 80G --for 4h` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。
-- Pin/unpin 成功后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态。结果保留服务端 owner/actor；刷新失败会单独说明，已成功的写入不会因此重试。同一时刻只执行一个写请求（pin/unpin/free/wake/reserve），不会把重复提交排队。
+- 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL`、`unreserve ID`、`free`、`wake MODEL`、`reserve --gpu N --size 80G --for 4h` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。
+- Pin/unpin 成功后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态。结果保留服务端 owner/actor；刷新失败会单独说明，已成功的写入不会因此重试。同一时刻只执行一个写请求（pin/unpin/free/wake/reserve/unreserve），不会把重复提交排队。
 - usage 视图提供 7 天、30 天和返回状态按钮，每 5 秒刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
 - 请求在后台线程执行，慢请求不会叠加轮询或阻塞按键。连接失败保留上一份快照，并显示错误；新快照到达后保留选中模型。
 - 实际 `free --ram` 先弹出二次确认，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。Free/wake 完成后立即刷新，部分结果与错误仍保留；后台执行期间 UI 与事件面板继续响应。
-- Reserve 的预览、只读拒绝与实际回执语义见上节；unreserve、模型登记/删除尚未开放。不能用本客户端命令启用生产调度。
+- Reserve 的预览、只读拒绝与实际回执语义见上节；模型登记/删除尚未开放。不能用本客户端命令启用生产调度。
 
 ### Scheduler 与数据面事件流
 
@@ -178,6 +189,7 @@ python -m pytest -q tests/test_llm_events.py tests/test_tui_events.py tests/test
 python -m pytest -q tests/test_llm_usage.py tests/test_tui_usage.py
 python -m pytest -q tests/test_llm_pin.py tests/test_tui_pin.py
 python -m pytest -q tests/test_llm_reserve.py tests/test_llm_reserve_http.py tests/test_tui_reserve.py
+python -m pytest -q tests/test_llm_unreserve.py tests/test_tui_unreserve.py
 python -m pytest -q tests/test_llm_actions.py tests/test_tui_actions.py
 python -m pytest -q tests/test_tui_shortcuts.py
 ```
