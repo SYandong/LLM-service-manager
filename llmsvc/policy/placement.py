@@ -87,6 +87,7 @@ def plan_placement(
     snapshot: StateSnapshot, request: ModelState, *, waiting: bool = False,
     settings: PolicySettings = PolicySettings(),
     exclusions: Optional[Mapping[str, str]] = None,
+    gpu_exclusions: Optional[Mapping[int, str]] = None,
 ) -> PlacementDecision:
     """Choose one GPU, then emit its complete eviction plan and final place.
 
@@ -112,6 +113,11 @@ def plan_placement(
         return PlacementDecision(blocked_by=tuple(blockers))
     default = request.is_default or (current is not None and current.is_default)
     projection = Projection(snapshot, settings, exclusions=exclusions)
+    excluded_gpus = {} if gpu_exclusions is None else dict(gpu_exclusions)
+    if any(isinstance(index, bool) or not isinstance(index, int) or index < 0
+           or not isinstance(reason, str) or not reason.strip()
+           for index, reason in excluded_gpus.items()):
+        raise ValueError("gpu_exclusions require nonnegative integer IDs and nonempty reasons")
     feasible = []
     candidate_cards = []
     for gpu in sorted(snapshot.gpus, key=lambda g: g.index):
@@ -119,6 +125,11 @@ def plan_placement(
             blockers.append(Blocker(request.name, "default_requires_exclusive_gpu", gpu.index))
             continue
         if any(b.gpu == gpu.index for b in accounting_blockers):
+            continue
+        # Accounting above still includes this GPU and all its residents/leases.
+        # This constraint removes only its destination candidacy.
+        if gpu.index in excluded_gpus:
+            blockers.append(Blocker(None, excluded_gpus[gpu.index], gpu.index))
             continue
         if not known_number(gpu.total_gb) or gpu.total_gb <= 0 or not known_number(gpu.external_gb):
             blockers.append(Blocker(None, "unknown_gpu_capacity", gpu.index))
