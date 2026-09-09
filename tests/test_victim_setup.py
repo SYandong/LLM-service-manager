@@ -2,6 +2,7 @@
 """Deterministic #127 setup-budget and diagnostic regressions; no live I/O."""
 
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -24,7 +25,9 @@ def delayed_reconciliation(scheduler, monkeypatch, *, seconds, every=False):
 
 def test_initial_victim_setup_tolerates_delay_beyond_shared_negative_budget(system, monkeypatch):
     scheduler, state, _ = system
-    assert scheduler.config.placement_wait_seconds == 0.08
+    # Recreate the historical short starting budget explicitly now that the
+    # shared fixture defaults to functional headroom (#149).
+    scheduler.config = replace(scheduler.config, placement_wait_seconds=0.08)
     delayed_reconciliation(scheduler, monkeypatch, seconds=0.1)
     lease_id = initialize_victim(scheduler, state)
     proof = state["setup_proof"]
