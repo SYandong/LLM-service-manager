@@ -185,6 +185,29 @@ ticks、候选 SHA256）与前后 `BindingObservation`：观测须覆盖本次�
 core 后续须在独立集成中提供可靠的前后观测及收尾证据。测试使用 fake HTTP 和
 #91 已提交的原生响应，不重复长实验。
 
+### 离线 generation 候选规划（#20 / #60）
+
+`plan_generation_candidate(original, expected_sha256=..., generation=...,
+endpoint=..., instance=...)` 是纯函数：输入已有候选字节、其精确 SHA256、调用方
+提供的 `gen_<32位小写hex>` 和 `InstanceIdentity`，返回 `GenerationCandidate`。
+结果包含 `source_sha256`、`previous_generation`、`candidate` 字节和现有
+`CandidateBinding`；绑定的摘要覆盖模型改动与 generation 编辑后的完整字节。
+若先规划 add/rm，应把模型编辑后的字节及其摘要作为这里的输入，不混用原文件
+摘要。源输入和结果分别限 1 MiB；这是独立离线规划上限，不代表其他读取器配置。
+
+函数复用局部 YAML 编辑器，仅插入或替换全局
+`macros.llmsvc_reload_generation`，保留其他字节、LF/CRLF、注释与无关 anchors。
+要求显式、非空、非 flow、无 anchor 的 macros 映射；已有 generation 只能是
+无 tag/anchor/alias 的单行合法标量，保留其原引号。重复/merge key、不支持的
+布局、嵌套重定义、其他标量引用该保留名称或已出现的候选标识均拒绝。
+
+调用方负责新标识的历史唯一性；函数不生成 nonce，也不能从输入证明文件现在
+仍未变化、实例身份真实、watcher 已配置或 native G 可见。它不读文件、不创建
+临时文件/恢复标记、不入队、不联网、不调用 validator/notifier，也不接入现有
+HTTP/CLI dry-run。缺失旧标识仅表示这些输入字节未定义它，不是旧服务不存在。
+即使后来 fixture 读数与该绑定匹配，仍只有可见性，收尾保持未知。生产提交须
+重新核对源、绑定、quiet、保护、内存、采用及独立收尾证据；此规划器不授予写权限。
+
 ### 队列快照与重建后的恢复检查
 
 `ReloadQueue.queue_snapshot()` / `ModelRegistry.queue_snapshot()` 返回分离的

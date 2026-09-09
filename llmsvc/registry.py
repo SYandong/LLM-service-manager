@@ -17,6 +17,7 @@ from typing import Any, Callable, Mapping, Sequence
 import yaml
 
 from llmsvc.reload import ReloadQueue
+from llmsvc.reload_witness import CandidateBinding, GENERATION_PATH, InstanceIdentity
 from urllib.parse import urlsplit, urlunsplit
 
 from llmsvc.state import Action, Activity, Blocker, ModelState, StateSnapshot
@@ -885,6 +886,9 @@ class _RegistryYamlEditor:
                 if "members" not in fields or {k: v for k, v in old.items() if k != "members"} != {k: v for k, v in new.items() if k != "members"}:
                     self._unsupported("only group membership may change")
                 self._members(*fields["members"], old["members"], new["members"], name, adding)
+        return self._render_edits(config)
+
+    def _render_edits(self, config: dict) -> bytes:
         result = self.text
         boundary = len(result)
         for start, end, replacement in sorted(self.edits, reverse=True):
@@ -898,6 +902,87 @@ class _RegistryYamlEditor:
         except (yaml.YAMLError, RecursionError) as exc:
             raise RegistryError("unsupported YAML layout: edit would break anchors or values") from exc
         return result.encode("utf-8")
+
+
+@dataclass(frozen=True)
+class GenerationCandidate:
+    """In-memory plan only; binding is supplied identity, not observed adoption."""
+
+    source_sha256: str
+    previous_generation: str | None
+    candidate: bytes
+    binding: CandidateBinding
+
+
+def plan_generation_candidate(original: bytes, *, expected_sha256: str, generation: str,
+                              endpoint: str, instance: InstanceIdentity) -> GenerationCandidate:
+    """Plan an inert native-witness macro edit without reading or writing a file.
+
+    The caller supplies a fresh nonce and identity; no freshness/history, watcher,
+    quiet, settlement or write authority is inferred. Fixed 1 MiB input/output
+    limits keep this standalone planner independent of the configured reader.
+    """
+    if not isinstance(original, bytes) or len(original) > 1024 * 1024:
+        raise RegistryError("generation planner requires at most 1 MiB of source bytes")
+    source_sha256 = hashlib.sha256(original).hexdigest()
+    if expected_sha256 != source_sha256:
+        raise RegistryError("generation source digest does not match")
+    try:
+        CandidateBinding(endpoint, generation, instance, source_sha256).to_dict()
+    except (ValueError, TypeError) as exc:
+        raise RegistryError("invalid generation candidate binding") from exc
+    try:
+        editor = _RegistryYamlEditor(original)
+        if "macros" not in editor.fields:
+            editor._unsupported("generation needs an explicit nonempty macros block")
+        key, macros = editor.fields["macros"]
+        editor._direct(key, macros)
+        entries = editor._mapping(macros)
+        header_end = editor._line_end(key.end_mark.index)
+        header = editor.text[key.end_mark.index:header_end]
+        if not entries or not re.fullmatch(r":[ \t]*(?:#[^\r\n]*)?\r?\n", header):
+            editor._unsupported("generation needs an unanchored nonempty macros block")
+        columns = {entry_key.start_mark.column for entry_key, _ in entries.values()}
+        if len(columns) != 1 or min(columns) <= key.start_mark.column:
+            editor._unsupported("inconsistent macro indentation")
+        macro_name = GENERATION_PATH.split(".", 1)[1]
+        old_entry = entries.get(macro_name)
+        # Any scalar mentioning this reserved name outside its defining key is
+        # conservatively rejected, including nested/local macro overrides.
+        for token in editor.tokens:
+            if isinstance(token, yaml.tokens.ScalarToken) and macro_name in token.value:
+                if old_entry is None or token.start_mark.index != old_entry[0].start_mark.index:
+                    raise RegistryError("generation macro must have no other definitions or references")
+            if isinstance(token, yaml.tokens.ScalarToken) and generation in token.value:
+                raise RegistryError("generation must differ from every existing scalar")
+        previous = None
+        if old_entry:
+            marker_key, value = old_entry
+            editor._direct(marker_key, value)
+            if (not isinstance(value, yaml.ScalarNode) or value.tag != "tag:yaml.org,2002:str"
+                    or value.style not in (None, "'", '\"')
+                    or value.start_mark.line != value.end_mark.line
+                    or not re.fullmatch(r"gen_[0-9a-f]{32}", value.value)):
+                editor._unsupported("generation must be a single-line generation string")
+            if any(isinstance(token, (yaml.tokens.AnchorToken, yaml.tokens.AliasToken, yaml.tokens.TagToken))
+                   and marker_key.end_mark.index <= token.start_mark.index < value.end_mark.index
+                   for token in editor.tokens):
+                editor._unsupported("generation scalar must not use anchors, aliases or explicit tags")
+            previous = value.value
+            quote = value.style or ""
+            editor.edits.append((value.start_mark.index, value.end_mark.index, quote + generation + quote))
+        else:
+            editor.edits.append((header_end, header_end,
+                                 " " * min(columns) + macro_name + ": " + generation + editor.newline))
+        expected = copy.deepcopy(editor.original)
+        expected["macros"][macro_name] = generation
+        candidate = editor._render_edits(expected)
+        if len(candidate) > 1024 * 1024:
+            raise RegistryError("generation candidate exceeds 1 MiB")
+    except (yaml.YAMLError, RecursionError) as exc:
+        raise RegistryError("unsupported YAML layout for generation planning") from exc
+    binding = CandidateBinding(endpoint, generation, instance, hashlib.sha256(candidate).hexdigest())
+    return GenerationCandidate(source_sha256, previous, candidate, binding)
 
 
 class ModelRegistry:
