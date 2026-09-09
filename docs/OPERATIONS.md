@@ -292,6 +292,15 @@ than zero and at most 900: source cleanup, cold wake and destination confirmatio
 share this one budget. Waits release the action lock; manual wake/reserve APIs
 are unchanged. Ordinary pin/default/identity/account protections still apply.
 
+Recovery unload/cold-wake requires a literal-IP HTTP(S) origin. Hostnames or
+invalid ports block recovery before source actions; DNS resolution, proxies and
+redirects are not supported for this path. Each request uses its prepared,
+immutable origin/path and an absolute socket watchdog, so stalled or trickled
+HTTP data cannot extend the operation deadline. This does not make arbitrary
+callbacks or OS storage calls preemptible. Cold-wake progress is observed through
+the existing sampler, not synchronous unbounded collector calls. Existing manual
+free/wake transport compatibility is unchanged; no additional flag is introduced.
+
 The first **actual ordinary recovery claim** atomically migrates a v2/v3 ledger
 to schema v4. Ordinary claims are separate from fault claims; existing pins,
 reserves, accounts and fault records are preserved. Default-off, read-only and
