@@ -1,12 +1,13 @@
 # Generated-By: Codex / gpt-6-astra
 """Offline reload safety and interrupted-transaction regression tests."""
 from dataclasses import replace
+import hashlib
 from pathlib import Path
 import threading
 
 import pytest
 
-from llmsvc.reload import CommandValidator, QuietPeriod, ReloadError, ReloadQueue, ValidationError, reload_blockers
+from llmsvc.reload import RecoveryProof, CommandValidator, QuietPeriod, ReloadError, ReloadQueue, ValidationError, reload_blockers
 from llmsvc.state import Activity, Lease, MemoryState, ModelState, Pin, StateSnapshot
 
 
@@ -238,7 +239,8 @@ def test_notify_failure_blocks_even_after_restart(harness):
     assert queue.marker.exists()
     with pytest.raises(ReloadError, match='not confirmed'):
         restarted.reconcile(lambda _: False)
-    assert restarted.reconcile(lambda _: True) == {'status': 'reconciled'}
+    assert restarted.reconcile(lambda _: RecoveryProof(hashlib.sha256(queue.marker.read_bytes()).hexdigest(),
+                                                     True, True, True, True)) == {'status': 'reconciled'}
     assert not queue.marker.exists()
 
 

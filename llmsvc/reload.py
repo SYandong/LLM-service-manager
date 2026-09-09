@@ -7,10 +7,12 @@ this module does not signal or modify a production service by itself.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -23,6 +25,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from llmsvc.state import StateSnapshot
+from llmsvc.reload_witness import (BindingObservation, CandidateBinding, GenerationRead,
+                                   InstanceIdentity, check_visibility)
 
 
 class ReloadError(RuntimeError):
@@ -150,6 +154,7 @@ class ReloadJob:
     transform: Callable[[bytes], bytes] = field(repr=False)
     precheck: Callable[[], list[dict]] | None = field(default=None, repr=False)
     after_apply: Callable[..., None] | None = field(default=None, repr=False)
+    witness_binding: CandidateBinding | None = field(default=None, repr=False)
     status: str = "queued"
     blocked_by: list[dict] = field(default_factory=list)
     config_committed: bool = False
@@ -157,9 +162,25 @@ class ReloadJob:
     apply_seconds: float | None = None
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "description": dict(self.description), "status": self.status,
-                "blocked_by": [dict(item) for item in self.blocked_by], "error": self.error,
-                "config_committed": self.config_committed, "apply_seconds": self.apply_seconds}
+        return copy.deepcopy({"id": self.id, "description": self.description, "status": self.status,
+                              "blocked_by": self.blocked_by, "error": self.error,
+                              "config_committed": self.config_committed, "apply_seconds": self.apply_seconds})
+
+
+@dataclass(frozen=True)
+class RecoveryProof:
+    """Explicit trusted verifier attestation; never produced by a native read.
+
+    All flags must be literally True. The marker digest binds the attestation to
+    one recovery record. A persisted native binding also requires matching instance.
+    These fields do not supply a new source of settlement/identity proof.
+    """
+    marker_sha256: str
+    generation_confirmed: bool = False
+    instance_confirmed: bool = False
+    settlement_confirmed: bool = False
+    cleanup_confirmed: bool = False
+    instance: InstanceIdentity | None = None
 
 
 class ReloadQueue:
@@ -232,7 +253,8 @@ class ReloadQueue:
 
     def enqueue(self, transform: Callable[[bytes], bytes], *, description: dict,
                 dry_run: bool = False, precheck: Callable[[], list[dict]] | None = None,
-                after_apply: Callable[..., None] | None = None) -> dict:
+                after_apply: Callable[..., None] | None = None,
+                witness_binding: CandidateBinding | None = None) -> dict:
         """Pure transforms only. Dry-run creates no staging files or queue entries."""
         with self.action_lock:
             if self.marker.exists() or self.marker.is_symlink():
@@ -243,13 +265,15 @@ class ReloadQueue:
             candidate = transform(data)
             if not isinstance(candidate, bytes):
                 raise TypeError("config transform must return bytes")
+            self._validate_candidate_binding(witness_binding, candidate)
             if dry_run:
-                result = {"would": [dict(description)]}
+                result = {"would": [copy.deepcopy(description)]}
                 self.log({"kind": "config_change", "dry_run": True, **result})
                 return result
             staged = self._stage(candidate, info)
             staged.unlink()
-            job = ReloadJob(uuid.uuid4().hex, dict(description), self.clock(), transform, precheck, after_apply)
+            job = ReloadJob(uuid.uuid4().hex, copy.deepcopy(description), self.clock(), transform,
+                            precheck, after_apply, witness_binding)
             self._pending.append(job)
             self._jobs[job.id] = job
             self.log({"kind": "config_change_queued", "dry_run": False, **job.to_dict()})
@@ -282,6 +306,7 @@ class ReloadQueue:
             try:
                 original, info = self._read()
                 candidate = job.transform(original)
+                self._validate_candidate_binding(job.witness_binding, candidate)
                 staged = self._stage(candidate, info)
                 # Validation may take time or overlap an inflight event.
                 job.blocked_by = self._blockers(job)
@@ -295,9 +320,15 @@ class ReloadQueue:
                             or current != original):
                         raise ReloadError("config changed during validation")
                     digest = hashlib.sha256(candidate).hexdigest()
-                    with self.marker.open("x", encoding="utf-8") as stream:
+                    record = {"schema_version": 1, "sha256": digest, "job": job.to_dict()}
+                    if job.witness_binding is not None:
+                        record["witness_binding"] = job.witness_binding.to_dict()
+                    marker_bytes = json.dumps(record, allow_nan=False).encode("utf-8")
+                    if len(marker_bytes) > 65536:
+                        raise ReloadError("recovery marker would exceed read limit")
+                    with self.marker.open("xb") as stream:
                         marker_created = True
-                        json.dump({"sha256": digest, "job": job.to_dict()}, stream)
+                        stream.write(marker_bytes)
                         stream.flush()
                         os.fsync(stream.fileno())
                     self._sync_directory()
@@ -346,23 +377,191 @@ class ReloadQueue:
         if self.clock() >= deadline:
             raise ReloadError("configuration operation deadline exceeded")
 
-    def reconcile(self, confirm: Callable[[dict], bool], *, dry_run: bool = False) -> dict:
-        """Clear a crash marker only after external adoption AND cleanup checks.
+    @staticmethod
+    def _validate_candidate_binding(binding: CandidateBinding | None, candidate: bytes) -> None:
+        if binding is not None:
+            binding.to_dict()  # Strict, read-only shape validation.
+            if binding.candidate_sha256 != hashlib.sha256(candidate).hexdigest():
+                raise ReloadError("candidate digest does not match witness binding")
 
-        confirm is a read-only integration callback, never a retry of the reload.
-        If disk has not reached the candidate, explicit operator recovery is needed.
+    @staticmethod
+    def _record_identity(info: os.stat_result) -> tuple:
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+    def _read_marker(self) -> tuple[dict, bytes, tuple]:
+        """Bounded regular-file read; never follows links or blocks on a FIFO."""
+        fd = os.open(self.marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 65536:
+                raise ReloadError("invalid recovery marker")
+            raw = stream.read(65537)
+            after = os.fstat(stream.fileno())
+        identity = self._record_identity(before)
+        try:
+            current_identity = self._record_identity(self.marker.lstat())
+        except OSError as exc:
+            raise ReloadError("recovery marker changed while reading") from exc
+        if len(raw) > 65536 or identity != self._record_identity(after) or identity != current_identity:
+            raise ReloadError("recovery marker changed while reading")
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate marker key")
+                result[key] = value
+            return result
+        def invalid_constant(value):
+            raise ValueError("nonfinite marker value")
+        try:
+            record = json.loads(raw, object_pairs_hook=unique, parse_constant=invalid_constant)
+            if not isinstance(record, dict) or not {"sha256", "job"} <= set(record) <= {"schema_version", "sha256", "job", "witness_binding"}:
+                raise ValueError("invalid record")
+            version = record.get("schema_version", 0)
+            if type(version) is not int or version not in (0, 1):
+                raise ValueError("unsupported marker version")
+            if not isinstance(record["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"]):
+                raise ValueError("invalid digest")
+            job = record["job"]
+            if (not isinstance(job, dict) or set(job) != {"id", "description", "status", "blocked_by", "error", "config_committed", "apply_seconds"}
+                    or not isinstance(job["id"], str) or not re.fullmatch(r"[0-9a-f]{32}", job["id"])
+                    or not isinstance(job["description"], dict)
+                    or job["status"] not in ("queued", "applied", "failed", "timed_out", "reconciliation_required")
+                    or type(job["config_committed"]) is not bool
+                    or not isinstance(job["blocked_by"], list) or not all(isinstance(x, dict) for x in job["blocked_by"])
+                    or (job["error"] is not None and not isinstance(job["error"], str))
+                    or (job["apply_seconds"] is not None and (not _number(job["apply_seconds"]) or job["apply_seconds"] < 0))):
+                raise ValueError("invalid job")
+            if "witness_binding" in record:
+                binding = CandidateBinding.from_dict(record["witness_binding"])
+                if binding.candidate_sha256 != record["sha256"]:
+                    raise ValueError("binding digest mismatch")
+        except (ValueError, TypeError, KeyError, RecursionError) as exc:
+            raise ReloadError("invalid recovery marker") from exc
+        return record, raw, identity
+
+    def inspect_recovery(self, *, reading: GenerationRead | None = None,
+                         before: BindingObservation | None = None,
+                         after: BindingObservation | None = None, max_age: float = 5) -> dict:
+        """Read persisted state and optional native evidence, with zero mutation.
+
+        NativeGenerationReader.read() and instance observations are supplied by
+        the caller; this inspection does not unexpectedly perform HTTP or probes.
+        A persisted marker always fences this inspection, even when G is visible.
+        """
+        with self.action_lock:
+            result = {"status": "reconciliation_required", "fenced": True, "marker_valid": False,
+                      "candidate_file_matches": None, "candidate_generation_visible": False,
+                      "settlement_confirmed": None, "blocked_by": []}
+            try:
+                record, raw, _ = self._read_marker()
+            except FileNotFoundError:
+                result.update(status="none", fenced=False, marker_valid=None)
+                return result
+            except (OSError, ReloadError):
+                result["blocked_by"] = [{"reason": "invalid_or_unreadable_recovery_marker"}]
+                return result
+            result.update(marker_valid=True, marker_sha256=hashlib.sha256(raw).hexdigest(),
+                          candidate_sha256=record["sha256"], job_id=record["job"]["id"],
+                          description=copy.deepcopy(record["job"]["description"]),
+                          recorded_status=record["job"]["status"])
+            try:
+                data, _ = self._read()
+                result["candidate_file_matches"] = hashlib.sha256(data).hexdigest() == record["sha256"]
+            except (OSError, ReloadError):
+                result["blocked_by"].append({"reason": "candidate_file_unavailable"})
+            if result["candidate_file_matches"] is False:
+                result["blocked_by"].append({"reason": "candidate_file_digest_changed"})
+            if "witness_binding" not in record:
+                result["blocked_by"].append({"reason": "native_binding_not_persisted"})
+            elif reading is None or before is None or after is None:
+                result["blocked_by"].append({"reason": "native_evidence_unavailable"})
+            else:
+                try:
+                    visible = check_visibility(CandidateBinding.from_dict(record["witness_binding"]),
+                                               before, reading, after, now=self.clock(), max_age=max_age)
+                    result["candidate_generation_visible"] = visible.candidate_generation_visible and result["candidate_file_matches"] is True
+                    result["blocked_by"].extend({"reason": reason} for reason in visible.reasons)
+                except (ValueError, TypeError, AttributeError):
+                    result["blocked_by"].append({"reason": "invalid_native_evidence"})
+            result["blocked_by"].append({"reason": "independent_old_server_settlement_unavailable"})
+            return result
+
+    def queue_snapshot(self) -> dict:
+        """Detached, current diagnostics; do not advance, validate or execute jobs.
+
+        `status` is a read-time view; recorded_status is the actual stored state.
+        An elapsed queued job is shown timed_out without removing or notifying it.
+        Prechecks retain their existing read-only callback contract.
+        """
+        with self.action_lock:
+            now = self.clock()
+            recovery = self.inspect_recovery()
+            rows = []
+            pending = {job.id for job in self._pending}
+            for job in self._jobs.values():
+                row = job.to_dict()
+                row.update(recorded_status=job.status, source="memory",
+                           elapsed_seconds=max(0, now - job.submitted_at),
+                           remaining_seconds=max(0, self.timeout - (now - job.submitted_at)))
+                if job.status == "queued":
+                    if now - job.submitted_at >= self.timeout:
+                        row.update(status="timed_out", error="no safe reload within timeout")
+                    else:
+                        try:
+                            row["blocked_by"] = copy.deepcopy(self._blockers(job))
+                        except Exception:
+                            row["blocked_by"] = [{"reason": "inspection_unavailable"}]
+                        if recovery["fenced"]:
+                            row["blocked_by"].append({"reason": "reconciliation_required"})
+                        if row["blocked_by"]:
+                            row["status"] = "blocked"
+                row["pending"] = job.id in pending and row["status"] != "timed_out"
+                rows.append(row)
+            if recovery.get("job_id") and recovery["job_id"] not in self._jobs:
+                rows.append({"id": recovery["job_id"], "description": copy.deepcopy(recovery["description"]),
+                             "status": "reconciliation_required", "recorded_status": recovery["recorded_status"],
+                             "source": "recovery_marker", "pending": False, "config_committed": None,
+                             "elapsed_seconds": None, "remaining_seconds": None,
+                             "blocked_by": copy.deepcopy(recovery["blocked_by"]), "error": None,
+                             "apply_seconds": None})
+            return {"schema_version": 1, "observed_at_monotonic": now, "jobs": rows,
+                    "pending_ids": [job.id for job in self._pending if now - job.submitted_at < self.timeout],
+                    "fenced": recovery["fenced"], "recovery": recovery}
+
+    def reconcile(self, confirm: Callable[[dict], RecoveryProof], *, dry_run: bool = False) -> dict:
+        """Clear only with explicit full proof, bound to an unchanged valid marker.
+
+        Native visibility/inspection results, booleans and partial truthy objects
+        are not full proof. The callback is a trusted read-only verifier, not a
+        retry of the reload. No native settlement source is introduced here.
         """
         with self.action_lock:
             if dry_run:
-                result = {"would": [{"kind": "reconcile_config"}]}
                 self.log({"kind": "config_reconcile", "dry_run": True})
-                return result
-            if self.marker.is_symlink():
-                raise ReloadError("reconciliation marker is a symlink")
-            record = json.loads(self.marker.read_text())
-            data, _ = self._read()
-            if hashlib.sha256(data).hexdigest() != record["sha256"] or not confirm(record):
+                return {"would": [{"kind": "reconcile_config"}]}
+            try:
+                record, raw, identity = self._read_marker()
+                data, _ = self._read()
+            except (OSError, ReloadError) as exc:
+                raise ReloadError("invalid or unavailable recovery state") from exc
+            if hashlib.sha256(data).hexdigest() != record["sha256"]:
                 raise ReloadError("adoption and cleanup not confirmed")
+            proof = confirm(copy.deepcopy(record))
+            if (not isinstance(proof, RecoveryProof) or proof.marker_sha256 != hashlib.sha256(raw).hexdigest()
+                    or not all(value is True for value in (proof.generation_confirmed, proof.instance_confirmed,
+                                                           proof.settlement_confirmed, proof.cleanup_confirmed))):
+                raise ReloadError("adoption and cleanup not confirmed")
+            if "witness_binding" in record and proof.instance != CandidateBinding.from_dict(record["witness_binding"]).instance:
+                raise ReloadError("recovery instance not confirmed")
+            try:
+                _, current_raw, current_identity = self._read_marker()
+                current_data, _ = self._read()
+            except (OSError, ReloadError) as exc:
+                raise ReloadError("recovery state changed during confirmation") from exc
+            if (current_raw != raw or current_identity != identity
+                    or hashlib.sha256(current_data).hexdigest() != record["sha256"]):
+                raise ReloadError("recovery state changed during confirmation")
             self.marker.unlink()
             self._sync_directory()
             self.log({"kind": "config_reconcile", "dry_run": False})

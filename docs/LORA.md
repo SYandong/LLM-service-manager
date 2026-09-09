@@ -185,6 +185,30 @@ ticks、候选 SHA256）与前后 `BindingObservation`：观测须覆盖本次�
 core 后续须在独立集成中提供可靠的前后观测及收尾证据。测试使用 fake HTTP 和
 #91 已提交的原生响应，不重复长实验。
 
+### 队列快照与重建后的恢复检查
+
+`ReloadQueue.queue_snapshot()` / `ModelRegistry.queue_snapshot()` 返回分离的
+`jobs`、`pending_ids`、`fenced` 和 `recovery`。任务包含读取时的 queued/blocked/
+timed_out/终态，以及 `recorded_status`；读取不会出队、执行动作或发送事件，
+实际超时推进仍由 `process_once()` 完成。仅标记中的未完成任务可在重建后显示，
+不会虚构已丢失的内存队列或跨重启 monotonic 时长。
+
+`inspect_recovery(reading=None, before=None, after=None, max_age=5)` 限量读取
+64 KiB 常规非链接标记并验证结构、候选摘要；坏标记仍保持 fence。它不自动
+联网。调用方可先用 `NativeGenerationReader.read(deadline=...)` 得到读数，再
+传入包围该读取的 `BindingObservation`。`enqueue(..., witness_binding=...)`
+可将已知 `CandidateBinding` 存入标记，提交前和重算后必须匹配精确候选摘要；
+旧标记没有绑定时保持未知，不从当前实例猜测原始身份。即使 native G 可见，
+恢复检查仍返回 `reconciliation_required`、`settlement_confirmed=None`，不清标记。
+
+`reconcile(confirm, dry_run=False)` 现在要求 verifier 返回显式 `RecoveryProof`，
+不再接受裸 bool、truthy 字典或只读可见性结果。证明须绑定当前 `marker_sha256`，
+明确确认 generation、实例、旧 server 收尾、目标清理；如标记含实例绑定，证明
+实例必须一致。标记和配置在 verifier 前后都要保持匹配。部分证明一律拒绝；
+`dry_run` 不读标记、不调用 verifier、不清标记。这个类型只表达独立可信 verifier
+的完整断言，不生成新的收尾/重启证明；目前只有显式 fixture 可以提供这些模拟
+事实。core 后续负责 HTTP/config/main 接入，此处未挂载诊断或恢复写接口。
+
 ## 交给 ops 的有界实测计划
 
 只有 ops 持有 `gpu-test.lock` 后执行。每次目标不超过 5 分钟；没有缓存的
