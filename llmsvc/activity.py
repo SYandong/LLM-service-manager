@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 from urllib.parse import quote
 
+from .config import canonical_ip
+
 
 UNKNOWN_SOURCE = "unknown"
 
@@ -27,7 +29,12 @@ class ActivityReader:
         deadline_ms: int = 80,
     ) -> None:
         self.path = Path(path)
-        self.ip_containers = dict(ip_containers or {})
+        self.ip_containers: dict[str, str] = {}
+        for source, container in (ip_containers or {}).items():
+            source = canonical_ip(source)
+            if source in self.ip_containers and self.ip_containers[source] != container:
+                raise ValueError("conflicting container mappings for the same IP")
+            self.ip_containers[source] = container
         self.deadline_ms = deadline_ms
         self.last_error: Optional[str] = None
 
@@ -369,10 +376,10 @@ def _source_ip(value: Optional[str]) -> Optional[str]:
         text = text[3:].strip()
     if not text:
         return None
-    parts = text.split(".")
-    if len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts):
-        return text
-    return None
+    try:
+        return canonical_ip(text)
+    except ValueError:
+        return None
 
 
 def _group_value(by: str, model: str, source: Mapping[str, Any]) -> str:
