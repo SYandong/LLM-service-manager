@@ -317,10 +317,12 @@ quiet、配置采用及旧资源结清证明。列表与预览可用不代表提
 - `blocked_by` 包括 `registry_writes_disabled`、实际 quiet 状态（初始为
   `inflight_stream_unknown`）、当前 reload 内存/保护准入与已有故障屏障。
   合法编辑预览不是可提交承诺；未知来源不能替换成零在途或已结清。
-- 未配置返回 `503 registry_not_configured`；请求或登记校验失败返回
-  `400 registry_invalid_request` 与说明；配置不可用/不安全返回
-  `503 registry_unavailable`；已有待核查事务标记返回
-  `409 registry_reconciliation_required`，不靠重试或预览清除标记。
+- 未配置返回 `503 registry_not_configured`；调用方请求或编辑校验失败返回
+  `400 registry_invalid_request` 与说明。GET 的配置来源不可读、不安全、
+  无效或无法序列化时返回 `503 registry_unavailable`，不归因于调用方请求。
+  已有待核查事务标记时，仍可读取的 GET 返回 `200` 与 `records`，在
+  `blocked_by` 中包含 `registry_reconciliation_required`；编辑预览则返回
+  `409 registry_reconciliation_required`。读取/重试不清除标记或推断结清。
 - 该阶段所有非 dry-run 登记/注销请求仍返回 `405`，依据当前模式使用
   `read_only` 或 `operation_not_enabled`；切换其他动作开关也不能启用它。
   不启动 reload worker，不借助空成功回调伪造验证、采用或资源结清。
