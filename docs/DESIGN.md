@@ -352,6 +352,30 @@ quiet、配置采用及旧资源结清证明。列表与预览可用不代表提
 事件或模型动作。HTTP 不接受任意路径、URL 或证明；不提供 proof 提交、
 reconcile、重试或强制清除接口。真实登记提交仍受 §3 完整协议约束。
 
+### 登记列表与预览详情（#152）
+
+后续详情接入复用现有 registry 方法，在原有响应中增加以下字段；它不改变
+列表/预览的只读边界，也不要求修改已就绪的前置功能提交。
+
+- `GET /v1/models` 保留 `records/writes_enabled/blocked_by`，增加
+  `inventory`，直接采用 `ModelRegistry.inventory()` 的独立快照。
+  `records` 仍仅列临时记录；`inventory.models` 可列常驻配置名，并明确
+  `source:config` 与 `temporary`。配置存在不代表已采用，过期或缺少运行态
+  观测保持 unknown；idle 到期时间不承诺已执行注销。
+- add/rm 预览保留 `would/dry_run/config_committed/blocked_by`，增加 `plan`，
+  从 `preview_add/preview_remove` 返回的元数据选取 `model`（add）、
+  `projected_base_sha256`、`candidate_sha256`、`port_reserved:false`
+  （适用时）及 `config_written:false`；不返回候选全文或命令配置。
+  `util_macro` 是配置值，不是实测内存；计划端口不预留，摘要不证明采用，
+  未来提交须基于当时来源重新计算。
+- model 的 `removable` 与局部阻塞不替代全局 `blocked_by`。禁写、quiet
+  未知、内存/保护、故障与恢复标记限制继续显示。内部 protected remove
+  的空动作/阻塞结果在 HTTP 层保持原有 `400` 拒绝语义；marker 预览 `409`、
+  来源不可用 `503`、请求无效 `400`、真实写入 `405` 均不改变。
+- 详情读取/预览不生成 job、不变更队列、意图或记账，不做 native 探测、
+  worker、验证器、文件提交或模型动作。兼容原基本字段，详情中的未知值
+  不补零；§3 的真实提交证明仍是独立要求。
+
 ## 6. CLI 与 TUI
 
 `cli/llm` 是单文件、仅标准库，用户复制到自己容器即可。子命令：`status` `top` `free` `wake` `pin` `unpin` `reserve` `add` `rm` `usage`。
