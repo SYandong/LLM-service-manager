@@ -44,7 +44,9 @@ def system(tmp_path):
             models=tuple(models.values()), errors=state["errors"], memory=MemoryState(state["memory"], 0),
             activity=tuple(Activity(name, time.time()-1000, 0, 0, 0) for name in models))
     config = SchedulerConfig("127.0.0.1", 8011, read_only=False, placement_enabled=True,
-        state_db_path=str(tmp_path / "state.sqlite"), placement_wait_seconds=0.08,
+        # Positive durable grants are functional tests, not an 80ms host/IO
+        # benchmark. Negative waits opt into their short deadline explicitly.
+        state_db_path=str(tmp_path / "state.sqlite"), placement_wait_seconds=2.0,
         action_poll_seconds=0.005, request_timeout_seconds=0.3, lease_probe_seconds=0.03)
     store = IntentStore(config.state_db_path, action_lock=threading.RLock())
     scheduler = Scheduler(config, collect, store=store)
@@ -134,6 +136,43 @@ def test_uncertain_confirmation_is_503_not_launcher_stop_conflict(system, observ
     assert scheduler.store.lease(lease_id)[0].status == "pending"
 
 
+@pytest.mark.parametrize("pause", [0.12, 0.4])
+def test_functional_grant_survives_predecision_delay_then_keeps_unknown_confirm(system, pause):
+    scheduler, state, _ = system
+    clock = [1000.0]
+    scheduler.placement.monotonic = lambda: clock[0]
+    reconcile = scheduler.placement.reconcile
+    timeline = []
+
+    def delayed_reconcile(*, deadline=None):
+        result = reconcile(deadline=deadline)
+        if not timeline:
+            # Simulate scheduling/administrative delay before decision/proof,
+            # not a late unit observation or a real sleep on the test host.
+            timeline.append({"phase": "before_decision", "deadline": deadline,
+                             "now": clock[0], "leases": len(scheduler.store.leases()),
+                             "errors": scheduler.snapshot().errors})
+            clock[0] += pause
+        return result
+
+    scheduler.placement.reconcile = delayed_reconcile
+    try:
+        lease_id = grant(scheduler)["lease_id"]
+    except LeaseError as exc:
+        pytest.fail(f"functional grant failed before confirmation: {exc.error}; "
+                    f"timeline={timeline}; now={clock[0]}; blockers={exc.blockers}; "
+                    f"probes={state['probes']}; leases={scheduler.store.leases()}")
+    assert timeline[0]["errors"] == () and timeline[0]["leases"] == 0
+    assert state["probes"] == ["a"]
+    ready(scheduler, state, lease_id)
+    state["observations"]["a"] = UnitObservation()
+    with pytest.raises(LeaseError) as caught:
+        scheduler.placement.finish("confirm", lease_id)
+    assert caught.value.status == 503
+    assert scheduler.store.lease(lease_id)[0].status == "pending"
+    assert scheduler.store.lease(lease_id)[0].budget_gb == 60
+
+
 def test_expiry_retains_loading_then_auto_confirms_or_releases(system):
     scheduler, state, _ = system
     lease_id = grant(scheduler)["lease_id"]
@@ -184,7 +223,6 @@ def test_restart_reconciles_persisted_accounts_and_keeps_pin(system, mode, expec
 
 def test_wait_releases_lock_for_confirm_release_and_never_resets_deadline(system):
     scheduler, state, _ = system
-    scheduler.config = replace(scheduler.config, placement_wait_seconds=0.4)
     first = grant(scheduler)["lease_id"]
     entered = threading.Event()
     original_wait = scheduler.changed.wait
@@ -194,13 +232,13 @@ def test_wait_releases_lock_for_confirm_release_and_never_resets_deadline(system
     scheduler.changed.wait = wait
     with ThreadPoolExecutor(1) as pool:
         waiting = pool.submit(grant, scheduler, "b")
-        assert entered.wait(0.2)
+        assert entered.wait(2)
         ready(scheduler, state, first)
         assert scheduler.placement.finish("confirm", first)["status"] == "confirmed"
         state["models"]["a"] = replace(state["models"]["a"], state="stopped", unit_active=False)
         state["observations"]["a"] = UnitObservation(False, True)
         assert scheduler.placement.finish("release", first)["status"] == "released"
-        assert waiting.result(timeout=1)["gpu"] == 0
+        assert waiting.result(timeout=3)["gpu"] == 0
     scheduler.config = replace(scheduler.config, placement_wait_seconds=0.05)
     stop = threading.Event()
     def notify():
@@ -223,6 +261,7 @@ def test_wait_releases_lock_for_confirm_release_and_never_resets_deadline(system
     ("unit", "unit_exists"), ("unknown-unit", "unit_state_unknown"), ("errors", "unknown_or_stale_snapshot")])
 def test_blockers_do_not_actuate_or_allocate(system, condition, reason):
     scheduler, state, _ = system
+    scheduler.config = replace(scheduler.config, placement_wait_seconds=0.08)
     if condition == "reserve":
         scheduler.store.put_reserve(Reserve("held", 0, 1, time.time()+100, "owner"))
     elif condition == "ram":
@@ -362,6 +401,7 @@ def test_readonly_version_one_does_not_migrate_and_writable_upgrade_preserves_pi
 
 def test_protected_or_eviction_required_residents_are_never_stopped(system):
     scheduler, state, _ = system
+    scheduler.config = replace(scheduler.config, placement_wait_seconds=0.08)
     state["models"]["a"] = replace(state["models"]["a"], state="awake", unit_active=True,
         health_ok=True, is_sleeping=False, gpu=0, budget_gb=80, resident_gb=80)
     scheduler.sample_once()
@@ -378,6 +418,7 @@ def test_protected_or_eviction_required_residents_are_never_stopped(system):
 
 def test_wait_only_consumes_published_samples_and_enforces_same_deadline(system):
     scheduler, _, _ = system
+    scheduler.config = replace(scheduler.config, placement_wait_seconds=0.08)
     scheduler.store.put_reserve(Reserve("held", 0, 100, time.time()+100, "owner"))
     scheduler.collect = lambda: pytest.fail("place must not start a probe beyond its deadline")
     started = time.monotonic()
@@ -415,6 +456,7 @@ def test_pending_cold_starts_reserve_host_memory_and_configured_budget_floor(sys
     transport.models["b"]["util"] = 0.2
     state["memory"] = 165  # Two 10 GiB cold starts would breach the 150 floor.
     scheduler.sample_once()
+    scheduler.config = replace(scheduler.config, placement_wait_seconds=0.08)
     with pytest.raises(LeaseError) as caught:
         grant(scheduler, "b", util=0.2)
     assert "host_memory_floor" in [b.reason for b in caught.value.blockers]
@@ -504,6 +546,7 @@ def test_missing_trusted_identity_reports_deduplicated_recovery_without_probe(sy
     scheduler.placement.reconcile()
     errors = scheduler.snapshot().errors
     assert "lease_model_unobserved:a" in errors
+    scheduler.config = replace(scheduler.config, placement_wait_seconds=0.08)
     with pytest.raises(LeaseError):
         grant(scheduler, "b")
     assert state["probes"] == []
@@ -544,6 +587,7 @@ def test_restore_verified_identity_and_reopen_same_ledger_recovers_safely(system
         if mode == "absent":
             assert grant(scheduler, "b")["gpu"] == 0
         else:
+            scheduler.config = replace(scheduler.config, placement_wait_seconds=0.08)
             with pytest.raises(LeaseError):
                 grant(scheduler, "b")
             assert scheduler.store.lease(lease_id)[0].budget_gb == 60
