@@ -54,8 +54,10 @@ def test_readonly_preview_zero_writes_and_actual_405(pin_api,pin_service,monkeyp
 
 
 @pytest.mark.parametrize('words',[['unreserve'],['unreserve',''],['unreserve','x\ny']])
-def test_invalid_id_is_rejected(pin_api,words):
+def test_invalid_id_is_rejected(pin_api,words,capsys):
     with pytest.raises(SystemExit): command(pin_api,*words)
+    if len(words)>1:
+        assert "Reservation ID" in capsys.readouterr().err
 
 
 def test_actual_lost_delete_reply_is_not_retried(pin_api,pin_service):

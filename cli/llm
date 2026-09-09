@@ -762,6 +762,13 @@ def model_name(value):
     return value
 
 
+def reservation_id(value):
+    try:
+        return model_name(value)
+    except argparse.ArgumentTypeError:
+        raise argparse.ArgumentTypeError("Reservation ID must be nonempty and contain no control characters") from None
+
+
 def validate_registry_result(args, result):
     try:
         if args.command == "registry":
@@ -950,7 +957,7 @@ def build_parser(parser_class=argparse.ArgumentParser):
         model.add_argument("--dry-run", action="store_true")
         model.add_argument("--json", action="store_true")
     unreserve = commands.add_parser("unreserve", help="Remove a reservation without waking models")
-    unreserve.add_argument("id", type=model_name, help="Reservation ID from status/reserve response")
+    unreserve.add_argument("id", type=reservation_id, help="Reservation ID from status/reserve response")
     unreserve.add_argument("--dry-run", action="store_true")
     unreserve.add_argument("--json", action="store_true")
     return parser
