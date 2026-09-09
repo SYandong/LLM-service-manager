@@ -24,3 +24,7 @@ collectors: {}
 #   shared_roots: [/absolute/shared/models]
 #   daemon_port_range: [8101, 8199]
 #   reserved_ports: [] # Optional; scheduler listen/model collector ports reserved too.
+#   # Optional byte caps: strict integers 1..16777216; no unlimited mode.
+#   config_max_bytes: 1048576
+#   model_config_max_bytes: 1048576
+#   weight_index_max_bytes: 8388608
