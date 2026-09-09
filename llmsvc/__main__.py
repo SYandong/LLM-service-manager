@@ -72,6 +72,31 @@ def build_usage(collector):
     return usage
 
 
+def build_registry(config, scheduler):
+    """Mount existing registry transforms with no live validation/reload path."""
+    if not config.registry:
+        return None
+    from pathlib import Path
+    from llmsvc.registry import ModelRegistry
+    from llmsvc.reload import QuietPeriod, ReloadQueue
+    def disabled(*args, **kwargs):
+        raise RuntimeError("registry writes are not enabled")
+    def reserved_ports():
+        ports = list(config.registry.get("reserved_ports", [])) + [config.listen_port]
+        for model in config.collectors.get("models", {}).values():
+            if "port" in model:
+                ports.append(model["port"])
+        return ports
+    queue = ReloadQueue(Path(config.registry["config_path"]), action_lock=scheduler.action_lock,
+        quiet=QuietPeriod(), snapshot=scheduler.snapshot, validate=disabled, notify_reload=disabled,
+        log=lambda event: logging.getLogger("llmsvc.registry").info(json.dumps(event, allow_nan=False)),
+        wall_clock=scheduler.clock, max_snapshot_age=config.max_snapshot_age_seconds,
+        operation_timeout=min(config.request_timeout_seconds, 60))
+    return ModelRegistry(queue, shared_roots=config.registry["shared_roots"],
+        daemon_port_range=tuple(config.registry["daemon_port_range"]), reserved_ports=reserved_ports,
+        now=scheduler.clock)
+
+
 def main():
     parser = argparse.ArgumentParser(description="llmsvc scheduler (read-only by default)")
     parser.add_argument("--version", action="version", version=__version__)
@@ -97,6 +122,7 @@ def main():
         if config.state_db_path:
             store = IntentStore(config.state_db_path, action_lock=threading.RLock(), read_only=config.read_only)
         scheduler = Scheduler(config, collect=collector, store=store, usage=build_usage(collector), event_relay=event_relay)
+        scheduler.registry = build_registry(config, scheduler)
         if config.model_actions_enabled:
             scheduler.model_actions = ModelActionController(scheduler, transport)
         if config.placement_enabled:
