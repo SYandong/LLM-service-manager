@@ -35,6 +35,9 @@ Integration owns subsequent release coordination. A single release owner
 prepares the version bump, changelog and artifacts in an isolated worktree.
 Other implementation lanes continue their own files; coordinate the three
 version literals in `pyproject.toml`, `llmsvc/__init__.py` and `cli/llm`.
+The release PR also updates README release-page links, wheel filenames and
+command availability to match the included code, coordinating these narrow
+changes with the README owner. Do not describe an unmerged API as released.
 Root owns the initial #76 release. Use a `chore/<issue>-release-...` branch and a
 `chore(release): ...` commit/PR title under this explicit user authorization.
 
