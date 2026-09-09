@@ -4,7 +4,7 @@ llama-swap 之上的多 GPU 控制面：查看模型与用量、请求释放/唤
 pin 与 GPU reserve，并提供可选终端面板。llama-swap 和 vllm-wrapper
 负责推理路由、排队及后端 sleep/wake；scheduler 负责资源记账、保护和调度。
 
-当前文档面向 [v0.1.0-alpha.6 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.6)。
+当前文档面向 [v0.1.0-alpha.7 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.7)。
 发布功能不等于所在部署已启用它们：scheduler 默认只读，模型动作、放置、
 自动策略及故障恢复各有独立开关。实现与现场验收进度见 [ROADMAP](docs/ROADMAP.md)。
 
@@ -57,7 +57,7 @@ PYREQUEST
 
 ## 用户：CLI、状态与可选 TUI
 
-从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.6)
+从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.7)
 下载 `llm` 和 `SHA256SUMS`，核对对应 SHA-256 后，将脚本放在当前目录：
 
 ```sh
@@ -90,7 +90,7 @@ RAM   llmsvc 86/200 GiB budget  host available 823 GiB
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install './llmsvc-0.1.0a6-py3-none-any.whl[tui]'
+.venv/bin/python -m pip install './llmsvc-0.1.0a7-py3-none-any.whl[tui]'
 .venv/bin/llm
 ```
 
@@ -126,8 +126,11 @@ free/reserve 默认客户端等待 150 秒，wake 为 930 秒，可用 `--wait` 
 不会改变服务端期限。断线后先查 `status`，客户端不会重试写操作。
 客户端不切换服务端开关，也不绕过 `read_only` / `operation_not_enabled`。
 `unreserve ID [--dry-run]` 通过现有 DELETE API 幂等解除预约，TUI 使用同一命令；
-它不唤醒模型，丢失响应时不自动重试。当前发布 CLI 尚无 add/rm 或 reload 命令；
-不要据设计草案调用未挂载 API。
+它不唤醒模型，丢失响应时不自动重试。配置过 registry 的 scheduler 还支持
+`models`（临时登记记录）以及 `add PATH --name NAME --base BASE --dry-run` /
+`rm NAME --dry-run`。PATH 必须位于服务可读且允许的共享目录；预览不登记模型、
+不预留端口，合法编辑仍可能因全局条件而不可提交。实际 add/rm 写入仍返回 405，
+尚无已发布的 reload 或 registry job/reconcile 命令，不要据草案调用未挂载 API。
 
 ## 管理员：架构、部署与回滚
 
@@ -167,7 +170,7 @@ python3 -m llmsvc --config deploy/scheduler.example.yaml --check-config
 | 并发与冷启动 | [concurrencyLimit 准备](deploy/CONCURRENCY.md)、[薄 launcher](deploy/LAUNCHER.md)。32 客户端实测采用固定 llama-swap 加 fake backend；不是所有 vLLM 模型的容量保证。 |
 | TTL/reaper 与生产回滚 | [转换顺序](docs/OPERATIONS.md)及 [DESIGN §7](docs/DESIGN.md#7-部署与验证)。保留完整旧配置/脚本，不并行启用冲突策略；TTL 为零时只停 scheduler 会失去 idle sleep。 |
 | 故障恢复与账本 | [FAULTS](llmsvc/FAULTS.md)、[运维恢复限制](docs/OPERATIONS.md#fault-fences-and-ledger-rollback-130)。默认关闭，真实首 claim 才原子迁移 v2→v3；只读/dry-run 不迁移，旧 v2 程序拒绝 v3。 |
-| 新模型、LoRA 与 reload | [登记/LoRA 现状](docs/LORA.md)及 [DESIGN](docs/DESIGN.md)。准备服务可见权重、唯一模型名/端口、预算和完整配置候选，交管理员审核；当前不能通过已发布 CLI/HTTP 自助完成登记。 |
+| 新模型、LoRA 与 reload | [登记/LoRA 现状](docs/LORA.md)及 [DESIGN](docs/DESIGN.md)。准备服务可见权重、唯一模型名/端口、预算和完整配置候选，交管理员审核；配置过 registry 时可用 CLI/HTTP 列表及 add/rm 预览，真实登记提交仍未开放。 |
 
 启用故障检测前还需验证实际采样约 1 Hz 与严格证据时间界限（含轮次小于
 2 秒）；默认 15 秒采样不能证明 10 秒谓词，配置目标不能替代实测。
