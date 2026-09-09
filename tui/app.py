@@ -487,7 +487,7 @@ class SchedulerApp(App):
         self.prepare_command("wake")
 
     def action_help(self):
-        self.show_result("f prefill free · p prefill selected pin (duration required) · w prefill selected wake · Enter submits · free --ram confirms separately · free [--gpu N] [--need 80G] [--ram] · wake MODEL [--wait 930] · pin MODEL --for 8h · unpin MODEL · reserve --gpu N --size 80G --for 4h · all operations accept --dry-run · status · usage --days 7|30 · u usage · / command · Ctrl+R reset events after known restart · q quit")
+        self.show_result("f prefill free · p prefill selected pin (duration required) · w prefill selected wake · Enter submits · free --ram confirms separately · free [--gpu N] [--need 80G] [--ram] · wake MODEL [--wait 930] · pin MODEL --for 8h · unpin MODEL · unreserve ID · reserve --gpu N --size 80G --for 4h · all operations accept --dry-run · status · usage --days 7|30 · u usage · / command · Ctrl+R reset events after known restart · q quit")
 
     def action_reset_events(self):
         self.event_reader.reset_cursor()
@@ -572,7 +572,7 @@ class SchedulerApp(App):
                     raise CommandMessage("Shortcut model is no longer in the snapshot; refresh and select it again")
             if args.command == "usage":
                 self.show_usage(args)
-            elif args.command in ("pin", "unpin", "free", "wake", "reserve"):
+            elif args.command in ("pin", "unpin", "free", "wake", "reserve", "unreserve"):
                 if self._write_busy:
                     self.show_result("An operation is already running; wait for its result (no request queued)")
                 elif args.command == "free" and args.ram and not args.dry_run:
