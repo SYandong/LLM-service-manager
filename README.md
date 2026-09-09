@@ -4,9 +4,9 @@ llama-swap 之上的多 GPU 控制面：查看模型与用量、请求释放/唤
 pin 与 GPU reserve，并提供可选终端面板。llama-swap 和 vllm-wrapper
 负责推理路由、排队及后端 sleep/wake；scheduler 负责资源记账、保护和调度。
 
-当前文档面向 [v0.1.0-alpha.7 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.7)。
+当前文档面向 [v0.1.0-alpha.8 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.8)。
 发布功能不等于所在部署已启用它们：scheduler 默认只读，模型动作、放置、
-自动策略及故障恢复各有独立开关。实现与现场验收进度见 [ROADMAP](docs/ROADMAP.md)。
+自动策略、故障恢复及 sleeping recovery 各有独立开关。实现与现场验收进度见 [ROADMAP](docs/ROADMAP.md)。
 
 ## 用户：第一次请求
 
@@ -57,7 +57,7 @@ PYREQUEST
 
 ## 用户：CLI、状态与可选 TUI
 
-从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.7)
+从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.8)
 下载 `llm` 和 `SHA256SUMS`，核对对应 SHA-256 后，将脚本放在当前目录：
 
 ```sh
@@ -90,7 +90,7 @@ RAM   llmsvc 86/200 GiB budget  host available 823 GiB
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install './llmsvc-0.1.0a7-py3-none-any.whl[tui]'
+.venv/bin/python -m pip install './llmsvc-0.1.0a8-py3-none-any.whl[tui]'
 .venv/bin/llm
 ```
 
@@ -127,12 +127,18 @@ free/reserve 默认客户端等待 150 秒，wake 为 930 秒，可用 `--wait` 
 客户端不切换服务端开关，也不绕过 `read_only` / `operation_not_enabled`。
 `unreserve ID [--dry-run]` 通过现有 DELETE API 幂等解除预约，TUI 使用同一命令；
 它不唤醒模型，丢失响应时不自动重试。配置过 registry 的 scheduler 还支持
-`models`（临时登记记录）以及 `add PATH --name NAME --base BASE --dry-run` /
+`models`（临时登记记录及配置 inventory）、`registry`（只读队列/恢复状态）以及 `add PATH --name NAME --base BASE --dry-run` /
 `rm NAME --dry-run`。PATH 必须位于服务可读且允许的共享目录；预览不登记模型、
 不预留端口，合法编辑仍可能因全局条件而不可提交。实际 add/rm 写入仍返回 405，
-尚无已发布的 reload 或 registry job/reconcile 命令，不要据草案调用未挂载 API。
+`registry` 只读展示已知 job 与恢复状态，未知值保持 null；它不启动 worker、
+提交证明、reconcile 或清除 fence。inventory 与预览计划不证明运行时已经采纳配置。
 
 ## 管理员：架构、部署与回滚
+
+alpha.8 提供默认关闭的 [sleeping recovery 执行器](llmsvc/RECOVERY.md)。
+首次实际普通恢复 claim 会原子升级状态库到 schema v4；旧 schema-v3 版本拒绝
+该库。不要删除 claim 或覆盖旧备份来强行降级。发布和安装不授权启用该执行器，
+运维边界与回滚要求见 [操作手册](docs/OPERATIONS.md)。
 
 ```mermaid
 flowchart LR
