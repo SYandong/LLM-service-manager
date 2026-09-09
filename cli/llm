@@ -727,12 +727,6 @@ def format_action_result(args, result):
 
 
 def result_exit_code(args, result):
-    if args.command == "models":
-        return 1 if result.get("known") is False or result.get("error") else 0
-    if args.command in ("add", "rm"):
-        if args.dry_run:
-            return 1 if result.get("blocked_by") else 0
-        return 0 if result["status"] == "applied" else 1
     if args.command == "usage":
         return 0 if result["known"] else 1
     if args.command in ("pin", "unpin", "free", "wake", "reserve") and args.dry_run:
@@ -758,43 +752,6 @@ def model_name(value):
     if not value.strip() or any(unicodedata.category(ch).startswith("C") for ch in value):
         raise argparse.ArgumentTypeError("Model name must be nonempty and contain no control characters")
     return value
-
-
-def validate_registry_result(args, result):
-    try:
-        if args.dry_run:
-            if not isinstance(result["would"], list):
-                raise ValueError
-            expected = "add_model" if args.command == "add" else "remove_model"
-            name = args.name if args.command == "add" else args.model
-            for item in result["would"]:
-                if item["kind"] != expected or item["model"] != name:
-                    raise ValueError
-        else:
-            if result["status"] not in ("queued", "blocked", "applied", "failed", "timed_out", "reconciliation_required"):
-                raise ValueError
-            if "config_committed" in result and type(result["config_committed"]) is not bool:
-                raise ValueError
-            if result["status"] == "applied" and result.get("config_committed") is not True:
-                raise ValueError
-        blockers = result.get("blocked_by", [])
-        if not isinstance(blockers, list) or not all(isinstance(item["reason"], str) for item in blockers):
-            raise ValueError
-    except (KeyError, TypeError, ValueError):
-        raise ClientError("Invalid model registry response; check state/events before retrying an uncertain write") from None
-    return result
-
-
-def format_registry_result(args, result):
-    if args.command == "models":
-        label = "Registry listing" if result.get("known") is not False and not result.get("error") else "Registry listing unavailable"
-    elif args.dry_run:
-        label = "Model change preview; nothing queued or applied"
-    else:
-        label = "Model change queued; not applied" if result["status"] == "queued" else "Model change: " + result["status"]
-        committed = result.get("config_committed")
-        label += "\nConfig committed: " + ("yes" if committed is True else "no" if committed is False else "unknown")
-    return label + "\n" + json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
 
 
 def validate_pin_result(args, result):
@@ -882,37 +839,10 @@ def build_parser(parser_class=argparse.ArgumentParser):
     reserve.add_argument("--dry-run", action="store_true", help="Preview without persistence, model actions or ID allocation")
     reserve.add_argument("--json", action="store_true", help="Print the complete receipt and evacuation result")
     reserve.add_argument("--wait", type=action_timeout, default=150, help="HTTP response wait seconds (default:150); does not change server deadline")
-    models = commands.add_parser("models", help="List configured registry models through scheduler")
-    models.add_argument("--json", action="store_true")
-    for name in ("add", "rm"):
-        model = commands.add_parser(name, help="Register full weights" if name == "add" else "Remove a temporary model")
-        if name == "add":
-            model.add_argument("path", type=model_name, help="Full-weight path visible to scheduler; validated there")
-            model.add_argument("--name", required=True, type=model_name)
-            model.add_argument("--base", required=True, type=model_name)
-        else:
-            model.add_argument("model", type=model_name)
-        model.add_argument("--dry-run", action="store_true")
-        model.add_argument("--json", action="store_true")
     return parser
 
 
 def execute_command(args, client, *, now=None):
-    if args.command == "models":
-        return client.request("GET", "/v1/models")
-    if args.command in ("add", "rm"):
-        query = "?dry_run=1" if args.dry_run else ""
-        try:
-            if args.command == "add":
-                result = client.request("POST", "/v1/models" + query,
-                                        {"name": args.name, "path": args.path, "base": args.base})
-            else:
-                result = client.request("DELETE", "/v1/models/" + quote(args.model, safe="") + query)
-        except ClientError as exc:
-            if exc.status is not None or args.dry_run:
-                raise
-            raise ClientError(str(exc) + "; model change outcome unknown: check state/events; no automatic write retry") from None
-        return validate_registry_result(args, result)
     if args.command == "reserve":
         payload = {"gpu": args.gpu, "size_gb": args.size, "until": intent_expiry(args.duration, now),
                    "by": PIN_COMPATIBILITY_LABEL}
@@ -973,8 +903,6 @@ def format_result(args, result, width=100):
         return format_action_result(args, result)
     if args.command == "reserve":
         return format_reserve_result(args, result)
-    if args.command in ("models", "add", "rm"):
-        return format_registry_result(args, result)
     return format_status(result, width=width)
 
 
