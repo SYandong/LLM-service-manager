@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import re
@@ -969,6 +970,15 @@ class ModelRegistry:
         return self.queue.inspect_recovery(**evidence)
 
     def add(self, body: Mapping[str, Any], *, dry_run: bool = False) -> dict:
+        return self._add(body, dry_run=dry_run)
+
+    def preview_add(self, body: Mapping[str, Any]) -> dict:
+        """Plan against pending FIFO changes; no port reservation or config write."""
+        report: dict = {}
+        result = self._add(body, dry_run=True, report=report)
+        return {**result, **report, "port_reserved": False, "config_written": False}
+
+    def _add(self, body: Mapping[str, Any], *, dry_run: bool, report: dict | None = None) -> dict:
         if "lora" in body:
             raise RegistryError("LoRA registration is disabled pending issue #21 measurements")
         if set(body) != {"name", "path", "base"} or not all(isinstance(v, str) and v for v in body.values()):
@@ -980,10 +990,34 @@ class ModelRegistry:
             result = add_full_weight_model(config, records, name=name, model_path=path, base_model=base,
                                            shared_roots=self.shared_roots, daemon_port_range=self.daemon_port_range,
                                            reserved_ports=self.reserved_ports(), created_at=created_at)
-            return self._encode(data, result.config, result.records)
+            candidate = self._encode(data, result.config, result.records)
+            if report is not None:
+                macros = result.config["models"][name].get("macros")
+                report.update(model={"name": name, "base": base,
+                                     "daemon_port": result.record["daemon_port"],
+                                     "util_macro": copy.deepcopy(macros.get("util") if isinstance(macros, Mapping) else None)},
+                              projected_base_sha256=hashlib.sha256(data).hexdigest(),
+                              candidate_sha256=hashlib.sha256(candidate).hexdigest(), blocked_by=[])
+            return candidate
         return self.queue.enqueue(transform, description={"kind": "add_model", "model": name, "base": base}, dry_run=dry_run)
 
     def remove(self, name: str, *, dry_run: bool = False, require_expired: bool = False) -> dict:
+        return self._remove(name, dry_run=dry_run, require_expired=require_expired)
+
+    def preview_remove(self, name: str) -> dict:
+        """Show model-level protection or the projected removal without cleanup."""
+        with self.queue.action_lock:
+            plan = plan_temporary_model_removal(name, self.records(), self.queue.snapshot(), now=self.now(),
+                                                max_snapshot_age_seconds=self.queue.max_snapshot_age)
+            if not plan.allowed:
+                return {"would": [], "blocked_by": [asdict(item) for item in plan.blockers],
+                        "candidate_sha256": None, "projected_base_sha256": None, "config_written": False}
+            report: dict = {}
+            result = self._remove(name, dry_run=True, report=report)
+            return {**result, **report, "config_written": False}
+
+    def _remove(self, name: str, *, dry_run: bool, require_expired: bool = False,
+                report: dict | None = None) -> dict:
         validate_safe_model_name(name)
         with self.queue.action_lock:
             existing = self._removals.get(name)
@@ -1005,7 +1039,11 @@ class ModelRegistry:
             def transform(data: bytes) -> bytes:
                 config, records = self._decode(data)
                 result = remove_temporary_model(config, records, name=name, snapshot=self.queue.snapshot(), now=self.now())
-                return self._encode(data, result.config, result.records)
+                candidate = self._encode(data, result.config, result.records)
+                if report is not None:
+                    report.update(projected_base_sha256=hashlib.sha256(data).hexdigest(),
+                                  candidate_sha256=hashlib.sha256(candidate).hexdigest(), blocked_by=[])
+                return candidate
             def cleanup(*, deadline: float) -> None:
                 # The routing entry is gone before cleanup. Core must recheck protection
                 # against late data-plane activity before touching the target unit.
@@ -1023,6 +1061,45 @@ class ModelRegistry:
             if not dry_run:
                 self._removals[name] = result["id"]
             return result
+
+    def inventory(self) -> dict:
+        """Detached configuration inventory, not a data-plane registration ACK.
+
+        Runtime state is separately observed; unknown/stale probes remain unknown.
+        `removable` means model-level eligibility, not reload admission. No command
+        strings, model-file reads, queue advancement or native probes are included.
+        """
+        with self.queue.action_lock:
+            data, _ = self.queue._read()
+            config, records = self._decode(data)
+            now = self.now()
+            try:
+                state = self.queue.snapshot()
+            except Exception:
+                state = StateSnapshot(errors=("snapshot_unavailable",))
+            fresh = (type(state.sampled_at) in (int, float) and math.isfinite(state.sampled_at)
+                     and 0 <= now - state.sampled_at <= self.queue.max_snapshot_age and not state.errors)
+            rows = []
+            for name in sorted(config["models"]):
+                model = _model_by_name(state, name) if fresh else None
+                record = records.get(name)
+                plan = (plan_temporary_model_removal(name, records, state, now=now,
+                                                     max_snapshot_age_seconds=self.queue.max_snapshot_age)
+                        if record is not None else RemovalPlan(False, (Blocker(name, "not_temporary"),)))
+                rows.append({"name": name, "source": "config", "temporary": record is not None,
+                             "base": record.get("base") if record is not None else None,
+                             "daemon_port": record["daemon_port"] if record is not None else (model.port if model else None),
+                             "created_at": record["created_at"] if record is not None else None,
+                             "last_used_at": plan.last_used_at,
+                             "expires_at": (plan.last_used_at + DEFAULT_EXPIRY_SECONDS
+                                            if plan.last_used_at is not None else None),
+                             "runtime_state": model.state if model else "unknown",
+                             "removable": plan.allowed,
+                             "blocked_by": [asdict(item) for item in plan.blockers]})
+            queue = self.queue.queue_snapshot()
+            return {"models": rows, "config_sha256": hashlib.sha256(data).hexdigest(),
+                    "pending_changes": [job for job in queue["jobs"] if job["pending"]],
+                    "fenced": queue["fenced"], "recovery": queue["recovery"]}
 
     def expire(self, *, dry_run: bool = False) -> list[dict]:
         with self.queue.action_lock:
