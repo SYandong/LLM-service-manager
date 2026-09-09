@@ -1,0 +1,16 @@
+{
+  "_comment": "Generated-By: Codex / gpt-6-astra. Direct synthetic zero-delta LoRA mechanics only. Every GPU run requires a fresh shared-lock preflight; no production/reload permission.",
+  "container": "llmsvc",
+  "lock_path": "/path/to/shared/gpu-test.lock",
+  "model_path": "/path/to/cached/Qwen2.5-7B-Instruct",
+  "vllm_binary": "/path/to/installed/vllm",
+  "source": "/path/to/reviewed/checkout",
+  "output_dir": "/path/to/private/lora-evidence",
+  "lxc_prefix": ["sudo", "-n", "lxc"],
+  "swap_url": "http://127.0.0.1:8000",
+  "gpu": 0,
+  "wall_seconds": 300,
+  "startup_seconds": 150,
+  "util": 0.2,
+  "flashinfer_sampler": false
+}
