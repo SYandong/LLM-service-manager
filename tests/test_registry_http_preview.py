@@ -277,7 +277,7 @@ def test_copied_stdlib_cli_uses_actual_mounted_registry_without_effects(mounted,
              "add": ["add", str(mounted.weights), "--name", "new", "--base", "base", "--dry-run", "--json"],
              "rm": ["rm", "saved", "--dry-run", "--json"]}[operation]
     before = mounted.files(), mounted.scheduler.events_since(0)
-    run = subprocess.run([sys.executable, "-I", str(executable), "--url",
+    run = subprocess.run([sys.executable, "-I", "-S", str(executable), "--url",
                           "http://127.0.0.1:"+str(mounted.address[1]), *words],
                          cwd=outside, env={**os.environ, "XDG_CONFIG_HOME": str(outside / "config")},
                          capture_output=True, text=True, timeout=5)
