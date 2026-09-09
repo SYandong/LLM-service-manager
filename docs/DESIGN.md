@@ -296,8 +296,35 @@ ID、不持久化、不追加动作事件、不启动清退传输，也不因预
 | `POST /v1/reserve` | `{gpu, size_gb, until, by}` → `{id, gpu, size_gb, until, by, evacuation:{status, stopped, skipped, error?}}`，持久化与清退结果见 §4.4 |
 | `DELETE /v1/reserve/{id}` | 幂等移除意图 → `{id, by}`；不唤醒模型，取消未提交的清退步骤（§4.4） |
 | `POST /v1/wake/{model}` | |
+| `GET /v1/models` | 临时登记元数据与提交阻塞原因；见下方只读列表/预览约定 |
 | `POST /v1/models` `DELETE /v1/models/{name}` | 临时模型登记，走安静时刻协议（§3） |
 | `GET /v1/usage?days=7&by=container` | 按来源汇总 |
+
+
+### 临时模型列表与预览（#137）
+
+安全接入阶段先提供配置过的只读列表与编辑预览，真实提交仍需 §3 的
+quiet、配置采用及旧资源结清证明。列表与预览可用不代表提交链路已启用。
+
+- `GET /v1/models` 返回 `200 {records, writes_enabled:false, blocked_by}`。
+  `records` 是按名称索引的现有 `llmsvc_registry` 临时登记元数据；常驻模型的
+  观测仍从 `/v1/state` 读取，不能把该列表当作数据面 `/v1/models`。
+- `POST /v1/models?dry_run=1` 使用 `{name,path,base}`；
+  `DELETE /v1/models/{name}?dry_run=1` 不带请求体。成功保留现有
+  `{would:[描述]}`，并返回 `dry_run:true`、`config_committed:false` 与
+  `blocked_by`。无 job ID、暂存文件、队列项、配置/账本写入、unit/unload
+  动作或调度事件；配置与共享路径的读取校验不授予执行权限。
+- `blocked_by` 包括 `registry_writes_disabled`、实际 quiet 状态（初始为
+  `inflight_stream_unknown`）、当前 reload 内存/保护准入与已有故障屏障。
+  合法编辑预览不是可提交承诺；未知来源不能替换成零在途或已结清。
+- 未配置返回 `503 registry_not_configured`；请求或登记校验失败返回
+  `400 registry_invalid_request` 与说明；配置不可用/不安全返回
+  `503 registry_unavailable`；已有待核查事务标记返回
+  `409 registry_reconciliation_required`，不靠重试或预览清除标记。
+- 该阶段所有非 dry-run 登记/注销请求仍返回 `405`，依据当前模式使用
+  `read_only` 或 `operation_not_enabled`；切换其他动作开关也不能启用它。
+  不启动 reload worker，不借助空成功回调伪造验证、采用或资源结清。
+  后续 job 查询与真实提交按对应实现另行接入，不在本约定中生成占位 job。
 
 ## 6. CLI 与 TUI
 
