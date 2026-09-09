@@ -2,6 +2,7 @@
 """Protected sleeping-model retirement/relocation; never fault cleanup."""
 
 from dataclasses import replace
+from typing import Mapping, Optional
 
 from llmsvc.state import Action, Blocker, Reserve, StateSnapshot
 from .common import PolicySettings, Projection, known_number, snapshot_blockers
@@ -35,6 +36,7 @@ def _trigger(snapshot, model, reason):
 def plan_relocation(
     snapshot: StateSnapshot, *, model: str, reason: str,
     settings: PolicySettings = PolicySettings(),
+    exclusions: Optional[Mapping[str, str]] = None,
 ) -> PlacementDecision:
     """Plan one sleeper's response to an active reserve or proven wake deficit.
 
@@ -50,7 +52,7 @@ def plan_relocation(
     blockers = snapshot_blockers(snapshot)
     if blockers:
         return PlacementDecision(blocked_by=blockers)
-    p = Projection(snapshot, settings)
+    p = Projection(snapshot, settings, exclusions=exclusions)
     source = p.models.get(model)
     if source is None or source.state != "sleeping":
         return PlacementDecision(blocked_by=(Blocker(model, "model_not_sleeping"),))
@@ -93,7 +95,7 @@ def plan_relocation(
                         snapshot.sampled_at + 1, "policy-preflight")
     hypothetical = replace(snapshot, models=models, memory=memory,
                            reserves=snapshot.reserves + (exclusion,))
-    placement = plan_placement(hypothetical, request, settings=settings)
+    placement = plan_placement(hypothetical, request, settings=settings, exclusions=p.exclusions)
     if placement.gpu is None:
         return replace(placement, blocked_by=placement.blocked_by +
                        (Blocker(source.name, "relocation_unavailable", source.gpu),))
@@ -104,6 +106,7 @@ def plan_relocation(
 
 def plan_sleeping_recovery(
     snapshot: StateSnapshot, *, settings: PolicySettings = PolicySettings(),
+    exclusions: Optional[Mapping[str, str]] = None,
 ) -> PlacementDecision:
     """Choose one lowest-value actionable sleeper; core replans after execution.
 
@@ -111,7 +114,7 @@ def plan_sleeping_recovery(
     destination accounting. This entry point ensures a single preflighted move
     or unused-sleeper stop per decision, with blockers for protected candidates.
     """
-    p = Projection(snapshot, settings)
+    p = Projection(snapshot, settings, exclusions=exclusions)
     if p.blockers:
         return PlacementDecision(blocked_by=tuple(p.blockers))
     candidates = p.candidates([m for m in snapshot.models if m.state == "sleeping"], stop=True)
@@ -119,7 +122,8 @@ def plan_sleeping_recovery(
         reserves = [r for r in snapshot.reserves if r.gpu == model.gpu and
                     (not known_number(r.until) or r.until > snapshot.sampled_at)]
         reason = "reserve" if reserves else "cannot_wake"
-        decision = plan_relocation(snapshot, model=model.name, reason=reason, settings=settings)
+        decision = plan_relocation(snapshot, model=model.name, reason=reason, settings=settings,
+                                   exclusions=p.exclusions)
         if decision.actions:
             return replace(decision, blocked_by=tuple(p.blockers) + decision.blocked_by)
         p.blockers.extend(b for b in decision.blocked_by if b.reason != "wake_budget_available")
