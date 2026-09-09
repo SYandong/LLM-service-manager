@@ -67,4 +67,35 @@ public payload or a synthetic core Reserve record. Claim/lease binding, proxy
 fences, finite shared deadlines, restart/no-replay rules and final runtime/DESIGN
 validation belong to the combined #160 feature, not these pure input additions.
 
+## Destination replacement profiles for ordinary recovery
+
+Both recovery entrypoints additionally accept
+`replacement_requests: Optional[Mapping[str, ModelState]] = None`. When supplied,
+a recent-use candidate requires its matching stopped destination request, with
+valid util/budget, known nonnegative weights, compatible default role and no
+active-unit claim. Core supplies the real configured/lease floor; policy applies
+it only to the destination request. Source protection, accounting and the trigger
+use the unchanged observed source. The hypothetical stopped source record also
+keeps its observed metadata, distinct from the replacement request.
+
+The same map supplies known `weights_gb` for every pending/stale start model.
+Their weights are charged per lease record, as in normal core placement; expired
+pending/stale entries are not ignored. Confirmed/released history is not charged.
+Before any returned source action, projected host availability after releasing
+only the source snapshot's sleeping weight must cover replacement weight, those
+pending weights and the existing host floor. Equality is admitted; shortage is
+`host_memory_floor`. Destination-victim releases are not borrowed for admission.
+Missing/invalid required source profiles return `missing_replacement_request` /
+`invalid_replacement_request`; unavailable pending weights return `unknown_memory`.
+All failures return zero source/victim actions for that candidate.
+
+Unused retirement needs no replacement profile. None preserves prior pure
+callers, including their legacy preflight behavior; it must not be used as a
+fallback for an unavailable runtime profile. The effects-enabled core recovery
+controller must supply the map and validate its floors, even when it is empty
+because required data is unavailable. Actual stop/reentry still needs fresh
+observed release/admission proof; a projected release is not a measurement.
+These inputs belong in the same #160 runtime/DESIGN feature, with no public HTTP
+field, new threshold, schema or ranking change.
+
 <!-- Generated-By: Codex / gpt-6-astra -->
