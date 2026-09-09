@@ -8,7 +8,7 @@ No file/process inspection is implicit; binding observations belong to the calle
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import http.client
 import ipaddress
 import json
@@ -237,6 +237,21 @@ class CandidateBinding:
     instance: InstanceIdentity
     candidate_sha256: str
 
+    def to_dict(self) -> dict:
+        _validate_binding(self)
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: object) -> CandidateBinding:
+        if not isinstance(value, dict) or set(value) != {"endpoint", "generation", "instance", "candidate_sha256"}:
+            raise ValueError("invalid candidate binding")
+        instance = value["instance"]
+        if not isinstance(instance, dict) or set(instance) != {"pid", "start_ticks"}:
+            raise ValueError("invalid instance binding")
+        result = cls(value["endpoint"], value["generation"], InstanceIdentity(**instance), value["candidate_sha256"])
+        _validate_binding(result)
+        return result
+
 
 @dataclass(frozen=True)
 class BindingObservation:
@@ -256,6 +271,18 @@ class VisibilityCheck:
 def _valid_instance(instance: InstanceIdentity | None) -> bool:
     return (isinstance(instance, InstanceIdentity) and type(instance.pid) is int and instance.pid > 0
             and isinstance(instance.start_ticks, str) and bool(re.fullmatch(r"[0-9]+", instance.start_ticks)))
+
+
+def _validate_binding(binding: CandidateBinding) -> None:
+    if (not isinstance(binding, CandidateBinding) or not isinstance(binding.endpoint, str)
+            or not binding.endpoint.endswith("/api/mcp")
+            or not isinstance(binding.generation, str) or not _GENERATION.fullmatch(binding.generation)
+            or not isinstance(binding.candidate_sha256, str) or not _DIGEST.fullmatch(binding.candidate_sha256)
+            or not _valid_instance(binding.instance)):
+        raise ValueError("invalid candidate binding")
+    # Constructor validation is pure: no socket or DNS operation.
+    if NativeGenerationReader(binding.endpoint[:-len("/api/mcp")]).endpoint != binding.endpoint:
+        raise ValueError("candidate endpoint must be canonical")
 
 
 def check_visibility(expected: CandidateBinding, before: BindingObservation,

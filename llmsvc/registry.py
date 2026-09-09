@@ -960,6 +960,14 @@ class ModelRegistry:
             data, _ = self.queue._read()
             return self._decode(data)[1]
 
+    def queue_snapshot(self) -> dict:
+        """Public detached queue/recovery diagnostics for core's future HTTP adapter."""
+        return self.queue.queue_snapshot()
+
+    def inspect_recovery(self, **evidence: Any) -> dict:
+        """Read a persisted recovery record, optionally with native read evidence."""
+        return self.queue.inspect_recovery(**evidence)
+
     def add(self, body: Mapping[str, Any], *, dry_run: bool = False) -> dict:
         if "lora" in body:
             raise RegistryError("LoRA registration is disabled pending issue #21 measurements")
