@@ -453,8 +453,10 @@ class Scheduler:
         try:
             with self.action_lock:
                 if method == "GET" and path == "/v1/models":
-                    result = {"records": self.registry.records(), "writes_enabled": False,
-                              "inventory": self.registry.inventory(),
+                    inventory = self.registry.inventory(include_records=True)
+                    records = inventory.pop("records")
+                    result = {"records": records, "writes_enabled": False,
+                              "inventory": inventory,
                               "blocked_by": self.registry_blockers()}
                 elif method == "GET" and path == "/v1/registry":
                     result = {"queue": self.registry.queue_snapshot(), "writes_enabled": False,
