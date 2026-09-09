@@ -12,5 +12,15 @@ event_heartbeat_seconds: 15
 memory_budget_gb: 200
 host_min_available_gb: 150
 # Empty collectors intentionally report unknown. Supply the integrated #4/#5
-# adapter settings before counting the one-day/one-week observation evidence.
+# adapter settings before bounded observation/preview checks; unknown is not zero.
 collectors: {}
+
+# Optional registry mount: omitted by default. Uncomment only after configuring
+# the reviewed absolute paths. This enables temporary-model list/dry-run preview
+# only; it neither provisions files nor enables actual writes or a reload worker.
+# See llmsvc/REGISTRY_API.md for request/result and recovery-blocker semantics.
+# registry:
+#   config_path: /absolute/path/to/llama-swap.yaml
+#   shared_roots: [/absolute/shared/models]
+#   daemon_port_range: [8101, 8199]
+#   reserved_ports: [] # Optional; scheduler listen/model collector ports reserved too.
