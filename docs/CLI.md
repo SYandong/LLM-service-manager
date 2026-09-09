@@ -150,7 +150,7 @@ LLM_URL=http://scheduler:8011 python3 llm rm ft --dry-run --json
 
 - 支持 #152 详情的服务还返回 inventory：可包含永久配置模型与临时模型，但 records 仍只含临时记录。CLI/TUI 显示 source=config、temporary 标志、配置 base/port、独立观测的 runtime_state、last-use/idle-expiry 和 model-level removable/protection。未知观测、端口或时间保留 unknown/null；expiry 为 Unix 秒的空闲过期候选，不是已安排的删除。removable 仅表示模型级资格，不代替顶层 quiet/故障/恢复/写禁用等全局阻塞。
 - Add/rm 预览可附加 plan：显示既有 owner 计算的 model/base/daemon_port/util_macro 与 projected/candidate SHA256。端口仅为 pending FIFO 投影下的计划值，未预留；util_macro 是配置，不是实测显存或分配保证。重复预览不会占用端口或写配置；提交前需重新规划。candidate hash 不证明 proxy 已采用、旧 generation 已退出或资源收尾。受保护/无效 rm 仍返回 400，不能因内部预览返回 empty would 而视为成功。
-- 旧服务省略 inventory/plan 时仍按基础字段工作；提供的详情形状无效时明确报协议错误，不猜测缺失值。详情不会带候选配置字节或完整命令；`--json` 保留合法返回数据及 null，普通 CLI 与 TUI 另外给出上述边界提示。
+- 旧服务省略 inventory/plan 时仍按基础字段工作；提供的详情形状无效时明确报协议错误，不猜测缺失值。实际临时 HTTP/复制 CLI/TUI 检查覆盖了 pending FIFO 下的重复计划、未预留端口、过期/保护/unknown 展示和原有 400/409/503/405 边界；配置、队列和事件保持不变。详情不会带候选配置字节或完整命令；`--json` 保留合法返回数据及 null，普通 CLI 与 TUI 另外给出上述边界提示。
 - `models` 读取同一个 scheduler 的 `/v1/models`，返回配置文件中的 **temporary registry records**，不是全部常驻模型发现，也不是当前 proxy 已采用配置的证明。常驻/运行状态看 `status`。输出保留 records、writes_enabled 和 blocked_by；空 records 是可用列表中的空集合，503 unavailable 不会被显示为空集合。
 - 当前 #137 list/preview 接口的写操作始终关闭。预览返回 would、dry_run=true、config_committed=false 和真实阻塞原因，包括 registry_writes_disabled、unknown quiet 与当前保护/故障条件。合法编辑不表示可提交；没有 job ID、排队项、staging、落盘或 model action。阻塞预览返回退出码 1，正常列表读取返回 0。
 - 未配置 registry 返回 503 registry_not_configured；路径/模型等校验失败为 400 registry_invalid_request（保留 message）；配置不可安全读取为 503 registry_unavailable；待核对事务使预览返回 409 registry_reconciliation_required。`--json` 保留结构化错误 body 并返回非零；普通输出与 TUI 同样保留详情。
@@ -231,7 +231,7 @@ python -m pytest -q tests/test_llm_actions.py tests/test_tui_actions.py
 python -m pytest -q tests/test_tui_shortcuts.py
 python -m pytest -q tests/test_llm_models.py tests/test_llm_models_http.py tests/test_tui_models.py
 python -m pytest -q tests/test_llm_registry_status.py tests/test_tui_registry_status.py
-python -m pytest -q tests/test_llm_model_details.py tests/test_tui_model_details.py
+python -m pytest -q tests/test_llm_model_details.py tests/test_llm_model_details_http.py tests/test_tui_model_details.py
 ```
 
 测试使用核心包的状态结构生成 JSON，并在临时 loopback HTTP 服务上验证单文件复制、无 site-packages 的 Python 启动、JSON 保真与窄屏。Python 3.10 可用时直接执行该解释器的复制测试；CI 使用 Python 3.10。客户端测试不访问生产服务或 GPU。
