@@ -226,10 +226,13 @@ The locked read-only preflight at **2026-09-08 06:09:52 UTC** observed:
   depth at most six). This is not a claim about every directory on the machine.
 
 **Decision: the LoRA GPU smoke was not started.** The exact missing prerequisite
-is a cached compatible adapter with real weights, declared base/rank/target
-modules, and a semantic probe that demonstrates adapter behavior. Do not download
-large assets, fabricate an adapter, or run a base-only test and label it LoRA
-acceptance. The five-minute end-to-end duration is also not yet measured for a
+at that time was a cached compatible adapter with declared base/rank/target
+modules and a semantic probe. The later user-authorized
+[synthetic zero-delta fixture](LORA_SMOKE.md) now removes the supplied-fixture
+dependency for mechanics validation: its installed vLLM CPU loader check passes.
+It is explicitly untrained and cannot establish fine-tune quality or nonzero
+adapter semantics. Do not download large assets or label base-only inference
+as LoRA acceptance. The five-minute end-to-end duration is also not yet measured for a
 complete base/no-LoRA versus LoRA comparison. These observations are historical;
 a later launch requires a new locked preflight, including in-flight evidence.
 

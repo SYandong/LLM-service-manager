@@ -474,7 +474,7 @@ class Scheduler:
             if marker.exists() or marker.is_symlink():
                 raise IntentWriteError(409, "registry_reconciliation_required") from exc
             raise IntentWriteError(503, "registry_unavailable") from exc
-        except (OSError, ValueError, TypeError) as exc:
+        except (OSError, ValueError, TypeError, RecursionError) as exc:
             raise IntentWriteError(503, "registry_unavailable") from exc
 
     def usage(self, *, days: int = 7, by: str = "container") -> dict:

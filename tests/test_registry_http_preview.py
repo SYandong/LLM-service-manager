@@ -262,6 +262,13 @@ def test_invalid_or_non_json_registry_source_is_unavailable_not_a_broken_respons
     assert request(mounted.address, "GET", "/v1/models") == (503, {"error": "registry_unavailable"})
 
 
+def test_deeply_nested_source_is_an_explicit_unavailable_response(mounted):
+    mounted.path.write_text("models: " + "[" * 2000 + "0" + "]" * 2000 + "\n")
+    before = mounted.files(), mounted.scheduler.events_since(0)
+    assert request(mounted.address, "GET", "/v1/models") == (503, {"error": "registry_unavailable"})
+    assert_readonly(mounted, before)
+
+
 @pytest.mark.parametrize("operation", ["models", "add", "rm"])
 def test_copied_stdlib_cli_uses_actual_mounted_registry_without_effects(mounted, tmp_path, operation):
     import os
@@ -277,7 +284,7 @@ def test_copied_stdlib_cli_uses_actual_mounted_registry_without_effects(mounted,
              "add": ["add", str(mounted.weights), "--name", "new", "--base", "base", "--dry-run", "--json"],
              "rm": ["rm", "saved", "--dry-run", "--json"]}[operation]
     before = mounted.files(), mounted.scheduler.events_since(0)
-    run = subprocess.run([sys.executable, "-I", str(executable), "--url",
+    run = subprocess.run([sys.executable, "-I", "-S", str(executable), "--url",
                           "http://127.0.0.1:"+str(mounted.address[1]), *words],
                          cwd=outside, env={**os.environ, "XDG_CONFIG_HOME": str(outside / "config")},
                          capture_output=True, text=True, timeout=5)

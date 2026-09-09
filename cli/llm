@@ -735,7 +735,7 @@ def result_exit_code(args, result):
         return 0 if result["status"] == "applied" else 1
     if args.command == "usage":
         return 0 if result["known"] else 1
-    if args.command in ("pin", "unpin", "free", "wake", "reserve") and args.dry_run:
+    if args.command in ("pin", "unpin", "free", "wake", "reserve", "unreserve") and args.dry_run:
         return 1 if result["blocked_by"] else 0
     if args.command == "reserve":
         return 0 if result["evacuation"]["status"] == "complete" else 1
@@ -762,7 +762,14 @@ def model_name(value):
 
 def validate_registry_result(args, result):
     try:
-        if args.dry_run:
+        if args.command == "models":
+            if not isinstance(result["records"], dict) or type(result["writes_enabled"]) is not bool:
+                raise ValueError
+            if not all(isinstance(name, str) and isinstance(record, dict) for name, record in result["records"].items()):
+                raise ValueError
+        elif args.dry_run:
+            if result["dry_run"] is not True or result["config_committed"] is not False or "id" in result:
+                raise ValueError
             if not isinstance(result["would"], list):
                 raise ValueError
             expected = "add_model" if args.command == "add" else "remove_model"
@@ -777,7 +784,7 @@ def validate_registry_result(args, result):
                 raise ValueError
             if result["status"] == "applied" and result.get("config_committed") is not True:
                 raise ValueError
-        blockers = result.get("blocked_by", [])
+        blockers = result["blocked_by"]
         if not isinstance(blockers, list) or not all(isinstance(item["reason"], str) for item in blockers):
             raise ValueError
     except (KeyError, TypeError, ValueError):
@@ -787,7 +794,8 @@ def validate_registry_result(args, result):
 
 def format_registry_result(args, result):
     if args.command == "models":
-        label = "Registry listing" if result.get("known") is not False and not result.get("error") else "Registry listing unavailable"
+        label = "Temporary model registry (configured file, not active adoption)"
+        label += "\nRegistry writes enabled: " + ("yes" if result["writes_enabled"] else "no")
     elif args.dry_run:
         label = "Model change preview; nothing queued or applied"
     else:
@@ -795,6 +803,30 @@ def format_registry_result(args, result):
         committed = result.get("config_committed")
         label += "\nConfig committed: " + ("yes" if committed is True else "no" if committed is False else "unknown")
     return label + "\n" + json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
+
+
+def format_registry_error(error):
+    text = str(error)
+    if isinstance(error, ClientError) and isinstance(error.payload, dict):
+        text += "\n" + json.dumps(error.payload, ensure_ascii=False, indent=2, allow_nan=False)
+    return text
+
+
+def validate_unreserve_result(args, result):
+    try:
+        if args.dry_run:
+            if not isinstance(result["would"], list) or not isinstance(result["blocked_by"], list):
+                raise ValueError
+            for item in result["would"]:
+                if item["kind"] != "unreserve" or item["id"] != args.id:
+                    raise ValueError
+            if not all(isinstance(item["reason"], str) for item in result["blocked_by"]):
+                raise ValueError
+        elif result["id"] != args.id or not isinstance(result["by"], str) or not result["by"].strip():
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        raise ClientError("Invalid unreserve response; inspect current reservations before retrying") from None
+    return result
 
 
 def validate_pin_result(args, result):
@@ -894,12 +926,16 @@ def build_parser(parser_class=argparse.ArgumentParser):
             model.add_argument("model", type=model_name)
         model.add_argument("--dry-run", action="store_true")
         model.add_argument("--json", action="store_true")
+    unreserve = commands.add_parser("unreserve", help="Remove a reservation without waking models")
+    unreserve.add_argument("id", type=model_name, help="Reservation ID from status/reserve response")
+    unreserve.add_argument("--dry-run", action="store_true")
+    unreserve.add_argument("--json", action="store_true")
     return parser
 
 
 def execute_command(args, client, *, now=None):
     if args.command == "models":
-        return client.request("GET", "/v1/models")
+        return validate_registry_result(args, client.request("GET", "/v1/models"))
     if args.command in ("add", "rm"):
         query = "?dry_run=1" if args.dry_run else ""
         try:
@@ -913,6 +949,15 @@ def execute_command(args, client, *, now=None):
                 raise
             raise ClientError(str(exc) + "; model change outcome unknown: check state/events; no automatic write retry") from None
         return validate_registry_result(args, result)
+    if args.command == "unreserve":
+        path = "/v1/reserve/" + quote(args.id, safe="") + ("?dry_run=1" if args.dry_run else "")
+        try:
+            result = client.request("DELETE", path)
+        except ClientError as exc:
+            if exc.status is not None or args.dry_run:
+                raise
+            raise ClientError(str(exc) + "; deletion outcome unknown: inspect reservations; no automatic write retry") from None
+        return validate_unreserve_result(args, result)
     if args.command == "reserve":
         payload = {"gpu": args.gpu, "size_gb": args.size, "until": intent_expiry(args.duration, now),
                    "by": PIN_COMPATIBILITY_LABEL}
@@ -975,6 +1020,10 @@ def format_result(args, result, width=100):
         return format_reserve_result(args, result)
     if args.command in ("models", "add", "rm"):
         return format_registry_result(args, result)
+    if args.command == "unreserve":
+        if args.dry_run:
+            return format_action_result(args, result)
+        return clean_text("Unreserve acknowledged: %s; actor %s; no model wake/restart" % (result["id"], result["by"]))
     return format_status(result, width=width)
 
 
@@ -1002,6 +1051,12 @@ def main(argv=None):
             print("TUI: install with pip install 'llmsvc[tui]' and run llm in a terminal.")
         return result_exit_code(args, result)
     except ClientError as exc:
+        if args.command in ("models", "add", "rm"):
+            if getattr(args, "json", False) and isinstance(exc.payload, dict):
+                print(json.dumps(exc.payload, ensure_ascii=False, indent=2, allow_nan=False))
+            else:
+                print("llm: " + clean_text(format_registry_error(exc)), file=sys.stderr)
+            return 1
         print("llm: " + clean_text(exc), file=sys.stderr)
         return 1
     except (KeyError, TypeError, ValueError, OverflowError):
