@@ -4,9 +4,9 @@
 from dataclasses import replace
 from typing import Mapping, Optional
 
-from llmsvc.state import Action, Blocker, Reserve, StateSnapshot
+from llmsvc.state import Action, Blocker, ModelState, Reserve, StateSnapshot
 from .common import PolicySettings, Projection, known_number, snapshot_blockers
-from .placement import PlacementDecision, _accounting, plan_placement
+from .placement import PlacementDecision, _accounting, _budget, plan_placement
 
 
 def _trigger(snapshot, model, reason):
@@ -37,6 +37,7 @@ def plan_relocation(
     snapshot: StateSnapshot, *, model: str, reason: str,
     settings: PolicySettings = PolicySettings(),
     exclusions: Optional[Mapping[str, str]] = None,
+    replacement_requests: Optional[Mapping[str, ModelState]] = None,
 ) -> PlacementDecision:
     """Plan one sleeper's response to an active reserve or proven wake deficit.
 
@@ -83,11 +84,39 @@ def plan_relocation(
         return PlacementDecision(actions=(Action("stop", source.name, reason, source.gpu),))
     if not p.memory_known() or not known_number(source.weights_gb):
         return PlacementDecision(blocked_by=(Blocker(model, "unknown_memory", source.gpu),))
+    request = None
+    if replacement_requests is not None:
+        profiles = dict(replacement_requests)
+        if source.name not in profiles:
+            return PlacementDecision(blocked_by=(Blocker(model, "missing_replacement_request", source.gpu),))
+        request = profiles[source.name]
+        if (not isinstance(request, ModelState) or request.name != source.name
+                or request.state != "stopped" or request.unit_active is True
+                or type(request.is_default) is not bool or request.is_default != source.is_default
+                or not known_number(request.weights_gb) or _budget(request, 1.0) is None):
+            return PlacementDecision(blocked_by=(Blocker(model, "invalid_replacement_request", source.gpu),))
+        pending_weight = 0.0
+        for lease in snapshot.leases:
+            if lease.status not in ("pending", "stale"):
+                continue
+            pending = profiles.get(lease.model)
+            if (not isinstance(pending, ModelState) or pending.name != lease.model
+                    or not known_number(pending.weights_gb)):
+                return PlacementDecision(blocked_by=(Blocker(lease.model, "unknown_memory", lease.gpu),))
+            pending_weight += pending.weights_gb
+        # Match normal cold placement admission, using only the observed source
+        # weight as a possible release. Do not borrow destination victim RAM.
+        available_after_stop = p.available + source.weights_gb
+        if not known_number(available_after_stop) or not known_number(pending_weight):
+            return PlacementDecision(blocked_by=(Blocker(model, "unknown_memory", source.gpu),))
+        if available_after_stop - request.weights_gb - pending_weight < snapshot.memory.host_min_available_gb:
+            return PlacementDecision(blocked_by=(Blocker(model, "host_memory_floor", source.gpu),))
     # This is a detached hypothetical state for preflight, never persisted. A
     # successful source stop must be observed before core uses the freed RAM.
     p.stop(source, reason)
-    request = replace(source, state="stopped", gpu=None, unit_active=False)
-    models = tuple(request if m.name == source.name else m for m in snapshot.models)
+    stopped_source = replace(source, state="stopped", gpu=None, unit_active=False)
+    request = stopped_source if request is None else request
+    models = tuple(stopped_source if m.name == source.name else m for m in snapshot.models)
     memory = replace(snapshot.memory, host_available_gb=p.available, sleeping_weights_gb=p.sleeping)
     # Exclude the source even when pressure later clears; this operation means
     # replacement on a different card. The synthetic reserve exists only here.
@@ -107,6 +136,7 @@ def plan_relocation(
 def plan_sleeping_recovery(
     snapshot: StateSnapshot, *, settings: PolicySettings = PolicySettings(),
     exclusions: Optional[Mapping[str, str]] = None,
+    replacement_requests: Optional[Mapping[str, ModelState]] = None,
 ) -> PlacementDecision:
     """Choose one lowest-value actionable sleeper; core replans after execution.
 
@@ -117,13 +147,14 @@ def plan_sleeping_recovery(
     p = Projection(snapshot, settings, exclusions=exclusions)
     if p.blockers:
         return PlacementDecision(blocked_by=tuple(p.blockers))
+    profiles = None if replacement_requests is None else dict(replacement_requests)
     candidates = p.candidates([m for m in snapshot.models if m.state == "sleeping"], stop=True)
     for model in candidates:
         reserves = [r for r in snapshot.reserves if r.gpu == model.gpu and
                     (not known_number(r.until) or r.until > snapshot.sampled_at)]
         reason = "reserve" if reserves else "cannot_wake"
         decision = plan_relocation(snapshot, model=model.name, reason=reason, settings=settings,
-                                   exclusions=p.exclusions)
+                                   exclusions=p.exclusions, replacement_requests=profiles)
         if decision.actions:
             return replace(decision, blocked_by=tuple(p.blockers) + decision.blocked_by)
         p.blockers.extend(b for b in decision.blocked_by if b.reason != "wake_budget_available")
