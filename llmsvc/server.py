@@ -57,6 +57,12 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                     self._json(400, {"error": "invalid_request"})
                 else:
                     self._json(200, self.server.scheduler.registry_request("GET", target.path))
+            elif target.path == "/v1/registry":
+                if (target.query or self.headers.get("Transfer-Encoding") is not None
+                        or self.headers.get_all("Content-Length", ["0"]) != ["0"]):
+                    self._json(400, {"error": "invalid_request"})
+                else:
+                    self._json(200, self.server.scheduler.registry_request("GET", target.path))
             elif target.path == "/v1/usage":
                 self._usage(target.query)
             elif target.path == "/v1/events":
