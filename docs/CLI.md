@@ -154,6 +154,8 @@ LLM_URL=http://scheduler:8011 python3 llm rm ft --dry-run --json
 - 不带 `--dry-run` 的 add/rm 仍可被服务器以 405 read_only/operation_not_enabled 拒绝；CLI 不启用写操作、不自动切换成预览，也不重试不确定的 POST/DELETE。未知结果先核对状态与事件。
 - 结果呈现支持既有 registry job 的 queued/blocked/applied/failed/timed_out/reconciliation_required 字段，明确分开排队、config_committed 和最终应用。queued 返回非零并显示“not applied”；不会把 HTTP 200 或文件提交当完整应用。当前安全接口不创建这些 job，也没有新增 job 轮询端点；实际作业/写入需要后续已审核 core 接入。
 
+实际临时 HTTP/配置/完整权重结构夹具已验证单文件 `-I -S` 的列表、add/rm 预览、结构化错误，以及 100×30/窄终端 TUI；所有配置文件、队列、事件和 unit/transport 回调保持不变。权重内容和状态为 CPU 测试夹具，没有冷启动推理或实际 reload。
+
 TUI 输入框使用相同的 `models`、`add`、`rm` 命令。列表结果不会替换运行时模型快照；迟到列表不会覆盖之后的写请求或退出界面。预览/操作回复后照常刷新 state，保留结构化阻塞与提交状态。列表、预览以及 CPU 夹具都不提供可靠 quiet、采用/收尾或生产授权，完整 #19/#20 验收仍继续。
 
 ## 可选 TUI
@@ -210,7 +212,7 @@ python -m pytest -q tests/test_llm_reserve.py tests/test_llm_reserve_http.py tes
 python -m pytest -q tests/test_llm_unreserve.py tests/test_tui_unreserve.py
 python -m pytest -q tests/test_llm_actions.py tests/test_tui_actions.py
 python -m pytest -q tests/test_tui_shortcuts.py
-python -m pytest -q tests/test_llm_models.py tests/test_tui_models.py
+python -m pytest -q tests/test_llm_models.py tests/test_llm_models_http.py tests/test_tui_models.py
 ```
 
 测试使用核心包的状态结构生成 JSON，并在临时 loopback HTTP 服务上验证单文件复制、无 site-packages 的 Python 启动、JSON 保真与窄屏。Python 3.10 可用时直接执行该解释器的复制测试；CI 使用 Python 3.10。客户端测试不访问生产服务或 GPU。
