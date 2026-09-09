@@ -43,6 +43,17 @@ proxy adoption or assert that a pending configuration is active. Use `/v1/state`
 for model observations. List remains readable during an interrupted transaction
 and adds `registry_reconciliation_required` to its blockers.
 
+The additive `inventory` field contains the existing registry's configured model
+rows, configuration digest, pending changes and recovery fence. Unlike `records`,
+these rows can also include permanent configured names (`source: config`,
+`temporary: false`). Runtime state is separately observed and stays unknown for
+missing/stale observations. `last_used_at`/`expires_at` remain null when unknown;
+a derived seven-day expiry is not a scheduled or completed deletion. `removable`
+is model-level eligibility, not global reload readiness. The action lock
+serializes daemon operations; separate registry reads do not promise an atomic
+view of external filesystem writers. `inventory.config_sha256` describes that
+inventory read, not proof of data-plane adoption.
+
 `POST /v1/models?dry_run=1` accepts `{name,path,base}`. The existing registry
 checks full-weight paths within shared roots, name/alias collisions, permanent
 base configuration and daemon port availability. LoRA remains disabled.
@@ -55,6 +66,17 @@ not mean commit readiness: blockers include disabled writes, actual unknown
 quiet state, current reload admission and fault-fence blockers. Polling zero
 inflight never establishes quiet. Preview creates no job ID, staging file,
 queued job, event, configuration write or unit/network action.
+
+Successful previews also include `plan`, selecting the owner's existing
+`model` (for add), `projected_base_sha256`, `candidate_sha256`,
+`port_reserved: false` where supplied, and `config_written: false`. Add's model
+fields are `name`, `base`, `daemon_port` and `util_macro`; util is configured
+metadata, not measured bytes or an allocation guarantee. No candidate bytes or
+full command blocks are returned. Pending FIFO edits affect the projection;
+repeated previews do not reserve a port or enqueue a request. A future actual
+submission must compute its own candidate again. Protected/invalid remove still
+returns HTTP400, including when the internal preview helper reports blockers
+with an empty `would`; it is not converted into a successful response.
 
 Actual POST/DELETE remains rejected in every mode: HTTP405 `read_only`, or
 `operation_not_enabled` when ordinary intent writes are enabled. There is no
