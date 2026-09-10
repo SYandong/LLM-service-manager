@@ -89,7 +89,9 @@ retains the full budget and bootstrap fence.
 
 Before any default launch submission, explicit file-only rollback can release
 only its own pending lease after the existing positive-exit checks. Ops restores
-verified files without restarting an unleased old preload. After launch
+verified files without restarting an unleased old preload. If stop was never
+submitted, a fresh exact-original-instance/zero-request proof may instead retain
+that existing source while rolling back files; absence is not fabricated. After launch
 submission, rollback refuses to stop a running default or pretend the attempt
 never happened. It never restores an old ledger snapshot. Unknown rollback or
 activation results retain evidence rather than clearing the claim by elapsed time.

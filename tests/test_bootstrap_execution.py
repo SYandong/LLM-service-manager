@@ -132,7 +132,11 @@ def bootstrap_service(tmp_path):
                 source_config_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),launcher_sha256=spec['launcher_sha256'],
                 launcher_config_sha256=spec['launcher_config_sha256'],observed_at=time.monotonic())
             if world['source'] is not None:
-                result.update(active_ready=True,identity=source_id(world['source']),default_confirmed=True)
+                observed=probe('default');lease=store.lease(record['lease_id'])[0]
+                result.update(active_ready=True,identity=source_id(world['source']),default_confirmed=True,
+                    default_binding={'model':'default','unit':'vllm-default.service','lease_id':lease.lease_id,
+                                     'gpu':lease.gpu,'invocation_id':observed.invocation_id,
+                                     'pid':world['unit'].pid,'start_ticks':ticks(world['unit'].pid)})
             return result
     controller=BootstrapController(scheduler,backend=Migration())
     load=controller._launcher

@@ -114,15 +114,29 @@ class BootstrapController:
         self.scheduler.emit('bootstrap_stage',model=self.model,detail={'stage':value['stage'],'lease_id':value['lease_id']})
         return value
 
-    def _source_hash(self):
+    def _source_state(self):
+        import yaml
         path=Path(self.scheduler.config.registry['config_path'])
-        return hashlib.sha256(_read_regular_file(path,self.scheduler.config.registry.get('config_max_bytes',1048576))[0]).hexdigest()
+        raw,_=_read_regular_file(path,self.scheduler.config.registry.get('config_max_bytes',1048576))
+        try:
+            document=yaml.safe_load(raw)
+            startup=document.get('hooks',{}).get('on_startup',{})
+            preserved=startup.get('preload')==[self.model] and not startup.get('profile')
+        except (AttributeError,TypeError,yaml.YAMLError) as exc:
+            raise BootstrapError('bootstrap source preload is unreadable') from exc
+        return hashlib.sha256(raw).hexdigest(),preserved
+
+    def _source_hash(self):
+        return self._source_state()[0]
 
     def _context(self,record=None):
         account=None
         if record is not None and record['lease_id'] is not None:
             row=self.scheduler.store.lease(record['lease_id'])
-            if row is not None and row[0].status!='released':account={**asdict(row[0]),'unit':row[1]}
+            if row is not None and row[0].status!='released':
+                account={**asdict(row[0]),'unit':row[1]}
+                observed=record['migration'].get('default_observed')
+                if observed is not None:account['invocation_id']=observed['invocation_id']
         transaction=record['id'] if record else self.pending_id
         return {'transaction_id':transaction,'bootstrap_id':transaction,'manifest_sha256':self.spec['manifest_sha256'],
                 'default_model':self.model,'default_unit':self.unit,'source_origin':self.source_origin,'launcher_sha256':self.spec['launcher_sha256'],
@@ -154,12 +168,13 @@ class BootstrapController:
             raw,_=_read_regular_file(Path(self.spec[path_key]),limit)
             if hashlib.sha256(raw).hexdigest()!=self.spec[hash_key]:
                 raise BootstrapError('staged bootstrap launcher inputs changed')
+        source_hash,preload_preserved=self._source_state()
         return (result.get('staged') is True and result.get('source_absent') is True
-                and result.get('helpers_settled') is True and result.get('default_preload_preserved') is True
+                and result.get('helpers_settled') is True and preload_preserved
                 and result.get('launcher_sha256')==self.spec['launcher_sha256']
                 and result.get('launcher_config_sha256')==self.spec['launcher_config_sha256']
                 and result.get('source_config_sha256')==self.spec['target_config_sha256']
-                and self._source_hash()==self.spec['target_config_sha256'])
+                and source_hash==self.spec['target_config_sha256'])
 
     def policy_snapshot(self,snapshot):
         """Preserve raw unknowns; scoped cold bootstrap may exclude expected source-down errors."""
@@ -269,8 +284,11 @@ class BootstrapController:
                 self._start_admission(record)
                 effects['launch']='submitted'
             if stage=='start_acknowledged':effects['launch']='acknowledged'
-            if stage=='confirmed':self._confirmed(record)
-            self._save(record,stage=mapped,effects=effects)
+            migration=record['migration']
+            if stage=='confirmed':
+                observed=self._confirmed(record)
+                migration={**migration,'default_observed':asdict(observed)}
+            self._save(record,stage=mapped,effects=effects,migration=migration)
         if stage=='placing':
             s.sample_once()  # Publish fresh physical observations before the HTTP lease request.
 
@@ -303,9 +321,10 @@ class BootstrapController:
         with s.store.bootstrap_scope(record['id']):
             s.sample_once()
             observation=s.placement._inspect(self.model,self.deadline)
-            if not s.placement._healthy(row[0],row[1],observation):
+            if (not s.placement._healthy(row[0],row[1],observation) or not observation.invocation_id
+                    or record['migration'].get('default_observed',{}).get('invocation_id',observation.invocation_id)!=observation.invocation_id):
                 raise BootstrapError('default unit health or lease identity is unconfirmed')
-        return row
+        return observation
 
     def run(self,*,dry_run=False):
         if dry_run:return {'would':[{'kind':'bootstrap_default','model':self.model}],'dry_run':True}
@@ -327,11 +346,11 @@ class BootstrapController:
                 decision,blocked=s.placement._decision(s.snapshot(),request,waiting=False)
                 if decision is None or not decision.actions or any(action.kind!='place' for action in decision.actions):
                     raise BootstrapError('bootstrap initial placement is not admissible')
-            before=self._source_hash();proof=self._request('bootstrap_preflight')
-            if (before!=self.spec['base_config_sha256'] or self._source_hash()!=before
+            before,preserved=self._source_state();proof=self._request('bootstrap_preflight')
+            if (before!=self.spec['base_config_sha256'] or not preserved or self._source_state()!=(before,True)
                     or proof.get('source_config_sha256')!=before or proof.get('legacy_backends_absent') is not True or proof.get('ready') is not True
                     or proof.get('default_preload_preserved') is not True
-                    or proof.get('preload')!=[self.model] or type(proof.get('in_flight')) is not int or proof['in_flight']!=0):
+                    or type(proof.get('in_flight')) is not int or proof['in_flight']!=0):
                 raise BootstrapError('bootstrap preflight is unknown or busy')
             identity(proof.get('identity'))
             self.token=secrets.token_hex(32)
@@ -373,11 +392,17 @@ class BootstrapController:
         proof=self._request('bootstrap_observe',record)
         current=identity(proof.get('identity'));old=record['migration']['preflight']['identity']
         if ((current['pid'],current['start_ticks'])==(old['pid'],old['start_ticks']) or proof.get('active_ready') is not True
-                or proof.get('default_confirmed') is not True or proof.get('default_preload_preserved') is not True
+                or proof.get('default_confirmed') is not True
                 or proof.get('source_config_sha256')!=self.spec['target_config_sha256']
-                or self._source_hash()!=self.spec['target_config_sha256']):
+                or self._source_state()!=(self.spec['target_config_sha256'],True)):
             raise BootstrapError('bootstrap source/default handoff is unconfirmed')
-        self._confirmed(record)
+        observed=self._confirmed(record)
+        binding=proof.get('default_binding');lease=self.scheduler.store.lease(record['lease_id'])[0]
+        if (not isinstance(binding,dict) or binding.get('model')!=self.model or binding.get('unit')!=self.unit
+                or binding.get('lease_id')!=record['lease_id'] or binding.get('invocation_id')!=observed.invocation_id
+                or binding.get('gpu')!=lease.gpu or type(binding.get('pid')) is not int or binding['pid']<=0
+                or not isinstance(binding.get('start_ticks'),str) or not binding['start_ticks'].isdigit()):
+            raise BootstrapError('native default binding differs from confirmed account')
         self._save(record,stage='complete',
                    migration={**record['migration'],'activated':proof})
         return {'stage':'complete','model':self.model,'lease_id':record['lease_id']}
@@ -411,9 +436,16 @@ class BootstrapController:
                 if 'rollback' in record['effects']:raise BootstrapError('unknown bootstrap rollback requires source settlement')
                 record=self._save(record,effects={**record['effects'],'rollback':'submitted'})
                 proof=self._request('bootstrap_rollback',record)
-                if (proof.get('rolled_back') is not True or proof.get('source_absent') is not True
-                        or proof.get('helpers_settled') is not True or proof.get('legacy_backends_absent') is not True
-                        or proof.get('default_preload_preserved') is not True or self._source_hash()!=self.spec['base_config_sha256']):
+                old=record['migration']['preflight']['identity']
+                absent=proof.get('source_absent') is True and proof.get('helpers_settled') is True
+                retained=False
+                if proof.get('original_source_retained') is True:
+                    current=identity(proof.get('identity'))
+                    retained=((current['pid'],current['start_ticks'])==(old['pid'],old['start_ticks'])
+                              and type(proof.get('in_flight')) is int and proof['in_flight']==0)
+                if (proof.get('rolled_back') is not True or not (absent or retained)
+                        or proof.get('legacy_backends_absent') is not True
+                        or self._source_state()!=(self.spec['base_config_sha256'],True)):
                     raise BootstrapError('bootstrap file rollback remains unconfirmed')
                 self._save(record,stage='aborted',effects={**record['effects'],'rollback':'acknowledged'},
                            migration={**record['migration'],'rolled_back':proof})
@@ -441,10 +473,13 @@ class BootstrapController:
                 with s.store.bootstrap_scope(record['id']):
                     s.sample_once();row=s.store.lease(record['lease_id'])
                     observed=s.placement._inspect(self.model,self.deadline)
-                    if row is None or not s.placement._healthy(row[0],row[1],observed):
+                    if (row is None or not s.placement._healthy(row[0],row[1],observed) or not observed.invocation_id
+                            or record['migration'].get('default_observed',{}).get('invocation_id',observed.invocation_id)!=observed.invocation_id):
                         raise BootstrapError('submitted bootstrap launch remains unconfirmed')
+                    if 'default_observed' not in record['migration']:
+                        record=self._save(record,migration={**record['migration'],'default_observed':asdict(observed)})
                     if record['stage'] in ('start_submitted','start_acknowledged'):
-                        record=self._save(record,stage='health_observed',migration={**record['migration'],'default_observed':asdict(observed)})
+                        record=self._save(record,stage='health_observed')
                     if record['stage']=='health_observed':record=self._save(record,stage='confirm_submitted')
                     s.placement.finish('confirm',record['lease_id'])
                     record=self._save(record,stage='default_confirmed')

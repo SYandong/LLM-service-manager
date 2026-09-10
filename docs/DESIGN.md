@@ -179,6 +179,10 @@ JSON 协议；未完成的适配器必须报告未知。受控进程／loopback 
 再允许受管 source preload。源、端点、别名及 daemon 环境配置须由固定的迁移
 manifest 保留；空 host 的 listen 绑定不等于 HTTP 探测目的地址，也不能默默
 收窄地址族。具体操作范围仍由已获准的固定 source/unit/文件迁移限定。
+初次 stage 仅按固定 manifest 将原 unit 的 Restart 改为 no 并加入独立 attempt
+EnvironmentFile，保留其余定义字节；daemon-reload 后重绑同一 PID/start 与已批准
+fragment，再重验零在途、无模型/后台任务，才可发送受身份保护的停止信号。
+这不把 source 的环境文件当作 daemon 环境，也不允许未绑定文件或其他 unit 操作。
 
 首次真实声明惰性建立 schema7 屏障，保留 pins/reserves/已有账户。普通写操作
 被阻塞，仅本次内部 launcher 的能力可为指定默认模型申请/转换租约；租约写入
