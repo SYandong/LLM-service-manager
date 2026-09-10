@@ -62,8 +62,10 @@ Generated-By: <harness> / <model-id>
 
 ## 6. 线上安全红线
 
-- **不要在运行期改 `/etc/llama-swap/config.yaml`**，除非通过调度器的"安静时刻"机制（零在途请求时落盘）。llama-swap 的 reload 会让所有醒着的模型进入 sleep，并中断在途请求。
+- **不要在运行期改 `/etc/llama-swap/config.yaml`**，除非通过调度器的"安静时刻"机制（零在途请求时落盘），或本节限定的显式维护协议。常规 llama-swap reload 会让所有醒着的模型进入 sleep，并中断在途请求；维护模式不得绕过其独立的实例退出、采用与结清证明。
 - 调度器只允许操作 `vllm-*.service` 这些 transient unit 和 llama-swap 的 `/api/models/unload/{id}`、`/upstream/{id}/`。不碰其他用户的进程。
+- **显式维护模式的限定例外（#60）**：仅当已有该次维护的操作授权，且同时配置 `catalog_mode: maintenance`、`catalog_enabled: true`、`model_actions_enabled: true`、`read_only: false`、绝对路径的 `maintenance_command` 和已核实的固定私有 profile 时，才可按 [DESIGN 的显式实例维护协议](docs/DESIGN.md#显式实例维护模式60) 扩展上述操作范围。适配器仅可对 profile 固定的 llama-swap unit（绑定 fragment SHA-256、可执行文件和当前实例，`Restart=no`）的精确主进程发送受身份保护的 SIGTERM，并启动该固定 unit；仅可创建和管理本次维护自有的 `llmsvc-maint-helper-*` oneshot jobs，以已核实的 helper/后端身份完成 level-1 sleep 后停止对应 wrapper。后端 unit 仍限于 `vllm-*.service`，不包括其他用户的进程。默认模型后端只允许 level-1 sleep，不允许硬停；wrapper 或代理退出不能当作后端退出或释放记账的证明。
+- 该例外仍要求维护 preflight 及 `stop_old` / `stop_candidate` 前重新取得新鲜的零在途观察，保留 `reload_blockers` 的默认模型、pin 和 RAM 保护；未知或失败的实例、helper、清理及回滚结果保留持久化屏障与当前账户，不重发不明结果的动作。它不把两次零观察变成连续 quiet 证明，常规热重载仍须满足自身连续 quiet 门槛。只读自动升级器不得启用维护模式；每次实际维护按本节的生产操作记录规则留痕，并须通过当前配置、身份、保护与回滚条件核对。
 - 默认模型永远不被硬停；pin 住的模型不被任何自动策略碰。
 - 新版本先在容器内的另一个端口（历史上用 8010）验证，再切生产。切换步骤写在 `deploy/` 的脚本里，可回滚。
 - 对生产做手工操作（stop unit、改 TTL）要在 issue 或 PR 里留记录。
