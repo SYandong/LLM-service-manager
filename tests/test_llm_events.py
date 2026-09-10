@@ -235,3 +235,25 @@ def test_known_daemon_restart_resets_cursor_but_disconnect_does_not(api, core_st
         assert paths[:3] == ["/v1/events?since=0", "/v1/events?since=2", "/v1/events?since=0"]
     finally:
         assert reader.close()
+
+
+def test_dirty_notification_runs_outside_lock_and_comments_are_not_events(api):
+    response = MemoryResponse(b': heartbeat\n\n' + frame(1) + b': heartbeat\n\n')
+    reader = api["EventReader"](api["SchedulerClient"]("http://scheduler.invalid", timeout=1,
+                               opener=lambda *args, **kwargs: response), retry_delay=30)
+    updates = []
+    changed = threading.Event()
+    def notified():
+        # drain takes the same lock: notification must happen outside it.
+        updates.append(reader.drain())
+        if any(item["events"] for item in updates):
+            changed.set()
+    reader.set_notify(notified)
+    reader.start()
+    try:
+        assert changed.wait(2)
+    finally:
+        assert reader.close()
+    assert [event["id"] for update in updates for event in update["events"]] == [1]
+    assert any(update["status"] == "SSE connected" for update in updates)
+    reader.set_notify(None)

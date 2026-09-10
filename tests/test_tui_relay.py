@@ -100,7 +100,9 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
             assert len(ids) == len(set(ids))
             server_events = {event.id: event for event in scheduler.events_since(0)}
             assert all(server_events[event["id"]].detail == event.get("detail", {}) for event in app.event_history)
-            log_text = " ".join(line.text for line in app.dashboard.query_one("#events", RichLog).lines)
+            # RichLog now wraps at the actual panel width; whitespace at line
+            # boundaries is presentation, while every provenance phrase remains.
+            log_text = " ".join(" ".join(line.text for line in app.dashboard.query_one("#events", RichLog).lines).split())
             assert "[llama-swap]" in log_text and "[scheduler]" in log_text
             assert "unlisted_model" in log_text and "intentional filtering" in log_text
             assert "timeout" in log_text and "invalid_event" in log_text
