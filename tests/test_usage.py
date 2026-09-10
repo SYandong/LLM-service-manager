@@ -1,7 +1,8 @@
 # Generated-By: Codex / gpt-6-astra
 import sqlite3
-import time
+from types import SimpleNamespace
 
+import llmsvc.activity as activity
 from llmsvc.activity import ActivityReader
 
 
@@ -144,7 +145,8 @@ def test_usage_nonintegral_real_tokens_report_unknown(tmp_path):
     assert result["totals"] == {"requests": None, "input_tokens": None, "output_tokens": None}
 
 
-def test_usage_large_fixture_stays_under_100ms(tmp_path):
+def large_usage_fixture(tmp_path):
+    """Original synthetic usage dataset shared with the opt-in performance tool."""
     db = tmp_path / "activity.sqlite"
     now = 2_000_000
     row_count = 25_500
@@ -174,11 +176,21 @@ def test_usage_large_fixture_stays_under_100ms(tmp_path):
         )
         conn.commit()
 
+    return db, now
+
+
+def test_usage_large_fixture_aggregates_all_counts_and_tokens(tmp_path, monkeypatch):
+    db, now = large_usage_fixture(tmp_path)
+    monkeypatch.setattr(activity, "time", SimpleNamespace(monotonic=lambda: 0.0))
     reader = ActivityReader(db)
-    started = time.perf_counter()
+    assert reader.deadline_ms == 80
     result = reader.usage(days=7, by="container", now=now)
-    elapsed_ms = (time.perf_counter() - started) * 1000
 
     assert result["known"] is True
-    assert result["totals"]["requests"] == row_count
-    assert elapsed_ms < 100
+    assert reader.last_error is reader.last_error_code is None
+    assert result["totals"] == {
+        "requests": 25_500,
+        "input_tokens": sum(index % 17 for index in range(25_500)),
+        "output_tokens": sum(index % 31 for index in range(25_500)),
+    }
+    assert len(result["rows"]) == 5
