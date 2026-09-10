@@ -141,6 +141,52 @@ request/transaction IDs. HTTP uses an absolute socket watchdog; late results are
 rejected. OS/storage scheduling is not claimed hard real-time. Dry-run emits an
 unaccepted plan without invoking mutation commands or writing proof files.
 
+## Bound phase witness (#170)
+
+With the scheduler's explicit `native_witness` opt-in, core records immutable
+`native_provenance` (canonical MCP endpoint, source/image/dialect settings and
+base generation) before effects. The adapter validates that context against its
+pinned `native_origin` and `native_binary_sha256`. This profile has one executable
+and no source-image installer: `old`, `candidate` and `restored` must all select
+that same image. Additional allowlisted images do not enable an upgrade.
+
+For example, the corresponding **scheduler** setting is the following mapping;
+replace both placeholders with the verified source commit and executable hash.
+This is separate from the native adapter profile, not an extra profile key:
+
+```yaml
+native_witness:
+  images:
+    - source_commit: <verified-v252-source-commit>
+      executable_sha256: <same-native_binary_sha256-as-profile>
+      dialect: v252-path
+  phase_images:
+    old: <same-native_binary_sha256-as-profile>
+    candidate: <same-native_binary_sha256-as-profile>
+    restored: <same-native_binary_sha256-as-profile>
+```
+
+The separately pinned query dialect may be selected for its supported source
+image; it is never tried as a fallback. In bound mode the actual native
+inspection still verifies the running image, owned listeners, configuration and
+accounts. Candidate/base observations return only `configuration_file_confirmed`
+for the independently checked bytes. They make no additional unbound generation
+RPC and do not claim `configuration_confirmed` or a generation value. Core's
+instance/image/listener-bound reader supplies generation visibility. All old
+source, helper, backend, attempt and cleanup proofs remain separately required.
+Missing provenance retains legacy behavior; malformed or conflicting provenance
+fails closed, including before an effect or dry-run dispatch.
+
+An untagged base cannot enter this mode. Prepare a generation-tagged **target**
+configuration through the existing generation planner as an explicitly reviewed
+[bootstrap](BOOTSTRAP.md) input, preserving default preload, aliases and resolved
+model commands. Bind its exact bytes/hash into the bootstrap manifest before
+activation. This is a candidate preparation route, not permission to stamp the
+live base or to infer a null generation. Bootstrap still requires its reviewed
+runtime and actual resource/account proofs; a release without bootstrap cannot
+perform it. Never change provenance on a pending claim, discard a fence, or use
+visibility as successful old-server settlement.
+
 ## Evidence retention and operator recovery
 
 The state directory contains source-owned stop/start/helper records, including

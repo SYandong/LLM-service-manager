@@ -311,3 +311,93 @@ def test_base_account_integrity_does_not_certify_unknown_attempt_helpers(native_
     result = adapter.operation('observe_base', context, time.monotonic() + 1)
     assert result['backends_confirmed'] and result['cleanup_confirmed']
     assert not result['helpers_settled'] and not result['attempt_settled']
+
+
+def bound_context(adapter, context):
+    from llmsvc.reload_witness import PINNED_COMMIT
+    image = adapter.profile['native_binary_sha256']
+    context['native_provenance'] = {
+        'endpoint': adapter.profile['native_origin'] + '/api/mcp',
+        'base_generation': 'gen_' + '0' * 32,
+        'settings': {'images': [{'source_commit': PINNED_COMMIT,
+            'executable_sha256': image, 'dialect': 'v252-path'}],
+            'phase_images': dict.fromkeys(('old', 'candidate', 'restored'), image)},
+    }
+
+
+@pytest.mark.parametrize('operation', ['observe_candidate', 'observe_base'])
+def test_bound_file_observation_has_no_unbound_rpc_or_visibility_claim(native_observation, monkeypatch, operation):
+    from llmsvc.reload_witness import NativeGenerationReader
+    adapter, context = native_observation
+    bound_context(adapter, context)
+    monkeypatch.setattr(NativeGenerationReader, 'read', lambda *a, **k: pytest.fail('unbound RPC'))
+    result = adapter.operation(operation, context, time.monotonic() + 1)
+    assert result['configuration_file_confirmed'] is True
+    assert 'configuration_confirmed' not in result and 'generation' not in result
+    assert result['old_settled'] and result['helpers_settled'] and result['backends_confirmed']
+    assert result['attempt_bound'] and result['identity'] == context['old_identity']
+    assert result['cleanup_confirmed'] == (operation == 'observe_base')
+    if operation == 'observe_base':
+        assert result['attempt_settled']
+
+
+@pytest.mark.parametrize('operation', ['observe_candidate', 'observe_base'])
+def test_bound_file_does_not_hide_changed_bytes_or_missing_settlement(native_observation, operation):
+    adapter, context = native_observation
+    bound_context(adapter, context)
+    adapter.config.write_text('models: {}\n# changed after inspection\n')
+    adapter._retired = lambda *a: (False, False, [])
+    result = adapter.operation(operation, context, time.monotonic() + 1)
+    assert result['configuration_file_confirmed'] is False
+    assert not result['old_settled'] and not result['helpers_settled']
+    assert result['backends_confirmed']  # Separate from file/old-source evidence.
+
+
+@pytest.mark.parametrize('invalid', ['null', 'extra', 'endpoint', 'base_generation', 'settings',
+                                    'phase_image', 'missing_phase', 'unsupported_source'])
+@pytest.mark.parametrize('operation', ['observe_candidate', 'start_candidate', 'stop_old'])
+def test_invalid_bound_provenance_refuses_before_rpc_or_effect(native_observation, monkeypatch, invalid, operation):
+    from llmsvc.reload_witness import NativeGenerationReader, PINNED_COMMIT
+    adapter, context = native_observation
+    bound_context(adapter, context)
+    proof = context['native_provenance']
+    if invalid == 'null': context['native_provenance'] = None
+    elif invalid == 'extra': proof['fallback'] = True
+    elif invalid == 'endpoint': proof['endpoint'] = 'http://127.0.0.1:54320/api/mcp'
+    elif invalid == 'base_generation': proof['base_generation'] = None
+    elif invalid == 'settings': proof['settings'] = {}
+    elif invalid == 'missing_phase': del proof['settings']['phase_images']['restored']
+    elif invalid == 'unsupported_source': proof['settings']['images'][0]['source_commit'] = 'f' * 40
+    else:
+        # Even a valid allowlisted second image is not a source installer.
+        proof['settings']['images'].append({'source_commit': PINNED_COMMIT,
+            'executable_sha256': 'f' * 64, 'dialect': 'v252-path'})
+        proof['settings']['phase_images']['candidate'] = 'f' * 64
+    monkeypatch.setattr(NativeGenerationReader, 'read', lambda *a, **k: pytest.fail('fallback RPC'))
+    adapter._ensure_effect = lambda *a: pytest.fail('effect submission')
+    adapter.inspect_native = lambda *a: pytest.fail('inspection before provenance validation')
+    with pytest.raises(ExecutorError, match='native_provenance_unbound'):
+        adapter.operation(operation, context, time.monotonic() + 1)
+
+
+def test_bound_file_still_requires_actual_pinned_native_inspection(native_observation):
+    adapter, context = native_observation
+    bound_context(adapter, context)
+    def changed_image(*args):
+        raise ExecutorError('running_native_image_unpinned')
+    adapter.inspect_native = changed_image
+    with pytest.raises(ExecutorError, match='running_native_image_unpinned'):
+        adapter.operation('observe_candidate', context, time.monotonic() + 1)
+
+
+def test_legacy_still_rechecks_file_after_generation_rpc(native_observation, monkeypatch):
+    from types import SimpleNamespace
+    from llmsvc.reload_witness import NativeGenerationReader
+    adapter, context = native_observation
+    def changed_file(*args, **kwargs):
+        adapter.config.write_text('models: {}\n# changed during RPC\n')
+        return SimpleNamespace(error=None, generation=context['generation'])
+    monkeypatch.setattr(NativeGenerationReader, 'read', changed_file)
+    result = adapter.operation('observe_candidate', context, time.monotonic() + 1)
+    assert result['configuration_confirmed'] is False
+    assert 'configuration_file_confirmed' not in result
