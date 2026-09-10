@@ -58,6 +58,86 @@ reviewed archive/rollback handoff. Uninstall refuses changed managed files and
 nonempty state directories rather than deleting observations or persistent pin
 records. These limits are explicit outstanding #8 integration work.
 
+## Read-only runtime upgrades and host pull (#169)
+
+`deploy/upgrade.sh` upgrades an existing installation; it does not uninstall it.
+Copy/edit [upgrade.example.json](../deploy/upgrade.example.json) to match the
+installation manifest and existing shared directory (`cli_path` must be that
+shared directory's `llm`). Keep the file-bind trampoline and LXD profile unchanged.
+The updater reads/verifies `trampoline_path` and never writes it. It changes only
+the directory-side `llm`, `bin/llm-run`, owned scheduler launcher/unit and one
+shared `current` pointer. Client launchers resolve that pointer once and exec a
+versioned environment. Prior scheduler/TUI environments and generations remain
+available; no automatic garbage collection removes running clients' imports.
+
+A release bundle has `deployment.json`, the standalone CLI, pinned application
+and dependency wheels, and a bootstrap pip wheel. Every payload is hashed; the
+application wheel's script must match the standalone CLI (apart from the wheel's
+normalized shebang). Installation uses `venv --without-pip`, runs pip from its
+verified wheel and installs only explicit offline wheels. No ensurepip, network
+fallback, source build or global package installation occurs. The optional TUI
+is checked in the same new shared environment as the scheduler.
+
+```sh
+# Read-only planning: no files, lock, installer or service command is created.
+deploy/upgrade.sh apply --root /path/to/disposable/root \
+  --settings /path/to/upgrade.json --bundle /path/to/verified/bundle --dry-run
+# Prepare/validate/switch within the disposable root; no host systemctl there.
+deploy/upgrade.sh apply --root /path/to/disposable/root \
+  --settings /path/to/upgrade.json --bundle /path/to/verified/bundle
+# Use the exact transaction ID from the result.
+deploy/upgrade.sh rollback --root /path/to/disposable/root \
+  --settings /path/to/upgrade.json --transaction TRANSACTION_ID --dry-run
+```
+
+For an authorized installed-site upgrade use `--root /` after rehearsal. Both
+candidate `--check-config` and `--once` must pass. Configured live host memory
+must remain available. Before each cutover the updater checks fresh inference
+activity; this is a scheduler-restart guard, not a new trusted reload/quiet proof.
+Only `llmsvc-scheduler.service` is restarted. Health requires a sampled read-only
+state, the selected runtime in the service process, shared CLI version/status,
+and unchanged active llama-swap/reaper. No inference endpoint, alias, data-plane
+config, TTL/reaper, model launcher or scheduler ledger is changed.
+
+The site YAML is operator-owned. A changed hash since initial installation is
+not silently ignored or replaced: the exact current bytes are saved in the
+private transaction, validated and rechecked before/after switching. The new
+manifest records that observed config and retains the old manifest in history.
+Unit/CLI/dispatcher and original-backup integrity still must pass. A concurrent
+config/pointer edit blocks the transaction; rollback never overwrites an unknown
+operator edit. Successful upgrades use manifest schema2; old install/uninstall
+is not a replacement upgrade path. A failed restart/health check restores actual
+previous pointer/files/config state and restarts the prior scheduler. Retained
+generations are not deleted. An interrupted transaction blocks a new upgrade;
+use its exact `rollback --transaction` to reconcile known before/after bytes,
+never delete the journal or bypass hashes. Conflicting external edits require
+explicit reconciliation before another mutation.
+
+Host automation uses [pull.example.json](../deploy/pull.example.json) and one
+`deploy/pull_release.py --settings /path/to/pull.json` invocation per poll. It
+uses outbound HTTPS to the configured GitHub repository, ignores drafts,
+resolves the actual tag commit, verifies release manifest/bundle checksums and
+rejects archive links/traversal/unlisted payloads. It pushes a fresh versioned
+input directory and invokes the existing reviewed upgrader over LXC; there is
+no inbound CI runner, profile edit or second deployment owner. `--tag` selects
+an explicit released tag; `--dry-run` performs no network/write/command. Successful
+same-tag polls are no-ops; failed/pending attempts require operator reconciliation
+rather than an unattended retry loop. Render the single host service/timer into a new review directory with
+`--render-systemd /path/to/new/unit-review` (`--dry-run` writes nothing), then
+install/enable only that reviewed pair. Rendering starts no service. The timer
+uses the configured poll interval and the host cache lock excludes concurrent
+manual invocations; do not install competing pollers.
+
+Read-only bundles/site configuration may use the authorized automatic path.
+Non-read-only configuration or model-action/placement/automation/fault/recovery
+opt-ins are rejected with an approval-required error: future unattended M2
+changes retain a manual review/approval gate, not a config flag that bypasses it.
+Release publication is integration-owned; see [RELEASING](RELEASING.md). A same-
+version bootstrap rehearsal does not satisfy the separate real-tag **version
+change** acceptance. Record actual staging/live success, failure, rollback and
+unchanged trampoline/profile/config/backup evidence with the operation; no
+calendar wait or unmeasured stability claim is required.
+
 ## Observation and evidence
 
 `deploy/capture.py` takes configurable, bounded, read-only probes and writes
