@@ -34,6 +34,9 @@ class SchedulerConfig:
     registry: dict[str, Any] = field(default_factory=dict)
     native_witness: dict[str, Any] = field(default_factory=dict)
     catalog_enabled: bool = False
+    catalog_mode: str = "hot_reload"
+    catalog_profiles: dict[str, Any] = field(default_factory=dict)
+    maintenance_command: list[str] = field(default_factory=list)
     state_db_path: str = ""
     data_plane_events_enabled: bool = False
     data_plane_event_capacity: int = 256
@@ -129,6 +132,14 @@ class SchedulerConfig:
             raise ValueError("placement_enabled must be a boolean")
         if type(self.model_actions_enabled) is not bool:
             raise ValueError("model_actions_enabled must be a boolean")
+        if self.catalog_mode not in ("hot_reload", "maintenance"):
+            raise ValueError("catalog_mode must be hot_reload or maintenance")
+        if not isinstance(self.catalog_profiles, dict) or not all(isinstance(v, dict) for v in self.catalog_profiles.values()):
+            raise ValueError("catalog_profiles must be a model mapping")
+        if (not isinstance(self.maintenance_command, list) or len(self.maintenance_command) > 16
+                or any(not isinstance(v, str) or not v or "\x00" in v for v in self.maintenance_command)
+                or (self.maintenance_command and not Path(self.maintenance_command[0]).is_absolute())):
+            raise ValueError("maintenance_command must be an explicit absolute executable argv")
         if type(self.catalog_enabled) is not bool:
             raise ValueError("catalog_enabled must be a boolean")
         if type(self.read_only) is not bool:

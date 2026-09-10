@@ -432,3 +432,30 @@ logs do not establish old-server settlement. Keep recovery/barrier and #53
 quiet/production gates until an independent settlement contract is verified.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+
+### Explicit native maintenance adapter
+
+The same catalog worker can use the opt-in native instance transition described
+in [deploy/MAINTENANCE.md](../deploy/MAINTENANCE.md). The profile pins the service,
+image, configuration and backend identities, and replaces generic shutdown-log
+inference with attributable helper job outcomes. Provisioning that profile,
+native helper command and dedicated attempt environment file is a separate
+reviewed site step; the read-only release puller does not activate it.
+
+Provisioning the managed `cmdStop` also changes ordinary llama-swap unloads:
+they invoke the same native helper, which verifies the configured backend,
+requests level-1 sleep, confirms sleeping, and signals only the matching wrapper.
+Outside a maintenance claim this runs directly and creates no maintenance claim
+or helper job. This production unload-path change belongs in the reviewed site
+transition and rollback record even when no catalog change is being submitted;
+it must not be introduced implicitly by a read-only runtime update. Sleeping or
+stopping the wrapper does not establish backend exit or release its lease budget.
+
+Retain the source-owned start/stop/helper records and exact job units while any
+claim is pending. Never reset/delete failed helper records or restore a stale
+ledger to force rollback. An absent PID after an unknown submitted start is not
+proof that no candidate ran. Known pre-command refusal and positively bound
+new/base instances have separate recovery paths. A configuration rollback keeps
+current account releases; it does not recreate a removed model's old lease.
+
+<!-- Generated-By: Codex / gpt-6-astra -->

@@ -2,6 +2,7 @@
 """Scheduler entry point: read-only by default, with opt-in pin intent writes."""
 
 import argparse
+import copy
 import json
 import logging
 import signal
@@ -99,6 +100,49 @@ def build_registry(config, scheduler):
             ("model_config_max_bytes", "weight_index_max_bytes") if key in config.registry})
 
 
+def maintenance_config(config):
+    """Use explicit trusted profile completions; never change existing fields."""
+    if config.catalog_mode != "maintenance" or not config.catalog_enabled:
+        return config
+    models = config.collectors.get("models", {})
+    completed = {}
+    for name, existing in models.items():
+        profile = config.catalog_profiles.get(name)
+        if not isinstance(profile, dict):
+            raise ValueError("maintenance needs trusted profiles for every current model")
+        if any(key in existing and existing[key] != value for key, value in profile.items()):
+            raise ValueError("maintenance profile disagrees with configured model")
+        completed[name] = {**copy.deepcopy(existing), **copy.deepcopy(profile)}
+    return replace(config, collectors={**copy.deepcopy(config.collectors), "models": completed})
+
+
+def build_catalog(config, scheduler):
+    from llmsvc.catalog import CatalogRuntime
+    if scheduler.registry is None:
+        raise ValueError("catalog checkpoint/install requires configured registry")
+    queue = scheduler.registry.queue
+    if config.catalog_mode != "maintenance" or not config.maintenance_command:
+        return CatalogRuntime(scheduler, queue)
+    from llmsvc.maintenance import CommandBackend, MaintenanceController
+    from llmsvc.registry import ModelRegistry
+    controller = MaintenanceController(scheduler, queue, CommandBackend(config.maintenance_command, monotonic=queue.clock))
+    profiles = copy.deepcopy(config.catalog_profiles)
+    def trusted_profiles(candidate):
+        document, _ = ModelRegistry._decode(candidate)
+        try:
+            return {name: copy.deepcopy(profiles[name]) for name in document["models"]}
+        except KeyError as exc:
+            raise ValueError("requested model lacks a trusted maintenance profile") from exc
+    queue.validate = controller.validate
+    runtime = CatalogRuntime(scheduler, queue, transition=controller, verifier=controller.verify,
+                             profile_provider=trusted_profiles, instance_provider=controller.inspect_instance)
+    scheduler.registry.stop_model = controller.stop_model
+    scheduler.registry.unit_absent = controller.unit_absent
+    if runtime.can_submit():
+        runtime.connect_registry(scheduler.registry)
+    return runtime
+
+
 def main():
     parser = argparse.ArgumentParser(description="llmsvc scheduler (read-only by default)")
     parser.add_argument("--version", action="version", version=__version__)
@@ -106,7 +150,11 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="force read-only operation and never create or write the intent database")
     parser.add_argument("--check-config", action="store_true", help="validate configuration and exit")
     parser.add_argument("--once", action="store_true", help="collect one JSON snapshot and exit")
+    parser.add_argument("--maintenance-recover", choices=("observe", "rollback"),
+                        help="exclusive operator recovery using the configured maintenance adapter")
     args = parser.parse_args()
+    if args.maintenance_recover and (args.once or args.check_config):
+        parser.error("maintenance recovery cannot be combined with once/check-config")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     store = None
     collector = None
@@ -115,6 +163,7 @@ def main():
         config = load_config(args.config)
         if args.dry_run or args.check_config or args.once:
             config = replace(config, read_only=True)
+        config = maintenance_config(config)
         collector = build_collector(config)
         event_relay = build_event_relay(config)
         transport = None
@@ -138,10 +187,12 @@ def main():
             from llmsvc.faults import FaultRecoveryController
             scheduler.faults = FaultRecoveryController(scheduler)
         if config.catalog_enabled or (store is not None and store.catalog_checkpoint() is not None):
-            if scheduler.registry is None:
-                raise ValueError("catalog checkpoint/install requires configured registry")
-            from llmsvc.catalog import CatalogRuntime
-            CatalogRuntime(scheduler, scheduler.registry.queue)
+            build_catalog(config, scheduler)
+            checkpoint = store.catalog_checkpoint() if store is not None else None
+            if checkpoint is not None:
+                logging.getLogger("llmsvc.catalog").info(json.dumps({"kind": "catalog_restored",
+                    "catalog_epoch": scheduler.catalog_epoch, "phase": checkpoint["phase"],
+                    "fenced": scheduler.catalog_fenced, "mode": config.catalog_mode}))
 
     except (OSError, ValueError, TypeError, ImportError, sqlite3.Error) as exc:
         try:
@@ -163,6 +214,13 @@ def main():
             if store is not None:
                 store.close()
 
+    if args.maintenance_recover and args.dry_run:
+        try:
+            operation = "rollback_maintenance" if args.maintenance_recover == "rollback" else "reconcile_maintenance"
+            print(json.dumps({"would": [{"kind": operation}]}))
+        finally:
+            close_scheduler()
+        return 0
     if args.check_config:
         close_scheduler()
         return 0
@@ -181,6 +239,22 @@ def main():
     except OSError as exc:
         close_scheduler()
         parser.error(str(exc))
+    if args.maintenance_recover:
+        # Binding the normal control endpoint precedes recovery effects, so a
+        # running normal scheduler cannot be bypassed by a second operator CLI.
+        try:
+            if scheduler.catalog is None or scheduler.catalog.transition is None:
+                raise ValueError("maintenance recovery requires the configured transition mode")
+            scheduler.sample_once()
+            controller = scheduler.catalog.transition
+            result = controller.rollback() if args.maintenance_recover == "rollback" else controller.reconcile()
+            print(json.dumps(result, allow_nan=False))
+            return 0
+        finally:
+            try:
+                close_scheduler()
+            finally:
+                server.server_close()
     # Signal handlers only notify. HTTP shutdown must run outside serve_forever.
     exit_requested = threading.Event()
     previous = {}
