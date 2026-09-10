@@ -199,6 +199,8 @@ def manifest_for(settings, root):
     prefix = inside(root, settings["prefix"])
     path = inside(root, settings["prefix"] + "/manifest.json")
     manifest = json.loads(path.read_text())
+    if manifest.get("schema_version") == 2:
+        raise DeploymentError("versioned installation: use upgrade.py rollback; archive generations before uninstall")
     if manifest.get("schema_version") != 1 or manifest.get("settings") != settings or manifest.get("root") != str(root):
         raise DeploymentError("manifest/settings/root mismatch")
     # Manifest must never authorize deletion outside this installation.

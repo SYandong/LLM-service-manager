@@ -1,0 +1,18 @@
+{
+  "_comment": "Generated-By: Codex / gpt-6-astra. Host outbound pull only; keep one deploy owner. Configure existing reviewed upgrade tool/site settings; no inbound CI runner or credentials required for a public repository.",
+  "repo": "SYandong/LLM-service-manager",
+  "cache_dir": "/var/cache/llmsvc-releases",
+  "container": "llmsvc",
+  "container_bundle_root": "/opt/llmsvc-upgrade-inputs",
+  "container_settings": "/etc/llmsvc/upgrade.json",
+  "upgrade_program": "/opt/llmsvc-deploy/deploy/upgrade.py",
+  "container_python": "/usr/bin/python3",
+  "lxc_prefix": [
+    "sudo",
+    "-n",
+    "lxc"
+  ],
+  "host_python": "/usr/bin/python3",
+  "host_program": "/opt/llmsvc-deploy/deploy/pull_release.py",
+  "poll_interval_seconds": 300
+}
