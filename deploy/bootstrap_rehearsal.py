@@ -94,7 +94,7 @@ def run(args):
         manifest_path=work/'manifest.json';private_create(manifest_path,manifest)
         dispatch=work/'dispatch.json';pin=checksum(manifest_path.read_bytes());private_create(dispatch,{'bootstrap_adapter':True,'manifest_path':str(manifest_path),'manifest_sha256':pin})
         context={'bootstrap_id':token,'transaction_id':token,'manifest_sha256':pin,'default_model':model,'default_unit':backend,
-                 'account':None,'launch_submitted':False,'effects':{}}
+                 'source_origin':origin,'account':None,'launch_submitted':False,'effects':{}}
         def request(op):
             sent=time.monotonic()
             envelope={'operation':op,'context':context,'timeout_seconds':min(15,deadline-sent)}
