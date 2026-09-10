@@ -42,3 +42,13 @@ collectors: {}
 #   config_max_bytes: 1048576
 #   model_config_max_bytes: 1048576
 #   weight_index_max_bytes: 8388608
+
+# Explicit native instance maintenance remains opt-in; package upgrades do not
+# enable it. Reconcile the native profile/service/helper prerequisites in
+# deploy/MAINTENANCE.md before using the same existing catalog worker.
+# catalog_mode: maintenance
+# maintenance_command:
+#   - /opt/approved-runtime/bin/python
+#   - /opt/approved-source/deploy/maintenance_executor.py
+#   - --profile
+#   - /etc/llmsvc/maintenance-profile.json
