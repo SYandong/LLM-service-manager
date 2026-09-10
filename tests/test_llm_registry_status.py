@@ -52,7 +52,7 @@ def test_restart_marker_nulls_remain_unknown_and_fenced(api,inspection,monkeypat
     assert queue['recovery']['settlement_confirmed'] is None
     assert json.loads(api['format_result'](parsed(api,'--json'),result))==result
     text=api['format_result'](parsed(api),result)
-    assert 'Fenced: yes (retained)' in text and 'missing jobs do not prove application' in text
+    assert 'Queue/config fence: yes (retained)' in text and 'missing jobs do not prove application' in text
     assert (old.path.read_bytes(),old.marker.read_bytes(),inspection.scheduler.events_since(0))==before
 
 

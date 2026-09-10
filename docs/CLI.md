@@ -152,10 +152,10 @@ LLM_URL=http://scheduler:8011 python3 llm rm ft --dry-run --json
 - Add/rm 预览可附加 plan：显示既有 owner 计算的 model/base/daemon_port/util_macro 与 projected/candidate SHA256。端口仅为 pending FIFO 投影下的计划值，未预留；util_macro 是配置，不是实测显存或分配保证。重复预览不会占用端口或写配置；提交前需重新规划。candidate hash 不证明 proxy 已采用、旧 generation 已退出或资源收尾。受保护/无效 rm 仍返回 400，不能因内部预览返回 empty would 而视为成功。
 - 旧服务省略 inventory/plan 时仍按基础字段工作；提供的详情形状无效时明确报协议错误，不猜测缺失值。实际临时 HTTP/复制 CLI/TUI 检查覆盖了 pending FIFO 下的重复计划、未预留端口、过期/保护/unknown 展示和原有 400/409/503/405 边界；配置、队列和事件保持不变。详情不会带候选配置字节或完整命令；`--json` 保留合法返回数据及 null，普通 CLI 与 TUI 另外给出上述边界提示。
 - `models` 读取同一个 scheduler 的 `/v1/models`，返回配置文件中的 **temporary registry records**，不是全部常驻模型发现，也不是当前 proxy 已采用配置的证明。常驻/运行状态看 `status`。输出保留 records、writes_enabled 和 blocked_by；空 records 是可用列表中的空集合，503 unavailable 不会被显示为空集合。
-- 当前 #137 list/preview 接口的写操作始终关闭。预览返回 would、dry_run=true、config_committed=false 和真实阻塞原因，包括 registry_writes_disabled、unknown quiet 与当前保护/故障条件。合法编辑不表示可提交；没有 job ID、排队项、staging、落盘或 model action。阻塞预览返回退出码 1，正常列表读取返回 0。
+- 默认入口缺少 catalog 验证能力，模型写操作仍关闭；显式配齐可信 profile/instance/quiet/adoption/settlement/cleanup 能力的 scheduler 可接受既有 add/rm 请求并返回 job。预览返回 would、dry_run=true、config_committed=false 和真实阻塞原因，包括 registry_writes_disabled、unknown quiet 与当前保护/故障条件。合法编辑不表示可提交；预览没有 job ID、排队项、staging、落盘或 model action。阻塞预览返回退出码 1，正常列表读取返回 0。
 - 未配置 registry 返回 503 registry_not_configured；路径/模型等校验失败为 400 registry_invalid_request（保留 message）；配置不可安全读取为 503 registry_unavailable；待核对事务使预览返回 409 registry_reconciliation_required。`--json` 保留结构化错误 body 并返回非零；普通输出与 TUI 同样保留详情。
 - 不带 `--dry-run` 的 add/rm 仍可被服务器以 405 read_only/operation_not_enabled 拒绝；CLI 不启用写操作、不自动切换成预览，也不重试不确定的 POST/DELETE。未知结果先核对状态与事件。
-- 结果呈现支持既有 registry job 的 queued/blocked/applied/failed/timed_out/reconciliation_required 字段，明确分开排队、config_committed 和最终应用。queued 返回非零并显示“not applied”；不会把 HTTP 200 或文件提交当完整应用。当前安全接口不创建这些 job，也没有新增 job 轮询端点；实际作业/写入需要后续已审核 core 接入。
+- 结果呈现支持既有 registry job 的 queued/blocked/applied/failed/timed_out/reconciliation_required 字段，明确分开排队、config_committed 和配置阶段 status；applied 不替代全局 catalog 围栏/采用/结算判断。queued 返回非零并显示“not applied”；不会把 HTTP 200 或文件提交当完整应用。默认入口不会创建这些 job；具备 catalog 提交能力的服务器沿用现有 job 形状，可通过 `registry` 读取状态，没有新增 job 轮询端点。
 
 实际临时 HTTP/配置/完整权重结构夹具已验证单文件 `-I -S` 的列表、add/rm 预览、结构化错误，以及 100×30/窄终端 TUI；所有配置文件、队列、事件和 unit/transport 回调保持不变。权重内容和状态为 CPU 测试夹具，没有冷启动推理或实际 reload。
 
@@ -169,11 +169,13 @@ LLM_URL=http://scheduler:8011 python3 llm registry --json
 
 `registry` 从已配置 scheduler 的单个 `GET /v1/registry` 读取队列/恢复聚合，也可在 TUI 命令框使用。读取成功返回 0，只表示取得快照，不表示 job 应用、恢复完成或允许写入。未配置/不可用返回结构化 503 和非零退出码；没有 proof、reconcile、retry 或 clear 参数/请求。
 
+`Queue/config fence` 仅对应 `queue.fenced`，不是全局动作围栏。`Global blockers` 单独显示服务器顶层 blocked_by；例如最终 checkpoint 保存失败时，queue 可以为 false、job 为 applied，但 `catalog_reconciliation_required` 仍阻止动作。没有顶层 blocker 只表示本次快照未报告，不是全局可执行保证；客户端不猜测缺失的全局 fence 字段。`writes_enabled=true` 仅表示提交能力，不证明 runtime 已采用或旧资源已结算。
+
 完整保留 owner 的 status、recorded_status、source、pending、config_committed、blocked_by、error 和 recovery。内存 job 的 blocked/timed_out 是当前只读投影，recorded_status 可仍为 queued，读取不会消费任务。observed_at_monotonic 和 elapsed 是进程内单调时间，不转成墙钟，不与上一次进程比较。
 
 重启后来源为 recovery_marker 的 job 可带 null elapsed/remaining/config_committed；缺失的内存 job 不意味着 applied。损坏或无法确认的 marker 仍显示 fenced/reconciliation_required；候选文件摘要匹配或 generation 可见也不证明 settlement。客户端显示并保留 fence，不会尝试清除或调用 native probe。默认 writes_enabled=false 与未知 quiet 阻塞保持可见。
 
-实际 HTTP/队列/临时 marker 的 CPU 测试覆盖超时投影、重启 null、损坏 marker、复制 CLI 与窄终端，使用写/探针/worker 陷阱证明读取无副作用；不代表生产恢复或长期稳定性测量。
+实际 HTTP/队列/临时 marker 的 CPU 测试覆盖超时投影、重启 null、损坏 marker、复制 CLI 与窄终端；catalog 测试还复现 published checkpoint 保留而 queue 已 applied/unfenced 的情况，验证 CLI/TUI 显示全局阻塞并保留原始 JSON/null，读取不改变文件、数据库、队列、事件或验证器调用。其余只读测试使用写/探针/worker 陷阱证明读取无副作用；不代表生产恢复或长期稳定性测量。
 
 ## 可选 TUI
 
@@ -197,7 +199,7 @@ LLM_URL=http://scheduler:8011 python cli/llm
 - usage 视图提供 7 天、30 天和返回状态按钮，每 5 秒刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
 - 请求在后台线程执行，慢请求不会叠加轮询或阻塞按键。连接失败保留上一份快照，并显示错误；新快照到达后保留选中模型。
 - 实际 `free --ram` 先弹出二次确认，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。Free/wake 完成后立即刷新，部分结果与错误仍保留；后台执行期间 UI 与事件面板继续响应。
-- Reserve 的预览、只读拒绝与实际回执语义见上节；模型实际写入尚未开放；可使用 models/add/rm 的安全列表和预览。不能用本客户端命令启用生产调度。
+- Reserve 的预览、只读拒绝与实际回执语义见上节；默认入口的模型实际写入仍关闭；具有显式 catalog 提交能力的服务器可以排队 add/rm，queued 不等于 applied 或全局动作可用。安全列表/预览保持可用。不能用本客户端命令启用生产调度。
 
 ### Scheduler 与数据面事件流
 

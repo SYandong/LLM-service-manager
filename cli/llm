@@ -907,7 +907,10 @@ def validate_registry_result(args, result):
 def format_registry_result(args, result):
     if args.command == "registry":
         label = "Registry queue/recovery inspection; no apply or recovery action"
-        label += "\nFenced: " + ("yes (retained)" if result["queue"]["fenced"] else "no")
+        label += "\nQueue/config fence: " + ("yes (retained)" if result["queue"]["fenced"] else "no")
+        reasons = ", ".join(clean_text(item["reason"]) for item in result["blocked_by"])
+        label += "\nGlobal blockers: " + (reasons or "none reported (not a readiness guarantee)")
+        label += "\nQueue status is a config-stage projection, not global action readiness"
         label += "\nTimes are process-local monotonic; missing jobs do not prove application"
     elif args.command == "models":
         label = "Temporary model registry (configured file, not active adoption)"
