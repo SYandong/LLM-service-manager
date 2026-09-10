@@ -48,9 +48,11 @@ Root owns the initial #76 release. Use a `chore/<issue>-release-...` branch and 
    The initial release depends on merged #73 and #75.
 2. Run the offline suite and package/CLI/TUI checks on the release candidate.
    Local tests must not contact a live model service without the existing
-   idle-GPU test gate. `tests/test_smoke.py` is a live service suite; excluding it
-   from local offline verification must be disclosed. The normal PR CI remains
-   unchanged and runs its complete suite on Python 3.10.
+   idle-GPU test gate. Run the complete current `tests` suite on Python 3.10;
+   the retired proxy's live tests are no longer part of it. Older release
+   receipts retain their historical exclusions; do not copy those exclusions
+   into current validation. Model-running deployment harnesses remain separately
+   owned by ops and require their actual idle/protection gates.
 3. Require explicit Fable approval of the current release PR head, current
    successful CI and resolved blockers. Apply the ROADMAP's squash/commit
    verification rules. New commits invalidate prior approval.

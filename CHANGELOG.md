@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Retire the old single-backend proxy source, dashboard/configuration and their
+  dedicated tests and example (#27). Current CLI/TUI, scheduler, model protection
+  and deployment behavior are unchanged. Active documentation and package source
+  selection use the current control plane. Historical release/roadmap records and
+  previously published immutable artifacts remain available for provenance.
+- Source retirement performs no additional site shutdown, uninstall, dormant-unit
+  deletion or change to the shared CLI mounts. Current bounded consumer evidence
+  and the previously authorized stop are recorded separately; arbitrary renamed
+  consumers or future manual invocations are not certified absent forever.
+
 ## 0.1.0-alpha.9 — 2026-09-10
 
 Incremental preview; Python distribution `0.1.0a9`.
