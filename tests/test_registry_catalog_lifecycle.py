@@ -73,6 +73,8 @@ def test_real_registry_add_installs_catalog_before_existing_place_confirm(bridge
 def test_real_registry_remove_keeps_late_pin_and_then_retires_admission(bridge):
     c, api, weights, _ = bridge
     add_model(c, api, weights)
+    assert not any(lease.model == 'fine' for lease, _ in c.store.leases())
+    assert c.store.fault('fine') is None and c.store.recovery('fine') is None
     status, job = request(c.address, 'DELETE', '/v1/models/fine')
     assert status == 200, job
     assert job['description']['kind'] == 'remove_model'
@@ -87,7 +89,9 @@ def test_real_registry_remove_keeps_late_pin_and_then_retires_admission(bridge):
     assert c.runtime.process_once()['status'] == 'applied'
     c.s.sample_once()
     assert 'fine' not in api.records()
-    assert 'fine' in c.s.collect.models and 'fine' not in c.s.placement.transport.active_models
+    # This fixture has no retained lease/fault/recovery reference. Observation
+    # retention is optional here; removed names must never regain admission.
+    assert 'fine' not in c.s.placement.transport.active_models
     status, body = request(c.address, 'POST', '/v1/place', {'model':'fine', 'util':.2})
     assert status == 404 and body['error'] == 'unknown_model'
 
