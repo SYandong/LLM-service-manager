@@ -110,8 +110,35 @@ class BootstrapController:
         return record
 
     def _save(self,record,**changes):
-        value=bootstrap_state.save(self.scheduler.store,record,{**record,**changes})
-        self.scheduler.emit('bootstrap_stage',model=self.model,detail={'stage':value['stage'],'lease_id':value['lease_id']})
+        s=self.scheduler
+        with s.action_lock:
+            stage=changes.get('stage',record['stage'])
+            if stage in ('complete','aborted') and record['stage']!=stage:
+                self._enabled()
+                if not self.busy or self._record()!=record:
+                    raise BootstrapError('bootstrap terminal owner or checkpoint changed')
+                if stage=='complete':
+                    # This probe can sample/wait. Everything that can invalidate
+                    # completion must be checked again after it, under this lock.
+                    observed=self._confirmed(record)
+                    row=s.store.lease(record['lease_id'])
+                    proof=changes.get('migration',record['migration']).get('activated',{})
+                    binding=proof.get('default_binding',{})
+                    if (row is None or binding.get('lease_id')!=record['lease_id']
+                            or binding.get('model')!=self.model or binding.get('unit')!=self.unit
+                            or binding.get('gpu')!=row[0].gpu
+                            or binding.get('invocation_id')!=observed.invocation_id):
+                        raise BootstrapError('bootstrap terminal default binding changed')
+                expected=self.spec['target_config_sha256' if stage=='complete' else 'base_config_sha256']
+                if self._source_state()!=(expected,True):
+                    raise BootstrapError('bootstrap terminal source changed')
+                # No external callback/probe follows these final checks. Store
+                # validation and its compare-and-save remain inside action_lock.
+                self._enabled()
+                if not self.busy or self._record()!=record or self.clock()>=self.deadline:
+                    raise BootstrapError('bootstrap terminal checkpoint changed or deadline exceeded')
+            value=bootstrap_state.save(s.store,record,{**record,**changes})
+        s.emit('bootstrap_stage',model=self.model,detail={'stage':value['stage'],'lease_id':value['lease_id']})
         return value
 
     def _source_state(self):

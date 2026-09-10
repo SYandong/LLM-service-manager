@@ -69,6 +69,14 @@ The store rechecks that scope; capability rotation on explicit recovery also
 invalidates old waiting request threads. The capability is hashed in the claim
 and is not logged or exposed through a tenant proof endpoint.
 
+Terminal `complete` and `aborted` persistence holds the shared action lock through
+final validation and compare-and-save. After the last health/source reads it
+rechecks execution/stopping, unchanged configured inputs and claim, exact source
+bytes/preload and the remaining deadline; completion also rechecks the confirmed
+default binding. Failure keeps the nonterminal claim. A pending lease already
+released from positive absence during rollback stays released; a failed final
+check does not restore that budget or claim a completed rollback.
+
 ## Source exclusion and unknowns
 
 The raw public snapshot retains source-down errors and unknown activity. Only the
