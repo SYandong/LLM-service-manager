@@ -326,6 +326,8 @@ class CatalogRuntime:
                 endpoint=self.scheduler.config.collectors["swap_url"].rstrip("/")+"/api/mcp", instance=instance)
             profiles = self.profile_provider(generated.candidate)
             prepared = self.prepare(generated.candidate, profiles, binding=generated.binding)
+            if prepared.base_sha256 != digest(original):
+                raise ReloadError("catalog source changed during registry preparation")
             return self.enqueue(prepared, cleanup=after_apply, precheck=precheck, description=description)
 
     def _proof(self, record, marker_record, *, deadline):
