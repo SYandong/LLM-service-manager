@@ -7,6 +7,7 @@ configure/pin this adapter, its source unit and managed helper command first.
 """
 import argparse
 import contextlib
+import errno
 import hashlib
 import http.client
 import ipaddress
@@ -176,11 +177,37 @@ class NativeAdapter(ScopeInspector):
         self.config=Path(profile['native_config_path'])
         if self.config.parent!=Path(profile['native_config_dir']):raise ExecutorError('native_config_directory_mismatch')
         self.http=NativeHTTP(profile['native_origin'])
-        listen=ipaddress.ip_address(profile['listen_host']);port=profile['listen_port']
+        host=profile['listen_host'];port=profile['listen_port']
+        if not isinstance(host,str):raise ExecutorError('literal_or_empty_listen_host_required')
+        try:listen=None if host=='' else ipaddress.ip_address(host)
+        except (ValueError,TypeError) as exc:
+            raise ExecutorError('literal_or_empty_listen_host_required') from exc
         if type(port) is not int or not 0<port<65536 or port!=self.http.port:
             raise ExecutorError('native_listen_port_mismatch')
-        if (not listen.is_unspecified and str(listen)!=self.http.host) or (listen.is_unspecified and not ipaddress.ip_address(self.http.host).is_loopback):
-            raise ExecutorError('native_origin_not_local_listener')
+        # Empty host preserves the native :PORT spelling. It is a bind identity,
+        # never an HTTP destination, and needs an explicit reachability contract.
+        origins=profile.get('native_probe_origins')
+        if origins is None:
+            if listen is None:raise ExecutorError('wildcard_probe_origins_required')
+            origins=[profile['native_origin']]
+        if (not isinstance(origins,list) or not 1<=len(origins)<=4
+                or profile['native_origin'] not in origins):
+            raise ExecutorError('invalid_native_probe_origins')
+        endpoints=set()
+        for origin in origins:
+            if not isinstance(origin,str):raise ExecutorError('invalid_native_probe_origins')
+            probe=NativeHTTP(origin);address=ipaddress.ip_address(probe.host)
+            if probe.port!=port:raise ExecutorError('native_probe_port_mismatch')
+            if listen is None or listen.is_unspecified:
+                if not address.is_loopback:raise ExecutorError('native_origin_not_local_listener')
+                if listen is not None and listen.version==4 and address.version!=4:
+                    raise ExecutorError('native_probe_address_family_mismatch')
+            elif address!=listen:
+                raise ExecutorError('native_origin_not_local_listener')
+            endpoint=(probe.host,probe.port)
+            if endpoint in endpoints:raise ExecutorError('duplicate_native_probe_origin')
+            endpoints.add(endpoint)
+        self.native_probe_origins=tuple(origins)
         self.state=private_directory(profile['state_dir'])
         self.envfile=Path(profile['launch_environment_file'])
         if self.envfile.parent!=self.state:raise ExecutorError('launch_environment_outside_state')
@@ -269,6 +296,23 @@ class NativeAdapter(ScopeInspector):
                     matches.append(fields[9])
         return bool(matches) and all(inode in inodes for inode in matches)
 
+    def _native_snapshot(self,group,deadline):
+        # Probe all configured families through their literal destinations. An
+        # IPv6 wildcard inode alone cannot prove IPv4 reachability (V6ONLY).
+        # Read the primary snapshot last so its in-flight sample is the newest.
+        origins=[o for o in self.native_probe_origins if o!=self.profile['native_origin']]
+        origins.append(self.profile['native_origin'])
+        snapshot=None
+        for origin in origins:
+            if not self.listener_owned(origin,group,deadline):
+                raise ExecutorError('native_listener_not_owned')
+            http=self.http if origin==self.profile['native_origin'] else NativeHTTP(origin)
+            snapshot=http.snapshot(deadline)
+        for origin in origins:
+            if not self.listener_owned(origin,group,deadline):
+                raise ExecutorError('native_listener_changed_during_probe')
+        return snapshot
+
     def backend(self,name,deadline,expected=None):
         row=self.models.get(name)
         if row is None:raise ExecutorError('backend_profile_missing')
@@ -346,9 +390,7 @@ class NativeAdapter(ScopeInspector):
         source=self.show(self.profile['unit'],deadline)
         if source['Restart']!='no':raise ExecutorError('native_source_requires_no_automatic_restart')
         self.native_image(base['identity']['pid'])
-        if not self.listener_owned(self.profile['native_origin'],base['scope']['control_group'],deadline):
-            raise ExecutorError('native_listener_not_owned')
-        snapshot=self.http.snapshot(deadline)
+        snapshot=self._native_snapshot(base['scope']['control_group'],deadline)
         active=[name for name,state in snapshot.states.items() if state!='stopped']
         if any(snapshot.states[n]!='ready' for n in active):raise ExecutorError('native_model_transition_in_progress')
         account_map=None
@@ -415,6 +457,7 @@ class NativeAdapter(ScopeInspector):
         scope_hash=digest(scope)
         identity={**base['identity'],'scope_sha256':scope_hash}
         actors=[{**p,'scope_sha256':scope_hash} for p in actors]
+        self.native_image(base['identity']['pid'])
         if file_bytes(self.config)!=raw or super().inspect(deadline)['identity']!=base['identity']:
             raise ExecutorError('native_source_changed_during_observation')
         return {'identity':identity,'scope':scope,'actors':actors,'backend_bindings':bindings,'helper_models':helper_models,
@@ -530,7 +573,28 @@ class NativeAdapter(ScopeInspector):
         return {'pid':pid,'start_ticks':current['start_ticks'],'scope_sha256':digest(scope)}
 
     def _address_available(self):
-        host=self.profile['listen_host'];port=self.profile['listen_port'];address=ipaddress.ip_address(host)
+        host=self.profile['listen_host'];port=self.profile['listen_port']
+        if host=='':
+            # Reserve-check both wildcard families simultaneously. V6ONLY here
+            # prevents our own temporary IPv6 socket conflicting with our IPv4
+            # check; it never changes the native listener or host networking.
+            required={ipaddress.ip_address(NativeHTTP(o).host).version for o in self.native_probe_origins}
+            sockets=[]
+            try:
+                for family,address,version in ((socket.AF_INET,'0.0.0.0',4),(socket.AF_INET6,'::',6)):
+                    try:
+                        sock=socket.socket(family,socket.SOCK_STREAM);sockets.append(sock)
+                        if version==6:sock.setsockopt(socket.IPPROTO_IPV6,socket.IPV6_V6ONLY,1)
+                        sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+                        sock.bind((address,port))
+                    except OSError as exc:
+                        if version not in required and exc.errno in (errno.EAFNOSUPPORT,errno.EPROTONOSUPPORT,errno.EADDRNOTAVAIL):
+                            continue
+                        return False
+                return True
+            finally:
+                for sock in sockets:sock.close()
+        address=ipaddress.ip_address(host)
         sock=socket.socket(socket.AF_INET6 if address.version==6 else socket.AF_INET,socket.SOCK_STREAM)
         try:
             sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);sock.bind((str(address),port));return True
