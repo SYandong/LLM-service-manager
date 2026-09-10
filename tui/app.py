@@ -222,6 +222,7 @@ class SchedulerApp(App):
             "schema": "schema unavailable or unsupported", "parse": "invalid activity data",
             "unavailable": "source unavailable", "corrupt": "database damaged",
             "interrupted": "read interrupted", "read_failed": "read failed",
+            "io": "database read I/O failed",
             "round_deadline": "collector round deadline exceeded",
             "previous_probe_running": "previous activity read still running",
             "not configured": "source not configured",
