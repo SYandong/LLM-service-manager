@@ -718,8 +718,41 @@ class NativeAdapter(ScopeInspector):
         private_update(record_path,record,{'stage':'started','identity':current['identity'],'scope':current['scope'],'actors':current['actors']})
         return {'accepted':True,'identity':current['identity'],'observed_at':time.monotonic()}
 
+    def _bound_file_mode(self, context):
+        """Validate the immutable core provenance without submitting a native RPC.
+
+        This adapter has one pinned executable and no image installer. Core's
+        image allowlist cannot authorize switching that executable between phases.
+        inspect_native separately verifies the current process image/listeners.
+        """
+        if 'native_provenance' not in context:
+            return False
+        from llmsvc.native_binding import validate_settings
+        from llmsvc.reload_witness import CandidateBinding, InstanceIdentity, NativeGenerationReader
+        proof = context['native_provenance']
+        try:
+            if not isinstance(proof, dict) or set(proof) != {'endpoint', 'settings', 'base_generation'}:
+                raise ValueError('invalid provenance fields')
+            pins = validate_settings(proof['settings'])
+            image = self.profile['native_binary_sha256']
+            phases = proof['settings'].get('phase_images')
+            if (not pins or phases != dict.fromkeys(('old', 'candidate', 'restored'), image)
+                    or image not in {pin.executable_sha256 for pin in pins}):
+                raise ValueError('single-image adapter cannot switch phase images')
+            endpoint = NativeGenerationReader(self.profile['native_origin']).endpoint
+            if proof['endpoint'] != endpoint:
+                raise ValueError('native endpoint differs from pinned profile')
+            old = validate_identity(context['old_identity'])
+            CandidateBinding(endpoint=endpoint, generation=proof['base_generation'],
+                instance=InstanceIdentity(old['pid'], old['start_ticks']),
+                candidate_sha256=context['base_sha256']).to_dict()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ExecutorError('native_provenance_unbound') from exc
+        return True
+
     def operation(self,operation,context,deadline,dry_run=False):
         if time.monotonic()>=deadline:raise ExecutorError('native_operation_deadline')
+        bound_file_mode = self._bound_file_mode(context)
         if operation=='validate':return self.validate(context['candidate_path'],context['candidate_sha256'],deadline,dry_run=dry_run)
         effects={'stop_old','start_candidate','stop_model','stop_candidate','start_base'}
         if operation in effects:
@@ -766,23 +799,31 @@ class NativeAdapter(ScopeInspector):
             result['observed_at']=time.monotonic()
             return result
         current=self.inspect_native(context,deadline);phase='candidate' if operation=='observe_candidate' else 'base'
-        from llmsvc.reload_witness import NativeGenerationReader
-        generation=NativeGenerationReader(self.profile['native_origin']).read(deadline=deadline)
         wanted=context['candidate_sha256'] if phase=='candidate' else context['base_sha256']
-        config_ok=current['config_sha256']==wanted and generation.error is None
-        if phase=='candidate':config_ok=config_ok and generation.generation==context['generation']
+        file_ok=(current['config_sha256']==wanted
+                 and hashlib.sha256(file_bytes(self.config)).hexdigest()==current['config_sha256'])
+        if bound_file_mode:
+            # Only the independently observed file bytes. The controller supplies
+            # generation visibility via its image/instance/listener-bound reader.
+            configuration={'configuration_file_confirmed':file_ok}
         else:
-            _,cfg=self.config_data()
-            config_ok=config_ok and generation.generation==cfg.get('macros',{}).get('llmsvc_reload_generation')
-        config_ok=config_ok and hashlib.sha256(file_bytes(self.config)).hexdigest()==current['config_sha256']
+            from llmsvc.reload_witness import NativeGenerationReader
+            generation=NativeGenerationReader(self.profile['native_origin']).read(deadline=deadline)
+            config_ok=file_ok and generation.error is None
+            if phase=='candidate':config_ok=config_ok and generation.generation==context['generation']
+            else:
+                _,cfg=self.config_data()
+                config_ok=config_ok and generation.generation==cfg.get('macros',{}).get('llmsvc_reload_generation')
+            config_ok=config_ok and hashlib.sha256(file_bytes(self.config)).hexdigest()==current['config_sha256']
+            configuration={'configuration_confirmed':config_ok,'generation':generation.generation}
         bound=self._attempt_binding(current['identity'],context,phase)
         # Candidate adoption precedes removed-model cleanup. Restoring the base
         # cancels that removal intent, but still requires current account integrity;
         # released accounts retain their submitted-stop/positive-exit requirement.
         cleanup=(self._backends(context,deadline,cleanup=True) if phase=='candidate'
                  else result['backends_confirmed'])
-        result.update(identity=current['identity'],config_sha256=current['config_sha256'],generation=generation.generation,
-                      configuration_confirmed=config_ok,cleanup_confirmed=cleanup,
+        result.update(configuration)
+        result.update(identity=current['identity'],config_sha256=current['config_sha256'],cleanup_confirmed=cleanup,
                       ingress_state='open',attempt_bound=bound,operation_id=context['operation_id'] if bound else None,
                       observed_at=time.monotonic())
         if phase=='base':
