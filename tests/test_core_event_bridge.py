@@ -58,7 +58,11 @@ def config(**kwargs):
 
 
 @pytest.fixture
-def live_bridge():
+def live_bridge(request):
+    # Default capacity4 belongs to backpressure tests. Functional consumers may
+    # explicitly select a separate finite fixture capacity through indirect
+    # parametrization; this never changes production configuration.
+    capacity = getattr(request, "param", 4)
     outgoing = queue.Queue()
     done = threading.Event()
     connections = []
@@ -86,7 +90,7 @@ def live_bridge():
     upstream_thread = threading.Thread(target=lambda: upstream.serve_forever(poll_interval=0.01))
     upstream_thread.start()
     cfg = config(collectors={"swap_url": "http://127.0.0.1:"+str(upstream.server_port), "models": {"m": {}}},
-                 data_plane_event_capacity=4, data_plane_event_batch_size=1)
+                 data_plane_event_capacity=capacity, data_plane_event_batch_size=1)
     relay = build_event_relay(cfg)
     scheduler = Scheduler(cfg, lambda: StateSnapshot(sampled_at=time.time(),
         models=(ModelState("m", state="awake", unit_active=True),)), event_relay=relay)
@@ -407,3 +411,74 @@ def test_close_failure_on_check_config_still_closes_database(monkeypatch):
     with pytest.raises(RuntimeError, match="close failed"):
         entry.main()
     assert store.closed == relay.closes == 1
+
+
+@pytest.mark.parametrize(("live_bridge", "fill_buffer"), [(16, False), (4, True)], indirect=["live_bridge"])
+def test_real_dispatch_admission_and_publication_are_separate(live_bridge, fill_buffer, monkeypatch):
+    scheduler, relay, outgoing, _, connections = live_bridge
+    assert relay.buffer.capacity == (4 if fill_buffer else 16)
+    until(lambda: any(e.kind == "data_plane_connection" and e.detail["status"] == "connected"
+                      for e in scheduler.events_since(0)))
+    paused, consumer_paused, dispatched = threading.Event(), threading.Event(), threading.Event()
+    admitted, published = [], []
+    drain, dispatch = relay.drain, relay.subscription._dispatch
+    append, emit = relay.buffer._append_locked, scheduler.emit
+
+    def controlled_drain(max_events=128):
+        if paused.is_set():
+            consumer_paused.set()
+            return {"events": [], "dropped": 0, "dropped_by_reason": {}, "upstream_loss_unknown": True}
+        return drain(max_events=max_events)
+
+    def record_append(kind, model, detail, received_at):
+        accepted = append(kind, model, detail, received_at)
+        if kind == "data_plane_error" and detail["reason"] == "invalid_event":
+            admitted.append(accepted)  # Original return under the buffer mutex.
+        return accepted
+
+    def record_dispatch(lines, state):
+        try:
+            return dispatch(lines, state)
+        finally:
+            if any(b"fixture-admission-proof" in line for line in lines):
+                dispatched.set()  # Completion is not a publication receipt.
+
+    def record_emit(kind, **kwargs):
+        event = emit(kind, **kwargs)
+        if kind in ("data_plane_error", "data_plane_dropped"):
+            published.append(event)  # Actual scheduler ID after original emit.
+        return event
+
+    monkeypatch.setattr(relay, "drain", controlled_drain)
+    monkeypatch.setattr(relay.buffer, "_append_locked", record_append)
+    monkeypatch.setattr(relay.subscription, "_dispatch", record_dispatch)
+    monkeypatch.setattr(scheduler, "emit", record_emit)
+    paused.set()
+    try:
+        assert consumer_paused.wait(2), "fixture consumer did not reach pause boundary"
+        with relay.buffer._lock:
+            assert not relay.buffer._queue  # Startup connection events already drained.
+        if fill_buffer:
+            for _ in range(relay.buffer.capacity):
+                relay.buffer.error("timeout")
+        outgoing.put({"type": "modelStatus", "data": "invalid JSON",
+                      "fixture_dispatch_id": "fixture-admission-proof"})
+        assert dispatched.wait(2), (admitted, published)
+        assert admitted == [not fill_buffer]
+        assert not published  # The real consumer is still paused in both cases.
+        assert relay.subscription._thread.is_alive()
+    finally:
+        paused.clear()
+    if fill_buffer:
+        until(lambda: any(e.kind == "data_plane_dropped" and e.detail["dropped_by_reason"].get("buffer_full") == 1
+                          for e in published))
+        assert not any(e.kind == "data_plane_error" and e.detail["reason"] == "invalid_event" for e in published)
+        summary = next(e for e in published if e.kind == "data_plane_dropped")
+        assert summary.detail["upstream_loss_unknown"] is True
+    else:
+        until(lambda: any(e.kind == "data_plane_error" and e.detail["reason"] == "invalid_event" for e in published))
+        error = next(e for e in published if e.kind == "data_plane_error" and e.detail["reason"] == "invalid_event")
+        assert error.id in {e.id for e in scheduler.events_since(0)}
+        assert error.detail["trusted_for_quiet"] is False
+        assert "fixture_dispatch_id" not in json.dumps(error.detail)
+    assert connections == ["/api/events"]
