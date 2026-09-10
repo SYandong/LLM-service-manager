@@ -428,3 +428,14 @@ def test_reboot_cannot_reuse_old_attempt_tags_or_file_receipts(site):
     with pytest.raises(ExecutorError,match='boot_identity_changed'):
         site.adapter.operation('bootstrap_rollback',site.context,time.monotonic()+2)
     assert len(site.calls)==before
+
+
+def test_confirmed_backend_without_ready_native_default_does_not_finish_activation(site):
+    stage(site);confirm_default_fixture(site)
+    assert site.adapter.operation('bootstrap_activate',site.context,time.monotonic()+3)['active_ready']
+    # Backend stays confirmed and active, but the native wrapper/default has gone.
+    # This cannot be confused with a successfully adopted default preload.
+    site.snapshot.states={'m':'stopped'}
+    shutil.rmtree(site.proc/'44');write(site.group/'cgroup.procs','43\n')
+    with pytest.raises(ExecutorError,match='default_native_not_ready'):
+        site.adapter.operation('bootstrap_observe',site.context,time.monotonic()+2)
