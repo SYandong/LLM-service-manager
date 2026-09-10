@@ -97,7 +97,7 @@ def native_process(tmp_path):
 @pytest.mark.parametrize('dialect', [V252_DIALECT, QUERY_DIALECT])
 def test_actual_image_listener_and_instance_choose_one_pinned_dialect(native_process, dialect):
     source = native_process(dialect)
-    result = source.reader.read(source.expected, deadline=time.monotonic()+5)
+    result = source.reader.read(source.expected, expected_image_sha256=source.settings['images'][0]['executable_sha256'], deadline=time.monotonic()+5)
     assert result.visibility.candidate_generation_visible
     assert result.visibility.settlement_confirmed is None
     assert result.pin.dialect == dialect and result.instance == identity(source.process.pid)
@@ -126,7 +126,7 @@ def test_mismatched_binding_opens_no_native_request(native_process, change):
     else:
         deadline = time.monotonic()-1
     with pytest.raises(WitnessError):
-        source.reader.read(expected, deadline=deadline)
+        source.reader.read(expected, expected_image_sha256=source.reader._pins[0].executable_sha256, deadline=deadline)
     assert source.requests() == []
 
 
@@ -137,7 +137,7 @@ def test_same_image_other_process_cannot_claim_the_endpoint(native_process):
     other.reader._readers = expected_source.reader._readers
     expected = replace(other.expected, endpoint=expected_source.reader.endpoint)
     with pytest.raises(WitnessError, match='endpoint_not_owned_by_instance'):
-        other.reader.read(expected, deadline=time.monotonic()+5)
+        other.reader.read(expected, expected_image_sha256=other.settings['images'][0]['executable_sha256'], deadline=time.monotonic()+5)
     assert expected_source.requests() == other.requests() == []
 
 
@@ -168,7 +168,7 @@ def test_changes_after_rpc_invalidate_the_read_without_retry(native_process, mon
         return result
     monkeypatch.setattr(native, 'read', changed)
     with pytest.raises(WitnessError):
-        source.reader.read(source.expected, deadline=time.monotonic()+5)
+        source.reader.read(source.expected, expected_image_sha256=source.settings['images'][0]['executable_sha256'], deadline=time.monotonic()+5)
     assert len(source.requests()) == 1
 
 
@@ -178,7 +178,7 @@ def test_explicit_wrong_dialect_never_falls_back(native_process):
     reader = BoundNativeGenerationReader(source.reader.endpoint[:-len('/api/mcp')], settings,
         instance_provider=lambda **kwargs:identity(source.process.pid),
         config_reader=lambda:_read_regular_file(source.path,1024*1024))
-    result = reader.read(source.expected, deadline=time.monotonic()+5)
+    result = reader.read(source.expected, expected_image_sha256=source.settings['images'][0]['executable_sha256'], deadline=time.monotonic()+5)
     assert not result.visibility.candidate_generation_visible
     assert result.reading.error == 'native_tool_error' and len(source.requests()) == 1
 
@@ -205,7 +205,7 @@ def test_running_image_read_limit_blocks_before_http(native_process):
     source = native_process()
     source.reader._max_image = 1
     with pytest.raises(WitnessError, match='running_image_unavailable_or_too_large'):
-        source.reader.read(source.expected, deadline=time.monotonic()+5)
+        source.reader.read(source.expected, expected_image_sha256=source.settings['images'][0]['executable_sha256'], deadline=time.monotonic()+5)
     assert source.requests() == []
 
 
@@ -220,8 +220,22 @@ def test_factory_binds_current_configuration_and_remains_inert_until_read(native
     reader = build_bound_generation_reader(current[0], instance_provider=inspected,
         config_reader=lambda:_read_regular_file(source.path,1024*1024), config_provider=lambda:current[0])
     assert not calls and not source.requests()
-    assert reader.read(source.expected, deadline=time.monotonic()+5).visibility.candidate_generation_visible
+    assert reader.read(source.expected, expected_image_sha256=source.settings['images'][0]['executable_sha256'], deadline=time.monotonic()+5).visibility.candidate_generation_visible
     current[0] = replace(current[0], native_witness={})
     with pytest.raises(WitnessError, match='witness_configuration_changed'):
-        reader.read(source.expected, deadline=time.monotonic()+5)
+        reader.read(source.expected, expected_image_sha256=source.settings['images'][0]['executable_sha256'], deadline=time.monotonic()+5)
     assert len(source.requests()) == 1
+
+
+def test_phase_cannot_accept_another_allowed_image(native_process):
+    source = native_process()
+    other_digest = hashlib.sha256(Path('/bin/sleep').read_bytes()).hexdigest()
+    settings = copy.deepcopy(source.settings)
+    settings['images'].append({'source_commit':QUERY_PINNED_COMMIT,
+                              'executable_sha256':other_digest, 'dialect':QUERY_DIALECT})
+    reader = BoundNativeGenerationReader(source.reader.endpoint[:-len('/api/mcp')], settings,
+        instance_provider=lambda **kwargs:identity(source.process.pid),
+        config_reader=lambda:_read_regular_file(source.path,1024*1024))
+    with pytest.raises(WitnessError, match='phase_running_image_mismatch'):
+        reader.read(source.expected, expected_image_sha256=other_digest, deadline=time.monotonic()+5)
+    assert source.requests() == []

@@ -21,10 +21,11 @@ or disabling settings/origin invalidates an existing reader. The instance
 provider is the configured native service inspector, not a tenant-supplied PID.
 The config reader is the existing bounded safe queue read returning bytes/stat.
 
-`read(expected: CandidateBinding, deadline=...)` checks the configured service's
+`read(expected: CandidateBinding, expected_image_sha256=..., deadline=...)` checks the configured service's
 current PID/start ticks and the caller's same PID/network namespaces. It hashes
 the open `/proc/<pid>/exe` image, rechecks image stat and process identity,
-selects the matching provenance pin, and binds the configured TCP listener inode
+requires the phase's explicitly expected image (another allowed image is insufficient),
+selects its provenance pin, and binds the configured TCP listener inode
 to that process's open descriptor. Another process running the same executable
 cannot satisfy this endpoint check. Ambiguous listener rows, unknown processes,
 configuration mismatch or an unpinned executable reject before native HTTP.
@@ -46,7 +47,7 @@ hard-real-time I/O. No source process is signalled or changed by this reader.
 ## Combined feature integration
 
 This caller is prepared for the single #170 feature. Its final maintenance
-consumer must supply the phase's expected old/new/restored identity and preserve
+consumer must supply the phase's expected old/new/restored identity and image digest, and preserve
 its provenance binding across the durable claim. It must call this reader before
 accepting generation visibility while retaining independent settlement and
 cleanup checks. The ordinary main bootstrap does not activate a native source

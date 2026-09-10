@@ -238,13 +238,17 @@ class BoundNativeGenerationReader:
         return _Observation(BindingObservation(self.clock(), expected, hashlib.sha256(raw).hexdigest()),
                             pin, image, _file_identity(info), listener)
 
-    def read(self, expected, *, deadline):
+    def read(self, expected, *, expected_image_sha256, deadline):
         """Perform exactly one selected native read between local observations."""
         if not isinstance(expected, CandidateBinding) or expected.endpoint != self.endpoint:
             raise WitnessError('configured_endpoint_mismatch')
         expected.to_dict()  # Existing strict public binding validation.
+        if not isinstance(expected_image_sha256, str) or expected_image_sha256 not in self._readers:
+            raise WitnessError('expected_image_not_configured')
         try:
             before = self._observe(expected.instance, deadline)
+            if before.pin.executable_sha256 != expected_image_sha256:
+                raise WitnessError('phase_running_image_mismatch')
             if before.binding.candidate_sha256 != expected.candidate_sha256:
                 raise WitnessError('candidate_file_digest_unconfirmed')
             reader = self._readers[before.pin.executable_sha256]
