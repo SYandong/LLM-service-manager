@@ -76,7 +76,7 @@ def validate_assets(directory, commit, tag):
     version = m['python_version']
     if not VERSION.fullmatch(version) or tag != 'v0.1.0-alpha.' + VERSION.fullmatch(version)[1]:
         raise ValueError('Invalid version/tag')
-    expected = {'llm', f'llmsvc-{version}-py3-none-any.whl', f'llmsvc-{version}.tar.gz', 'wheelhouse.tar.gz'}
+    expected = {'llm', f'llmsvc-{version}-py3-none-any.whl', f'llmsvc-{version}.tar.gz', 'deployment.tar.gz'}
     if names != expected:
         raise ValueError('Unexpected payload set')
     sums = {}
@@ -185,21 +185,35 @@ def build(evidence, root):
     wheelhouse = root / 'wheelhouse'; wheelhouse.mkdir()
     run(sys.executable, '-m', 'pip', 'download', '--only-binary=:all:', '--dest', str(wheelhouse), str(wheel) + '[tui]')
     shutil.copy2('cli/llm', artifacts / 'llm')
-    # Two independent offline installs verify the shipped wheelhouse as well.
+    run(sys.executable, '-m', 'pip', 'download', '--only-binary=:all:', '--no-deps', '--dest', str(wheelhouse), 'pip==26.2.1')
+    bootstrap = next(wheelhouse.glob('pip-*.whl'))
+    install_wheels = sorted(p for p in wheelhouse.glob('*.whl') if p != bootstrap)
+    # Two independent offline installs use the exact bootstrap needed on site.
     for mode in ('minimal', 'tui'):
         env = root / mode
-        run(sys.executable, '-m', 'venv', str(env))
+        run(sys.executable, '-m', 'venv', '--without-pip', str(env))
         python = str(env / 'bin/python')
         package = str(wheel) + ('[tui]' if mode == 'tui' else '')
-        run(python, '-m', 'pip', 'install', '--no-index', '--find-links', str(wheelhouse), package)
-        run(python, '-m', 'pip', 'check')
+        pip = ('env', 'PYTHONPATH=' + str(bootstrap), python, '-m', 'pip')
+        run(*pip, 'install', '--no-index', '--find-links', str(wheelhouse), package)
+        run(*pip, 'check')
         for command in ((python, '-I', '-c', 'import llmsvc;print(llmsvc.__version__)'),
                         (str(env / 'bin/llm'), '--version'), (str(env / 'bin/llmsvc-scheduler'), '--version')):
             assert run(*command, cwd=root) == evidence['python_version']
         code = 'import tui.app' if mode == 'tui' else "import importlib.util;assert importlib.util.find_spec('textual') is None"
         run(python, '-I', '-c', code, cwd=root)
     assert run(sys.executable, '-I', '-S', str(artifacts / 'llm'), '--version') == evidence['python_version']
-    with tarfile.open(artifacts / 'wheelhouse.tar.gz', 'w:gz') as t:
+    deployment = {'schema_version': 1, 'tag': evidence['tag'], 'version': evidence['python_version'],
+                  'commit': evidence['commit'], 'scope': 'read_only',
+                  'app_wheel': 'wheelhouse/' + wheel.name, 'cli': 'llm',
+                  'bootstrap_pip': 'wheelhouse/' + bootstrap.name,
+                  'install_wheels': ['wheelhouse/' + p.name for p in install_wheels],
+                  'files': {'llm': sha256(artifacts / 'llm'),
+                            **{'wheelhouse/' + p.name: sha256(p) for p in wheelhouse.iterdir()}}}
+    (root / 'deployment.json').write_text(json.dumps(deployment, indent=2) + '\n')
+    with tarfile.open(artifacts / 'deployment.tar.gz', 'w:gz') as t:
+        t.add(root / 'deployment.json', arcname='deployment.json')
+        t.add(artifacts / 'llm', arcname='llm')
         for p in sorted(wheelhouse.iterdir()):
             t.add(p, arcname='wheelhouse/' + p.name)
     evidence['wheelhouse'] = {'python': '3.10', 'platform': 'linux_x86_64',

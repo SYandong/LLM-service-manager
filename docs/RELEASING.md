@@ -106,11 +106,19 @@ CLI with `-I -S`. The successful exact merge CI supplies the full test evidence;
 this packaging stage does not repeat that suite or run live model tests.
 
 New automated releases have six assets: wheel, sdist, `llm`,
-`wheelhouse.tar.gz`, `release-manifest.json` and `SHA256SUMS`. The wheelhouse holds
-`wheelhouse/*.whl`, including this release and its resolved runtime/TUI wheels;
+`deployment.tar.gz`, `release-manifest.json` and `SHA256SUMS`. The deployment bundle holds `deployment.json`, `llm` and
+`wheelhouse/*.whl`, including this release, bootstrap pip 26.2.1 and its resolved
+runtime/TUI wheels;
 the manifest records each member hash and the target Python/platform. Deployment
 must validate the entire checksum/manifest set and safely extract only those
-members before `pip install --no-index --find-links ...`. Dependency upgrades are
+members before `pip install --no-index --find-links ...`. The nested `deployment.json` uses schema_version 1 with tag/version/commit,
+`scope: read_only`, app_wheel/cli/bootstrap_pip relative paths, install_wheels
+(excluding bootstrap pip) and a files map of every payload's SHA-256. The outer
+asset checksum authenticates this metadata; it cannot authenticate itself. Scope
+specifies the permitted upgrade mode, not proof that the current site is read-only:
+ops checks the actual configuration before applying. Create the venv without pip,
+bootstrap through the shipped pip wheel and install the explicit install_wheels
+with `--no-deps --no-index`; `pip check` verifies closure. Dependency upgrades are
 not applied to the existing environment in place. Older releases (including
 alpha.8's completed five-asset publication) remain immutable and are not silently
 retrofitted with a wheelhouse.

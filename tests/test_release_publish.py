@@ -57,7 +57,7 @@ def test_stale_missing_or_revoked_review_rejected(reviews):
 def assets(path):
     path.mkdir()
     m = {'commit': COMMIT, 'tag': TAG, 'python_version': '0.1.0a9', 'assets': {}}
-    for name in ['llm', 'llmsvc-0.1.0a9-py3-none-any.whl', 'llmsvc-0.1.0a9.tar.gz', 'wheelhouse.tar.gz']:
+    for name in ['llm', 'llmsvc-0.1.0a9-py3-none-any.whl', 'llmsvc-0.1.0a9.tar.gz', 'deployment.tar.gz']:
         f = path / name; f.write_bytes(name.encode())
         m['assets'][name] = {'sha256': pub.sha256(f), 'bytes': f.stat().st_size}
     (path / 'release-manifest.json').write_text(json.dumps(m))
