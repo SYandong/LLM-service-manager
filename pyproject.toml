@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmsvc"
-version = "0.1.0a8"
+version = "0.1.0a9"
 description = "A control plane for llama-swap on shared GPU servers"
 requires-python = ">=3.10"
 dependencies = ["PyYAML>=6", "rich>=13"]

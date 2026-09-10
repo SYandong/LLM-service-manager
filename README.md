@@ -4,7 +4,7 @@ llama-swap 之上的多 GPU 控制面：查看模型与用量、请求释放/唤
 pin 与 GPU reserve，并提供可选终端面板。llama-swap 和 vllm-wrapper
 负责推理路由、排队及后端 sleep/wake；scheduler 负责资源记账、保护和调度。
 
-当前文档面向 [v0.1.0-alpha.8 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.8)。
+当前文档面向 [v0.1.0-alpha.9 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.9)。
 发布功能不等于所在部署已启用它们：scheduler 默认只读，模型动作、放置、
 自动策略、故障恢复及 sleeping recovery 各有独立开关。实现与现场验收进度见 [ROADMAP](docs/ROADMAP.md)。
 
@@ -57,7 +57,7 @@ PYREQUEST
 
 ## 用户：CLI、状态与可选 TUI
 
-从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.8)
+从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.9)
 下载 `llm` 和 `SHA256SUMS`，核对对应 SHA-256 后，将脚本放在当前目录：
 
 ```sh
@@ -90,7 +90,7 @@ RAM   llmsvc 86/200 GiB budget  host available 823 GiB
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install './llmsvc-0.1.0a8-py3-none-any.whl[tui]'
+.venv/bin/python -m pip install './llmsvc-0.1.0a9-py3-none-any.whl[tui]'
 .venv/bin/llm
 ```
 
@@ -99,6 +99,9 @@ python3 -m venv .venv
 `r` 刷新、`/` 输入命令、`u` 查看用量、`?` 帮助、`q` 退出。
 `f/p/w` 只预填命令，按 Enter 才提交。TUI 事件经 scheduler 转发；缺少数据面
 事件不代表无活动，`stopped` 事件也不能单独证明 unit 退出或资源释放。
+新版面板按变化更新模型单元格和事件，保留当前选择，心跳仅更新连接状态。
+等待操作展示目标、已用时间及可用的已观测阶段；没有可信估计时显示 ETA unknown，
+配置中的冷启动总时长不会冒充实时剩余时间。
 
 ## 用户：释放、保护、预约与唤醒
 
@@ -155,8 +158,12 @@ flowchart LR
 3.10+。首先编辑部署路径、模型/unit/探针配置及独立验证端口，在隔离目录预演。
 [安装与回滚手册](docs/OPERATIONS.md#staged-installation-8)说明
 `install.sh/uninstall.sh/rollback.sh` 的 `--root`、`--settings` 和 `--dry-run`。
-安装器不启动服务；其 unit 强制只读。生产 rollback 当前拒绝直接应用到 `/`，
-不可把 staging 成功理解为完整生产回滚已执行。
+安装器不启动服务；其 unit 强制只读。已有安装使用新的
+[版本化只读升级/回退与出站拉取流程](docs/OPERATIONS.md#read-only-runtime-upgrades-and-host-pull-169)，
+从同版 `deployment.tar.gz` 离线安装新环境，校验后切换，失败回退。
+固定的 `llm` 文件挂载跳板与用户推理地址保持不变；实际 site 配置须保留并校验。
+旧 `rollback.sh` 仍不接受生产 `/` 或版本化 manifest，不能用它绕过新流程。
+发布包可用不等于现场升级/回退验收已完成。
 
 ```sh
 # 在安装了运行时的环境、同版源码目录中执行；只校验配置，不启动服务。
