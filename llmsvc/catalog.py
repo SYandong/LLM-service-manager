@@ -102,7 +102,8 @@ class CatalogRuntime:
         registry.submit_change = self.submit_change
         reserved = registry.reserved_ports
         registry.reserved_ports = lambda: list(reserved()) + [
-            p["port"] for p in self.manifest["retained"].values() if type(p.get("port")) is int]
+            p["port"] for name, p in self.manifest["retained"].items()
+            if type(p.get("port")) is int and self._retained_required(name, p)]
 
     def _enabled(self):
         s = self.scheduler
@@ -172,21 +173,13 @@ class CatalogRuntime:
                 if name in old and old[name] != profile:
                     raise ValueError("existing catalog profile changes require separate configuration reconciliation")
                 ports.add(port); units.add(unit); retained.pop(name, None)
-            store = self.scheduler.store
-            referenced = {lease.model for lease, _ in store.leases()} if store else set()
-            if store:
-                referenced.update(claim.model for claim in store.faults())
-                referenced.update(claim.model for claim in store.recoveries())
             for name, profile in old.items():
                 if name not in active:
-                    if name in referenced:
+                    if name in self.manifest["active"] or self._retained_required(name, profile):
+                        # First removal keeps observation metadata. A later
+                        # generation may retire it only after fresh absence.
                         retained[name] = profile
-                    elif name in self.manifest["active"]:
-                        # This candidate's bound cleanup proof is required before
-                        # publication. Until then the old manifest remains live.
-                        retained.pop(name, None)
-                    elif store and any(lease.model == name and lease.status == "released" and unit == profile.get("unit")
-                                       for lease, unit in store.leases(include_released=True)):
+                    else:
                         retained.pop(name, None)
             # Retained exact identities cannot alias a new active endpoint/unit.
             for profile in retained.values():
@@ -195,6 +188,24 @@ class CatalogRuntime:
             self._check_membership(active)
             manifest = {"sources": sources(self.scheduler.config), "active": active, "retained": retained}
             return PreparedCatalog(digest(original), candidate, catalog_json(manifest), binding, self.epoch)
+
+    def _retained_required(self, name, profile):
+        """Read-only eligibility for retiring an already-retained descriptor."""
+        from llmsvc.actions import _known
+        s, store = self.scheduler, self.scheduler.store
+        if s.catalog_fenced or s.catalog_epoch != self.epoch or store is None:
+            return True
+        if (any(lease.model == name for lease, _ in store.leases())
+                or store.fault(name) is not None or store.recovery(name) is not None):
+            return True
+        raw = s._snapshot
+        if (not s._sample_source_time_provided or s._sample_bounds is None or raw.errors
+                or not _known(raw.sampled_at)
+                or not 0 <= s.clock()-raw.sampled_at <= s.config.max_snapshot_age_seconds):
+            return True
+        models = [model for model in raw.models if model.name == name]
+        return not (len(models) == 1 and models[0].unit == profile.get("unit")
+                    and models[0].unit_active is False and models[0].state == "stopped")
 
     def _check_membership(self, active, previous=None):
         previous = self.manifest["active"] if previous is None else previous

@@ -16,9 +16,13 @@ an immutable prospective generation. Every candidate model needs explicit
 trusted weights, budget/util, known default role, distinct canonical vllm unit,
 daemon port and direct literal-IP endpoint. No resource size is inherited from
 an arbitrary command, macro or base name. A new temporary model cannot be default;
-same-name profile changes are rejected in this registration slice and require separate configuration reconciliation. Removed metadata with unresolved lease/fault/recovery references is
-retained for observation and lease reconciliation (including reserved endpoints), while active admission and
+same-name profile changes are rejected in this registration slice and require separate configuration reconciliation. Removed metadata is initially retained for observation and lease reconciliation, while active admission and
 normal transport paths exclude that name. Removed pinned/default names block.
+Already-retained descriptors and their endpoints can be retired by a later catalog
+transaction only after a fresh, error-free current-generation observation confirms
+the exact configured unit stopped/absent and no live lease/fault/recovery reference
+remains. Unknown/stale observations and active references retain metadata and port
+reservation; observing absence itself never releases model accounting.
 Global collector/source settings are unchanged by this transaction.
 
 `submit_change` connects the existing registry callback, composing its pure model edit with the existing generation planner, explicit trusted profiles and instance. `enqueue` preserves registry descriptions, late prechecks and cleanup as well as catalog membership protection.
