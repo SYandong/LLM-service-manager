@@ -40,3 +40,23 @@ performance result must be recorded as its own bounded artifact, not folded into
 functional-suite success or public private-derived claims without clearance.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+
+## Query-work regression (#167)
+
+`tests/test_activity_query_cost.py` compares SQLite VM instruction counts on the
+existing 25,500-row synthetic fixture with a controlled clock. The reader now
+uses the summary's latest timestamp and the producer's existing model/time/ID
+index to seek the highest-ID row, instead of ranking every historical row for
+source lookup. Counts and source selection stay in one read transaction; old-only
+models, future rows, timestamp ties and unknown latest origins retain their
+meaning. Missing indexes do not change correctness; no index or database write
+is performed by the reader.
+
+The regression requires the entire read to use less work than the old latest-row
+query alone. It is an algorithmic-work check, not a new wall-clock benchmark,
+lock-availability guarantee or proof that arbitrary host scheduling fits 80ms.
+Existing real cancellation/lock replay remains authoritative for unknown/error
+handling. Runtime 80ms and collector 1.8s limits are unchanged; source attribution
+and live error-frequency acceptance remain separate.
+
+<!-- Generated-By: Codex / gpt-6-astra -->
