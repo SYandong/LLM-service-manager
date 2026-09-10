@@ -369,6 +369,20 @@ timed_out/终态，以及 `recorded_status`；读取不会出队、执行动作�
 补写并未完成全局动作/重启验收；实际目录安装与 claim 释放仍由 core 同一
 生命周期实现。这些库防护不会挂载写入或新的 HTTP 恢复入口。
 
+### 缺失 receipt 的内部恢复确认（#157 / #159）
+
+`ReloadQueue.confirm_retired_receipt(raw, confirm, dry_run=False)` 仅供持有独立
+持久化 claim 的 core 生命周期调用，不挂载 HTTP。它复用原 marker 结构和
+`RecoveryProof` 校验；有 marker 时要求与保存字节完全一致，再走原 reconcile。
+marker 缺失时，也须有精确持久化 receipt、完整新鲜证明、匹配的实例/候选文件、
+验证期间及目录 fsync 前后的无 marker 检查，才清除队列内存 latch。外来 marker、
+不完整证明、文件变化或 I/O 失败保持队列阻塞；不写配置、不重发 reload、不擦除
+外来 receipt。dry-run 不读取或修改 receipt，也不调用证明提供者。
+
+队列确认不释放 core 的持久化 claim。core 仍须在最终当前证明及队列 fence
+复查之后持久化 release；这一步失败仍阻塞动作和记账。真实 queue/catalog/
+SQLite/HTTP fixture 验证该分界及重建后恢复，不能当作现场采用或资源结清实测。
+
 ## 交给 ops 的有界实测计划
 
 只有 ops 持有 `gpu-test.lock` 后执行。每次目标不超过 5 分钟；没有缓存的
