@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import replace
 
 from llmsvc.state import Activity, MemoryState, ModelState, StateSnapshot
+from llmsvc.activity import ActivityReadError, activity_error_reason
 from .probes import Probes
 
 
@@ -47,18 +48,18 @@ class Collector:
             if self._closed.is_set():
                 break
             if time.monotonic() >= deadline:
-                errors.append(name + ": deadline exceeded")
+                errors.append(name + (": round_deadline" if name == "activity" else ": deadline exceeded"))
                 continue
             previous = self.pending.get(name)
             if previous is not None and not previous.done():
-                errors.append(name + ": previous probe still running")
+                errors.append(name + (": previous_probe_running" if name == "activity" else ": previous probe still running"))
                 continue
             try:
                 current[name] = self.pool.submit(fn)
             except RuntimeError as exc:
                 # close() can shut down the executor between the check and
                 # submit. A broken executor also makes this source unknown.
-                errors.append(name + ": " + type(exc).__name__)
+                errors.append(name + ": " + (activity_error_reason(exc) if name == "activity" else type(exc).__name__))
                 continue
             self.pending[name] = current[name]
         if current:
@@ -67,13 +68,13 @@ class Collector:
         for name, future in current.items():
             if not future.done():
                 future.cancel()
-                errors.append(name + ": deadline exceeded")
+                errors.append(name + (": round_deadline" if name == "activity" else ": deadline exceeded"))
                 continue
             try:
                 result[name] = future.result()
             except Exception as exc:
                 # Do not expose URLs, paths, commands, or response payloads.
-                errors.append(name + ": " + type(exc).__name__)
+                errors.append(name + ": " + (activity_error_reason(exc) if name == "activity" else type(exc).__name__))
         return result
 
     def collect(self):
@@ -103,7 +104,7 @@ class Collector:
             def read_activity():
                 values = self.activity_reader.read(now=sampled_at)
                 if self.activity_reader.last_error:
-                    raise ValueError("activity unavailable")
+                    raise ActivityReadError(getattr(self.activity_reader, "last_error_code", "read_failed"))
                 return values
             jobs["activity"] = read_activity
         first = self._read(jobs, started + self.deadline / 2, errors)
