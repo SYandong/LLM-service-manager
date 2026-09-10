@@ -390,6 +390,8 @@ def test_close_failure_on_check_config_still_closes_database(monkeypatch):
             self.action_lock = threading.RLock()
             self.read_only = True
             self.closed = 0
+        def catalog_checkpoint(self):
+            return None
         def close(self):
             self.closed += 1
     class FailedClose(BufferedRelay):

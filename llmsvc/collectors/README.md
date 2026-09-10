@@ -86,3 +86,44 @@ metadata**. IP mappings cannot reconstruct those historical origins. The live
 fixtures are in `tests/fixtures/telemetry/`; no request text or raw logs are saved.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+
+## Runtime catalog generations (#157)
+
+Prepare a fresh `Collector` from a core-validated model/profile mapping for each
+catalog generation. Construction copies the supplied settings and does not run
+probes. Unit discovery alone still supplies no trusted daemon URL, weights or
+default status. Core decides which removed-model profiles remain available for
+observation of uncertain leases/fault claims; the collector does not infer or
+release that ownership.
+
+`close()` is terminal, idempotent and does not wait for running probes. Calls
+after close return an empty unknown snapshot with `collector: closed`; a round
+that observes retirement before its completion check discards its observations
+in the same way. Pending executor work is cancelled when possible, while probes
+already running retain their original bounded timeout. A submit/shutdown race
+becomes unknown rather than an exception. No replacement round consumes the
+retired instance's pending futures.
+
+This is adapter cleanup, **not** a catalog-install or publication transaction.
+Core captures the collector reference and generation together, installs the
+validated catalog only at its guarded lifecycle point, and checks that token
+again before publishing or acting on a result. A result completed just before
+retirement still belongs to the old generation; even an empty retired snapshot
+must not overwrite the new generation. Do not mutate active `.models` in place.
+Core dry-run/read-only catalog paths must leave installed collector/relay
+instances untouched and must not start or retire them.
+
+The existing relay constructors also support a prepared, unstarted replacement
+with a separate immutable model allowlist, dedup state and bounded queue. Core
+owns swapping its relay reference, starting the accepted instance, fencing old
+publications and final bounded drain/discard reporting. Stop/join the old
+subscription outside the core action lock; close can wait up to its stream
+timeout. Do not mutate `.model_ids` while its reader parses events. This does
+not turn UI events into identity, adoption, settlement or continuous quiet
+proof; actual v252 remains `ordered_source=False`.
+
+These owner changes and their generation/concurrency fixtures belong in core's
+single #157 lifecycle code/DESIGN PR. They do not activate a registered model
+by themselves or satisfy the full #19 cold-load acceptance.
+
+<!-- Generated-By: Codex / gpt-6-astra -->

@@ -176,7 +176,7 @@ def test_progress_cannot_skip_durable_submission_or_exit_stages(recovery_store, 
 def test_unsupported_future_schema_is_rejected_without_writes(recovery_store):
     store, path, claim = recovery_store
     store.claim_recovery(claim)
-    store._db.execute("PRAGMA user_version = 5")
+    store._db.execute("PRAGMA user_version = 6")
     before = path.read_bytes()
     with pytest.raises(ValueError, match="unsupported"):
         IntentStore(path, action_lock=threading.RLock(), read_only=True)

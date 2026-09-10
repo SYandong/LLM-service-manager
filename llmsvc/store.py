@@ -60,7 +60,7 @@ class IntentStore:
         try:
             with self.action_lock, self._db:
                 version = self._db.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1, 2, 3, 4):
+                if version not in (0, 1, 2, 3, 4, 5):
                     raise ValueError("unsupported intent database version")
                 if read_only:
                     self._db.execute("SELECT model, until, owner FROM llmsvc_pins LIMIT 0")
@@ -74,6 +74,7 @@ class IntentStore:
                 self._has_leases = not read_only or version >= 2
                 self._has_faults = version >= 3
                 self._has_recoveries = version >= 4
+                self._has_catalog = version >= 5
                 if self._has_faults:
                     self._db.execute("SELECT lease_id, model, stage, record FROM llmsvc_faults LIMIT 0")
                 if self._has_leases:
@@ -81,6 +82,8 @@ class IntentStore:
                 if self._has_recoveries:
                     self._db.execute("SELECT id, model, stage, record FROM llmsvc_recoveries LIMIT 0")
                     self.recoveries()  # Reject unsupported/corrupt active fences.
+                if self._has_catalog:
+                    self.catalog_checkpoint()
         except Exception:
             self._db.close()
             raise
@@ -92,6 +95,95 @@ class IntentStore:
                 return ()
             return tuple(FaultClaim(**json.loads(row[0])) for row in self._db.execute(
                 "SELECT record FROM llmsvc_faults WHERE stage != 'complete' ORDER BY lease_id"))
+
+    def catalog_checkpoint(self):
+        from llmsvc.catalog_state import validate_checkpoint
+        with self.action_lock:
+            if not self._has_catalog:
+                return None
+            size = self._db.execute("SELECT length(CAST(record AS BLOB)) FROM llmsvc_catalog WHERE singleton=1").fetchone()
+            from llmsvc.catalog_state import MAX_CHECKPOINT_BYTES
+            if size is None or type(size[0]) is not int or size[0] > MAX_CHECKPOINT_BYTES:
+                raise ValueError("invalid catalog checkpoint size")
+            rows = self._db.execute("SELECT record FROM llmsvc_catalog WHERE singleton=1").fetchall()
+            if len(rows) != 1:
+                raise ValueError("catalog checkpoint absent")
+            record = json.loads(rows[0][0])
+            validate_checkpoint(record)
+            return record
+
+    def catalog_pending(self):
+        record = self.catalog_checkpoint()
+        return record is not None and record["phase"] not in ("released", "aborted")
+
+    def _catalog_allows_accounting(self):
+        if self.catalog_pending():
+            raise ValueError("catalog reconciliation pending")
+
+    def save_catalog(self, expected, record, *, dry_run=False):
+        """Compare-and-swap checkpoint; runtime verifies proof before phase changes."""
+        from llmsvc.catalog_state import catalog_json, validate_checkpoint
+        validate_checkpoint(record)
+        with self.action_lock:
+            if self.catalog_checkpoint() != expected:
+                raise ValueError("catalog checkpoint changed")
+            initial = expected is None or expected["phase"] in ("released", "aborted")
+            if initial:
+                if record["phase"] != "claimed":
+                    raise ValueError("catalog must begin claimed")
+                previous = expected
+                if previous is not None and previous["phase"] == "aborted":
+                    previous = previous["previous"]
+                if previous is not None:
+                    previous = {**previous, "previous": None}
+                if record["previous"] != previous:
+                    raise ValueError("catalog prior checkpoint mismatch")
+                if expected is not None and record["transaction_id"] == expected["transaction_id"]:
+                    raise ValueError("catalog transaction id reused")
+            else:
+                immutable = set(record)-{"phase", "marker_sha256", "marker_json", "previous"}
+                if any(record[k] != expected[k] for k in immutable):
+                    raise ValueError("catalog checkpoint identity changed")
+                if expected["marker_sha256"] is not None and record["marker_sha256"] != expected["marker_sha256"]:
+                    raise ValueError("catalog marker changed")
+                if record["previous"] != expected["previous"] and not (record["phase"] == "released" and record["previous"] is None):
+                    raise ValueError("catalog prior checkpoint changed")
+                transitions = {"claimed": {"claimed", "published", "aborted"}, "published": {"published", "released"}}
+                if record["phase"] not in transitions.get(expected["phase"], set()):
+                    raise ValueError("catalog phase transition rejected")
+            if dry_run:
+                return {"would": [{"kind": "catalog_"+record["phase"]}]}
+            if self.read_only:
+                raise PermissionError("intent store is read-only")
+            with self._db:
+                self._db.execute("BEGIN IMMEDIATE")
+                if self.catalog_checkpoint() != expected:
+                    raise ValueError("catalog changed before commit")
+                self._db.execute("CREATE TABLE IF NOT EXISTS llmsvc_faults (lease_id TEXT PRIMARY KEY, model TEXT NOT NULL, stage TEXT NOT NULL CHECK(stage IN ('claimed','released','complete')), record TEXT NOT NULL)")
+                self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS llmsvc_one_fault ON llmsvc_faults(model) WHERE stage != 'complete'")
+                self._db.execute("CREATE TABLE IF NOT EXISTS llmsvc_recoveries (id TEXT PRIMARY KEY, model TEXT NOT NULL, stage TEXT NOT NULL, record TEXT NOT NULL)")
+                self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS llmsvc_one_recovery ON llmsvc_recoveries(model) WHERE stage != 'complete'")
+                self._db.execute("CREATE TABLE IF NOT EXISTS llmsvc_catalog (singleton INTEGER PRIMARY KEY CHECK(singleton=1), record TEXT NOT NULL)")
+                self._db.execute("INSERT OR REPLACE INTO llmsvc_catalog VALUES (1, ?)", (catalog_json(record),))
+                self._db.execute("PRAGMA user_version=5")
+            self._has_catalog = self._has_recoveries = self._has_faults = True
+            return record
+
+    def restore_catalog_abort(self, expected):
+        """Restore the prior checkpoint only after a durably proven no-effect abort."""
+        with self.action_lock:
+            if (self.catalog_checkpoint() != expected or expected["phase"] != "aborted"
+                    or expected["previous"] is None):
+                raise ValueError("catalog abort checkpoint mismatch")
+            if self.read_only:
+                raise PermissionError("intent store is read-only")
+            from llmsvc.catalog_state import catalog_json
+            with self._db:
+                self._db.execute("BEGIN IMMEDIATE")
+                if self.catalog_checkpoint() != expected:
+                    raise ValueError("catalog abort changed")
+                self._db.execute("UPDATE llmsvc_catalog SET record=? WHERE singleton=1", (catalog_json(expected["previous"]),))
+            return expected["previous"]
 
     @staticmethod
     def _validate_recovery(claim):
@@ -165,6 +257,7 @@ class IntentStore:
                 or claim.proxy_submitted or claim.wake_submitted or claim.destination_lease_id):
             raise ValueError("invalid initial recovery")
         with self.action_lock:
+            self._catalog_allows_accounting()
             source = self.lease(claim.source_lease_id)
             if (source is None or (source[0].model, source[0].gpu, source[0].status, source[1]) !=
                     (claim.model, claim.source_gpu, "confirmed", claim.unit)
@@ -187,7 +280,7 @@ class IntentStore:
                         raise ValueError("recovery source changed")
                     self._db.execute("INSERT INTO llmsvc_recoveries VALUES (?, ?, ?, ?)",
                                      (claim.id, claim.model, claim.stage, json.dumps(asdict(claim), allow_nan=False)))
-                    self._db.execute("PRAGMA user_version = 4")
+                    self._db.execute("PRAGMA user_version = " + str(max(self._db.execute("PRAGMA user_version").fetchone()[0], 4)))
             finally:
                 version = self._db.execute("PRAGMA user_version").fetchone()[0]
                 self._has_faults, self._has_recoveries = version >= 3, version >= 4
@@ -215,6 +308,7 @@ class IntentStore:
         updated = replace(claim, stage=stage, error=error, **progress)
         self._validate_recovery(updated)
         with self.action_lock:
+            self._catalog_allows_accounting()
             if self.recovery(claim.model) != claim or self.fault(claim.model) is not None:
                 raise ValueError("recovery claim changed")
             source = self.lease(claim.source_lease_id)
@@ -260,6 +354,7 @@ class IntentStore:
         with self.action_lock:
             if self.recovery(claim.model) is not None:
                 raise ValueError("sleeping recovery pending")
+            self._catalog_allows_accounting()
             row = self.lease(claim.lease_id)
             if row is None or (row[0].model, row[0].gpu, row[0].status, row[1]) != (
                     claim.model, claim.gpu, "confirmed", claim.unit):
@@ -301,6 +396,7 @@ class IntentStore:
         with self.action_lock:
             if self.fault(claim.model) != claim:
                 raise ValueError("fault claim changed")
+            self._catalog_allows_accounting()
             row = self.lease(claim.lease_id)
             if row is None or (row[0].model, row[0].gpu, row[1]) != (claim.model, claim.gpu, claim.unit):
                 raise ValueError("fault account changed")
@@ -408,6 +504,7 @@ class IntentStore:
         if type(lease.gpu) is not int or lease.gpu < 0 or not 0 < finite_positive(lease.util, "util") <= 1 or lease.status != "pending":
             raise ValueError("invalid lease")
         with self.action_lock:
+            self._catalog_allows_accounting()
             if self.fault(lease.model) is not None:
                 raise ValueError("fault recovery pending")
             active = self.recovery(lease.model)
@@ -441,6 +538,7 @@ class IntentStore:
         if status not in ("confirmed", "stale", "released"):
             raise ValueError("invalid lease transition")
         with self.action_lock:
+            self._catalog_allows_accounting()
             row = self.lease(lease_id)
             if row is None or row[0].status == "released":
                 raise ValueError("lease is absent or revoked")

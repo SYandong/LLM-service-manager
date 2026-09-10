@@ -369,12 +369,30 @@ ID、不持久化、不追加动作事件、不启动清退传输，也不因预
 | `GET /v1/usage?days=7&by=container` | 按来源汇总 |
 
 
+### 已配置的目录提交能力（#157）
+
+上述实际登记/注销接口只有在 `catalog_enabled`、非只读账本以及明确注入的
+可信 profile/进程身份/采用与结清 verifier 和队列 adapter 同时存在时才接纳。
+此时沿用 registry 既有 job 回执：`{id, description, status, blocked_by,
+config_committed, error, apply_seconds}`；首次返回 `queued` 只表示入队。
+既有 `GET /v1/registry` 展示队列状态，`GET /v1/models` 与 registry 诊断的
+`writes_enabled` 表示提交能力，不代表 quiet、采用、结清或运行期目录已经就绪。
+`blocked_by` 继续展示当前技术和保护阻塞。缺少能力时默认仍是 `405`，
+切换 pin/模型动作开关不能替代这些条件；正常入口不伪造 verifier。
+
+有能力的 scheduler 使用一个有界队列 worker 驱动既有提交链，保留 registry
+原有 late precheck、expiry 和 removal cleanup，不回退绕过 catalog 的普通队列。
+全局持久化 catalog fence 未结清时拒绝新提交与冲突动作；即使配置阶段显示
+`applied`，仍须以目录 fence 与后续观测区分运行期安装是否已完成。恢复是内部
+显式验证流程，不增加客户端 proof、强制清理或重放接口。原有 dry-run 不入队、
+不创建目录对象或账本记录，实际模型名和推理 URL 契约不变。
+
 ### 临时模型列表与预览（#137）
 
 安全接入阶段先提供配置过的只读列表与编辑预览，真实提交仍需 §3 的
 quiet、配置采用及旧资源结清证明。列表与预览可用不代表提交链路已启用。
 
-- `GET /v1/models` 返回 `200 {records, writes_enabled:false, blocked_by}`。
+- 默认未启用提交时，`GET /v1/models` 返回 `200 {records, writes_enabled:false, blocked_by}`。
   `records` 是按名称索引的现有 `llmsvc_registry` 临时登记元数据；常驻模型的
   观测仍从 `/v1/state` 读取，不能把该列表当作数据面 `/v1/models`。
 - `POST /v1/models?dry_run=1` 使用 `{name,path,base}`；
@@ -391,7 +409,7 @@ quiet、配置采用及旧资源结清证明。列表与预览可用不代表提
   已有待核查事务标记时，仍可读取的 GET 返回 `200` 与 `records`，在
   `blocked_by` 中包含 `registry_reconciliation_required`；编辑预览则返回
   `409 registry_reconciliation_required`。读取/重试不清除标记或推断结清。
-- 该阶段所有非 dry-run 登记/注销请求仍返回 `405`，依据当前模式使用
+- 未注入上述 #157 完整提交能力时，所有非 dry-run 登记/注销请求仍返回 `405`，依据当前模式使用
   `read_only` 或 `operation_not_enabled`；切换其他动作开关也不能启用它。
   不启动 reload worker，不借助空成功回调伪造验证、采用或资源结清。
   后续 job 查询与真实提交按对应实现另行接入，不在本约定中生成占位 job。
@@ -442,6 +460,54 @@ reconcile、重试或强制清除接口。真实登记提交仍受 §3 完整协
 - 详情读取/预览不生成 job、不变更队列、意图或记账，不做 native 探测、
   worker、验证器、文件提交或模型动作。兼容原基本字段，详情中的未知值
   不补零；§3 的真实提交证明仍是独立要求。
+
+
+### 可信运行时模型目录（#157）
+
+registry 记录、候选文件、观测到的 unit 和已安装的运行时目录是不同状态。
+临时记录的出现不自动授予 probe/transport/place 权限。先由可信配置及经过
+校验的 base/profile 生成不可变的候选目录，绑定候选摘要、预期 unit、直接
+endpoint/端口及 profile 来源；不从任意 unit 发现或宏字符串猜测权重与预算。
+缺失必需信息明确阻塞，临时模型不继承 base 的默认模型身份。
+
+动态目录仅在内部受控提交/恢复生命周期中安装：对应配置与实例/代次身份、
+配置采用、旧资源结清及所需清理均有与该候选绑定的正面证明，当前文件与
+恢复标记再次核验一致后，才允许进入安装点。它位于相应成功屏障清除之前；
+安装失败不能清除屏障、宣称 applied 或留下半套已启用映射。文件落盘或
+native generation 可见均不单独满足这些条件；不新增 HTTP 证明提交或强制
+清除路径，实际证明来源缺失时继续阻塞。
+
+core 在现有 action/publication 锁内一致切换 admission、transport、collector
+与事件过滤的目录代次。准备新对象不触发探测或订阅；每代使用不可变模型
+集合，新 Collector/必要的新 relay 通过现有 owner 构造器建立，不原地修改
+运行中的 models/allowlist。采集任务释放锁前捕获目录代次与对象，发布前
+核对仍为同一代；旧代的成功或 unknown 结果都不能覆盖新状态。等待中的
+动作在每个副作用及记账提交前重验代次、操作权限与资源身份；过期结果
+不能成为新代动作依据。旧 collector 退休、relay 关闭/最终 drain 在 action
+锁外有界处理，旧事件不得冒充新代证据，quiet 信任仍不由 relay 推导。
+
+被移除或身份/profile 变更的模型若仍有 pending/uncertain lease 或 fault
+claim，不能丢弃其原可信观测/对账信息或改写预算。它们不再接受新的放置、
+唤醒或一般策略动作，但保留与原 unit/lease 身份绑定的对账路径，直至正面
+退出与记账/屏障结清；持久化的可信记账/目录检查点须足以在重启后恢复这类
+元数据。未解决的资源不能通过重新发现同名 unit、重新添加记录或新代 profile
+绕过保护；需要改变仍被占用身份时，明确阻塞或保留旧观测代，不能混用。
+
+安装点全部前置校验完成后才发布新的可放置名字；随后的 place/confirm
+仍使用原租约与完整预算协议。dry-run/read-only 不安装动态候选、不写目录
+检查点或迁移账本、不改队列且不运行探测/动作；普通静态只读启动配置不受
+此新增动态接入影响。测试中的已证明生命周期只验证控制逻辑，不等于现场
+#53/#60 证明或生产启用；新增存储/重启兼容边界与实现一起记录和审核。
+
+目录提交的全局冲突 claim 不得仅由 reload marker 是否存在推导（#159）。
+从首次不可逆文件/实例操作前到目录发布及 marker 删除/目录同步确认后，都须
+有独立的持久化 claim 和动作门禁。指针已发布但确认失败、marker 已删除但
+fsync 失败、恢复 marker 再次失败，都保持不可操作的恢复状态；重启从 claim/
+检查点识别未完成事务，不能把 marker 缺失当作成功。全部持久化均失败时须
+明确报告无法证明的恢复边界，不承诺不存在的崩溃持久性。原 reconcile 的
+证明回调保持只读；需要目录安装时，由单独、可验证的内部安装/释放阶段完成，
+不能把安装隐藏在 verifier 中或用旧 reload 证明越过目录阶段。
+
 
 ## 6. CLI 与 TUI
 

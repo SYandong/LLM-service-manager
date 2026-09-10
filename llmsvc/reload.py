@@ -269,6 +269,43 @@ class ReloadQueue:
         self.max_snapshot_age = max_snapshot_age
         self._pending: deque[ReloadJob] = deque()
         self._jobs: dict[str, ReloadJob] = {}
+        self._completion_marker: bytes | None = None
+
+    @property
+    def fenced(self) -> bool:
+        """Include failed marker retirement, even if repair could not persist."""
+        with self.action_lock:
+            return (self._completion_marker is not None
+                    or self.marker.exists() or self.marker.is_symlink())
+
+    def _retire_marker(self, raw: bytes) -> None:
+        """Release only after durable removal; repair the receipt on failure.
+
+        The in-process latch survives a failed repair. If *all* persistence fails,
+        restart safety needs core's independent durable transaction/catalog claim;
+        a volatile latch cannot make an unavailable filesystem durable.
+        """
+        self._completion_marker = raw
+        try:
+            # Never remove a replaced/invalid marker on behalf of this transaction.
+            _, current, _ = self._read_marker()
+            if current != raw:
+                raise ReloadError("recovery marker changed before retirement")
+            self.marker.unlink()
+            self._sync_directory()
+        except Exception:
+            try:
+                # Exclusive creation cannot overwrite somebody else's marker.
+                # This repairs only recovery metadata, never config or a notifier.
+                with self.marker.open("xb") as stream:
+                    stream.write(raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                self._sync_directory()
+            except Exception:
+                pass  # Keep the latch; inspection/reconciliation remain blocked.
+            raise
+        self._completion_marker = None
 
     def _read(self) -> tuple[bytes, os.stat_result]:
         return _read_regular_file(self.path, self.config_max_bytes)
@@ -305,7 +342,7 @@ class ReloadQueue:
                 witness_binding: CandidateBinding | None = None) -> dict:
         """Pure transforms only. Dry-run creates no staging files or queue entries."""
         with self.action_lock:
-            if self.marker.exists() or self.marker.is_symlink():
+            if self.fenced:
                 raise ReloadError("previous transaction requires reconciliation")
             data, info = self._read()
             for job in self._pending:
@@ -338,7 +375,7 @@ class ReloadQueue:
 
     def process_once(self) -> dict | None:
         with self.action_lock:
-            if not self._pending or self.marker.exists() or self.marker.is_symlink():
+            if not self._pending or self.fenced:
                 return None
             job = self._pending[0]
             if self.clock() - job.submitted_at >= self.timeout:
@@ -404,8 +441,7 @@ class ReloadQueue:
                     if job.after_apply:
                         job.after_apply(deadline=deadline)
                     self._check_deadline(deadline)
-                    self.marker.unlink()
-                    self._sync_directory()
+                    self._retire_marker(marker_bytes)
                     marker_created = False
                     job.status = "applied"
             except Exception as exc:
@@ -452,6 +488,14 @@ class ReloadQueue:
             raise ReloadError("recovery marker changed while reading") from exc
         if len(raw) > 65536 or identity != self._record_identity(after) or identity != current_identity:
             raise ReloadError("recovery marker changed while reading")
+        if self._completion_marker is not None and raw != self._completion_marker:
+            raise ReloadError("recovery marker does not match failed completion")
+        return self._parse_marker(raw), raw, identity
+
+    @staticmethod
+    def _parse_marker(raw: bytes) -> dict:
+        if not isinstance(raw, bytes) or len(raw) > 65536:
+            raise ReloadError("invalid recovery marker")
         def unique(pairs):
             result = {}
             for key, value in pairs:
@@ -486,7 +530,7 @@ class ReloadQueue:
                     raise ValueError("binding digest mismatch")
         except (ValueError, TypeError, KeyError, RecursionError) as exc:
             raise ReloadError("invalid recovery marker") from exc
-        return record, raw, identity
+        return record
 
     def inspect_recovery(self, *, reading: GenerationRead | None = None,
                          before: BindingObservation | None = None,
@@ -504,7 +548,10 @@ class ReloadQueue:
             try:
                 record, raw, _ = self._read_marker()
             except FileNotFoundError:
-                result.update(status="none", fenced=False, marker_valid=None)
+                if self._completion_marker is not None:
+                    result["blocked_by"] = [{"reason": "recovery_marker_persistence_failed"}]
+                else:
+                    result.update(status="none", fenced=False, marker_valid=None)
                 return result
             except (OSError, ReloadError):
                 result["blocked_by"] = [{"reason": "invalid_or_unreadable_recovery_marker"}]
@@ -596,12 +643,7 @@ class ReloadQueue:
             if hashlib.sha256(data).hexdigest() != record["sha256"]:
                 raise ReloadError("adoption and cleanup not confirmed")
             proof = confirm(copy.deepcopy(record))
-            if (not isinstance(proof, RecoveryProof) or proof.marker_sha256 != hashlib.sha256(raw).hexdigest()
-                    or not all(value is True for value in (proof.generation_confirmed, proof.instance_confirmed,
-                                                           proof.settlement_confirmed, proof.cleanup_confirmed))):
-                raise ReloadError("adoption and cleanup not confirmed")
-            if "witness_binding" in record and proof.instance != CandidateBinding.from_dict(record["witness_binding"]).instance:
-                raise ReloadError("recovery instance not confirmed")
+            self._confirm_proof(record, raw, proof)
             try:
                 _, current_raw, current_identity = self._read_marker()
                 current_data, _ = self._read()
@@ -610,7 +652,71 @@ class ReloadQueue:
             if (current_raw != raw or current_identity != identity
                     or hashlib.sha256(current_data).hexdigest() != record["sha256"]):
                 raise ReloadError("recovery state changed during confirmation")
-            self.marker.unlink()
-            self._sync_directory()
+            self._retire_marker(raw)
             self.log({"kind": "config_reconcile", "dry_run": False})
             return {"status": "reconciled"}
+
+    @staticmethod
+    def _confirm_proof(record: dict, raw: bytes, proof: RecoveryProof) -> None:
+        if (not isinstance(proof, RecoveryProof) or proof.marker_sha256 != hashlib.sha256(raw).hexdigest()
+                or not all(value is True for value in (proof.generation_confirmed, proof.instance_confirmed,
+                                                       proof.settlement_confirmed, proof.cleanup_confirmed))):
+            raise ReloadError("adoption and cleanup not confirmed")
+        if "witness_binding" in record and proof.instance != CandidateBinding.from_dict(record["witness_binding"]).instance:
+            raise ReloadError("recovery instance not confirmed")
+
+    def confirm_retired_receipt(self, raw: bytes, confirm: Callable[[dict], RecoveryProof], *,
+                                dry_run: bool = False) -> dict:
+        """Confirm core's durable receipt without deriving authority from absence.
+
+        Internal lifecycle only: core holds its independent durable claim before
+        and after this call. This clears only the queue latch, never that claim.
+        A present receipt uses ordinary reconcile; absent receipts need fresh
+        full proof, unchanged candidate bytes and checked durable absence.
+        """
+        with self.action_lock:
+            if dry_run:
+                return self.reconcile(confirm, dry_run=True)
+            record = self._parse_marker(raw)
+            if self._completion_marker is not None and raw != self._completion_marker:
+                raise ReloadError("receipt does not match failed completion")
+            self._completion_marker = raw
+            try:
+                try:
+                    _, current_raw, _ = self._read_marker()
+                except FileNotFoundError:
+                    pass
+                else:
+                    if current_raw != raw:
+                        raise ReloadError("recovery marker changed")
+                    return self.reconcile(confirm)
+                data, info = self._read()
+                if hashlib.sha256(data).hexdigest() != record["sha256"]:
+                    raise ReloadError("adoption and cleanup not confirmed")
+                proof = confirm(copy.deepcopy(record))
+                self._confirm_proof(record, raw, proof)
+                current, current_info = self._read()
+                if (current != data or self._record_identity(current_info) != self._record_identity(info)
+                        or self._completion_marker != raw):
+                    raise ReloadError("recovery state changed during confirmation")
+                self._require_marker_absent()
+                self._sync_directory()
+                self._require_marker_absent()
+                # Directory synchronization may overlap another source change.
+                final, final_info = self._read()
+                if final != data or self._record_identity(final_info) != self._record_identity(info):
+                    raise ReloadError("candidate changed during receipt retirement")
+                self._require_marker_absent()
+            except Exception:
+                self._completion_marker = raw
+                raise
+            self._completion_marker = None
+            self.log({"kind": "config_reconcile", "dry_run": False, "receipt_was_absent": True})
+            return {"status": "reconciled"}
+
+    def _require_marker_absent(self) -> None:
+        try:
+            self.marker.lstat()
+        except FileNotFoundError:
+            return
+        raise ReloadError("recovery marker appeared during receipt confirmation")

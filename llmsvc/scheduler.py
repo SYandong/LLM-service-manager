@@ -36,17 +36,19 @@ class DataPlaneBridge:
     reader, and lets its bounded buffer report local discard counts next round.
     """
 
-    def __init__(self, scheduler, relay):
+    def __init__(self, scheduler, relay, *, catalog_epoch=None):
         self.scheduler = scheduler
         self.relay = relay
+        self.catalog_epoch = scheduler.catalog_epoch if catalog_epoch is None else catalog_epoch
         self.pending = None
         self.thread = None
         self.stopping = threading.Event()
         self.closed = False
+        self._close_lock = threading.Lock()
         self.shutdown_discard = None
 
     def start(self):
-        if self.closed or self.thread is not None:
+        if self.closed or self.stopping.is_set() or self.thread is not None:
             raise RuntimeError("data-plane bridge already started or closed")
         self.relay.start()
         self.thread = threading.Thread(target=self._run, name="llmsvc-event-relay", daemon=True)
@@ -60,6 +62,13 @@ class DataPlaneBridge:
             return False
         try:
             batch = self.pending
+            if self.catalog_epoch != self.scheduler.catalog_epoch:
+                if batch["events"] or batch["dropped"]:
+                    self.scheduler.emit("catalog_events_discarded", detail={
+                        "catalog_epoch": self.catalog_epoch, "events": len(batch["events"]),
+                        "dropped": batch["dropped"], "upstream_loss_unknown": True})
+                self.pending = None
+                return True
             for event in batch["events"]:
                 self.scheduler.emit(event["kind"], model=event["model"], detail=event["detail"])
             if batch["dropped"]:
@@ -81,9 +90,17 @@ class DataPlaneBridge:
             self.stopping.wait(self.scheduler.config.data_plane_event_interval_seconds)
 
     def close(self):
-        if self.closed:
-            return
-        self.closed = True
+        if not self._close_lock.acquire(blocking=False):
+            raise RuntimeError("data-plane bridge close is already in progress")
+        try:
+            if self.closed:
+                return
+            self._close_once()
+            self.closed = True
+        finally:
+            self._close_lock.release()
+
+    def _close_once(self):
         self.stopping.set()
         try:
             self.relay.close()  # Interrupt and join the upstream reader first.
@@ -92,8 +109,8 @@ class DataPlaneBridge:
                 self.thread.join(timeout=self.scheduler.config.request_timeout_seconds)
                 if self.thread.is_alive():
                     raise RuntimeError("data-plane bridge consumer did not stop")
-            # Producer is closed. At most one pending batch plus one full source
-            # buffer is forwarded; never loop waiting for the action lock.
+            # Drain a bounded tail even if producer close failed. Only a fully
+            # successful close is terminal; never wait for the action lock.
             self.drain_once()
             if self.pending is None:
                 self.drain_once(max_events=self.scheduler.config.data_plane_event_capacity)
@@ -124,11 +141,15 @@ class Scheduler:
         self.placement = None
         self.reservation_actions = None
         self.registry = None
+        self.catalog = None
+        self.catalog_epoch = "0"*32
+        self.catalog_fenced = False
         self.automation = None
         self._automation_thread = None
         self.faults = None
         self.sleeping_recovery = None
         self._fault_thread = None
+        self._catalog_thread = None
         self._usage = usage
         self._collector_closed = False
         # One lock for action/accounting and publication. Slow read-only probes
@@ -177,8 +198,17 @@ class Scheduler:
                         snapshot = replace(snapshot, blocked_by=tuple(dict.fromkeys(snapshot.blocked_by + pending)))
                 except Exception:
                     snapshot = replace(snapshot, errors=snapshot.errors + ("intent_store_unavailable",))
+            if self.catalog_fenced or (self.store and self.store.catalog_pending()):
+                from llmsvc.state import Blocker
+                snapshot = replace(snapshot, blocked_by=snapshot.blocked_by+(Blocker(None, "catalog_reconciliation_required"),))
             return snapshot
 
+    def check_catalog(self, epoch=None):
+        from llmsvc.actions import ActionDispatchError
+        if self.catalog_fenced or (self.store is not None and self.store.catalog_pending()):
+            raise ActionDispatchError("catalog_reconciliation_required")
+        if epoch is not None and epoch != self.catalog_epoch:
+            raise ActionDispatchError("catalog_generation_changed")
 
     def preview(self, operation: str, payload: dict) -> dict:
         """Pure policy/intent preview; no executor, event append or store writer."""
@@ -438,8 +468,9 @@ class Scheduler:
         from llmsvc.reload import reload_blockers
         snapshot = self.snapshot()
         marker = self.registry.queue.marker
-        reconciliation = [{"reason": "registry_reconciliation_required"}] if marker.exists() or marker.is_symlink() else []
-        return ([{"reason": "registry_writes_disabled"}] + reconciliation + self.registry.queue.quiet.blockers()
+        reconciliation = [{"reason": "registry_reconciliation_required"}] if self.registry.queue.fenced else []
+        disabled = [] if self.catalog is not None and self.catalog.can_submit() else [{"reason": "registry_writes_disabled"}]
+        return (disabled + reconciliation + self.registry.queue.quiet.blockers()
                 + reload_blockers(snapshot, self.clock(), self.config.max_snapshot_age_seconds)
                 + [asdict(blocker) for blocker in snapshot.blocked_by])
 
@@ -447,19 +478,29 @@ class Scheduler:
         from llmsvc.registry import RegistryError
         from llmsvc.reload import ReloadError
         if method != "GET" and not dry_run:
-            raise IntentWriteError(405, "read_only" if self.config.read_only else "operation_not_enabled")
+            if self.config.read_only or self.catalog is None or not self.catalog.can_submit():
+                raise IntentWriteError(405, "read_only" if self.config.read_only else "operation_not_enabled")
         if self.registry is None:
             raise IntentWriteError(503, "registry_not_configured")
         try:
             with self.action_lock:
+                writable = self.catalog is not None and self.catalog.can_submit()
+                if method != "GET" and not dry_run:
+                    if self.catalog_fenced or (self.store and self.store.catalog_pending()):
+                        raise IntentWriteError(409, "registry_reconciliation_required")
+                    if self.registry.submit_change != self.catalog.submit_change:
+                        raise IntentWriteError(503, "catalog_not_connected")
+                    result = self.registry.handle(method, path, body, dry_run=False)
+                    json.dumps(result, allow_nan=False)
+                    return result
                 if method == "GET" and path == "/v1/models":
                     inventory = self.registry.inventory(include_records=True)
                     records = inventory.pop("records")
-                    result = {"records": records, "writes_enabled": False,
+                    result = {"records": records, "writes_enabled": writable,
                               "inventory": inventory,
                               "blocked_by": self.registry_blockers()}
                 elif method == "GET" and path == "/v1/registry":
-                    result = {"queue": self.registry.queue_snapshot(), "writes_enabled": False,
+                    result = {"queue": self.registry.queue_snapshot(), "writes_enabled": writable,
                               "blocked_by": self.registry_blockers()}
                 else:
                     if not isinstance(body, dict):
@@ -490,7 +531,7 @@ class Scheduler:
             raise error from exc
         except ReloadError as exc:
             marker = self.registry.queue.marker
-            if method != "GET" and (marker.exists() or marker.is_symlink()):
+            if method != "GET" and self.registry.queue.fenced:
                 raise IntentWriteError(409, "registry_reconciliation_required") from exc
             raise IntentWriteError(503, "registry_unavailable") from exc
         except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
@@ -564,10 +605,11 @@ class Scheduler:
         with self.action_lock:
             self._sample_started += 1
             generation = self._sample_started
+            catalog_epoch, collector = self.catalog_epoch, self.collect
         collection_started = self.monotonic()
         source_time_provided = False
         try:
-            snapshot = self.collect() if self.collect else self._unknown("collectors_not_configured")
+            snapshot = collector() if collector else self._unknown("collectors_not_configured")
             if not isinstance(snapshot, StateSnapshot):
                 raise TypeError("collector must return StateSnapshot")
             source_time_provided = snapshot.sampled_at is not None
@@ -582,10 +624,12 @@ class Scheduler:
             # Never serve a stale healthy snapshot as current after probe failure.
             source_time_provided = False
             snapshot = self._unknown("collection_failed")
-            self.emit("collection_error", detail={"error_type": type(exc).__name__})
+            with self.action_lock:
+                if catalog_epoch == self.catalog_epoch:
+                    self.emit("collection_error", detail={"error_type": type(exc).__name__})
         collection_finished = self.monotonic()
         with self.changed:
-            if generation < self._sample_published:
+            if catalog_epoch != self.catalog_epoch or generation < self._sample_published:
                 return self.snapshot()
             self._sample_published = generation
             self._sample_bounds = (generation, collection_started, collection_finished)
@@ -638,6 +682,15 @@ class Scheduler:
                 LOG.warning(json.dumps({"kind": "fault_error", "error_type": type(exc).__name__}))
             self.stopping.wait(self.config.fault_interval_seconds)
 
+    def _run_catalog(self):
+        while not self.stopping.is_set():
+            try:
+                if self.catalog is not None and self.catalog.can_submit():
+                    self.catalog.process_once()
+            except Exception as exc:
+                LOG.warning(json.dumps({"kind": "catalog_cycle_error", "error_type": type(exc).__name__}))
+            self.stopping.wait(self.config.action_poll_seconds)
+
     def start(self):
         with self.action_lock:
             if self._thread is not None:
@@ -655,6 +708,9 @@ class Scheduler:
             if self.faults is not None and self.faults.enabled():
                 self._fault_thread = threading.Thread(target=self._run_faults, name="llmsvc-faults", daemon=True)
                 self._fault_thread.start()
+            if self.catalog is not None and self.catalog.can_submit():
+                self._catalog_thread = threading.Thread(target=self._run_catalog, name="llmsvc-catalog", daemon=True)
+                self._catalog_thread.start()
         except Exception:
             self.stop()
             raise
@@ -669,6 +725,10 @@ class Scheduler:
         try:
             try:
                 try:
+                    if self._catalog_thread is not None and self._catalog_thread.is_alive():
+                        self._catalog_thread.join(timeout=self.catalog.queue.operation_timeout+self.config.request_timeout_seconds)
+                        if self._catalog_thread.is_alive():
+                            raise RuntimeError("catalog worker did not stop")
                     if self._automation_thread is not None and self._automation_thread.is_alive():
                         budget = self.config.automation_cycle_timeout_seconds
                         if self.sleeping_recovery is not None and self.sleeping_recovery.active:
@@ -682,8 +742,12 @@ class Scheduler:
                         if self._fault_thread.is_alive():
                             raise RuntimeError("fault worker did not stop")
             finally:
-                if self.event_bridge is not None:
-                    self.event_bridge.close()
+                try:
+                    if self.catalog is not None:
+                        self.catalog.retire()
+                finally:
+                    if self.event_bridge is not None:
+                        self.event_bridge.close()
         finally:
             try:
                 if self._thread is not None and self._thread.is_alive():

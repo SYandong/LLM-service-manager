@@ -32,6 +32,7 @@ class SchedulerConfig:
     read_only: bool = True
     collectors: dict[str, Any] = field(default_factory=dict)
     registry: dict[str, Any] = field(default_factory=dict)
+    catalog_enabled: bool = False
     state_db_path: str = ""
     data_plane_events_enabled: bool = False
     data_plane_event_capacity: int = 256
@@ -125,6 +126,8 @@ class SchedulerConfig:
             raise ValueError("placement_enabled must be a boolean")
         if type(self.model_actions_enabled) is not bool:
             raise ValueError("model_actions_enabled must be a boolean")
+        if type(self.catalog_enabled) is not bool:
+            raise ValueError("catalog_enabled must be a boolean")
         if type(self.read_only) is not bool:
             raise ValueError("read_only must be a boolean")
         if not isinstance(self.state_db_path, str):

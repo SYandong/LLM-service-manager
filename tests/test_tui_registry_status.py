@@ -22,7 +22,7 @@ def test_fenced_actual_registry_status_is_displayed_without_clearing(api,inspect
             await app.workers.wait_for_complete()
             await submit(app,pilot,'registry')
             text=output(app)
-            assert 'Fenced: yes (retained)' in text
+            assert 'Queue/config fence: yes (retained)' in text
             assert 'reconciliation_required' in text and 'settlement_confirmed' in text
             assert 'process-local monotonic' in text
         assert (inspection.queue.path.read_bytes(),inspection.queue.marker.read_bytes(),inspection.scheduler.events_since(0))==before
