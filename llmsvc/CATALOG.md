@@ -16,8 +16,8 @@ an immutable prospective generation. Every candidate model needs explicit
 trusted weights, budget/util, known default role, distinct canonical vllm unit,
 daemon port and direct literal-IP endpoint. No resource size is inherited from
 an arbitrary command, macro or base name. A new temporary model cannot be default;
-occupied/uncertain same-name profile changes are rejected. Removed metadata is
-retained for observation and lease reconciliation, while active admission and
+same-name profile changes are rejected in this registration slice and require separate configuration reconciliation. Removed metadata with unresolved lease/fault/recovery references is
+retained for observation and lease reconciliation (including reserved endpoints), while active admission and
 normal transport paths exclude that name. Removed pinned/default names block.
 Global collector/source settings are unchanged by this transaction.
 
@@ -54,7 +54,7 @@ proof/retirement reconciliation; it does not replay config, reload, cleanup,
 stop or wake. `reconcile` is a separate internal verified install/retirement
 operation, not an HTTP proof/force-clear endpoint. An absent marker or a volatile
 queue latch is insufficient authority. Missing source, foreign receipt, failed
-fsync, partial proof or a failed final checkpoint retains the global fence.
+fsync, partial proof or a failed final checkpoint retains the global fence. Failed old collector/relay closes keep their handles for retry; a bridge is marked closed only after its real subscription and consumer stop. Explicit reconciliation cannot release the fence while any retirement is incomplete.
 
 Deployment is coordinated with ops #169: the current reviewed, rehearsed,
 reversible maintenance rollout is authorized. Default-off/read-only upgrade does

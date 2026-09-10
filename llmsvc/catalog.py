@@ -56,7 +56,12 @@ class CatalogRuntime:
         self.epoch = scheduler.catalog_epoch
         self.jobs = {}
         self.pending = None
-        self.retired = []
+        previous = scheduler.catalog
+        if previous is not None and previous.busy:
+            raise ReloadError("catalog owner is still active")
+        self.retired = previous.retired if previous is not None else []
+        if previous is not None:
+            previous.retired = []
         self.staged = None
         self.busy = False
         self.deadline = 0.0
@@ -88,7 +93,7 @@ class CatalogRuntime:
 
     def can_submit(self):
         s = self.scheduler
-        return (s.config.catalog_enabled and not s.config.read_only and s.store is not None
+        return (s.catalog is self and s.config.catalog_enabled and not s.config.read_only and s.store is not None
                 and not s.store.read_only and callable(self.verifier) and callable(self.profile_provider)
                 and callable(self.instance_provider) and not s.stopping.is_set())
 
@@ -96,10 +101,13 @@ class CatalogRuntime:
         if registry.queue is not self.queue or not self.can_submit():
             raise ReloadError("trusted catalog submission is unavailable")
         registry.submit_change = self.submit_change
+        reserved = registry.reserved_ports
+        registry.reserved_ports = lambda: list(reserved()) + [
+            p["port"] for p in self.manifest["retained"].values() if type(p.get("port")) is int]
 
     def _enabled(self):
         s = self.scheduler
-        if s.config.read_only or not s.config.catalog_enabled or s.store is None or s.store.read_only:
+        if s.catalog is not self or s.config.read_only or not s.config.catalog_enabled or s.store is None or s.store.read_only:
             raise ReloadError("catalog installation is disabled")
         if not callable(self.verifier):
             raise ReloadError("catalog proof source is unavailable")
@@ -164,17 +172,24 @@ class CatalogRuntime:
                 if name not in self.manifest["active"] and profile["is_default"]:
                     raise ValueError("temporary catalog model cannot become default")
                 if name in old and old[name] != profile:
-                    rows = self.scheduler.store.leases() if self.scheduler.store else ()
-                    models = [m for m in self.scheduler._snapshot.models if m.name == name]
-                    if (any(l.model == name for l, _ in rows) or len(models) != 1
-                            or models[0].state != "stopped" or models[0].unit_active is not False
-                            or old[name].get("is_default") != profile["is_default"]
-                            or (self.scheduler.store and (self.scheduler.store.fault(name) or self.scheduler.store.recovery(name)))):
-                        raise ValueError("occupied or uncertain catalog profile changed")
+                    raise ValueError("existing catalog profile changes require separate configuration reconciliation")
                 ports.add(port); units.add(unit); retained.pop(name, None)
+            store = self.scheduler.store
+            referenced = {lease.model for lease, _ in store.leases()} if store else set()
+            if store:
+                referenced.update(claim.model for claim in store.faults())
+                referenced.update(claim.model for claim in store.recoveries())
             for name, profile in old.items():
                 if name not in active:
-                    retained[name] = profile
+                    if name in referenced:
+                        retained[name] = profile
+                    elif name in self.manifest["active"]:
+                        # This candidate's bound cleanup proof is required before
+                        # publication. Until then the old manifest remains live.
+                        retained.pop(name, None)
+                    elif store and any(lease.model == name and lease.status == "released" and unit == profile.get("unit")
+                                       for lease, unit in store.leases(include_released=True)):
+                        retained.pop(name, None)
             # Retained exact identities cannot alias a new active endpoint/unit.
             for profile in retained.values():
                 if profile.get("unit") in units or profile.get("port") in ports:
@@ -247,12 +262,13 @@ class CatalogRuntime:
 
     def retire(self):
         """Called outside action_lock, with the publication fence still held."""
-        retired, self.retired = self.retired, []
-        for collector, bridge in retired:
+        while self.retired:
+            collector, bridge = self.retired[0]
             try:
                 if bridge is not None: bridge.close()
             finally:
                 if collector is not None and hasattr(collector, "close"): collector.close()
+            self.retired.pop(0)  # Retain failed handles for explicit retry/reconciliation.
         s = self.scheduler
         if s._thread is not None and s._thread.is_alive() and s.event_bridge is not None and s.event_bridge.thread is None:
             s.event_bridge.start()
@@ -338,6 +354,14 @@ class CatalogRuntime:
         self._enabled()
         return proof
 
+    def _release_ready(self, record):
+        self._enabled()
+        if (self.retired or self.queue.fenced or self.scheduler.store.catalog_checkpoint() != record
+                or self.epoch != record["new_epoch"]
+                or digest(self.queue._read()[0]) != record["candidate_sha256"]):
+            raise ReloadError("catalog receipt or configuration changed before release")
+        self._check_membership(record["new_manifest"]["active"], record["old_manifest"]["active"])
+
     def _after_apply(self, deadline):
         record = self.scheduler.store.catalog_checkpoint()
         marker, raw, _ = self.queue._read_marker()
@@ -409,10 +433,11 @@ class CatalogRuntime:
                     raise ReloadError("catalog retirement is not complete")
                 marker = json.loads(record["marker_json"])
                 self._proof(record, marker, deadline=self.deadline)
+                self._release_ready(record)
                 s.store.save_catalog(record, {**record, "phase": "released", "previous": None})
                 self.pending = None
                 s.catalog_fenced = False
-                s.emit("catalog_installed", detail={"catalog_epoch": self.epoch})
+                s.emit("catalog_installed", detail={"catalog_epoch": self.epoch, "job_id": record["job_id"]})
                 return result
         finally:
             if owned:
@@ -484,6 +509,7 @@ class CatalogRuntime:
                 else:
                     raise ReloadError("catalog receipt retirement verifier unavailable")
                 self._proof(record, marker, deadline=deadline)
+                self._release_ready(record)
                 if record["phase"] != "released":
                     s.store.save_catalog(record, {**record, "phase": "released", "previous": None})
                 s.catalog_fenced = False
