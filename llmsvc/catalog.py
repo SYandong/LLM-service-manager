@@ -9,7 +9,6 @@ import copy
 import hashlib
 import ipaddress
 import json
-import re
 import uuid
 from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
@@ -130,7 +129,7 @@ class CatalogRuntime:
         binding.to_dict()
         if binding.endpoint != self.scheduler.config.collectors.get("swap_url", "").rstrip("/")+"/api/mcp":
             raise ValueError("catalog binding uses another proxy origin")
-        from llmsvc.registry import ModelRegistry
+        from llmsvc.registry import ModelRegistry, validate_safe_model_name
         document, records = ModelRegistry._decode(candidate)
         if not isinstance(document, dict) or not isinstance(document.get("models"), dict):
             raise ValueError("catalog candidate requires models")
@@ -143,8 +142,7 @@ class CatalogRuntime:
             old = {**self.manifest["retained"], **self.manifest["active"]}
             ports, units = set(), set()
             for name, profile in active.items():
-                if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
-                    raise ValueError("invalid catalog name")
+                validate_safe_model_name(name)
                 if not isinstance(profile, dict):
                     raise ValueError("invalid trusted model profile")
                 port = profile.get("port")
@@ -270,7 +268,7 @@ class CatalogRuntime:
                 if collector is not None and hasattr(collector, "close"): collector.close()
             self.retired.pop(0)  # Retain failed handles for explicit retry/reconciliation.
         s = self.scheduler
-        if s._thread is not None and s._thread.is_alive() and s.event_bridge is not None and s.event_bridge.thread is None:
+        if not s.stopping.is_set() and s._thread is not None and s._thread.is_alive() and s.event_bridge is not None and s.event_bridge.thread is None:
             s.event_bridge.start()
         s.request_sample()
 

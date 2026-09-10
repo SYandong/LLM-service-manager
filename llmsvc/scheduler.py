@@ -742,8 +742,12 @@ class Scheduler:
                         if self._fault_thread.is_alive():
                             raise RuntimeError("fault worker did not stop")
             finally:
-                if self.event_bridge is not None:
-                    self.event_bridge.close()
+                try:
+                    if self.catalog is not None:
+                        self.catalog.retire()
+                finally:
+                    if self.event_bridge is not None:
+                        self.event_bridge.close()
         finally:
             try:
                 if self._thread is not None and self._thread.is_alive():
