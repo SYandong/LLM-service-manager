@@ -97,6 +97,11 @@ class PlacementController:
             self.scheduler.action_lock.release()
 
     def _enabled(self):
+        from llmsvc.actions import ActionDispatchError
+        try:
+            getattr(self.transport, "check_catalog", lambda: None)()
+        except ActionDispatchError as exc:
+            raise LeaseError(503, exc.reason) from exc
         config = self.scheduler.config
         if config.read_only:
             raise LeaseError(405, "read_only")
@@ -122,7 +127,7 @@ class PlacementController:
         util = finite_positive(payload["util"], "util")
         if util > 1:
             raise ValueError("util must not exceed one")
-        if name not in self.transport.models:
+        if name not in getattr(self.transport, "active_models", self.transport.models):
             raise LeaseError(404, "unknown_model")
         metadata = self.transport.models[name]
         configured_util = metadata.get("util", util)
@@ -135,6 +140,11 @@ class PlacementController:
                           is_default=metadata.get("is_default") is True)
 
     def _decision(self, snapshot, request, *, waiting):
+        from llmsvc.actions import ActionDispatchError
+        try:
+            getattr(self.transport, "check_catalog", lambda: None)()
+        except ActionDispatchError as exc:
+            return None, (Blocker(request.name, exc.reason),)
         if self.scheduler.store is not None and self.scheduler.store.fault(request.name) is not None:
             return None, (Blocker(request.name, "fault_recovery_pending"),)
         if not self._fresh(snapshot):
