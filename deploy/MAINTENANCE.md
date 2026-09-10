@@ -14,6 +14,10 @@ read-only package upgrade does not provision this profile or activate maintenanc
 
 ## Site profile and service prerequisites
 
+For an installation without confirmed preload accounts, use the separate
+[first managed-start transaction](BOOTSTRAP.md). Maintenance does not adopt
+unleased units or remove the default preload to make inspection pass.
+
 Start from [maintenance.profile.example.json](maintenance.profile.example.json).
 Replace every placeholder using actual site observations and the verified source
 artifact. The profile and state directory must belong to the executing service

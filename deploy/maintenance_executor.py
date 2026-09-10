@@ -409,7 +409,12 @@ def main(argv=None):
         if profile_path.stat().st_size > MAX_RESPONSE:
             raise ExecutorError('profile_size_limit')
         profile = json.loads(profile_path.read_text())
-        if profile.get('native_adapter') is True:
+        if profile.get('bootstrap_adapter') is True:
+            from deploy.bootstrap_native import BootstrapAdapter
+            from deploy.maintenance_native import private_json
+            profile = private_json(profile_path)
+            inspector = BootstrapAdapter(profile, profile_path)
+        elif profile.get('native_adapter') is True:
             from deploy.maintenance_native import NativeAdapter, private_json
             profile = private_json(profile_path)
             inspector = NativeAdapter(profile, profile_path)
