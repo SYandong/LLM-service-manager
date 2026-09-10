@@ -60,7 +60,7 @@ class IntentStore:
         try:
             with self.action_lock, self._db:
                 version = self._db.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1, 2, 3, 4, 5):
+                if version not in (0, 1, 2, 3, 4, 5, 6):
                     raise ValueError("unsupported intent database version")
                 if read_only:
                     self._db.execute("SELECT model, until, owner FROM llmsvc_pins LIMIT 0")
@@ -75,6 +75,7 @@ class IntentStore:
                 self._has_faults = version >= 3
                 self._has_recoveries = version >= 4
                 self._has_catalog = version >= 5
+                self._has_maintenance = version >= 6
                 if self._has_faults:
                     self._db.execute("SELECT lease_id, model, stage, record FROM llmsvc_faults LIMIT 0")
                 if self._has_leases:
@@ -84,6 +85,9 @@ class IntentStore:
                     self.recoveries()  # Reject unsupported/corrupt active fences.
                 if self._has_catalog:
                     self.catalog_checkpoint()
+                if self._has_maintenance:
+                    self._db.execute("SELECT transaction_id, record FROM llmsvc_maintenance LIMIT 0")
+                    self.maintenance_checkpoints()
         except Exception:
             self._db.close()
             raise
@@ -114,16 +118,31 @@ class IntentStore:
 
     def catalog_pending(self):
         record = self.catalog_checkpoint()
-        return record is not None and record["phase"] not in ("released", "aborted")
+        if record is None:
+            return False
+        maintenance = self.maintenance_checkpoint(record["transaction_id"])
+        return (record["phase"] not in ("released", "aborted", "rolled_back")
+                or maintenance is not None and maintenance["stage"] not in ("released", "rolled_back", "aborted"))
 
     def _catalog_allows_accounting(self):
         if self.catalog_pending():
             raise ValueError("catalog reconciliation pending")
 
-    def save_catalog(self, expected, record, *, dry_run=False):
+    def save_catalog(self, expected, record, *, dry_run=False, maintenance=None):
         """Compare-and-swap checkpoint; runtime verifies proof before phase changes."""
         from llmsvc.catalog_state import catalog_json, validate_checkpoint
         validate_checkpoint(record)
+        if maintenance is not None:
+            from llmsvc.maintenance_state import validate_maintenance
+            validate_maintenance(maintenance)
+            if (record["phase"] != "claimed" or maintenance["stage"] != "claimed" or maintenance["effects"]
+                    or any(maintenance[key] != record[key] for key in ("transaction_id", "job_id", "base_sha256", "candidate_sha256"))):
+                raise ValueError("maintenance initial claim mismatch")
+            from llmsvc.maintenance import instance
+            from llmsvc.reload_witness import CandidateBinding
+            binding = CandidateBinding.from_dict(record["binding"])
+            if instance(maintenance["old_identity"]) != binding.instance or maintenance["generation"] != binding.generation:
+                raise ValueError("maintenance source binding mismatch")
         with self.action_lock:
             if self.catalog_checkpoint() != expected:
                 raise ValueError("catalog checkpoint changed")
@@ -165,9 +184,90 @@ class IntentStore:
                 self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS llmsvc_one_recovery ON llmsvc_recoveries(model) WHERE stage != 'complete'")
                 self._db.execute("CREATE TABLE IF NOT EXISTS llmsvc_catalog (singleton INTEGER PRIMARY KEY CHECK(singleton=1), record TEXT NOT NULL)")
                 self._db.execute("INSERT OR REPLACE INTO llmsvc_catalog VALUES (1, ?)", (catalog_json(record),))
-                self._db.execute("PRAGMA user_version=5")
+                if record["phase"] == "aborted" and self._has_maintenance:
+                    old_maintenance = self.maintenance_checkpoint(record["transaction_id"])
+                    if old_maintenance is not None:
+                        if old_maintenance["effects"]:
+                            raise ValueError("maintenance effects cannot be silently aborted")
+                        self._db.execute("UPDATE llmsvc_maintenance SET record=? WHERE transaction_id=?",
+                            (json.dumps({**old_maintenance, "stage": "aborted"}, allow_nan=False), record["transaction_id"]))
+                if maintenance is not None:
+                    self._db.execute("CREATE TABLE IF NOT EXISTS llmsvc_maintenance (transaction_id TEXT PRIMARY KEY, record TEXT NOT NULL)")
+                    self._db.execute("INSERT INTO llmsvc_maintenance VALUES (?, ?)",
+                                     (maintenance["transaction_id"], json.dumps(maintenance, allow_nan=False)))
+                version = self._db.execute("PRAGMA user_version").fetchone()[0]
+                self._db.execute("PRAGMA user_version="+str(max(version, 6 if maintenance is not None else 5)))
             self._has_catalog = self._has_recoveries = self._has_faults = True
+            self._has_maintenance = self._db.execute("PRAGMA user_version").fetchone()[0] >= 6
             return record
+
+    def maintenance_checkpoints(self):
+        from llmsvc.maintenance_state import MAX_MAINTENANCE_BYTES, validate_maintenance
+        with self.action_lock:
+            if not self._has_maintenance:
+                return ()
+            rows = []
+            for transaction_id, length in self._db.execute("SELECT transaction_id, length(CAST(record AS BLOB)) FROM llmsvc_maintenance"):
+                if type(length) is not int or length > MAX_MAINTENANCE_BYTES:
+                    raise ValueError("maintenance checkpoint exceeds limit")
+                raw = self._db.execute("SELECT record FROM llmsvc_maintenance WHERE transaction_id=?", (transaction_id,)).fetchone()[0]
+                record = json.loads(raw)
+                validate_maintenance(record)
+                if record["transaction_id"] != transaction_id:
+                    raise ValueError("maintenance transaction metadata mismatch")
+                rows.append(record)
+            return tuple(rows)
+
+    def maintenance_checkpoint(self, transaction_id):
+        return next((row for row in self.maintenance_checkpoints() if row["transaction_id"] == transaction_id), None)
+
+    def save_maintenance(self, expected, record):
+        from llmsvc.maintenance_state import validate_maintenance
+        validate_maintenance(record)
+        mutable = {"stage", "effects", "observations", "new_identity", "rollback_identity", "error"}
+        if any(record[key] != expected[key] for key in set(record)-mutable):
+            raise ValueError("maintenance identity changed")
+        for key in ("new_identity", "rollback_identity"):
+            if expected[key] is not None and expected[key] != record[key]:
+                raise ValueError("maintenance instance changed")
+        for key, old in expected["effects"].items():
+            if key not in record["effects"] or (old["acknowledged"] and not record["effects"][key]["acknowledged"]):
+                raise ValueError("maintenance effect receipt regressed")
+        with self.action_lock:
+            if self.read_only:
+                raise PermissionError("intent store is read-only")
+            checkpoint = self.catalog_checkpoint()
+            if checkpoint is None or checkpoint["transaction_id"] != record["transaction_id"]:
+                raise ValueError("maintenance catalog claim changed")
+            with self._db:
+                self._db.execute("BEGIN IMMEDIATE")
+                if self.maintenance_checkpoint(record["transaction_id"]) != expected:
+                    raise ValueError("maintenance checkpoint changed")
+                self._db.execute("UPDATE llmsvc_maintenance SET record=? WHERE transaction_id=?",
+                                 (json.dumps(record, allow_nan=False), record["transaction_id"]))
+        return record
+
+    def release_maintenance_lease(self, transaction_id, lease_id, unit):
+        """Only the exact removed target after core's positive unit-exit check."""
+        with self.action_lock:
+            if self.read_only:
+                raise PermissionError("intent store is read-only")
+            catalog = self.catalog_checkpoint()
+            state = self.maintenance_checkpoint(transaction_id)
+            row = self.lease(lease_id)
+            if (catalog is None or catalog["transaction_id"] != transaction_id or state is None or row is None
+                    or row[1] != unit or row[0].status != "confirmed"
+                    or row[0].model not in catalog["old_manifest"]["active"]
+                    or row[0].model in catalog["new_manifest"]["active"]
+                    or not state["effects"].get("stop_model:"+row[0].model, {}).get("submitted")
+                    or self.fault(row[0].model) or self.recovery(row[0].model)):
+                raise ValueError("maintenance cleanup account is unbound")
+            with self._db:
+                self._db.execute("BEGIN IMMEDIATE")
+                if self.lease(lease_id) != row or self.maintenance_checkpoint(transaction_id) != state:
+                    raise ValueError("maintenance cleanup account changed")
+                self._db.execute("UPDATE llmsvc_leases SET status='released' WHERE lease_id=?", (lease_id,))
+            return {"lease_id": lease_id, "status": "released"}
 
     def restore_catalog_abort(self, expected):
         """Restore the prior checkpoint only after a durably proven no-effect abort."""
