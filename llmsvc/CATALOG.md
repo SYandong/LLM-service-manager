@@ -22,7 +22,11 @@ Already-retained descriptors and their endpoints can be retired by a later catal
 transaction only after a fresh, error-free current-generation observation confirms
 the exact configured unit stopped/absent and no live lease/fault/recovery reference
 remains. Unknown/stale observations and active references retain metadata and port
-reservation; observing absence itself never releases model accounting.
+reservation; observing absence itself never releases model accounting. Re-adding
+the identical name/profile follows this same rule, checked at preparation, queued
+admission, publication and explicit reconciliation. A new reference before final
+release cannot reactivate an observation-only name. Queued reactivation blockers
+retain the existing queue timeout; they do not grant or release any budget.
 Global collector/source settings are unchanged by this transaction.
 
 `submit_change` connects the existing registry callback, composing its pure model edit with the existing generation planner, explicit trusted profiles and instance. `enqueue` preserves registry descriptions, late prechecks and cleanup as well as catalog membership protection.

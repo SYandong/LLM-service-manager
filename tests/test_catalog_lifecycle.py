@@ -501,3 +501,44 @@ def test_retained_endpoint_stays_reserved_without_current_absence(catalog,uncert
         c.store.create_lease(Lease("retained","retired",0,.4,20000,40),"vllm-retired.service")
         c.store.transition_lease("retained","confirmed")
     assert c.runtime._retained_required("retired",profile("retired",21002))
+
+
+def prepare_retained_base_reactivation(c):
+    first=yaml.safe_dump({"macros":{"llmsvc_reload_generation":"gen_"+"1"*32},"models":{"new":{}}}).encode()
+    binding=replace(c.binding,candidate_sha256=hashlib.sha256(first).hexdigest())
+    c.runtime.enqueue(c.runtime.prepare(first,{"new":c.models["new"]},binding=binding))
+    make_quiet(c.q.quiet,c.clock)
+    assert c.runtime.process_once()["status"]=="applied"
+    c.s.sample_once()
+    candidate=yaml.safe_dump({"macros":{"llmsvc_reload_generation":"gen_"+"2"*32},
+                              "models":{"base":{},"new":{}}}).encode()
+    binding=replace(c.binding,generation="gen_"+"2"*32,candidate_sha256=hashlib.sha256(candidate).hexdigest())
+    return c.runtime.prepare(candidate,c.models,binding=binding)
+
+
+def test_retained_reactivation_rechecks_reference_added_after_enqueue(catalog):
+    c=catalog;c.runtime.enqueue(prepare_retained_base_reactivation(c))
+    before=c.path.read_bytes(),c.store.catalog_checkpoint()
+    c.store.create_lease(Lease("late","base",0,.4,20000,40),"vllm-base.service")
+    c.store.transition_lease("late","confirmed")
+    c.world["units"]["base"]=UnitObservation(True,False,True,"late","2"*32)
+    c.s.sample_once()
+    result=c.runtime.process_once()
+    assert result["status"]=="queued" and {"reason":"catalog_reactivation_blocked"} in result["blocked_by"]
+    assert before==(c.path.read_bytes(),c.store.catalog_checkpoint())
+    assert "base" not in c.runtime.manifest["active"]
+    assert c.store.lease("late")[0].budget_gb==40
+    c.clock.advance(c.q.timeout)
+    assert c.runtime.process_once()["status"]=="timed_out"
+    assert before==(c.path.read_bytes(),c.store.catalog_checkpoint())
+
+
+def test_retained_reactivation_requires_fresh_absence_before_publication(catalog):
+    c=catalog;c.runtime.enqueue(prepare_retained_base_reactivation(c))
+    def unknown(*,deadline):
+        c.s._snapshot=replace(c.s._snapshot,errors=("resource observation unavailable",))
+    c.q.notify_reload=unknown
+    result=c.runtime.process_once()
+    assert result["status"]=="reconciliation_required" and result["config_committed"] is True
+    assert c.s.catalog_fenced and c.store.catalog_checkpoint()["phase"]=="claimed"
+    assert "base" not in c.runtime.manifest["active"] and "base" in c.runtime.manifest["retained"]
