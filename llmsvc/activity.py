@@ -137,30 +137,25 @@ class ActivityReader:
                     """,
                     (int(now_ts - 3600), int(now_ts - 600), int(now_ts)),
                 ).fetchall()
-                latest_rows = conn.execute(
-                    f"""
-                    SELECT model_id, src, metadata_json
-                    FROM (
-                        SELECT
-                            model_id,
-                            {src_expr} AS src,
-                            {metadata_expr} AS metadata_json,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY model_id
-                                ORDER BY ts_created DESC, id DESC
-                            ) AS row_number
+                latest_by_model: dict[str, tuple[Optional[str], Optional[str]]] = {}
+                for row in summary_rows:
+                    # The aggregate already found the last eligible timestamp.
+                    # Seek only its highest-ID row using the producer's existing
+                    # (model_id, ts_created DESC, id DESC) index instead of ranking
+                    # every historical row. Keep this inside the same read snapshot.
+                    latest = conn.execute(
+                        f"""
+                        SELECT {src_expr} AS src, {metadata_expr} AS metadata_json
                         FROM activity
-                        WHERE ts_created <= ?
-                    )
-                    WHERE row_number = 1
-                    """,
-                    (int(now_ts),),
-                ).fetchall()
-            latest_by_model: dict[str, tuple[Optional[str], Optional[str]]] = {}
-            for row in latest_rows:
-                model = row["model_id"]
-                if model not in latest_by_model:
-                    latest_by_model[model] = (row["src"], row["metadata_json"])
+                        WHERE model_id IS ? AND ts_created = ?
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (row["model_id"], row["last_used"]),
+                    ).fetchone()
+                    if latest is None:
+                        raise ActivityReadError("read_failed")
+                    latest_by_model[row["model_id"]] = (latest["src"], latest["metadata_json"])
 
             result: dict[str, dict[str, Any]] = {}
             for row in summary_rows:

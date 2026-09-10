@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.1.0-alpha.12 — 2026-09-11
+
+Urgent activity-query repair; Python distribution `0.1.0a12`.
+Includes #192 and #203 since the immutable alpha.11 tag, using the
+user-authorized #167 urgent-fix exception below the normal five-PR threshold.
+
+### Corrected and added
+
+- Activity reads reuse each model's latest timestamp from the summary and seek
+  its highest-ID row instead of ranking all historical rows (#203). Counts and
+  latest source remain in the same read transaction; timestamp ties, future-row
+  filtering, old-only models and unknown origins keep their prior meaning. A
+  missing seek result fails as unknown instead of returning a mixed snapshot.
+  Existing indexes are used when present; no index, schema or data is written.
+  Reader80ms/collector1.8s budgets remain unchanged. Deterministic SQLite work
+  and concurrent-WAL regressions establish the reduced work and snapshot
+  correctness, not a guarantee against scheduling or lock-related deadlines.
+- Explicit, default-off instance maintenance connects the registry/catalog
+  transaction to the configured native executor (#192). It records old/new/
+  restored identities and submissions durably, preserves unknown outcomes, and
+  requires independent source/helper/backend/cleanup proof before release.
+  Native helper completion is attributable to owned jobs, never a generic log
+  or HTTP200. Adoption is distinct from completed protected cleanup; recovery
+  settles only captured submitted-stop accounts from fresh positive exit.
+- Maintenance operation scope is documented in AGENTS and DESIGN. Opt-in gates,
+  pinned profiles, exact instance checks, default/pin/RAM protection and fresh
+  zero-in-flight checks remain required. Fresh zeros are not the ordinary
+  hot-reload continuous-quiet proof. Provisioning managed cmdStop helpers changes
+  ordinary unload handling too and remains a separate reviewed site step.
+
+### Compatibility and validation limits
+
+The first actual maintenance claim lazily upgrades the ledger to schema6;
+read-only/default-off/dry-run operation does not migrate it. Older readers reject
+schema6. Preserve current claims/accounts: a stale ledger restore, marker
+removal or replay of unknown effects is not rollback. Pending first-managed-start
+bootstrap/schema7 and source-origin replacement are not included in this release.
+
+The existing sole publisher and read-only deployment puller preserve current
+site settings, inference endpoints, model aliases and the fixed CLI mounts.
+This release does not enable maintenance, replace the source, or change TTL/
+reaper/model settings. Installed activity behavior is checked in a bounded
+window after deployment; genuine deadlines remain unknown and no fixed
+hour/day/week wait, historical-cause claim or zero-error guarantee is introduced.
+Long-term stability/calibration and desktop clipboard delivery remain separately
+unmeasured unless their own acceptance evidence is supplied.
+
 ## 0.1.0-alpha.11 — 2026-09-10
 
 Urgent export-path repair; Python distribution `0.1.0a11`.

@@ -34,6 +34,8 @@ class SchedulerConfig:
     registry: dict[str, Any] = field(default_factory=dict)
     native_witness: dict[str, Any] = field(default_factory=dict)
     catalog_enabled: bool = False
+    bootstrap_enabled: bool = False
+    bootstrap: dict[str, Any] = field(default_factory=dict)
     catalog_mode: str = "hot_reload"
     catalog_profiles: dict[str, Any] = field(default_factory=dict)
     maintenance_command: list[str] = field(default_factory=list)
@@ -72,8 +74,13 @@ class SchedulerConfig:
     action_poll_seconds: float = 0.2
 
     def __post_init__(self):
-        from llmsvc.native_binding import validate_settings
-        validate_settings(self.native_witness)
+        from llmsvc.native_binding import validate_settings as validate_witness_settings
+        validate_witness_settings(self.native_witness)
+        if type(self.bootstrap_enabled) is not bool or not isinstance(self.bootstrap, dict):
+            raise ValueError("invalid bootstrap configuration")
+        if self.bootstrap:
+            from llmsvc.bootstrap import validate_settings as validate_bootstrap_settings
+            validate_bootstrap_settings(self.bootstrap)
         try:
             address = ipaddress.ip_address(self.listen_host)
         except ValueError as exc:

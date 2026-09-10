@@ -67,7 +67,8 @@ class CommandBackend:
     def request(self, operation, context, *, deadline):
         if operation not in {"validate", "inspect", "preflight", "exclude", "stop_old", "observe_old",
                 "start_candidate", "observe_candidate", "resume", "observe_unit", "stop_model",
-                "stop_candidate", "observe_candidate_absent", "start_base", "observe_base"}:
+                "stop_candidate", "observe_candidate_absent", "start_base", "observe_base",
+                "bootstrap_preflight", "bootstrap_stage", "bootstrap_activate", "bootstrap_observe", "bootstrap_rollback"}:
             raise MaintenanceError("unsupported maintenance adapter operation")
         remaining = deadline-self.monotonic()
         if not math.isfinite(remaining) or remaining <= 0:

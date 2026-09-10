@@ -150,9 +150,18 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="force read-only operation and never create or write the intent database")
     parser.add_argument("--check-config", action="store_true", help="validate configuration and exit")
     parser.add_argument("--once", action="store_true", help="collect one JSON snapshot and exit")
+    parser.add_argument("--bootstrap-default", action="store_true",
+                        help="explicit bounded first managed-default migration")
+    parser.add_argument("--bootstrap-recover", choices=("observe", "resume", "rollback"),
+                        help="explicit bounded recovery of a durable default bootstrap")
     parser.add_argument("--maintenance-recover", choices=("observe", "rollback"),
                         help="exclusive operator recovery using the configured maintenance adapter")
     args = parser.parse_args()
+    bootstrap_mode = args.bootstrap_default or args.bootstrap_recover is not None
+    if args.bootstrap_default and args.bootstrap_recover:
+        parser.error("choose one bootstrap operation")
+    if bootstrap_mode and (args.maintenance_recover or args.once or args.check_config):
+        parser.error("bootstrap cannot be combined with other one-shot modes")
     if args.maintenance_recover and (args.once or args.check_config):
         parser.error("maintenance recovery cannot be combined with once/check-config")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -161,6 +170,12 @@ def main():
     event_relay = None
     try:
         config = load_config(args.config)
+        if bootstrap_mode and args.dry_run:
+            if not config.bootstrap:
+                raise ValueError("bootstrap settings are absent")
+            operation = "bootstrap_" + (args.bootstrap_recover or "default")
+            print(json.dumps({"would": [{"kind": operation, "model": config.bootstrap["model"]}], "dry_run": True}))
+            return 0  # No collector/store/adapter construction, DB creation or socket binding.
         if args.dry_run or args.check_config or args.once:
             config = replace(config, read_only=True)
         config = maintenance_config(config)
@@ -239,6 +254,28 @@ def main():
     except OSError as exc:
         close_scheduler()
         parser.error(str(exc))
+    if bootstrap_mode:
+        from llmsvc.bootstrap import BootstrapController, BootstrapError
+        bootstrap_thread = threading.Thread(target=server.serve_forever, name="llmsvc-bootstrap-http", daemon=True)
+        try:
+            controller = BootstrapController(scheduler)
+            scheduler.start(sampling_only=True)
+            bootstrap_thread.start()
+            result = controller.recover(args.bootstrap_recover) if args.bootstrap_recover else controller.run()
+            print(json.dumps(result, allow_nan=False))
+            return 0
+        except (BootstrapError, OSError, sqlite3.Error) as exc:
+            print(json.dumps({"error": "bootstrap_failed", "error_type": type(exc).__name__}), file=__import__("sys").stderr)
+            return 1
+        finally:
+            try:
+                close_scheduler()
+            finally:
+                if bootstrap_thread.is_alive():
+                    server.shutdown()
+                server.server_close()
+                if bootstrap_thread.ident is not None:
+                    bootstrap_thread.join(timeout=config.request_timeout_seconds)
     if args.maintenance_recover:
         # Binding the normal control endpoint precedes recovery effects, so a
         # running normal scheduler cannot be bypassed by a second operator CLI.

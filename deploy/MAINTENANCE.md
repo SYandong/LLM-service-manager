@@ -14,6 +14,10 @@ read-only package upgrade does not provision this profile or activate maintenanc
 
 ## Site profile and service prerequisites
 
+For an installation without confirmed preload accounts, use the separate
+[first managed-start transaction](BOOTSTRAP.md). Maintenance does not adopt
+unleased units or remove the default preload to make inspection pass.
+
 Start from [maintenance.profile.example.json](maintenance.profile.example.json).
 Replace every placeholder using actual site observations and the verified source
 artifact. The profile and state directory must belong to the executing service
@@ -42,6 +46,28 @@ The profile binds:
 - Optional `source_auxiliaries`, each with exact argv and running-image SHA256,
   for native read-only helpers such as its configured performance monitor. They
   must be direct children of the native process. Other actors remain unknown.
+
+`listen_host` binds the exact native `-listen` spelling: `""` means `:PORT`,
+`"0.0.0.0"` means `0.0.0.0:PORT`, and `"::"` means `[::]:PORT`. These spellings
+are not normalized into each other. An empty-host wildcard is never an HTTP
+destination. Keep `native_origin` as the primary literal-IP HTTP origin.
+
+An empty host requires an explicit `native_probe_origins` list containing the
+primary origin. The example requires both IPv4 and IPv6 loopback. Each configured
+origin must use the same port, belong to the pinned native cgroup, and return a
+complete native event snapshot within the shared operation deadline; ownership
+is rechecked afterward and the primary snapshot is sampled last. Literal listen
+profiles may omit this list to retain their one-origin behavior. No DNS, proxy,
+credential-bearing origin, duplicate endpoint or primary-only fallback is used.
+
+Carry forward the address families verified before migration. An IPv6 socket
+inode does not prove IPv4 reachability: a V6ONLY listener must not satisfy a
+required IPv4 probe. An unavailable required family blocks the transition;
+it does not silently narrow the listener. Explicit IPv4-only profiles provide
+no IPv6 evidence. Local loopback checks also do not prove remote firewall or
+client reachability. Address-availability checks temporarily bind both wildcard
+families and close their own sockets; they change no native socket or host setting
+and are not an ingress lock. Start/instance/listener proofs are still required.
 
 Each native model's `cmdStop` must be the reviewed helper command, with the
 literal model name and native `${PID}` substitution:

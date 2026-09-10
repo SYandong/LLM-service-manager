@@ -435,6 +435,12 @@ quiet/production gates until an independent settlement contract is verified.
 
 ### Explicit native maintenance adapter
 
+A read-only installation without confirmed preload leases first needs the
+[managed-start bootstrap](../deploy/BOOTSTRAP.md). Its native and daemon
+EnvironmentFile bindings are verified separately; preserve the default preload,
+existing endpoints and all ledger records. The source-off stage reports source
+telemetry as unknown while core validates the narrowly authorized first account.
+
 The same catalog worker can use the opt-in native instance transition described
 in [deploy/MAINTENANCE.md](../deploy/MAINTENANCE.md). The profile pins the service,
 image, configuration and backend identities, and replaces generic shutdown-log

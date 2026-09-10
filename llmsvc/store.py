@@ -10,6 +10,7 @@ import logging
 import math
 import re
 import sqlite3
+import threading
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -55,12 +56,13 @@ class IntentStore:
     def __init__(self, path, *, action_lock, read_only=False):
         self.action_lock = action_lock
         self.read_only = read_only
+        self._bootstrap_local = threading.local()
         uri = Path(path).resolve().as_uri() + ("?mode=ro" if read_only else "?mode=rwc")
         self._db = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=5)
         try:
             with self.action_lock, self._db:
                 version = self._db.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1, 2, 3, 4, 5, 6):
+                if version not in (0, 1, 2, 3, 4, 5, 6, 7):
                     raise ValueError("unsupported intent database version")
                 if read_only:
                     self._db.execute("SELECT model, until, owner FROM llmsvc_pins LIMIT 0")
@@ -76,6 +78,7 @@ class IntentStore:
                 self._has_recoveries = version >= 4
                 self._has_catalog = version >= 5
                 self._has_maintenance = version >= 6
+                self._has_bootstrap = version >= 7
                 if self._has_faults:
                     self._db.execute("SELECT lease_id, model, stage, record FROM llmsvc_faults LIMIT 0")
                 if self._has_leases:
@@ -88,6 +91,8 @@ class IntentStore:
                 if self._has_maintenance:
                     self._db.execute("SELECT transaction_id, record FROM llmsvc_maintenance LIMIT 0")
                     self.maintenance_checkpoints()
+                if self._has_bootstrap:
+                    self.bootstrap_checkpoint()
         except Exception:
             self._db.close()
             raise
@@ -107,6 +112,10 @@ class IntentStore:
                 return None
             size = self._db.execute("SELECT length(CAST(record AS BLOB)) FROM llmsvc_catalog WHERE singleton=1").fetchone()
             from llmsvc.catalog_state import MAX_CHECKPOINT_BYTES
+            if size is None and self._has_bootstrap:
+                bootstrap = self.bootstrap_checkpoint()
+                if bootstrap is not None and bootstrap["catalog_present"] is False:
+                    return None  # Explicit first-bootstrap schema, not a deleted catalog.
             if size is None or type(size[0]) is not int or size[0] > MAX_CHECKPOINT_BYTES:
                 raise ValueError("invalid catalog checkpoint size")
             rows = self._db.execute("SELECT record FROM llmsvc_catalog WHERE singleton=1").fetchall()
@@ -124,7 +133,31 @@ class IntentStore:
         return (record["phase"] not in ("released", "aborted", "rolled_back")
                 or maintenance is not None and maintenance["stage"] not in ("released", "rolled_back", "aborted"))
 
+    def bootstrap_checkpoint(self):
+        from llmsvc.bootstrap_state import read
+        with self.action_lock:
+            return read(self)
+
+    def bootstrap_pending(self):
+        from llmsvc.bootstrap_state import pending
+        with self.action_lock:
+            return pending(self)
+
+    def bootstrap_authorized(self):
+        from llmsvc.bootstrap_state import authorized
+        with self.action_lock:
+            return authorized(self)
+
+    def bootstrap_scope(self, owner):
+        from llmsvc.bootstrap_state import scope
+        return scope(self, owner)
+
+    def _bootstrap_guard(self):
+        if self.bootstrap_pending() and not self.bootstrap_authorized():
+            raise ValueError("bootstrap reconciliation pending")
+
     def _catalog_allows_accounting(self):
+        self._bootstrap_guard()
         if self.catalog_pending():
             raise ValueError("catalog reconciliation pending")
 
@@ -144,6 +177,8 @@ class IntentStore:
             if instance(maintenance["old_identity"]) != binding.instance or maintenance["generation"] != binding.generation:
                 raise ValueError("maintenance source binding mismatch")
         with self.action_lock:
+            if self.bootstrap_pending():
+                raise ValueError("bootstrap must finish before catalog migration")
             if self.catalog_checkpoint() != expected:
                 raise ValueError("catalog checkpoint changed")
             initial = expected is None or expected["phase"] in ("released", "aborted", "rolled_back")
@@ -191,6 +226,12 @@ class IntentStore:
                 self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS llmsvc_one_recovery ON llmsvc_recoveries(model) WHERE stage != 'complete'")
                 self._db.execute("CREATE TABLE IF NOT EXISTS llmsvc_catalog (singleton INTEGER PRIMARY KEY CHECK(singleton=1), record TEXT NOT NULL)")
                 self._db.execute("INSERT OR REPLACE INTO llmsvc_catalog VALUES (1, ?)", (catalog_json(record),))
+                if self._has_bootstrap:
+                    from llmsvc.bootstrap_state import encoded
+                    bootstrap = self.bootstrap_checkpoint()
+                    if bootstrap is not None and bootstrap["catalog_present"] is False:
+                        self._db.execute("UPDATE llmsvc_bootstrap SET record=? WHERE singleton=1",
+                                         (encoded({**bootstrap, "catalog_present": True}),))
                 if record["phase"] == "rolled_back":
                     self._db.execute("UPDATE llmsvc_maintenance SET record=? WHERE transaction_id=?",
                         (json.dumps({**rollback, "stage": "rolled_back"}, allow_nan=False), record["transaction_id"]))
@@ -544,6 +585,7 @@ class IntentStore:
         if self.read_only:
             raise PermissionError("intent store is read-only")
         with self.action_lock, self._db:
+            self._bootstrap_guard()
             self._db.execute(statement, values)
 
     def put_pin(self, pin: Pin, *, dry_run=False):
@@ -652,8 +694,12 @@ class IntentStore:
                                          (bound.stage, json.dumps(asdict(bound), allow_nan=False), bound.id))
                 return intent_result("place", asdict(lease), dry_run)
             if not dry_run:
-                self._write("INSERT INTO llmsvc_leases VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                            (*asdict(lease).values(), unit))
+                if self.bootstrap_pending():
+                    from llmsvc.bootstrap_state import insert_lease
+                    insert_lease(self, lease, unit)
+                else:
+                    self._write("INSERT INTO llmsvc_leases VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                (*asdict(lease).values(), unit))
         return intent_result("place", asdict(lease), dry_run)
 
     def transition_lease(self, lease_id, status, *, dry_run=False):
@@ -662,6 +708,8 @@ class IntentStore:
         with self.action_lock:
             self._catalog_allows_accounting()
             row = self.lease(lease_id)
+            if self.bootstrap_pending() and self.bootstrap_checkpoint()["lease_id"] != lease_id:
+                raise ValueError("bootstrap lease transition is unbound")
             if row is None or row[0].status == "released":
                 raise ValueError("lease is absent or revoked")
             if self.fault(row[0].model) is not None:
