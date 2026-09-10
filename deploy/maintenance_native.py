@@ -686,7 +686,7 @@ class NativeAdapter(ScopeInspector):
         old_scope,old_actors=self.original_scope(context)
         old,helpers,detail=self._retired(context['old_identity'],old_scope,old_actors,context,deadline)
         result={'old_identity':context['old_identity'],'old_settled':old,'helpers_settled':helpers,'helper_observations':detail,
-                'backends_confirmed':self._backends(context,deadline,cleanup=operation in ('observe_candidate','observe_base')),
+                'backends_confirmed':self._backends(context,deadline,cleanup=False),
                 'observed_at':time.monotonic()}
         if operation in ('observe_old','observe_candidate_absent'):
             if operation=='observe_candidate_absent':
@@ -712,8 +712,13 @@ class NativeAdapter(ScopeInspector):
             config_ok=config_ok and generation.generation==cfg.get('macros',{}).get('llmsvc_reload_generation')
         config_ok=config_ok and hashlib.sha256(file_bytes(self.config)).hexdigest()==current['config_sha256']
         bound=self._attempt_binding(current['identity'],context,phase)
+        # Candidate adoption precedes removed-model cleanup. Restoring the base
+        # cancels that removal intent, but still requires current account integrity;
+        # released accounts retain their submitted-stop/positive-exit requirement.
+        cleanup=(self._backends(context,deadline,cleanup=True) if phase=='candidate'
+                 else result['backends_confirmed'])
         result.update(identity=current['identity'],config_sha256=current['config_sha256'],generation=generation.generation,
-                      configuration_confirmed=config_ok,cleanup_confirmed=result['backends_confirmed'],
+                      configuration_confirmed=config_ok,cleanup_confirmed=cleanup,
                       ingress_state='open',attempt_bound=bound,operation_id=context['operation_id'] if bound else None,
                       observed_at=time.monotonic())
         if phase=='base':

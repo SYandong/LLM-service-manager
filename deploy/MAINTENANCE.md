@@ -97,6 +97,14 @@ independent evidence, the fence remains. There is no force-clear or speculative
 failed-start recovery. A successful rollback starts a distinct base instance,
 uses the exact base bytes and preserves all current ledger rows.
 
+Candidate observation reports backend/account integrity separately from removed-
+model cleanup. A confirmed captured backend may remain intact while cleanup is
+pending; candidate visibility alone cannot certify final completion. Base
+rollback checks current accounts without reissuing the cancelled removal intent.
+Already released accounts still require a recorded stop submission and positive
+unit absence; no old account is restored. Attempt and helper settlement remain
+separate required proofs even when backend integrity is confirmed.
+
 `stop_model` is restricted to the controller-approved removed model and its exact
 captured lease/unit/invocation. Its signal ACK releases no account. Actual unit
 exit is observed before the core releases the lease. A later configuration
