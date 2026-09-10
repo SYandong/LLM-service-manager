@@ -416,3 +416,15 @@ def test_completed_rollback_after_lost_callback_is_observed_not_repeated(site,mo
     with pytest.raises(OSError):site.adapter.operation('bootstrap_rollback',site.context,time.monotonic()+2)
     assert site.adapter.operation('bootstrap_observe',site.context,time.monotonic()+2)['rolled_back']
     with pytest.raises(ExecutorError):site.adapter.operation('bootstrap_rollback',site.context,time.monotonic()+2)
+
+
+def test_reboot_cannot_reuse_old_attempt_tags_or_file_receipts(site):
+    stage(site)
+    write(site.proc/'sys/kernel/random/boot_id','11111111-2222-3333-4444-555555555555')
+    before=len(site.calls)
+    with pytest.raises(ExecutorError,match='boot_identity_changed'):
+        site.adapter.operation('bootstrap_observe',site.context,time.monotonic()+2)
+    site.context['effects']['bootstrap_rollback']={'submitted':True,'acknowledged':False}
+    with pytest.raises(ExecutorError,match='boot_identity_changed'):
+        site.adapter.operation('bootstrap_rollback',site.context,time.monotonic()+2)
+    assert len(site.calls)==before

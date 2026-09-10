@@ -103,8 +103,9 @@ lock, file or service mutation. Core's final entrypoint and checkpoint validator
 must bind these fields in the same #201 implementation before deployment.
 
 A process restart or mode disablement is not permission to rerun a submitted
-operation. Partial file writes and unknown transport outcomes retain their
-records and budgets. Observe first. Rollback also records its submission and
+operation. A changed kernel boot ID also blocks old attempt tags from certifying
+a new source instance; retain the claim for explicit recovery. Partial file writes
+and unknown transport outcomes retain their records and budgets. Observe first. Rollback also records its submission and
 cannot be blindly rerun after interruption. OS/filesystem work cannot be made
 hard-real-time; the external bounded process protocol contains the execution
 window and preserves uncertainty after timeout.
