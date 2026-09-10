@@ -348,7 +348,10 @@ print(json.dumps(frames))
         inflight=None
         for event in frames:
             data=event.get('data');data=json.loads(data) if isinstance(data,str) else data
-            if event.get('type')=='inflight' and data.get('operation')=='snapshot':inflight=data.get('requests')
+            if event.get('type')=='inflight' and isinstance(data,dict) and data.get('operation')=='snapshot':
+                # v252 requests,omitempty omits the empty list in a valid snapshot.
+                # Missing snapshot/null/non-list/nonempty values still fail closed.
+                inflight=data.get('requests',[])
         if inflight != []: raise Error('fresh inference idle status unknown or busy')
         # Diagnostic scheduling guard for scheduler-only restart, not reload quiet proof.
         manage.emit('upgrade_idle_observed',continuous_quiet_proven=False)

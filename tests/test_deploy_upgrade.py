@@ -226,3 +226,22 @@ def test_failed_preparation_keeps_prior_rollback_and_chain_is_reversible(site,tm
     assert Staged(cfg,root).rollback(second['transaction'])['status']=='already_rolled_back'
     assert Staged(cfg,root).rollback(first['transaction'])['status']=='rolled_back'
     assert watched(site)==before
+
+
+@pytest.mark.parametrize('payload', [{'operation':'snapshot'}, {'operation':'snapshot','requests':[]}])
+def test_live_idle_guard_accepts_v252_explicit_empty_snapshot(site,payload):
+    root,cfg,_=site;obj=Upgrade(cfg,root);obj.root=Path('/')
+    frames=[{'type':'modelStatus','data':'[]'},{'type':'inflight','data':json.dumps(payload)}]
+    obj.run=lambda *a,**kw:subprocess.CompletedProcess(a,0,json.dumps(frames),'')
+    obj.idle()
+
+
+@pytest.mark.parametrize('payload', [None,{}, {'operation':'upsert'}, {'operation':'snapshot','requests':None},
+                                   {'operation':'snapshot','requests':{}}, {'operation':'snapshot','requests':False},
+                                   {'operation':'snapshot','requests':[{'id':'busy','model':'m'}]}])
+def test_live_idle_guard_rejects_unknown_or_busy_snapshots(site,payload):
+    root,cfg,_=site;obj=Upgrade(cfg,root);obj.root=Path('/')
+    frames=[{'type':'modelStatus','data':'[]'}]
+    if payload is not None:frames.append({'type':'inflight','data':json.dumps(payload)})
+    obj.run=lambda *a,**kw:subprocess.CompletedProcess(a,0,json.dumps(frames),'')
+    with pytest.raises(Error,match='unknown or busy'):obj.idle()
