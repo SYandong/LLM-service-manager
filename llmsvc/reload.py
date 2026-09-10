@@ -421,11 +421,11 @@ class ReloadQueue:
         if job.maintenance is None:
             quiet = self.quiet.blockers()
         else:
+            descriptor = None
             try:
-                _maintenance_descriptor(job.maintenance)
+                descriptor = _maintenance_descriptor(job.maintenance)
                 if not self._maintenance_available():
                     raise ReloadError("maintenance adapter unavailable")
-                descriptor = copy.deepcopy(job.maintenance)
                 quiet = self.maintenance_adapter.blockers(job)
                 if job.maintenance != descriptor:
                     job.maintenance = descriptor
@@ -433,6 +433,8 @@ class ReloadQueue:
                 if not isinstance(quiet, list) or not all(isinstance(item, dict) for item in quiet):
                     raise ReloadError("invalid maintenance blockers")
             except Exception:
+                if descriptor is not None:
+                    job.maintenance = descriptor
                 quiet = [{"reason": "maintenance_preflight_unavailable"}]
         return (quiet
                 + reload_blockers(self.snapshot(), self.wall_clock(), self.max_snapshot_age)
@@ -458,6 +460,8 @@ class ReloadQueue:
                 original, info = self._read()
                 if job.maintenance is not None:
                     _maintenance_descriptor(job.maintenance)
+                    if job.witness_binding is None:
+                        raise ReloadError("maintenance binding is required")
                     if hashlib.sha256(original).hexdigest() != job.maintenance["base_sha256"]:
                         raise ReloadError("maintenance base configuration changed")
                 candidate = job.transform(original)
