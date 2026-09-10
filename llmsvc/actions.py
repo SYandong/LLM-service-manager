@@ -433,6 +433,8 @@ class ModelActionController:
 
     def _enabled(self):
         getattr(self.transport, "check_catalog", lambda: None)()
+        if self.scheduler.store is not None and self.scheduler.store.bootstrap_pending():
+            raise ActionDispatchError("bootstrap_reconciliation_required")
         if self.scheduler.config.read_only:
             raise ActionDispatchError("read_only")
         if not self.scheduler.config.model_actions_enabled:

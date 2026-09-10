@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import contextvars
+import copy
 import errno
 import fcntl
 import hashlib
@@ -51,6 +53,27 @@ DEFAULT_CONFIG = {
 
 
 COMMAND_TIMEOUT_SECONDS = DEFAULT_CONFIG["command_timeout_seconds"]
+
+# Internal bootstrap integration; no extra public launcher/config arguments.
+_CALL = contextvars.ContextVar("llmsvc_launcher_call", default=None)
+
+
+def bounded_timeout(seconds: float) -> float:
+    value = float(seconds)
+    call = _CALL.get()
+    if call is not None and call["deadline"] is not None:
+        remaining = call["deadline"] - time.monotonic()
+        if remaining <= 0:
+            raise LaunchError("bootstrap deadline exceeded", 75)
+        value = min(value, remaining)
+    return value
+
+
+def progress(stage: str, **fields: Any) -> None:
+    call = _CALL.get()
+    if call is not None and call["progress"] is not None:
+        bounded_timeout(1)
+        call["progress"](stage, fields)
 
 
 @dataclass(frozen=True)
@@ -173,13 +196,25 @@ def request_json(
 ) -> tuple[int, dict[str, Any]]:
     data = None
     headers = {"Accept": "application/json"}
+    call = _CALL.get()
+    if call is not None:
+        headers.update(call["headers"])
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json"
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        call = _CALL.get()
+        if call is not None and call["headers"]:
+            class NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, *args, **kwargs):
+                    raise LaunchError("bootstrap authority redirected")
+            open_request = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open
+        else:
+            open_request = urllib.request.urlopen
+        with open_request(request, timeout=bounded_timeout(timeout)) as response:
             body = response.read().decode("utf-8")
+            bounded_timeout(timeout)
             parsed = json.loads(body) if body else {}
             if not isinstance(parsed, dict):
                 raise LaunchError(f"non-object JSON response from {url}")
@@ -253,7 +288,7 @@ def post_lease(config: dict[str, Any], path_template_key: str, lease_id: str) ->
 
 
 def run_checked(command: list[str], timeout: float | None = None) -> subprocess.CompletedProcess[str]:
-    command_timeout = float(COMMAND_TIMEOUT_SECONDS if timeout is None else timeout)
+    command_timeout = bounded_timeout(COMMAND_TIMEOUT_SECONDS if timeout is None else timeout)
     try:
         return subprocess.run(
             command,
@@ -367,7 +402,8 @@ def health_ok(config: dict[str, Any], port: str) -> bool:
     url = str(config["health_url_template"]).format(port=port)
     request = urllib.request.Request(url, method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=float(config["health_timeout_seconds"])):
+        with urllib.request.urlopen(request, timeout=bounded_timeout(config["health_timeout_seconds"])):
+            bounded_timeout(config["health_timeout_seconds"])
             return True
     except (urllib.error.URLError, TimeoutError):
         return False
@@ -376,7 +412,7 @@ def health_ok(config: dict[str, Any], port: str) -> bool:
 def monitor_startup(config: dict[str, Any], args: LaunchArgs, placement: Placement) -> int:
     unit_service = unit_service_name(args.unit, config)
     port = extract_port(args.command)
-    deadline = time.monotonic() + float(config["startup_timeout_seconds"])
+    deadline = time.monotonic() + bounded_timeout(config["startup_timeout_seconds"])
     poll = float(config["health_poll_seconds"])
     while True:
         runtime_state = unit_runtime_state(unit_service)
@@ -388,6 +424,8 @@ def monitor_startup(config: dict[str, Any], args: LaunchArgs, placement: Placeme
             log("unit_inactive_budget_retained", unit=unit_service, lease_id=placement.lease_id)
             return 1
         if port is not None and health_ok(config, port):
+            progress("health_observed", unit=unit_service, lease_id=placement.lease_id)
+            progress("confirm_submitted", unit=unit_service, lease_id=placement.lease_id)
             status, body = post_lease(config, "confirm_path_template", placement.lease_id)
             log("lease_confirm", unit=unit_service, lease_id=placement.lease_id, status=status, response=body)
             if status == 409:
@@ -395,6 +433,7 @@ def monitor_startup(config: dict[str, Any], args: LaunchArgs, placement: Placeme
                 return 75 if stopped else 1
             if status >= 400:
                 return 1
+            progress("confirmed", unit=unit_service, lease_id=placement.lease_id, response=body)
             return 0
         if time.monotonic() >= deadline:
             if runtime_state != "inactive" or not release_safe(unit_service):
@@ -403,7 +442,7 @@ def monitor_startup(config: dict[str, Any], args: LaunchArgs, placement: Placeme
             status, body = post_lease(config, "release_path_template", placement.lease_id)
             log("startup_timeout_release", unit=unit_service, lease_id=placement.lease_id, status=status, response=body)
             return 1
-        time.sleep(poll)
+        time.sleep(min(poll, max(0, deadline-time.monotonic())))
 
 
 @contextlib.contextmanager
@@ -418,7 +457,7 @@ def model_lock(config: dict[str, Any], model: str, dry_run: bool) -> Iterator[No
     lock_path = lock_dir / f"{safe}.{digest}.lock"
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        deadline = time.monotonic() + float(config["lock_timeout_seconds"])
+        deadline = time.monotonic() + bounded_timeout(config["lock_timeout_seconds"])
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -434,12 +473,14 @@ def model_lock(config: dict[str, Any], model: str, dry_run: bool) -> Iterator[No
         os.close(fd)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     global COMMAND_TIMEOUT_SECONDS
     argv = sys.argv[1:] if argv is None else argv
     try:
         args = parse_args(argv)
-        config = load_config(args.config_path)
+        call = _CALL.get()
+        config = copy.deepcopy(call["config"]) if call is not None and call["config"] is not None else load_config(args.config_path)
+        validate_config(config)
         COMMAND_TIMEOUT_SECONDS = float(config["command_timeout_seconds"])
         model = scheduler_model_from_unit(args.unit, config)
         unit_service = unit_service_name(args.unit, config)
@@ -448,15 +489,27 @@ def main(argv: list[str] | None = None) -> int:
                 state = unit_runtime_state(unit_service)
                 if state in {"active", "activating"}:
                     log("preexisting_unit", unit=unit_service, model=model, state=state)
+                    if _CALL.get() is not None and _CALL.get()["progress"] is not None:
+                        raise LaunchError("bootstrap cannot adopt a preexisting unit", 75)
                     return 0
                 log("preexisting_unit_unusable", unit=unit_service, model=model,
                     state=state, action_required="scheduler_cleanup",
                     error="Existing unit is not active/activating; scheduler cleanup or reviewed reset-failed is required")
                 return 75
-            placement = request_placement(config, model, args.util, args.dry_run)
+            prepared = _CALL.get()["placement"] if _CALL.get() is not None else None
+            if prepared is None:
+                if not args.dry_run:
+                    progress("placing", model=model, unit=unit_service)
+                placement = request_placement(config, model, args.util, args.dry_run)
+            else:
+                if args.dry_run:
+                    raise LaunchError("prepared bootstrap placement cannot be a preview", 64)
+                placement = prepared
             if args.dry_run:
                 return 0
             assert placement is not None
+            progress("placed", model=model, unit=unit_service, lease_id=placement.lease_id, gpu=placement.gpu)
+            progress("start_submitted", model=model, unit=unit_service, lease_id=placement.lease_id)
             if not start_unit(config, args, model, placement):
                 if release_safe(unit_service):
                     status, body = post_lease(config, "release_path_template", placement.lease_id)
@@ -464,6 +517,7 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     log("systemd_run_failed_budget_retained", unit=unit_service, lease_id=placement.lease_id)
                 return 1
+            progress("start_acknowledged", model=model, unit=unit_service, lease_id=placement.lease_id)
             return monitor_startup(config, args, placement)
     except LaunchError as exc:
         log("launch_error", error=str(exc), exit_code=exc.exit_code)
@@ -476,6 +530,20 @@ def main(argv: list[str] | None = None) -> int:
             return 130
         log("os_error", error=str(exc))
         return 1
+
+
+def main(argv: list[str] | None = None, *, progress=None, deadline=None, headers=None, config=None, placement=None) -> int:
+    """Existing executable path with internal durable-bootstrap notifications."""
+    if deadline is not None and (type(deadline) not in (int, float) or not math.isfinite(deadline)):
+        raise ValueError("deadline must be finite monotonic time")
+    if progress is not None and not callable(progress):
+        raise TypeError("progress must be callable")
+    token = _CALL.set({"progress": progress, "deadline": deadline, "headers": dict(headers or {}),
+                       "config": copy.deepcopy(config), "placement": placement})
+    try:
+        return _main(argv)
+    finally:
+        _CALL.reset(token)
 
 
 if __name__ == "__main__":

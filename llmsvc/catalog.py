@@ -103,7 +103,7 @@ class CatalogRuntime:
         mode_ready = ((s.config.catalog_mode == "hot_reload" and self.transition is None)
                       or (s.config.catalog_mode == "maintenance" and self.transition is not None and s.config.model_actions_enabled))
         return (mode_ready and s.catalog is self and s.config.catalog_enabled and not s.config.read_only and s.store is not None
-                and not s.store.read_only and callable(self.verifier) and callable(self.profile_provider)
+                and not s.store.read_only and not s.store.bootstrap_pending() and callable(self.verifier) and callable(self.profile_provider)
                 and callable(self.instance_provider) and not s.stopping.is_set())
 
     def connect_registry(self, registry):
@@ -119,6 +119,8 @@ class CatalogRuntime:
         s = self.scheduler
         if s.catalog is not self or s.config.read_only or not s.config.catalog_enabled or s.store is None or s.store.read_only:
             raise ReloadError("catalog installation is disabled")
+        if s.store.bootstrap_pending():
+            raise ReloadError("bootstrap must complete before maintenance")
         checkpoint = s.store.catalog_checkpoint()
         if checkpoint is not None and s.store.maintenance_checkpoint(checkpoint["transaction_id"]) is not None and self.transition is None:
             raise ReloadError("maintenance checkpoint requires its original transition mode")
