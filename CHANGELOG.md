@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.1.0-alpha.9 — 2026-09-10
+
+Incremental preview; Python distribution `0.1.0a9`.
+Includes #171, #172, #173, #176 and #178 since the immutable alpha.8 tag.
+
+### Added and corrected
+
+- The TUI updates keyed model cells and ordered event batches incrementally,
+  preserving selection and avoiding heartbeat log spam (#172). Compact GPU bars,
+  a single status line and measured elapsed time replace ambiguous progress.
+  Stages are labelled observed; configured cold-start totals are not live ETA.
+  In the recorded synthetic loopback/real-PTY 100x30 run, 60 seconds used 0.2333%
+  of one CPU core, key-to-PTY output was 14.92–28.22 ms and steady-state table
+  clears were zero. This excludes remote display latency; visual confirmation
+  and deployed acceptance remain separate.
+- Trusted successful main CI can publish an approved release PR automatically
+  (#171). Exact Fable/head CI, merge-tree identity, version and PR-count gates
+  precede building; publication is serialized and immutable, and downloaded
+  assets are verified before a draft becomes public. PR/fork events do not
+  publish. Existing releases are never replaced.
+- Versioned read-only upgrades and one outbound host release consumer preserve
+  site configuration, fixed CLI trampoline/profile mounts and prior environments
+  (#173). Candidates install offline, validate configuration/runtime and switch
+  only after fresh preflight; failed restart/health checks restore the recorded
+  prior state without overwriting unknown operator edits. Existing venv clients
+  can finish using their original generation. The legacy installer does not
+  handle versioned manifests.
+- Upgrade preflight accepts the explicit v252 empty inflight snapshot when its
+  empty `requests` list is omitted (#178). Missing snapshots, null/wrong types
+  and nonempty requests still block. This is a scheduler-restart observation,
+  not proof of continuous quiet for model/configuration reload.
+- The relay regression now deliberately exercises a real reconnect while proving
+  every stream belongs to the original worker and local dispatch creates none
+  (#176). Both terminal sizes retain provenance, redaction and cleanup checks;
+  production timeouts and the shared fixture are unchanged.
+
+### Compatibility and limits
+
+The release adds `deployment.tar.gz` to the existing wheel, sdist, standalone
+`llm`, manifest and checksums. It includes schema-1 deployment metadata, fixed
+bootstrap pip and resolved CPython3.10/Linux-x86_64 runtime/TUI wheels, verified
+through offline installs without ensurepip. Upgrade manifests use schema2;
+this is distinct from the scheduler intent ledger, whose existing lazy
+schema-v4 recovery contract is unchanged by this batch. No new project dependency.
+
+Read-only automatic upgrades and the current reviewed reversible rollout are
+authorized under #169. Future unattended M2 TTL/reaper/launcher changes still
+require approval. Actual tag-to-installed-version and live rollback evidence
+remain #169 acceptance, not an implication of staging or publication. The first
+preflight refusal is preserved; no forced bypass is introduced.
+
+Registry/catalog submission and schema5 in draft #175 are not part of this batch.
+Actual add/rm writes remain disabled without their separately implemented trusted
+capabilities. Quiet/adoption/independent settlement and protected-resource gates
+remain real requirements. No inference endpoint, model ID, TTL/reaper or shared
+file-bind change is performed by publishing this release. Live model latency and
+long-term stability/calibration are **NOT MEASURED**; bounded tests have no
+mandatory day/week waiting period.
+
 ## 0.1.0-alpha.8 — 2026-09-09
 
 Incremental preview; Python distribution `0.1.0a8`.
