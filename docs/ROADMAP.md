@@ -123,7 +123,7 @@
 
 - #3 的 CLI 占位与 README legacy 提示由 core 一次性建立；随后 `cli/` 交给 client，README 后续补充（含 #7 状态示例）与 #26 重写交给 ops。公共接口与包元数据始终由 core 发布，其他任务消费契约，不另建同名状态结构。
 - telemetry 提供 `DESIGN.md` §2 的三种失败信号；core 负责故障判定、清理/恢复、保留 pin 记录；policy 保证默认模型只放独占 GPU。故障清理与自动策略驱逐分别验证。
-- #27 退役门槛满足后，ops 才接管删除 `vllm_service/`、`tools/dashboard.py`、`config/server.yaml` 及对应 legacy 测试；core 同步调整包元数据与 CI。此前这些路径保持冻结。
+- #27 的源码退役由 ops 提供删除清单，core 同步包元数据，integration 组合成一个 PR 并核对当前消费者证据。退役后只保留现行控制面代码与测试；现场归档/停用定义的清理及 #28 的其他用户服务处理仍单独记录，不能由源码删除推断已完成。
 
 ### 执行波次
 
@@ -138,7 +138,7 @@
 
 ### 验收证据
 
-每个 PR 都运行针对性测试、`python -m pytest -q tests`、`git diff --check`，并通过当前提交的 Python 3.10 CI；包安装与独立 CLI smoke 按改动范围执行。保留 legacy 测试至 #27 退役验收。策略改动附回放，合成回归场景与真实历史来源分别标注；mock 不代替现场数据，等待时间不代替实际观察。
+每个 PR 都运行针对性测试、`python -m pytest -q tests`、`git diff --check`，并通过当前提交的 Python 3.10 CI；包安装与独立 CLI smoke 按改动范围执行。退役交付删除仅针对旧代理的测试，保留现行控制面保护、回放与集成检查。策略改动附回放，合成回归场景与真实历史来源分别标注；mock 不代替现场数据，等待时间不代替实际观察。
 
 | 范围 | 必须提供的证据 |
 |---|---|
@@ -157,6 +157,15 @@
 1. Fable 审核明确标注 harness/model，并对 **PR 当前完整 head SHA** 无歧义地表示可以合并。共享账号发布的 `COMMENTED` review 可以作为证据，但沉默、旧提交批准、普通 bot 评论或作者自报通过均不算。不能核实归属或 head 时保持 `waiting_review`，列出缺失证据。
 2. 当前 head 的 CI `test` 为 `SUCCESS`，没有未解决的阻塞反馈，依赖 PR 已合入。任何新提交都需重新取得 Fable 审核。
 3. 使用 `gh pr merge --squash --match-head-commit SHA` 绑定已核验的提交；不 direct push main、不 force push，不用 admin/auto-review 绕过分支保护。Fable 证据不替代 GitHub 强制要求的其他成员批准；保护规则拒绝时保留待合并状态。
+
+### 源码退役记录（#27）
+
+当前源码删除旧单后端代理、旧 dashboard/配置及仅服务该路径的测试与示例。
+README 与协作约束只保留现行入口；历史 CHANGELOG、原 milestone 日期和 issue
+名称用于追溯，不代表仍支持已退役命令。验收中的「无引用」指现行代码、导入、
+工具、配置和操作说明无依赖；归档记录不据此重写。源码退役不卸载已发布的旧
+制品，不改共享 CLI 挂载或现场服务，也不证明未知别名/未来手工启动永久不存在。
+当前环境核查的范围与例外保留在 #27 的交付证据中；完整 M6 验收仍逐项进行。
 
 ### 现场短测与外部门槛
 

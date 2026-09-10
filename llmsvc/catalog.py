@@ -38,12 +38,13 @@ class PreparedCatalog:
 
 class CatalogRuntime:
     def __init__(self, scheduler, queue, *, verifier=None, collector_factory=None,
-                 relay_factory=None, transport_factory=None, profile_provider=None, instance_provider=None):
+                 relay_factory=None, transport_factory=None, profile_provider=None, instance_provider=None, transition=None):
         from llmsvc.__main__ import build_collector, build_event_relay
         from llmsvc.actions import ManagedModelTransport
         if queue.action_lock is not scheduler.action_lock:
             raise ValueError("catalog requires the scheduler action lock")
         self.scheduler, self.queue, self.verifier = scheduler, queue, verifier
+        self.transition = transition
         self.profile_provider, self.instance_provider = profile_provider, instance_provider
         self.collector_factory = collector_factory or build_collector
         self.relay_factory = relay_factory or build_event_relay
@@ -65,6 +66,8 @@ class CatalogRuntime:
         self.busy = False
         self.deadline = 0.0
         scheduler.catalog = self
+        if transition is not None:
+            transition.bind(self)
         for controller in (scheduler.model_actions, scheduler.placement):
             if controller is not None:
                 epoch = self.epoch
@@ -83,6 +86,11 @@ class CatalogRuntime:
             self.pending = record
             manifest = record["new_manifest"] if record["phase"] in ("published", "released") else record["old_manifest"]
             epoch = record["new_epoch"] if record["phase"] in ("published", "released") else record["old_epoch"]
+            if record["phase"] == "rolled_back":
+                maintenance = scheduler.store.maintenance_checkpoint(record["transaction_id"])
+                if maintenance is None:
+                    raise ValueError("rolled-back catalog lacks its transition proof")
+                epoch = maintenance["rollback_epoch"]
             if manifest["sources"] != sources(scheduler.config):
                 raise ValueError("catalog source settings changed; reconciliation required")
             bundle = self._construct(manifest)
@@ -92,7 +100,9 @@ class CatalogRuntime:
 
     def can_submit(self):
         s = self.scheduler
-        return (s.catalog is self and s.config.catalog_enabled and not s.config.read_only and s.store is not None
+        mode_ready = ((s.config.catalog_mode == "hot_reload" and self.transition is None)
+                      or (s.config.catalog_mode == "maintenance" and self.transition is not None and s.config.model_actions_enabled))
+        return (mode_ready and s.catalog is self and s.config.catalog_enabled and not s.config.read_only and s.store is not None
                 and not s.store.read_only and callable(self.verifier) and callable(self.profile_provider)
                 and callable(self.instance_provider) and not s.stopping.is_set())
 
@@ -109,6 +119,9 @@ class CatalogRuntime:
         s = self.scheduler
         if s.catalog is not self or s.config.read_only or not s.config.catalog_enabled or s.store is None or s.store.read_only:
             raise ReloadError("catalog installation is disabled")
+        checkpoint = s.store.catalog_checkpoint()
+        if checkpoint is not None and s.store.maintenance_checkpoint(checkpoint["transaction_id"]) is not None and self.transition is None:
+            raise ReloadError("maintenance checkpoint requires its original transition mode")
         if not callable(self.verifier):
             raise ReloadError("catalog proof source is unavailable")
         if s.stopping.is_set():
@@ -334,8 +347,9 @@ class CatalogRuntime:
                 if cleanup is not None:
                     cleanup(deadline=deadline)
                 self._after_apply(deadline)
+            options = {"maintenance": self.transition.descriptor(prepared)} if self.transition is not None else {}
             result = self.queue.enqueue(transform, description=description or {"kind": "install_catalog"},
-                after_apply=after, precheck=combined_precheck, witness_binding=prepared.binding)
+                after_apply=after, precheck=combined_precheck, witness_binding=prepared.binding, **options)
             job_id = result["id"]
             self.jobs[job_id] = prepared
             return result
@@ -377,7 +391,13 @@ class CatalogRuntime:
         proof = self.verifier(copy.deepcopy(marker_record), deadline=deadline)
         if before != (self.scheduler.catalog_epoch, self.scheduler.store.catalog_checkpoint()):
             raise ReloadError("catalog verifier changed runtime state")
-        if (not isinstance(proof, RecoveryProof) or proof.marker_sha256 != record["marker_sha256"]
+        maintenance = self.scheduler.store.maintenance_checkpoint(record["transaction_id"])
+        if maintenance is not None:
+            if self.transition is None:
+                raise ReloadError("maintenance proof adapter unavailable")
+            self.transition.validate_proof(proof, record, maintenance)
+            self.queue._confirm_proof(marker_record, record["marker_json"].encode(), proof)
+        elif (not isinstance(proof, RecoveryProof) or proof.marker_sha256 != record["marker_sha256"]
                 or proof.instance != CandidateBinding.from_dict(record["binding"]).instance
                 or not all(v is True for v in (proof.generation_confirmed, proof.instance_confirmed,
                                                proof.settlement_confirmed, proof.cleanup_confirmed))):
@@ -442,7 +462,6 @@ class CatalogRuntime:
                 self.staged = self._construct(manifest)
                 self.busy = True
                 owned = True
-                s.catalog_fenced = True
                 previous = s.store.catalog_checkpoint()
                 if previous is not None and previous["phase"] == "aborted":
                     previous = previous["previous"]
@@ -452,7 +471,9 @@ class CatalogRuntime:
                     "new_epoch": uuid.uuid4().hex, "phase": "claimed", "base_sha256": prepared.base_sha256,
                     "candidate_sha256": prepared.binding.candidate_sha256, "marker_sha256": None, "marker_json": None,
                     "binding": prepared.binding.to_dict(), "old_manifest": self.manifest, "new_manifest": manifest, "previous": previous}
-                s.store.save_catalog(s.store.catalog_checkpoint(), record)
+                maintenance = self.transition.context_for_claim(record, prepared, job) if self.transition is not None else None
+                s.catalog_fenced = True
+                s.store.save_catalog(s.store.catalog_checkpoint(), record, maintenance=maintenance)
                 self.pending = record
                 result = self.queue.process_once()
                 if result and result["status"] == "applied":
@@ -472,8 +493,13 @@ class CatalogRuntime:
                     raise ReloadError("catalog retirement is not complete")
                 marker = json.loads(record["marker_json"])
                 self._proof(record, marker, deadline=self.deadline)
+                if self.transition is not None:
+                    self.transition.before_release(record, deadline=self.deadline)
                 self._release_ready(record)
-                s.store.save_catalog(record, {**record, "phase": "released", "previous": None})
+                released = {**record, "phase": "released", "previous": None}
+                s.store.save_catalog(record, released)
+                if self.transition is not None:
+                    self.transition.finish(released)
                 self.pending = None
                 s.catalog_fenced = False
                 s.emit("catalog_installed", detail={"catalog_epoch": self.epoch, "job_id": record["job_id"]})
@@ -495,6 +521,10 @@ class CatalogRuntime:
         """Explicit proof/install/retirement; never resubmit an old config job."""
         if dry_run:
             return {"would": [{"kind": "reconcile_catalog"}]}
+        if self.transition is not None:
+            checkpoint = self.scheduler.store.catalog_checkpoint()
+            if checkpoint is not None and self.scheduler.store.maintenance_checkpoint(checkpoint["transaction_id"]) is not None:
+                return self.transition.reconcile()
         s = self.scheduler
         deadline = self.queue.clock()+self.queue.operation_timeout
         with s.action_lock:

@@ -8,6 +8,13 @@ sample_interval_seconds: 15
 request_timeout_seconds: 10
 event_history_size: 1000
 event_heartbeat_seconds: 15
+# Optional read-only llama-swap events for the TUI; requires collectors.swap_url.
+# data_plane_events_enabled: false
+# Connection/response-header I/O timeout and shutdown join budget. An established
+# SSE stream may stay silent; this is not an idle-event deadline. Closing the
+# subscription interrupts its socket read. Silence is not a heartbeat or proof
+# of liveness/continuous quiet, and the relay remains untrusted for quiet gates.
+# data_plane_event_timeout_seconds: 2
 # Candidate GiB budgets; production stakeholder approval remains pending.
 memory_budget_gb: 200
 host_min_available_gb: 150
