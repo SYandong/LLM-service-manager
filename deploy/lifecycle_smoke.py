@@ -49,6 +49,11 @@ def validate(config):
         raise SmokeError('source must contain the reviewed collector and state modules')
     if not 0 < config.get('util', 0.2) < 1:
         raise SmokeError('util must be between zero and one')
+    if config.get('mode','direct') not in ('direct','scheduler-actions'):
+        raise SmokeError('unknown lifecycle mode')
+    if config.get('mode')=='scheduler-actions':
+        from deploy.scheduler_action_smoke import validate as validate_actions
+        validate_actions(config)
 
 
 def owned(environment, token):
@@ -350,13 +355,17 @@ def main(argv=None):
     args = parser.parse_args(argv)
     config = json.loads(args.config.read_text()); validate(config)
     if args.dry_run:
-        print(json.dumps({'dry_run': True, 'scope': 'cached-base lifecycle only', 'config': config}))
+        print(json.dumps({'dry_run': True, 'scope': config.get('mode','direct')+' lifecycle validation', 'config': config}))
         return 0
     output = Path(config['output_dir'])
     output.mkdir(mode=0o700, parents=True, exist_ok=True)
     with Path(config['lock_path']).open('a+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        run = Run(config)
+        if config.get('mode')=='scheduler-actions':
+            from deploy.scheduler_action_smoke import ActionRun
+            run = ActionRun(config)
+        else:
+            run = Run(config)
         result = run.execute()
         path = output / (run.model + '.json')
         path.write_text(json.dumps({'unit': run.unit, 'token': run.token, 'records': run.records}, indent=2)+'\n');path.chmod(0o600)
@@ -365,4 +374,7 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
+    import sys
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+    sys.modules.setdefault('deploy.lifecycle_smoke',sys.modules[__name__])
     raise SystemExit(main())
