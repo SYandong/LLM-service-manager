@@ -197,6 +197,7 @@ LLM_URL=http://scheduler:8011 python cli/llm
 - 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL`、`unreserve ID`、`models`、`registry`、`add PATH --name X --base BASE`、`rm NAME`、`free`、`wake MODEL`、`reserve --gpu N --size 80G --for 4h` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。
 - Pin/unpin 成功后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态。结果保留服务端 owner/actor；刷新失败会单独说明，已成功的写入不会因此重试。同一时刻只执行一个写请求（pin/unpin/free/wake/reserve/unreserve/add/rm），不会把重复提交排队。
 - usage 视图提供 7 天、30 天和返回状态按钮，每 5 秒刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
+- 活动读取失败显示 `Partial update · activity unavailable` 和受限安全原因（预算、锁、schema、parse 等）；旧版 `ValueError` 或未知原因只显示 `reason unavailable`。该轮活动数值按未知显示，不沿用旧计数；完整当前 snapshot/errors 保留在 `status --json`，不会被人类文案改写。读取成功而来源为 unknown/空时显示 `source unavailable`，仍保留已读取的计数；不能据此推断“未记录来源”、容器身份或数据库读取失败。部分来源已知时保留已知标签并标注其余来源不可用。
 - 请求在后台线程执行，慢请求不会叠加轮询或阻塞按键。连接失败保留上一份快照，并显示错误；新快照到达后保留选中模型。
 - 实际 `free --ram` 先弹出二次确认，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。Free/wake 完成后立即刷新，部分结果与错误仍保留；后台执行期间 UI 与事件面板继续响应。
 - Reserve 的预览、只读拒绝与实际回执语义见上节；默认入口的模型实际写入仍关闭；具有显式 catalog 提交能力的服务器可以排队 add/rm，queued 不等于 applied 或全局动作可用。安全列表/预览保持可用。不能用本客户端命令启用生产调度。
@@ -223,14 +224,20 @@ LLM_URL=http://scheduler:8011 python cli/llm
 
 ### Scheduler 与数据面事件流
 
-事件读取在独立线程中进行，只在数据/连接变化时通知界面，合并为最多每 0.5 秒更新一次。SSE 注释心跳不进入日志；不变连接状态不重绘。正常事件只追加，明确游标重置或乱序时间戳才重排有界日志。面板标题为 `Events via scheduler`；每行显示 UTC 时间、`[scheduler]` 或 `[llama-swap]` 来源、全局 scheduler 事件 ID 与详情。日志按 scheduler 时间戳/ID 排序并着色，保留最近 200 条；单条可见文本最多 2048 字符，原始字段仍保存在这 200 条本地历史中。连接失败后以 1–30 秒退避重连，携带上次完整接收的 `since` / `Last-Event-ID`，重复事件不会再显示。退出界面会中断活动流并等待读取线程关闭。
+事件读取在独立线程中进行，只在数据/连接变化时通知界面，合并为最多每 0.5 秒更新一次。SSE 注释心跳不进入日志；不变连接状态不重绘。正常事件只追加，明确游标重置或乱序时间戳才重排有界日志。面板标题为 `Events via scheduler`；默认行显示 UTC 时间、`[scheduler]` 或 `[data-plane]`、全局 scheduler 事件 ID 与简短变化。连接/在途状态固定显示；相同重连快照和重复错误不刷屏，实际变化/新错误类别仍显示，错误与本地丢弃计数持续更新。完整 JSON 与长来源/信任说明放在 Details 中。日志按 scheduler 时间戳/ID 排序并着色，保留最近 200 条；单条可见文本最多 2048 字符，原始字段仍保存在这 200 条本地历史中。连接失败后以 1–30 秒退避重连，携带上次完整接收的 `since` / `Last-Event-ID`，重复事件不会再显示。退出界面会中断活动流并等待读取线程关闭。
+
+点击 Details 或在非输入框焦点时按 `e`，可打开冻结的详情文本。原始最多 200 条事件、source/received_at、unknown/null、quiet-untrusted 和独立投递/丢弃计数完整保留。Shift+方向键选择文字；不承诺未验证的远程鼠标选择。Copy 复制选区；没有选区则请求复制简洁摘要。普通 200 条记录的冗长原文即使超过 64KiB，也不影响默认摘要复制；选区/摘要过大时明确提示 Save text，不静默截断。
+
+[合成场景的实际主界面、详情截图与 PTY 录制](../tests/test_tui_artifacts/168-events/README.md)展示了重复事件合并、计数保留和窄屏入口。
+
+Copy 使用 [Textual 的终端剪贴板请求](https://textual.textualize.io/api/app/#textual.app.App.copy_to_clipboard)，必须用户主动触发。显示 `Copy requested. If your terminal blocks clipboard access, use Save text.`，不冒充确认复制成功。SSH/终端能力可能阻止剪贴板访问；不会调用远程 OS 剪贴板命令。Save text 将完整冻结详情保存到运行 llm 的机器上用户指定的新 UTF-8 文件（0600），拒绝覆盖现有文件或符号链接。未点击保存时，打开或关闭窗口均不写文件；已经明确启动的保存可能在窗口关闭后完成。可用普通文本工具查看保存内容。背景事件不会改变当前详情中的选区或文件内容。
 
 当前 daemon 的事件历史有界且仅保存在内存中，游标不跨重启持久化。**确认 daemon 已重启后**按 `Ctrl+R`，仅在本地清空事件历史和游标，从 0 重新订阅。普通网络断线不会自动归零；当前接口没有可用于自动识别重启的实例标识。后端已淘汰的历史不能重建，ID 缺口会提示不可用事件数量；客户端 256 条投递队列超限也会明确提示丢失数量。
 
 客户端始终只读取 scheduler 的 `/v1/events`，不直连 llama-swap。已接入桥接的 scheduler 可在部署方显式配置 `data_plane_events_enabled` 后，通过同一个 SSE 流转发 llama-swap 的脱敏状态、聚合在途计数、连接与错误摘要。该开关默认关闭；客户端不会启用它。没有转发事件不代表上游没有活动。一个 scheduler 管理一个共享订阅，而不是为每个 TUI 重建数据面连接。
 
-- 数据面行保留 `source: llama-swap`、本地 `received_at` 和 `trusted_for_quiet: false`。蓝色 `data_plane_state` 是原始 starting/ready/stopping/stopped 摘要，**stopped 不代表 daemon 被硬停，也不证明显存或租约释放**；模型表只由 `/v1/state` 刷新。它们不能作为 reload/安静期的可信证据。
-- `data_plane_dropped` 的黄色行显示本地条目丢弃计数及分项原因，明确上游丢失未知。`unlisted_model` 是允许列表之外模型的有意过滤；每次快照可能再次计数。`invalid_event` 包括模型负载或流的 framing/schema 错误；`buffer_full` 是本地缓冲容量；`limit_exceeded` 是本地来源限制。保留各自计数，不将过滤数叫做网络/传输丢失。
+- 数据面行保留 `source: llama-swap`、本地 `received_at` 和 `trusted_for_quiet: false`。蓝色 `[data-plane]` 状态行是原始 starting/ready/stopping/stopped 摘要，**stopped 不代表 daemon 被硬停，也不证明显存或租约释放**；模型表只由 `/v1/state` 刷新。它们不能作为 reload/安静期的可信证据。
+- 本地丢弃的黄色简短行区分过滤、无效输入、溢出与来源限制；固定状态区给出收到的本地总数，详情/保存文本保留 `data_plane_dropped` 的完整分项，明确上游丢失未知。`unlisted_model` 是允许列表之外模型的有意过滤；每次快照可能再次计数。`invalid_event` 包括模型负载或流的 framing/schema 错误；`buffer_full` 是本地缓冲容量；`limit_exceeded` 是本地来源限制。保留各自计数，不将过滤数叫做网络/传输丢失。
 - 面板底部的 scheduler 历史缺口和客户端投递队列溢出提示仍单独计数，不与上述 relay 计数合并。上游 v252 丢失没有可测总量；本地接收/发布顺序也不是分布式时钟的全局顺序保证。
 - 转发不包含请求正文、请求 ID、header/IP、模型显示名、原始异常或 logData。冷启动原始日志流仍不是本接口的交付内容。
 - 关闭 TUI 只关闭自己的 scheduler SSE 读线程；daemon 负责共享数据面订阅与桥接生命周期。scheduler 正常停止时，客户端可接收其已成功发布的最后批次；忙锁导致仅写 journal 的未发布条目或断线期间无法投递的条目，不会被客户端声称收到。
@@ -244,7 +251,7 @@ CPU loopback 测试验证了两个来源从实际 HTTP、bridge、SSE 到 headle
 ```sh
 python -m pytest -q tests/test_llm.py
 python -m pytest -q tests/test_llm_tui.py tests/test_tui.py
-python -m pytest -q tests/test_llm_events.py tests/test_tui_events.py tests/test_tui_relay.py tests/test_tui_incremental.py
+python -m pytest -q tests/test_llm_events.py tests/test_tui_events.py tests/test_tui_relay.py tests/test_tui_incremental.py tests/test_tui_event_product.py
 python -m pytest -q tests/test_llm_usage.py tests/test_tui_usage.py
 python -m pytest -q tests/test_llm_pin.py tests/test_tui_pin.py
 python -m pytest -q tests/test_llm_reserve.py tests/test_llm_reserve_http.py tests/test_tui_reserve.py

@@ -58,6 +58,17 @@ def child(args):
             self.initial_clears = 0
             self.selected_at_start = None
 
+        def push_screen(self, *values, **options):
+            result = super().push_screen(*values, **options)
+            if args.details:
+                self.call_after_refresh(self.capture_details)
+            return result
+
+        def capture_details(self):
+            if len(self.screen_stack) > 1:
+                (output/'details.svg').write_text(self.export_screenshot(title='llm · synthetic event details'))
+                (output/'details-ready').write_text('ready')
+
         def on_mount(self):
             table = self.measured_table = self.query_one('#models', DataTable)
             self.measured_log = self.query_one('#events', RichLog)
@@ -132,9 +143,26 @@ def benchmark(args):
                 self.send_response(200); self.send_header('Content-Type', 'text/event-stream'); self.end_headers()
                 try:
                     self.wfile.write(b': connected\n\n'); self.wfile.flush()
-                    for i, kind in enumerate(['pin', 'sleep'], 1):
-                        item = {'id': i, 'timestamp': time.time(), 'kind': kind, 'model': 'research-model',
-                                'detail': {'fixture': True}}
+                    records = [{'kind': kind, 'model': 'research-model', 'detail': {'fixture': True}}
+                               for kind in ['pin', 'sleep']]
+                    if args.event_storm:
+                        for _ in range(20):
+                            for kind, detail in [('error', {'reason': 'timeout'}),
+                                                 ('connection', {'status': 'disconnected'}),
+                                                 ('connection', {'status': 'connected'}),
+                                                 ('inflight', {'count': None, 'operation': 'unknown'}),
+                                                 ('state', {'state': 'ready'}),
+                                                 ('dropped', {'dropped': 1, 'dropped_by_reason': {'unlisted_model': 1},
+                                                              'upstream_loss_unknown': True})]:
+                                records.append({'kind': 'data_plane_' + kind,
+                                                'model': 'research-model' if kind == 'state' else None,
+                                                'detail': {'source': 'llama-swap', 'received_at': time.time(),
+                                                           'trusted_for_quiet': False, **detail}})
+                        records.append({'kind': 'data_plane_state', 'model': 'research-model',
+                                        'detail': {'source': 'llama-swap', 'received_at': time.time(),
+                                                   'trusted_for_quiet': False, 'state': 'stopped'}})
+                    for i, item in enumerate(records, 1):
+                        item = {'id': i, 'timestamp': time.time(), **item}
                         self.wfile.write(('id: %s\ndata: %s\n\n' % (i, json.dumps(item))).encode())
                     self.wfile.flush()
                     while not stopped.wait(15):
@@ -151,7 +179,7 @@ def benchmark(args):
     env = dict(os.environ, TERM='xterm-256color', COLORTERM='truecolor')
     env.pop('NO_COLOR', None)
     process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--child', '--output', str(output),
-                                '--url', 'http://127.0.0.1:%s' % server.server_port],
+                                '--url', 'http://127.0.0.1:%s' % server.server_port] + (['--details'] if args.details else []),
                                stdin=slave, stdout=slave, stderr=slave, env=env, cwd=ROOT)
     os.close(slave)
     origin = time.monotonic()
@@ -184,6 +212,11 @@ def benchmark(args):
         while time.monotonic()-started < args.seconds:
             pump(min(0.05, max(0, args.seconds-(time.monotonic()-started))))
         ended = time.monotonic(); cpu_end = cpu_seconds(process.pid)
+        if args.details:
+            os.write(master, b'e')
+            wait_for(lambda: (output/'details-ready').exists())
+            os.write(master, b'\x1b')
+            for _ in range(5): pump()
         # Focus the real Input, then measure one key at a time. Match the actual
         # visible command string in the PTY payload, not an unrelated output byte.
         os.write(master, b'/')
@@ -210,6 +243,7 @@ def benchmark(args):
         frame_times = [duration for at, duration in result['frames_ms'] if started <= at <= ended]
         result.update(python=sys.version.split()[0], textual=importlib.metadata.version('textual'),
                       fixture='synthetic loopback HTTP + real SchedulerClient/EventReader and interactive Textual PTY',
+                      event_storm=args.event_storm, details_view_captured=args.details,
                       idle_seconds=ended-started, cpu_seconds=cpu_end-cpu_start,
                       idle_cpu_one_core_percent=100*(cpu_end-cpu_start)/(ended-started),
                       cpu_definition='100% = one logical CPU core; child process user+system / monotonic wall time',
@@ -238,6 +272,8 @@ if __name__ == '__main__':
     parser.add_argument('--width', type=int, default=100)
     parser.add_argument('--height', type=int, default=30)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--event-storm', action='store_true', help='Replay synthetic reconnect/unchanged state records')
+    parser.add_argument('--details', action='store_true', help='Open and record the read-only details view; no copy/save action')
     parser.add_argument('--child', action='store_true')
     parser.add_argument('--url')
     args = parser.parse_args()

@@ -18,6 +18,8 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, RichLog, Static
 
+from .event_view import EventDetails, EventPresentation
+
 
 class CommandMessage(Exception):
     """Parser output that belongs inside the UI, not on the terminal stream."""
@@ -93,11 +95,15 @@ class SchedulerApp(App):
     #content { height: 1fr; min-height: 6; }
     #models { width: 3fr; height: 1fr; min-height: 3; }
     #event-panel { width: 2fr; height: 1fr; min-width: 20; }
-    #event-title, #event-status { height: 1; }
+    #event-heading { height: 1; }
+    #event-title { width: 1fr; height: 1; }
+    #event-details { width: 9; min-width: 9; height: 1; min-height: 1; border: none; padding: 0; }
+    #source-status { height: 2; color: #a3a3a3; padding: 0 1; }
+    #event-status { height: 1; }
     #events { height: 1fr; }
     Screen.narrow #content { layout: vertical; }
     Screen.narrow #models { width: 1fr; }
-    Screen.narrow #event-panel { width: 1fr; height: 6; }
+    Screen.narrow #event-panel { width: 1fr; height: 7; }
     #details-view { height: 1; }
     #result-view { height: 2; }
     #details, #result { height: auto; min-height: 1; padding: 0 1; }
@@ -115,7 +121,7 @@ class SchedulerApp(App):
                 ("slash", "command", "Command"), ("question_mark", "help", "Help"),
                 ("ctrl+r", "reset_events", "Reset events"), ("u", "usage", "Usage"),
                 ("f", "prepare_free", "Free"), ("p", "prepare_pin", "Pin"),
-                ("w", "prepare_wake", "Wake")]
+                ("w", "prepare_wake", "Wake"), ("e", "event_details", "Event details")]
 
     def __init__(self, client, api, event_reader=None, **kwargs):
         super().__init__(**kwargs)
@@ -131,7 +137,9 @@ class SchedulerApp(App):
         self.terminal_width = 100
         self.event_reader = event_reader if event_reader is not None else api.EventReader(client)
         self.event_history = []
+        self.event_presentation = EventPresentation(api.clean_text)
         self.event_generation = 0
+        self.event_delivery = {}
         self._ui_timers = []
         self._ui_closed = False
         self._rendered = {}
@@ -160,7 +168,10 @@ class SchedulerApp(App):
         with Horizontal(id="content"):
             yield DataTable(id="models", cursor_type="row")
             with Vertical(id="event-panel"):
-                yield Static("Events via scheduler (last 200)", id="event-title", markup=False)
+                with Horizontal(id="event-heading"):
+                    yield Static("Events via scheduler", id="event-title", markup=False)
+                    yield Button("Details", id="event-details")
+                yield Static(self.event_presentation.status(), id="source-status", markup=False)
                 yield RichLog(id="events", max_lines=500, min_width=1, wrap=True, markup=False, highlight=False)
         with Vertical(id="usage-view"):
             with Horizontal(id="usage-controls"):
@@ -215,6 +226,44 @@ class SchedulerApp(App):
         if self.usage_active:
             self.render_usage()
 
+    def activity_failure(self):
+        """Human presentation only; the complete source diagnostics stay in snapshot."""
+        reasons = {
+            "deadline": "read budget exceeded", "locked": "database busy",
+            "schema": "schema unavailable or unsupported", "parse": "invalid activity data",
+            "unavailable": "source unavailable", "corrupt": "database damaged",
+            "interrupted": "read interrupted", "read_failed": "read failed",
+            "io": "database read I/O failed",
+            "round_deadline": "collector round deadline exceeded",
+            "previous_probe_running": "previous activity read still running",
+            "not configured": "source not configured",
+        }
+        for error in (self.snapshot or {}).get("errors", []):
+            if isinstance(error, str) and error.startswith("activity:"):
+                return reasons.get(error.partition(":")[2].strip(), "reason unavailable")
+        return None
+
+    @staticmethod
+    def activity_sources(stats):
+        sources = stats.get("by", [])
+        known = [source for source in sources if source and source != "unknown"]
+        if not known:
+            return "source unavailable"
+        return "from " + ", ".join(known) + (" · some sources unavailable" if len(known) < len(sources) else "")
+
+    def snapshot_message(self):
+        errors = self.snapshot.get("errors", [])
+        failure = self.activity_failure()
+        if failure is not None:
+            message = "Partial update · activity unavailable: " + failure
+            if any(not isinstance(error, str) or not error.startswith("activity:") for error in errors):
+                message += " · other observations unavailable (status --json for details)"
+        elif errors:
+            message = "Partial update · some observations unavailable (status --json for details)"
+        else:
+            message = "Updated"
+        return message + (" · read-only" if self.snapshot.get("read_only") else "")
+
     @work
     async def refresh_state(self, args=None):
         # A slow HTTP request must not start overlapping polls or freeze keyboard input.
@@ -234,9 +283,7 @@ class SchedulerApp(App):
             if getattr(args, "json", False):
                 message = json.dumps(snapshot, ensure_ascii=False)
             else:
-                errors = snapshot.get("errors", [])
-                message = "Updated" + (" · " + "; ".join(errors) if errors else
-                                       " · read-only" if snapshot.get("read_only") else "")
+                message = self.snapshot_message()
             if not self.usage_active:
                 self.show_result(message)
         except Exception as exc:
@@ -404,7 +451,9 @@ class SchedulerApp(App):
         self.dashboard.query_one("#usage-text", Static).update(text)
 
     def on_button_pressed(self, event):
-        if event.button.id == "usage-status":
+        if event.button.id == "event-details":
+            self.action_event_details()
+        elif event.button.id == "usage-status":
             self.show_status()
         elif event.button.id in ("usage-7", "usage-30"):
             days = event.button.id.removeprefix("usage-")
@@ -460,7 +509,8 @@ class SchedulerApp(App):
             self._table_columns = columns
             self._table_rows.clear()
             self.model_names = []
-        activity = {item["model"]: item for item in state.get("activity", [])}
+        activity = {} if self.activity_failure() is not None else {
+            item["model"]: item for item in state.get("activity", [])}
         now = state.get("sampled_at")
         observed_at = self.api.time.time() if now is None else now
         pins = {item["model"]: item for item in state.get("pins", []) if item["until"] > observed_at}
@@ -481,7 +531,8 @@ class SchedulerApp(App):
             else:
                 used = None if now is None or stats.get("last_request_at") is None else now - stats["last_request_at"]
                 row.extend([self.api.age(used), "?" if stats.get("requests_last_10m") is None else str(stats["requests_last_10m"]),
-                            ",".join(stats.get("by", [])) or "-", self.api.expiry(pin["until"]) if pin else "-"])
+                            ",".join(source for source in stats.get("by", []) if source and source != "unknown") or "?",
+                            self.api.expiry(pin["until"]) if pin else "-"])
             cells = tuple(Text(self.api.clean_text(value),
                                justify="right" if columns[index][0] in ("GPU", "MEM", "USED", "10m") else "left",
                                style="dim" if value in ("?", "?G", "-", "unknown") else "")
@@ -512,7 +563,11 @@ class SchedulerApp(App):
             observed_at = self.api.time.time() if now is None else now
             pin = next((item for item in self.snapshot.get("pins", [])
                         if item["model"] == name and item["until"] > observed_at), None)
-            text += " · from " + (", ".join(stats.get("by", [])) or "-")
+            failure = self.activity_failure()
+            if failure is not None:
+                text += " · activity unavailable: " + failure + " · source unavailable"
+            else:
+                text += " · " + self.activity_sources(stats)
             if pin:
                 text += " · pin %s (%s)" % (self.api.expiry(pin["until"]), pin["by"])
         self.update_static("details", self.api.clean_text(text))
@@ -586,7 +641,7 @@ class SchedulerApp(App):
         self.prepare_command("wake")
 
     def action_help(self):
-        self.show_result("f prefill free · p prefill selected pin (duration required) · w prefill selected wake · Enter submits · free --ram confirms separately · free [--gpu N] [--need 80G] [--ram] · wake MODEL [--wait 930] · pin MODEL --for 8h · unpin MODEL · unreserve ID · models · registry · add PATH --name X --base BASE · rm NAME · reserve --gpu N --size 80G --for 4h · all operations accept --dry-run · status · usage --days 7|30 · u usage · / command · Ctrl+R reset events after known restart · q quit")
+        self.show_result("f prefill free · p prefill selected pin (duration required) · w prefill selected wake · Enter submits · free --ram confirms separately · free [--gpu N] [--need 80G] [--ram] · wake MODEL [--wait 930] · pin MODEL --for 8h · unpin MODEL · unreserve ID · models · registry · add PATH --name X --base BASE · rm NAME · reserve --gpu N --size 80G --for 4h · all operations accept --dry-run · status · usage --days 7|30 · u usage · / command · e event details/copy/save · Ctrl+R reset events after known restart · q quit")
 
     def action_reset_events(self):
         self.event_reader.reset_cursor()
@@ -615,11 +670,13 @@ class SchedulerApp(App):
             self._event_timer.pause()
         self._event_notice.clear()
         update = self.event_reader.drain()
+        self.event_delivery = {key: value for key, value in update.items() if key != "events"}
         reset = update["generation"] != self.event_generation
         changed = reset or bool(update["events"])
         if update["generation"] != self.event_generation:
             self.event_generation = update["generation"]
             self.event_history.clear()
+            self.event_presentation.reset()
         status = update["status"]
         if update.get("missed"):
             status += " · %s events unavailable in server history" % update["missed"]
@@ -637,16 +694,49 @@ class SchedulerApp(App):
         incoming = sorted((item for item in update["events"] if item["id"] not in existing_ids), key=key)
         reordered = bool(self.event_history and incoming and key(incoming[0]) < key(self.event_history[-1]))
         self.event_history = sorted(self.event_history + incoming, key=key)[-200:]
+        for item in incoming:
+            self.event_presentation.account(item)
         log = self._event_log
         if reset or reordered:
             # Reset and late timestamps are exceptional; preserve the established
             # ordering contract without rewriting normal in-order delivery.
             log.clear()
+            self.event_presentation.reset_display()
             incoming = self.event_history
         for item in incoming[-200:]:
             self.observe_progress(item)
-            log.write(self.format_event(item))
+            line = self.event_presentation.line(item)
+            if line is not None:
+                log.write(line)
+        self.update_static("source-status", self.event_presentation.status())
         self.render_progress()
+
+    def event_export_text(self):
+        header = ("Events: frozen copy of retained scheduler history (at most 200 records).\n"
+                  "Data-plane observations originate from llama-swap, are not a daemon stop or resource release, "
+                  "and are not trusted quiet proof. received_at is local; upstream loss unknown.\n"
+                  "Local relay discards separate intentional filtering, invalid schema/framing, buffer overflow "
+                  "and source bounds. Connection/inflight events and repeated errors/snapshots remain in raw records.\n")
+        metadata = {"source_counters": self.event_presentation.counters(),
+                    "delivery": self.event_delivery,
+                    "connection_status": self._rendered.get("event-status", "unknown"),
+                    "events": self.event_history}
+        return header + "\n" + "\n".join(self.format_event(item).plain for item in self.event_history) + "\n\nRaw JSON:\n" + json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False)
+
+    def event_summary_text(self):
+        projection = EventPresentation(self.api.clean_text)
+        lines = ["Events summary · retained history (up to 200 records)",
+                 "Data-plane observations are not daemon state or proof of released resources."]
+        for item in self.event_history:
+            line = projection.line(item)
+            if line is not None:
+                lines.append(line.plain)
+        return "\n".join(lines) + "\n\n" + self.event_presentation.status()
+
+    def action_event_details(self):
+        if (self.is_running and self.screen is self.dashboard
+                and not isinstance(self.focused, Input)):
+            self.push_screen(EventDetails(self.event_export_text(), self.event_summary_text()))
 
     def observe_progress(self, item):
         progress = self._progress
@@ -711,6 +801,9 @@ class SchedulerApp(App):
         return Text(self.api.clean_text(line), style=color)
 
     def on_input_submitted(self, event):
+        if (not self.is_running or self.screen is not self.dashboard
+                or event.input.id != "command"):
+            return
         try:
             args = self.api.build_parser(UIParser).parse_args(shlex.split(event.value))
             if args.url or args.config or args.timeout:
