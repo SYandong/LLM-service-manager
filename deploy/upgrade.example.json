@@ -1,0 +1,11 @@
+{
+  "_comment": "Generated-By: Codex / gpt-6-astra. Read-only upgrade only; use exact installation/shared paths and deployment-provided URLs. Fixed trampoline is read/verified, never replaced.",
+  "prefix": "/opt/llmsvc-scheduler",
+  "shared_dir": "/srv/llmsvc",
+  "trampoline_path": "/usr/local/bin/llm",
+  "python": "/usr/bin/python3",
+  "scheduler_url": "http://scheduler.example.invalid:8011",
+  "swap_url": "http://data-plane.example.invalid:8000",
+  "command_timeout_seconds": 120,
+  "health_timeout_seconds": 30
+}

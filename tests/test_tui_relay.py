@@ -4,6 +4,7 @@
 import asyncio
 import copy
 import json
+import threading
 import time
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ pytest.importorskip("textual")
 
 from textual.widgets import RichLog, Static
 from tui.app import SchedulerApp
+from llmsvc.collectors.subscription import _HTTPEventStream
 from test_core_event_bridge import live_bridge, model_frame
 from test_llm_events import api
 from test_tui import FakeClient, snapshot
@@ -46,9 +48,35 @@ def app_for(api, address):
 
 
 @pytest.mark.parametrize("size", [(100, 30), (40, 24)])
-def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, live_bridge, size):
+def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, live_bridge, size, monkeypatch):
     async def scenario():
         scheduler, relay, outgoing, address, connections = live_bridge
+        owner = relay.subscription._thread
+        opened_by, dispatch_requests = [], []
+        force_timeout, timeout_raised = threading.Event(), threading.Event()
+        open_stream, read_line = _HTTPEventStream.__init__, _HTTPEventStream.readline
+        dispatch = relay.subscription._dispatch
+
+        def tracked_open(stream, *args, **kwargs):
+            opened_by.append(threading.current_thread())
+            return open_stream(stream, *args, **kwargs)
+
+        def controlled_read(stream, limit):
+            if force_timeout.is_set() and not timeout_raised.is_set():
+                timeout_raised.set()
+                raise TimeoutError("controlled fixture reconnect")
+            return read_line(stream, limit)
+
+        def tracked_dispatch(lines, state):
+            before = len(opened_by)
+            try:
+                return dispatch(lines, state)
+            finally:
+                dispatch_requests.append(len(opened_by) - before)
+
+        monkeypatch.setattr(_HTTPEventStream, "__init__", tracked_open)
+        monkeypatch.setattr(_HTTPEventStream, "readline", controlled_read)
+        monkeypatch.setattr(relay.subscription, "_dispatch", tracked_dispatch)
         app, requests, url = app_for(api, address)
         async with app.run_test(size=size) as pilot:
             await app.workers.wait_for_complete()
@@ -114,7 +142,31 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
             assert "Events via scheduler" in str(app.dashboard.query_one("#event-title", Static).render())
             assert all(method == "GET" and target.startswith(url + "/v1/") for method, target in requests)
             assert any("/v1/events?" in target for _, target in requests)
-            assert len(connections) == 1
+            # All original functional checks have passed. Force a real transport
+            # exception now, instead of relying on a host pause or a short timeout.
+            before_reconnect = max(e["id"] for e in app.event_history)
+            force_timeout.set()
+            await visible(app, pilot, lambda events: timeout_raised.is_set() and any(
+                e["id"] > before_reconnect and e["kind"] == "data_plane_error"
+                and e["detail"]["reason"] == "timeout" for e in events))
+            reconnect_error = next(e for e in app.event_history if e["id"] > before_reconnect
+                                   and e["kind"] == "data_plane_error" and e["detail"]["reason"] == "timeout")
+            await visible(app, pilot, lambda events: any(
+                e["id"] > reconnect_error["id"] and e["kind"] == "data_plane_connection"
+                and e["detail"]["status"] == "connected" for e in events))
+            assert len(connections) >= 2  # The controlled fault really re-opened HTTP.
+            assert relay.subscription._thread is owner and owner.is_alive()
+            assert opened_by and all(thread is owner for thread in opened_by)
+            # Every source frame (including local filtering/invalid payloads) was
+            # dispatched without creating a request. Reconnect opens belong only
+            # to the original subscription worker, never the UI/filter callbacks.
+            assert len(dispatch_requests) >= 5 and not any(dispatch_requests)
+            assert reconnect_error in app.event_history and invalid in app.event_history
+            assert reconnect_error["detail"]["source"] == "llama-swap"
+            assert reconnect_error["detail"]["trusted_for_quiet"] is False
+            assert isinstance(reconnect_error["detail"]["received_at"], (int, float))
+            assert "PRIVATE_MARKER" not in json.dumps(app.event_history)
+            assert all(method == "GET" and target.startswith(url + "/v1/") for method, target in requests)
             assert relay.subscription.ordered_source is False
         assert not app.event_reader.thread.is_alive()
         # Closing one dashboard does not shut down the daemon-owned shared relay.

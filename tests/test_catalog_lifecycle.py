@@ -458,7 +458,7 @@ def test_registry_remove_keeps_both_late_precheck_and_absent_cleanup(registry_ca
     result=c.runtime.process_once()
     assert result["status"]=="applied" and "fine" not in api.records()
     assert "fine" not in c.s.placement.transport.active_models
-    assert "fine" not in c.s.collect.models  # Positive cleanup and no durable resource references.
+    assert "fine" in c.s.collect.models  # Keep observation until a later generation can verify fresh absence.
 
 
 def test_temporary_metadata_port_mismatch_cannot_enter_runtime(registry_catalog):
@@ -468,3 +468,36 @@ def test_temporary_metadata_port_mismatch_cannot_enter_runtime(registry_catalog)
     status,body=request(c.address,"POST","/v1/models",{"name":"fine","path":str(weights),"base":"base"})
     assert status==503 and body["error"]=="registry_unavailable"
     assert c.path.read_bytes()==before and c.store.catalog_checkpoint() is None and not c.q._pending
+
+
+def test_removed_descriptor_waits_for_fresh_absence_before_port_reuse(registry_catalog):
+    c,api,weights=registry_catalog
+    status,_=request(c.address,"POST","/v1/models",{"name":"fine","path":str(weights),"base":"base"})
+    assert status==200
+    make_quiet(c.q.quiet,c.clock);assert c.runtime.process_once()["status"]=="applied"
+    c.s.sample_once()
+    assert request(c.address,"DELETE","/v1/models/fine")[0]==200
+    assert c.runtime.process_once()["status"]=="applied"
+    assert "fine" in c.s.collect.models and 21001 in api.reserved_ports()
+    # Publication clears sample provenance. Only a fresh new-generation sample
+    # proves absence; cleanup ACK/lack of a lease alone must not free the slot.
+    c.s.sample_once()
+    assert 21001 not in api.reserved_ports()
+    status,job=request(c.address,"POST","/v1/models",{"name":"fine","path":str(weights),"base":"base"})
+    assert status==200,job
+    assert c.runtime.process_once()["status"]=="applied"
+    assert api.records()["fine"]["daemon_port"]==21001
+
+
+@pytest.mark.parametrize("uncertain",["stale","unknown","live_account"])
+def test_retained_endpoint_stays_reserved_without_current_absence(catalog,uncertain):
+    c=catalog
+    c.runtime.manifest["retained"]["retired"]=profile("retired",21002)
+    c.s._snapshot=replace(c.s._snapshot,models=c.s._snapshot.models+(ModelState(
+        "retired",unit="vllm-retired.service",state="stopped",unit_active=False),))
+    if uncertain=="stale": c.clock.advance(c.cfg.max_snapshot_age_seconds+1)
+    elif uncertain=="unknown": c.s._snapshot=replace(c.s._snapshot,errors=("unit observation unavailable",))
+    else:
+        c.store.create_lease(Lease("retained","retired",0,.4,20000,40),"vllm-retired.service")
+        c.store.transition_lease("retained","confirmed")
+    assert c.runtime._retained_required("retired",profile("retired",21002))
