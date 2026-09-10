@@ -334,6 +334,8 @@ class BootstrapAdapter:
         value = private_json(root/'record.json')
         if value['bootstrap_id'] != context['bootstrap_id'] or value['manifest_sha256'] != self.manifest_hash:
             raise ExecutorError('bootstrap_record_binding')
+        if value['preflight']['scope']['boot_id'] != (self.proc/'sys/kernel/random/boot_id').read_text().strip():
+            raise ExecutorError('bootstrap_boot_identity_changed')
         return value
 
     @contextlib.contextmanager
