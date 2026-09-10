@@ -217,6 +217,8 @@ class ManagedModelTransport:
         if not isinstance(models, dict) or not models or any(not isinstance(value, dict) for value in models.values()):
             raise ValueError("model actions require a nonempty configured model mapping")
         self.models = {name: dict(value) for name, value in models.items()}
+        self._active_models = None
+        self.catalog_guard = None
         self.units = {}
         self.paths = set()
         for name, model in self.models.items():
@@ -235,6 +237,23 @@ class ManagedModelTransport:
         self.monotonic = monotonic
         self.run = run or subprocess.run
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
+
+    @property
+    def active_models(self):
+        # Legacy configured transports retain their existing mapping behavior;
+        # a catalog generation supplies an explicit immutable admission set.
+        return frozenset(self.models) if self._active_models is None else self._active_models
+
+    @active_models.setter
+    def active_models(self, names):
+        values = frozenset(names)
+        if not values <= self.models.keys():
+            raise ValueError("active catalog names lack observation profiles")
+        self._active_models = values
+
+    def check_catalog(self):
+        if self.catalog_guard is not None:
+            self.catalog_guard()
 
     def _remaining(self, deadline):
         remaining = deadline - self.monotonic()
@@ -266,7 +285,10 @@ class ManagedModelTransport:
         """Capture one approved origin/path without submitting any request."""
         from urllib.error import HTTPError
         from urllib.request import Request
-        if (method, path) not in self.paths:
+        self.check_catalog()
+        active_paths = {(method_, prefix+quote(name, safe="")+suffix) for name in self.active_models
+                        for method_, prefix, suffix in (("POST", "/api/models/unload/", ""), ("GET", "/upstream/", "/"))}
+        if (method, path) not in self.paths or (method, path) not in active_paths:
             raise ActionDispatchError("unapproved_model_path")
         if bounded:
             import http.client
@@ -275,6 +297,7 @@ class ManagedModelTransport:
             host, port, version, secure = self.bounded_origin()
             context = ssl.create_default_context() if secure else None
             def submit_bounded(*, deadline):
+                self.check_catalog()
                 remaining = self._remaining(deadline)
                 connection = http.client.HTTPConnection(host, port, timeout=remaining)
                 sock = socket.socket(socket.AF_INET6 if version == 6 else socket.AF_INET, socket.SOCK_STREAM)
@@ -322,6 +345,7 @@ class ManagedModelTransport:
         request = Request(self.swap_url + path, method=method)
         opener = self.opener
         def submit(*, deadline):
+            self.check_catalog()
             try:
                 with opener.open(request, timeout=self._remaining(deadline)) as response:
                     return response.status
@@ -332,7 +356,8 @@ class ManagedModelTransport:
         return submit
 
     def stop_unit(self, unit, *, deadline):
-        if unit not in self.units.values():
+        self.check_catalog()
+        if unit not in {self.units[name] for name in self.active_models}:
             raise ActionDispatchError("unmanaged_unit")
         result = self.run([self.systemctl, "stop", unit], capture_output=True, text=True,
                           check=False, timeout=self._remaining(deadline))
@@ -372,6 +397,7 @@ class ModelActionController:
         return claim is not None and not (recovery is not None and recovery.authorized(name, action=action))
 
     def _before_action(self, action):
+        getattr(self.transport, "check_catalog", lambda: None)()
         if self._fault_pending(action.model):
             raise ActionDispatchError("fault_recovery_pending")
         if self._recovery_pending(action.model, action=True):
@@ -406,6 +432,7 @@ class ModelActionController:
         return lock()
 
     def _enabled(self):
+        getattr(self.transport, "check_catalog", lambda: None)()
         if self.scheduler.config.read_only:
             raise ActionDispatchError("read_only")
         if not self.scheduler.config.model_actions_enabled:
@@ -424,6 +451,8 @@ class ModelActionController:
                 and not snapshot.errors)
 
     def _model(self, snapshot, name):
+        if name not in getattr(self.transport, "active_models", self.transport.models):
+            raise ActionDispatchError("model_retired")
         if self._fault_pending(name):
             raise ActionDispatchError("fault_recovery_pending")
         if self._recovery_pending(name):
@@ -441,7 +470,7 @@ class ModelActionController:
         from llmsvc.policy import plan_free
         protected = {}
         for model in snapshot.models:
-            if model.name not in self.transport.models:
+            if model.name not in getattr(self.transport, "active_models", self.transport.models):
                 protected[model.name] = "unmanaged_model"
             elif model.unit != self.transport.unit_for_model(model.name):
                 protected[model.name] = "configured_unit_mismatch"

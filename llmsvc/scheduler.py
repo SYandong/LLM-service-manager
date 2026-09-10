@@ -36,9 +36,10 @@ class DataPlaneBridge:
     reader, and lets its bounded buffer report local discard counts next round.
     """
 
-    def __init__(self, scheduler, relay):
+    def __init__(self, scheduler, relay, *, catalog_epoch=None):
         self.scheduler = scheduler
         self.relay = relay
+        self.catalog_epoch = scheduler.catalog_epoch if catalog_epoch is None else catalog_epoch
         self.pending = None
         self.thread = None
         self.stopping = threading.Event()
@@ -60,6 +61,13 @@ class DataPlaneBridge:
             return False
         try:
             batch = self.pending
+            if self.catalog_epoch != self.scheduler.catalog_epoch:
+                if batch["events"] or batch["dropped"]:
+                    self.scheduler.emit("catalog_events_discarded", detail={
+                        "catalog_epoch": self.catalog_epoch, "events": len(batch["events"]),
+                        "dropped": batch["dropped"], "upstream_loss_unknown": True})
+                self.pending = None
+                return True
             for event in batch["events"]:
                 self.scheduler.emit(event["kind"], model=event["model"], detail=event["detail"])
             if batch["dropped"]:
@@ -124,6 +132,9 @@ class Scheduler:
         self.placement = None
         self.reservation_actions = None
         self.registry = None
+        self.catalog = None
+        self.catalog_epoch = "0"*32
+        self.catalog_fenced = False
         self.automation = None
         self._automation_thread = None
         self.faults = None
@@ -177,8 +188,17 @@ class Scheduler:
                         snapshot = replace(snapshot, blocked_by=tuple(dict.fromkeys(snapshot.blocked_by + pending)))
                 except Exception:
                     snapshot = replace(snapshot, errors=snapshot.errors + ("intent_store_unavailable",))
+            if self.catalog_fenced or (self.store and self.store.catalog_pending()):
+                from llmsvc.state import Blocker
+                snapshot = replace(snapshot, blocked_by=snapshot.blocked_by+(Blocker(None, "catalog_reconciliation_required"),))
             return snapshot
 
+    def check_catalog(self, epoch=None):
+        from llmsvc.actions import ActionDispatchError
+        if self.catalog_fenced or (self.store is not None and self.store.catalog_pending()):
+            raise ActionDispatchError("catalog_reconciliation_required")
+        if epoch is not None and epoch != self.catalog_epoch:
+            raise ActionDispatchError("catalog_generation_changed")
 
     def preview(self, operation: str, payload: dict) -> dict:
         """Pure policy/intent preview; no executor, event append or store writer."""
@@ -438,7 +458,7 @@ class Scheduler:
         from llmsvc.reload import reload_blockers
         snapshot = self.snapshot()
         marker = self.registry.queue.marker
-        reconciliation = [{"reason": "registry_reconciliation_required"}] if marker.exists() or marker.is_symlink() else []
+        reconciliation = [{"reason": "registry_reconciliation_required"}] if self.registry.queue.fenced else []
         return ([{"reason": "registry_writes_disabled"}] + reconciliation + self.registry.queue.quiet.blockers()
                 + reload_blockers(snapshot, self.clock(), self.config.max_snapshot_age_seconds)
                 + [asdict(blocker) for blocker in snapshot.blocked_by])
@@ -490,7 +510,7 @@ class Scheduler:
             raise error from exc
         except ReloadError as exc:
             marker = self.registry.queue.marker
-            if method != "GET" and (marker.exists() or marker.is_symlink()):
+            if method != "GET" and self.registry.queue.fenced:
                 raise IntentWriteError(409, "registry_reconciliation_required") from exc
             raise IntentWriteError(503, "registry_unavailable") from exc
         except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
@@ -564,10 +584,11 @@ class Scheduler:
         with self.action_lock:
             self._sample_started += 1
             generation = self._sample_started
+            catalog_epoch, collector = self.catalog_epoch, self.collect
         collection_started = self.monotonic()
         source_time_provided = False
         try:
-            snapshot = self.collect() if self.collect else self._unknown("collectors_not_configured")
+            snapshot = collector() if collector else self._unknown("collectors_not_configured")
             if not isinstance(snapshot, StateSnapshot):
                 raise TypeError("collector must return StateSnapshot")
             source_time_provided = snapshot.sampled_at is not None
@@ -582,10 +603,12 @@ class Scheduler:
             # Never serve a stale healthy snapshot as current after probe failure.
             source_time_provided = False
             snapshot = self._unknown("collection_failed")
-            self.emit("collection_error", detail={"error_type": type(exc).__name__})
+            with self.action_lock:
+                if catalog_epoch == self.catalog_epoch:
+                    self.emit("collection_error", detail={"error_type": type(exc).__name__})
         collection_finished = self.monotonic()
         with self.changed:
-            if generation < self._sample_published:
+            if catalog_epoch != self.catalog_epoch or generation < self._sample_published:
                 return self.snapshot()
             self._sample_published = generation
             self._sample_bounds = (generation, collection_started, collection_finished)

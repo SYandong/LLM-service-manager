@@ -137,6 +137,12 @@ def main():
         if config.fault_recovery_enabled:
             from llmsvc.faults import FaultRecoveryController
             scheduler.faults = FaultRecoveryController(scheduler)
+        if config.catalog_enabled or (store is not None and store.catalog_checkpoint() is not None):
+            if scheduler.registry is None:
+                raise ValueError("catalog checkpoint/install requires configured registry")
+            from llmsvc.catalog import CatalogRuntime
+            CatalogRuntime(scheduler, scheduler.registry.queue)
+
     except (OSError, ValueError, TypeError, ImportError, sqlite3.Error) as exc:
         try:
             if event_relay is not None:

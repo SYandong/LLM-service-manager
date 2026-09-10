@@ -101,7 +101,7 @@ class SleepingRecoveryController:
         for model in snapshot.models:
             if model.state not in ("awake", "sleeping"):
                 continue
-            if model.name not in t.models or model.unit != t.units.get(model.name):
+            if model.name not in t.active_models or model.unit != t.units.get(model.name):
                 result[model.name] = "unmanaged_or_changed_unit"
             elif model.name not in confirmed:
                 result[model.name] = "unleased_model"
