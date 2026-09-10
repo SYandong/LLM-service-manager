@@ -5,7 +5,7 @@ import hashlib
 import pytest
 import yaml
 
-from llmsvc.registry import ModelRegistry, plan_generation_candidate
+from llmsvc.registry import ModelRegistry
 from llmsvc.reload import ReloadError
 from llmsvc.leases import UnitObservation
 from llmsvc.state import Pin
@@ -30,29 +30,24 @@ def bridge(catalog, registry):
     # Explicit trusted fixture profiles, not inferred measurements from macros.
     trusted = {'base': profile('base', 21000), 'fine': profile('fine', 21001)}
     submitted = []
-    def submit(transform, *, description, dry_run=False, precheck=None, after_apply=None):
-        assert dry_run is False
-        current, _ = c.q._read()
-        changed = transform(current)
-        candidate = plan_generation_candidate(changed, expected_sha256=digest(changed),
-            generation='gen_'+format(len(submitted)+1, '032x'), endpoint=c.binding.endpoint, instance=c.binding.instance)
-        names = yaml.safe_load(candidate.candidate)['models']
-        prepared = c.runtime.prepare(candidate.candidate, {name:trusted[name] for name in names}, binding=candidate.binding)
-        if prepared.base_sha256 != digest(current):
-            raise ReloadError('catalog source changed during registry preparation')
-        job = c.runtime.enqueue(prepared, cleanup=after_apply, precheck=precheck,
-                                description=description, dry_run=False)
-        submitted.append(description)
-        return job
+    def profiles(candidate):
+        names = yaml.safe_load(candidate)['models']
+        submitted.append(set(names))
+        return {name:trusted[name] for name in names}
+    c.runtime.profile_provider = profiles
+    c.runtime.instance_provider = lambda **kw: c.binding.instance
     api = ModelRegistry(c.q, shared_roots=(weights.parent,), daemon_port_range=(21000, 21010),
         stop_model=lambda *a, **kw: pytest.fail('stopped fixture must not invoke model stop'),
         unit_absent=lambda name, **kw:not c.world['units'].get(name, UnitObservation(False, True)).active,
-        now=c.clock, submit_change=submit)
+        now=c.clock)
+    c.runtime.connect_registry(api)
+    c.s.registry = api
     return c, api, weights, submitted
 
 
 def add_model(c, api, weights):
-    job = api.add({'name':'fine', 'path':str(weights), 'base':'base'})
+    status, job = request(c.address, 'POST', '/v1/models', {'name':'fine', 'path':str(weights), 'base':'base'})
+    assert status == 200, job
     assert job['description'] == {'kind':'add_model', 'model':'fine', 'base':'base'}
     make_quiet(c.q.quiet, c.clock)
     result = c.runtime.process_once()
@@ -64,7 +59,7 @@ def add_model(c, api, weights):
 def test_real_registry_add_installs_catalog_before_existing_place_confirm(bridge):
     c, api, weights, submitted = bridge
     add_model(c, api, weights)
-    assert submitted == [{'kind':'add_model', 'model':'fine', 'base':'base'}]
+    assert submitted == [{'base', 'fine'}]
     assert api.records()['fine']['daemon_port'] == 21001
     assert c.s.placement.transport.models['fine']['is_default'] is False
     status, placed = request(c.address, 'POST', '/v1/place', {'model':'fine', 'util':.2})
@@ -78,7 +73,8 @@ def test_real_registry_add_installs_catalog_before_existing_place_confirm(bridge
 def test_real_registry_remove_keeps_late_pin_and_then_retires_admission(bridge):
     c, api, weights, _ = bridge
     add_model(c, api, weights)
-    job = api.remove('fine')
+    status, job = request(c.address, 'DELETE', '/v1/models/fine')
+    assert status == 200, job
     assert job['description']['kind'] == 'remove_model'
     before = c.path.read_bytes(), c.store.catalog_checkpoint()
     c.store.put_pin(Pin('fine', c.clock()+100, 'fixture-owner'))
@@ -114,5 +110,5 @@ def test_source_change_during_registry_prepare_never_queues_stale_candidate(brid
     monkeypatch.setattr(c.runtime, 'prepare', external_change)
     with pytest.raises(ReloadError, match='source changed'):
         api.add({'name':'fine', 'path':str(weights), 'base':'base'})
-    assert c.path.read_bytes() == changed and not c.q._pending and submitted == []
+    assert c.path.read_bytes() == changed and not c.q._pending
     assert c.store.catalog_checkpoint() is None and c.world['calls'] == []
