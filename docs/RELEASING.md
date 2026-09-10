@@ -69,10 +69,81 @@ Root owns the initial #76 release. Use a `chore/<issue>-release-...` branch and 
    If publication is interrupted, inspect the existing tag/release and finish
    missing assets; never overwrite an existing published version with new code.
 
-This authorization covers this repository's GitHub Releases. PyPI publishing,
-production rollout, model/process shutdowns and announcements to a group are
-separate actions and retain their existing authority and acceptance requirements.
-Installation remains read-only by default; publishing does not enable mutation
-flags, change llama-swap/reaper settings or start a production observer.
+## Automated publication and deployment (#169)
+
+The current user authorization permits automatic read-only upgrades and the
+reviewed, rehearsed reversible maintenance rollout. Ops owns the single outbound
+host deployment consumer, staging, current site configuration, health checks and
+rollback; integration owns release preparation and this publisher. Preserve
+existing inference endpoints, model compatibility and the file-bind `llm`
+trampoline/profile mounts. Future unattended M2 changes to TTL/reaper/launcher
+still require approval. Actual protection, quiet, adoption and settlement proof
+conditions remain; authorization is not evidence that they hold.
+
+`.github/workflows/release.yml` runs after **successful `ci` push runs on this
+repository's main branch**. It never publishes for PR/fork events, tag pushes or
+ordinary feature merges. The publisher re-fetches the CI run and checks the
+unique merged `chore(release): v0.1.0-alpha.N` PR, exact final-head Fable marker
+and reviewer identity, successful head CI, resolved review threads, identical
+merge/head trees, version literals and changelog. Checkout credentials are not
+persisted. One concurrency group serializes publication; the workflow uses only
+GitHub's scoped token and never obtains host deployment credentials.
+
+Prepare the next release PR after five qualifying merged PRs. The publisher
+recounts first-parent PR merges from the previous published alpha tag; release
+maintenance does not count. A reviewed release PR may explicitly record an early
+release as `Release-Exception: #ISSUE — concrete reason`. Integration must tie
+that exception to the user's authority and actual urgent/delivery need; elapsed
+time or a completed wave is not an exception. There remains one candidate and
+one publisher. Once this workflow is active, integration does not race it with a
+second tag or release process.
+
+The workflow builds on CPython 3.10 / Linux x86_64, re-builds the wheel from the
+sdist and compares every wheel entry. It collects binary runtime/TUI dependency
+wheels, then installs both minimal and TUI variants **offline** in separate venvs,
+checks dependencies/versions, imports TUI outside the checkout and runs copied
+CLI with `-I -S`. The successful exact merge CI supplies the full test evidence;
+this packaging stage does not repeat that suite or run live model tests.
+
+New automated releases have six assets: wheel, sdist, `llm`,
+`deployment.tar.gz`, `release-manifest.json` and `SHA256SUMS`. The deployment bundle holds `deployment.json`, `llm` and
+`wheelhouse/*.whl`, including this release, bootstrap pip 26.2.1 and its resolved
+runtime/TUI wheels;
+the manifest records each member hash and the target Python/platform. Deployment
+must validate the entire checksum/manifest set and safely extract only those
+members before `pip install --no-index --find-links ...`. The nested `deployment.json` uses schema_version 1 with tag/version/commit,
+`scope: read_only`, app_wheel/cli/bootstrap_pip relative paths, install_wheels
+(excluding bootstrap pip) and a files map of every payload's SHA-256. The outer
+asset checksum authenticates this metadata; it cannot authenticate itself. Scope
+specifies the permitted upgrade mode, not proof that the current site is read-only:
+ops checks the actual configuration before applying. Create the venv without pip,
+bootstrap through the shipped pip wheel and install the explicit install_wheels
+with `--no-deps --no-index`; `pip check` verifies closure. Dependency upgrades are
+not applied to the existing environment in place. Older releases (including
+alpha.8's completed five-asset publication) remain immutable and are not silently
+retrofitted with a wheelhouse.
+
+`release-manifest.json` binds tag, Python version, exact merge, reviewed head,
+Fable review URL, merge CI URL, previous baseline and qualifying PRs. Its `assets`
+map contains payload byte lengths and SHA-256 values; `SHA256SUMS` covers those
+payloads plus the manifest. After upload, the publisher downloads and verifies
+all six assets before making the draft public. The tag is annotated and never
+moved. A repeat run verifies an already-public release and exits without writes;
+a complete matching draft can finish publication without rebuilding. A partial
+or conflicting draft fails closed: restore missing bytes from the retained build
+artifact after inspection, then rerun. Never overwrite existing uploaded bytes
+with a fresh build or delete a conflicting tag to make the job green.
+
+The host consumer polls published prereleases, not GitHub Actions events; releases
+created with `GITHUB_TOKEN` need not trigger another workflow. It must ignore
+drafts, verify the manifest/tag/asset contract and run its staging, fresh use check,
+health and rollback sequence. A published tag is not automatic permission for
+unattended M2 changes. #169 remains open until staging and actual upgrade/rollback
+plus a real tag-to-`llm --version` transition have measured receipts. #168 visual
+acceptance separately requires the user's screenshot/PTY feedback.
+
+GitHub Releases and the above authorized deployment are in scope. PyPI uploads,
+unrelated process shutdowns and group announcements remain separate. Publication
+itself changes no site settings or production processes.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
