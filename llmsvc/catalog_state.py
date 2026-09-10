@@ -38,9 +38,9 @@ def validate_checkpoint(record):
             raise ValueError("catalog marker receipt mismatch")
     elif raw is not None:
         raise ValueError("catalog marker digest absent")
-    if record["phase"] not in ("claimed", "published", "released", "aborted"):
+    if record["phase"] not in ("claimed", "published", "released", "aborted", "rolled_back"):
         raise ValueError("invalid catalog phase")
-    if record["phase"] in ("published", "released") and marker is None:
+    if record["phase"] in ("published", "released", "rolled_back") and marker is None:
         raise ValueError("catalog publication lacks marker binding")
     from llmsvc.reload_witness import CandidateBinding
     binding = CandidateBinding.from_dict(record["binding"])
@@ -64,6 +64,6 @@ def validate_checkpoint(record):
 
     previous = record["previous"]
     if previous is not None:
-        if not isinstance(previous, dict) or previous.get("previous") is not None or previous.get("phase") != "released":
+        if not isinstance(previous, dict) or previous.get("previous") is not None or previous.get("phase") not in ("released", "rolled_back"):
             raise ValueError("invalid prior catalog checkpoint")
         validate_checkpoint(previous)
