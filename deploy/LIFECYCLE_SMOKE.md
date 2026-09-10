@@ -24,7 +24,7 @@ directory. Before startup it repeats the preflight. During loading/inference it
 monitors the candidate card and serving activity; a foreign/unclassified process
 or new serving activity aborts only the test.
 
-The runner bypasses the production eviction/placement launcher. It starts the
+The default `direct` mode bypasses the production eviction/placement launcher. It starts the
 cached base directly using eager mode, bf16, 512 context, one sequence, eight
 output tokens maximum and the configured util. Offline environment variables
 prevent opportunistic downloads. Cache paths are isolated. Development sleep
@@ -71,5 +71,81 @@ deterministic replay; long-term stability and calibration remain NOT MEASURED,
 not a day/week completion gate. Actual LoRA still requires its compatible cached
 adapter and semantic fixture. Test cleanup may never stop/sleep existing
 workloads to make space.
+
+## Scheduler action mode (#9 / #10 / #23)
+
+Set `mode: scheduler-actions` using
+[scheduler-action.example.json](scheduler-action.example.json). It is integrated
+into the same runner and shared GPU lock; it does not install a second production
+driver or add an API. Its extra native/wrapper binaries must be already available
+and SHA256-pinned. The scheduler interpreter and reviewed source must exist;
+there are no package or model downloads. `--dry-run` validates inputs without
+creating locks, files, units, sockets or requests.
+
+This mode creates one isolated native source, scheduler, profile, empty ledger
+and UUID model namespace. It stages only owner-marked temporary files. Native
+configuration has no preload and retains only this test model. A single bounded
+inference request to that source starts the official wrapper and the **existing
+lease-aware launcher**, which calls actual place, starts its assigned daemon,
+checks health and confirms the lease. The harness never inserts a confirmed
+account. A guard rejects an unexpected GPU before the launcher starts anything;
+the existing release path still requires proven absence.
+
+The sampler uses an owned wrapper around real `nvidia-smi --id <selected GPU>`.
+Indices are not renumbered and foreign processes on that card are not filtered
+out. A separate read-only systemctl adapter exposes only the test unit, so other
+models cannot enter this isolated scheduler’s configured model set; it refuses
+all stop/start commands. The inherited host-side inventory continues checking real GPU ownership and
+production serving activity. The configured host meminfo path must be an existing
+live bind of the host file: device/inode identity is compared with the host's
+`/proc/meminfo` before starting. Static snapshots and container meminfo are not
+admission evidence. No host bind or production configuration is created here.
+The isolated scheduler retains its standard RAM admission floor in addition to
+the inherited host preflight; a passing GPU preflight does not override a policy
+RAM refusal.
+
+After the recorded cold request, the harness waits at most40 seconds for the
+existing pure free preview to permit this model. The policy's >30-second idle
+condition, pin/in-flight protection and RAM constraints remain intact. Unknown
+activity or another blocker fails the run instead of editing timestamps or
+changing policy. `cold_start_cost_seconds` is an explicit ranking input, not a
+measured cold-start latency; measurements are recorded separately.
+
+The action sequence uses actual `POST /v1/free`, a fresh observed sleeping state
+and residual GPU memory, then actual `POST /v1/wake/<model>`. Before and after each
+action the same confirmed lease, full budget and exact daemon PID/start/invocation
+must remain bound. Normal unload invokes a test-local guard around the official
+wrapper sleep command: it verifies the daemon token/lease/listener and wrapper
+scope, confirms sleeping, then signals only the wrapper's pidfd. No unverified
+numeric stop-pid is passed to another process.
+
+The existing standalone CLI's `SchedulerClient` and `EventReader` collect the
+scheduler result event. Evidence includes a **local** request UUID, model, actual
+lease/unit identity, pre-request cursor, result event ID, HTTP duration, event
+receipt duration and before/after resident memory. The API does not carry a server
+request ID or a lease ID in `free_result`: correlation is explicitly limited to
+the isolated single-operation scope, cursor and exact response fields. It is not
+a claim that those wire fields exist. Missing results, observed duplicate matches,
+gaps, disconnects, resets, partial/refused operations and unknown measurements
+fail validation. Event receipt can precede HTTP return; its signed offset is kept.
+These measurements do not certify continuous quiet or old-server settlement.
+
+All helper requests run in bounded token-tagged units so the host runner can keep
+checking GPU/serving conditions during long requests. The total remains at most
+300 seconds with45 seconds reserved for cleanup. Runtime caps and stop limits are
+applied to each owned unit. Cleanup stops only the matching daemon, asks the real
+lease API to release after proven exit, and kills only matching test control-unit
+cgroups before removal, preventing late native unload callbacks from reaching an
+uncertain daemon. Unknown ownership or release leaves the private ledger/files
+for inspection. Existing workloads are never stopped or slept to make room.
+
+CPU contract tests run the actual scheduler HTTP server, empty SQLite ledger,
+existing launcher, a real loopback health child and scheduler SSE. Hardware,
+systemd and source sleep/wake observations are explicitly fixtures. They verify
+place/confirm accounting, free/wake/event behavior, refusal and cleanup boundaries;
+they **do not measure vLLM/GPU sleep, wake or UI latency**. The real chain remains
+NOT MEASURED until an eligible GPU and reviewed harness permit the bounded run.
+No old direct-lifecycle, LoRA, native-maintenance or UI receipt is relabeled as
+this mode's acceptance; long-term stability/calibration remain NOT MEASURED.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
