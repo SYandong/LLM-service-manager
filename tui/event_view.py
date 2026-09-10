@@ -166,6 +166,21 @@ class EventPresentation:
         return Text('%s [%s] #%s %s' % (stamp, 'data-plane' if relayed else 'scheduler', item['id'], body), style=color)
 
 
+class ExportPathInput(Input):
+    """Keep native edit actions ordered with text in this field's own queue."""
+    async def on_key(self, event):
+        # Printable keys are consumed locally by Input. If edit bindings bubble
+        # back to App, later text in the same terminal burst may overtake them.
+        # Run only Input's existing bindings here; unknown/global keys keep their
+        # normal routing and other input widgets remain unchanged.
+        for binding in Input.BINDINGS:
+            if event.key in binding.key.split(","):
+                event.stop()
+                event.prevent_default()
+                await self.run_action(binding.action)
+                return
+
+
 class EventDetails(ModalScreen):
     """Frozen plain text; no clipboard or filesystem side effect on opening."""
     DEFAULT_CSS = '''
@@ -195,7 +210,7 @@ class EventDetails(ModalScreen):
             yield Static('Event details · frozen snapshot', id='event-dialog-title', markup=False)
             yield TextArea(self.text, read_only=True, soft_wrap=True, id='event-text')
             yield Static('Save UTF-8 text on this machine:', id='export-label')
-            yield Input(placeholder='Choose a new file path', id='export-path')
+            yield ExportPathInput(placeholder='Choose a new file path', id='export-path')
             with Horizontal(id='export-buttons'):
                 yield Button('Copy', id='event-copy')
                 yield Button('Save text', id='event-save')
