@@ -183,7 +183,11 @@ class BootstrapController:
             if not self.busy or self.clock()>=self.deadline:
                 raise IntentWriteError(503,'bootstrap_reconciliation_required')
             record=self._record()
-            try:local=ipaddress.ip_address(source_ip).is_loopback or source_ip==s.config.listen_host
+            try:
+                peer=ipaddress.ip_address(source_ip);configured=ipaddress.ip_address(s.config.listen_host)
+                peer=getattr(peer,'ipv4_mapped',None) or peer
+                configured=getattr(configured,'ipv4_mapped',None) or configured
+                local=peer.is_loopback or peer==configured
             except ValueError:local=False
             valid=(local and isinstance(token,str) and len(token)==64 and
                    hmac.compare_digest(hashlib.sha256(token.encode()).hexdigest(),record['token_sha256']))
@@ -408,6 +412,7 @@ class BootstrapController:
                 record=self._save(record,effects={**record['effects'],'rollback':'submitted'})
                 proof=self._request('bootstrap_rollback',record)
                 if (proof.get('rolled_back') is not True or proof.get('source_absent') is not True
+                        or proof.get('helpers_settled') is not True or proof.get('legacy_backends_absent') is not True
                         or proof.get('default_preload_preserved') is not True or self._source_hash()!=self.spec['base_config_sha256']):
                     raise BootstrapError('bootstrap file rollback remains unconfirmed')
                 self._save(record,stage='aborted',effects={**record['effects'],'rollback':'acknowledged'},
