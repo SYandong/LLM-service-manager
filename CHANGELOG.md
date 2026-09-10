@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.1.0-alpha.11 — 2026-09-10
+
+Urgent export-path repair; Python distribution `0.1.0a11`.
+Includes #194, #195, #196 and #198 since the immutable alpha.10 tag.
+The user-authorized urgent-fix exception releases this four-PR batch for #197.
+
+### Corrected
+
+- Export-path edit controls and printable characters retain their input order
+  when a terminal delivers them in one batch (#198). Clearing a field and typing
+  a replacement filename no longer lets a delayed edit erase the new text.
+  Only this field uses the existing native Input actions in its own message
+  queue; no dependency, global key routing or button cooldown changes. Save
+  remains explicit, full UTF-8, mode0600 and refuses existing files/symlinks;
+  filenames cannot become scheduler commands.
+- Test-only repairs separate post-action functional observations from the
+  intentionally short negative deadline (#194), and trace relay dispatch,
+  buffer admission/discard, actual publication IDs and UI delivery (#195).
+  Rejected notifications produce truthful discard evidence, not an invented
+  notification. These controlled regressions do not reconstruct every prior
+  host scheduling failure.
+- Large activity/usage functional fixtures keep their data and default reader
+  budget while controlling the test clock (#196). Real cancellation tests stay
+  separate; an explicit opt-in performance tool retains the wall-clock target,
+  records its chosen measurement window and never treats cancelled empty results
+  as successful zero. Ordinary tests add no load-based skips or production
+  deadline changes.
+
+### Compatibility and validation limits
+
+The read-only upgrade uses the existing six-asset publisher and sole reversible
+puller; versions, endpoints, model settings and fixed CLI mounts retain their
+contracts. Maintenance/schema6 and source-origin upgrade work are not included.
+Genuine activity deadlines and unavailable source attribution remain unknown.
+
+Prior alpha.10 terminal checks remain separate partial/narrow attempts. The new
+path-ordering regression is validated after this reviewed release is installed;
+publication alone is not an installed test. Clipboard requests still depend on
+terminal support and do not confirm delivery to a user's desktop. Long-term
+stability, continuous quiet and settlement are not inferred from these checks.
+
 ## 0.1.0-alpha.10 — 2026-09-10
 
 Urgent user-facing repairs; Python distribution `0.1.0a10`.
