@@ -144,6 +144,10 @@ LoRA 路径待 M4 调研（base 开 `--enable-lora` + 运行时装载，是否�
 观察改写为 QuietPeriod 零值或同实例 RecoveryProof。维护是单独、默认关闭的
 `catalog_mode: maintenance`，同时要求 catalog/model-actions 开关、非只读账本、
 明确配置的执行适配器及可信 profile。用户侧仍使用已有模型接口和 llm 命令。
+可操作的 source unit、wrapper 和自有 helper jobs 严格限于
+[AGENTS §6 的显式维护例外](../AGENTS.md#6-线上安全红线)，不扩展常规模式权限。
+维护 preflight 和实际 `stop_old` / `stop_candidate` 前分别重验新鲜零在途；
+这是显式实例维护的条件，不是常规热重载所需的连续五秒 quiet 证明。
 
 维护回执使用显式 `InstanceTransitionProof`，分别绑定旧／新实例、scope、
 配置摘要、事务 marker、旧实例及 helper 结清、保留后端和必要清理结果。
