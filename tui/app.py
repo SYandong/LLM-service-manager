@@ -215,6 +215,43 @@ class SchedulerApp(App):
         if self.usage_active:
             self.render_usage()
 
+    def activity_failure(self):
+        """Human presentation only; the complete source diagnostics stay in snapshot."""
+        reasons = {
+            "deadline": "read budget exceeded", "locked": "database busy",
+            "schema": "schema unavailable or unsupported", "parse": "invalid activity data",
+            "unavailable": "source unavailable", "corrupt": "database damaged",
+            "interrupted": "read interrupted", "read_failed": "read failed",
+            "round_deadline": "collector round deadline exceeded",
+            "previous_probe_running": "previous activity read still running",
+            "not configured": "source not configured",
+        }
+        for error in (self.snapshot or {}).get("errors", []):
+            if isinstance(error, str) and error.startswith("activity:"):
+                return reasons.get(error.partition(":")[2].strip(), "reason unavailable")
+        return None
+
+    @staticmethod
+    def activity_sources(stats):
+        sources = stats.get("by", [])
+        known = [source for source in sources if source and source != "unknown"]
+        if not known:
+            return "source unavailable"
+        return "from " + ", ".join(known) + (" · some sources unavailable" if len(known) < len(sources) else "")
+
+    def snapshot_message(self):
+        errors = self.snapshot.get("errors", [])
+        failure = self.activity_failure()
+        if failure is not None:
+            message = "Partial update · activity unavailable: " + failure
+            if any(not isinstance(error, str) or not error.startswith("activity:") for error in errors):
+                message += " · other observations unavailable (status --json for details)"
+        elif errors:
+            message = "Partial update · some observations unavailable (status --json for details)"
+        else:
+            message = "Updated"
+        return message + (" · read-only" if self.snapshot.get("read_only") else "")
+
     @work
     async def refresh_state(self, args=None):
         # A slow HTTP request must not start overlapping polls or freeze keyboard input.
@@ -234,9 +271,7 @@ class SchedulerApp(App):
             if getattr(args, "json", False):
                 message = json.dumps(snapshot, ensure_ascii=False)
             else:
-                errors = snapshot.get("errors", [])
-                message = "Updated" + (" · " + "; ".join(errors) if errors else
-                                       " · read-only" if snapshot.get("read_only") else "")
+                message = self.snapshot_message()
             if not self.usage_active:
                 self.show_result(message)
         except Exception as exc:
@@ -460,7 +495,8 @@ class SchedulerApp(App):
             self._table_columns = columns
             self._table_rows.clear()
             self.model_names = []
-        activity = {item["model"]: item for item in state.get("activity", [])}
+        activity = {} if self.activity_failure() is not None else {
+            item["model"]: item for item in state.get("activity", [])}
         now = state.get("sampled_at")
         observed_at = self.api.time.time() if now is None else now
         pins = {item["model"]: item for item in state.get("pins", []) if item["until"] > observed_at}
@@ -481,7 +517,8 @@ class SchedulerApp(App):
             else:
                 used = None if now is None or stats.get("last_request_at") is None else now - stats["last_request_at"]
                 row.extend([self.api.age(used), "?" if stats.get("requests_last_10m") is None else str(stats["requests_last_10m"]),
-                            ",".join(stats.get("by", [])) or "-", self.api.expiry(pin["until"]) if pin else "-"])
+                            ",".join(source for source in stats.get("by", []) if source and source != "unknown") or "?",
+                            self.api.expiry(pin["until"]) if pin else "-"])
             cells = tuple(Text(self.api.clean_text(value),
                                justify="right" if columns[index][0] in ("GPU", "MEM", "USED", "10m") else "left",
                                style="dim" if value in ("?", "?G", "-", "unknown") else "")
@@ -512,7 +549,11 @@ class SchedulerApp(App):
             observed_at = self.api.time.time() if now is None else now
             pin = next((item for item in self.snapshot.get("pins", [])
                         if item["model"] == name and item["until"] > observed_at), None)
-            text += " · from " + (", ".join(stats.get("by", [])) or "-")
+            failure = self.activity_failure()
+            if failure is not None:
+                text += " · activity unavailable: " + failure + " · source unavailable"
+            else:
+                text += " · " + self.activity_sources(stats)
             if pin:
                 text += " · pin %s (%s)" % (self.api.expiry(pin["until"]), pin["by"])
         self.update_static("details", self.api.clean_text(text))
