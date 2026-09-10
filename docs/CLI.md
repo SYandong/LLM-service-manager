@@ -197,6 +197,7 @@ LLM_URL=http://scheduler:8011 python cli/llm
 - 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL`、`unreserve ID`、`models`、`registry`、`add PATH --name X --base BASE`、`rm NAME`、`free`、`wake MODEL`、`reserve --gpu N --size 80G --for 4h` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。
 - Pin/unpin 成功后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态。结果保留服务端 owner/actor；刷新失败会单独说明，已成功的写入不会因此重试。同一时刻只执行一个写请求（pin/unpin/free/wake/reserve/unreserve/add/rm），不会把重复提交排队。
 - usage 视图提供 7 天、30 天和返回状态按钮，每 5 秒刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
+- 活动读取失败显示 `Partial update · activity unavailable` 和受限安全原因（预算、锁、schema、parse 等）；旧版 `ValueError` 或未知原因只显示 `reason unavailable`。该轮活动数值按未知显示，不沿用旧计数；完整当前 snapshot/errors 保留在 `status --json`，不会被人类文案改写。读取成功而来源为 unknown/空时显示 `source unavailable`，仍保留已读取的计数；不能据此推断“未记录来源”、容器身份或数据库读取失败。部分来源已知时保留已知标签并标注其余来源不可用。
 - 请求在后台线程执行，慢请求不会叠加轮询或阻塞按键。连接失败保留上一份快照，并显示错误；新快照到达后保留选中模型。
 - 实际 `free --ram` 先弹出二次确认，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。Free/wake 完成后立即刷新，部分结果与错误仍保留；后台执行期间 UI 与事件面板继续响应。
 - Reserve 的预览、只读拒绝与实际回执语义见上节；默认入口的模型实际写入仍关闭；具有显式 catalog 提交能力的服务器可以排队 add/rm，queued 不等于 applied 或全局动作可用。安全列表/预览保持可用。不能用本客户端命令启用生产调度。
