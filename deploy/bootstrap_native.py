@@ -310,8 +310,10 @@ class BootstrapAdapter:
                 or any(not NativeAdapter.listener_owned(inspector, origin, before['scope']['control_group'], deadline)
                        for origin in origins)):
             raise ExecutorError('bootstrap_source_changed')
-        return {**before, 'in_flight': 0, 'legacy_backends_absent': True,
-                'default_preload_preserved': True}
+        return {'identity':before['identity'], 'scope':before['scope'], 'actors':before['actors'],
+                'observed_at':time.monotonic(), 'in_flight':0, 'actors_known':True,
+                'configuration_confirmed':True, 'legacy_backends_absent':True,
+                'default_preload_preserved':True}
 
     def _base(self):
         return {'manifest_sha256': self.manifest_hash, 'default_model': self.default,
