@@ -53,6 +53,9 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
         scheduler, relay, outgoing, address, connections = live_bridge
         owner = relay.subscription._thread
         opened_by, dispatch_requests = [], []
+        frame_ids = ("ignored-log", "state", "inflight", "filtered-model", "invalid-payload")
+        dispatched = {name: threading.Event() for name in frame_ids}
+        invalid_published, release_invalid = threading.Event(), threading.Event()
         force_timeout, timeout_raised = threading.Event(), threading.Event()
         open_stream, read_line = _HTTPEventStream.__init__, _HTTPEventStream.readline
         dispatch = relay.subscription._dispatch
@@ -68,11 +71,25 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
             return read_line(stream, limit)
 
         def tracked_dispatch(lines, state):
+            payload = json.loads(b"\n".join(line[5:].lstrip() for line in lines if line.startswith(b"data:")))
+            frame_id = payload.get("fixture_dispatch_id")
             before = len(opened_by)
             try:
                 return dispatch(lines, state)
             finally:
+                if frame_id == "invalid-payload":
+                    # The real error is published before the dispatch returns.
+                    # Hold only test bookkeeping to exercise that interleaving.
+                    invalid_published.set()
+                    assert release_invalid.wait(5), "test did not release invalid dispatch"
                 dispatch_requests.append(len(opened_by) - before)
+                if frame_id in dispatched:
+                    dispatched[frame_id].set()
+
+        async def send_frame(app, pilot, frame_id, payload, *, wait=True):
+            outgoing.put({**payload, "fixture_dispatch_id": frame_id})
+            if wait:
+                await visible(app, pilot, lambda events: dispatched[frame_id].is_set())
 
         monkeypatch.setattr(_HTTPEventStream, "__init__", tracked_open)
         monkeypatch.setattr(_HTTPEventStream, "readline", controlled_read)
@@ -80,12 +97,12 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
         app, requests, url = app_for(api, address)
         async with app.run_test(size=size) as pilot:
             await app.workers.wait_for_complete()
-            outgoing.put({"type": "logData", "data": "PRIVATE_MARKER raw log/request body"})
-            outgoing.put(model_frame("stopped"))
+            await send_frame(app, pilot, "ignored-log", {"type": "logData", "data": "PRIVATE_MARKER raw log/request body"})
+            await send_frame(app, pilot, "state", model_frame("stopped"))
             native = scheduler.emit("pin", model="m", detail={"fixture": True})
             await visible(app, pilot, lambda events: any(e["kind"] == "data_plane_state" for e in events)
                           and any(e["id"] == native.id for e in events))
-            outgoing.put({"type": "inflight", "data": {"operation": "snapshot", "requests": [
+            await send_frame(app, pilot, "inflight", {"type": "inflight", "data": {"operation": "snapshot", "requests": [
                 {"id": "PRIVATE_MARKER", "model": "m", "body": "PRIVATE_MARKER"}]}})
             await visible(app, pilot, lambda events: any(e["kind"] == "data_plane_inflight"
                           and e["detail"]["operation"] == "snapshot" for e in events))
@@ -94,7 +111,7 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
             inflight = next(e for e in app.event_history if e["kind"] == "data_plane_inflight"
                             and e["detail"]["operation"] == "snapshot")
             assert inflight["detail"]["count"] == 1 and inflight["detail"]["operation"] == "snapshot"
-            outgoing.put(model_frame(model="not-allowlisted-PRIVATE_MARKER"))
+            await send_frame(app, pilot, "filtered-model", model_frame(model="not-allowlisted-PRIVATE_MARKER"))
             await visible(app, pilot, lambda events: any(e["kind"] == "data_plane_dropped" for e in events))
             # Deterministically reproduce an earlier unrelated error without
             # waiting for a socket timeout or changing the shared fixture budget.
@@ -103,12 +120,20 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
                           and e["detail"]["reason"] == "timeout" for e in events))
             timeout = next(e for e in app.event_history if e["kind"] == "data_plane_error"
                            and e["detail"]["reason"] == "timeout")
-            outgoing.put({"type": "modelStatus", "data": "PRIVATE_MARKER invalid JSON"})
+            await send_frame(app, pilot, "invalid-payload", {"type": "modelStatus", "data": "PRIVATE_MARKER invalid JSON"}, wait=False)
             def intended_error(event):
                 return (event["kind"] == "data_plane_error" and event["id"] > timeout["id"]
                         and event["detail"]["reason"] == "invalid_event")
 
-            await visible(app, pilot, lambda events: any(intended_error(e) for e in events))
+            try:
+                await visible(app, pilot, lambda events: invalid_published.is_set()
+                              and any(intended_error(e) for e in events))
+                assert not dispatched["invalid-payload"].is_set()
+                assert all(dispatched[name].is_set() for name in frame_ids if name != "invalid-payload")
+                assert not any(dispatch_requests)
+            finally:
+                release_invalid.set()
+            await visible(app, pilot, lambda events: all(done.is_set() for done in dispatched.values()))
             invalid = next(e for e in app.event_history if intended_error(e))
             assert timeout in app.event_history  # Unrelated errors are retained, not filtered away.
             assert event_of(app, "data_plane_error")["detail"]["reason"] == "timeout"
@@ -136,6 +161,7 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
             assert "timeout" in log_text and "invalid_event" in log_text
             assert "upstream loss unknown" in log_text
             assert "PRIVATE_MARKER" not in log_text + json.dumps(app.event_history)
+            assert "fixture_dispatch_id" not in json.dumps(app.event_history)
             assert "not a daemon stop" in app.format_event(plane).plain
             assert str(app.format_event(plane).style) == "blue"
             assert str(app.format_event(next(e for e in app.event_history if e["id"] == native.id)).style) == "cyan"
@@ -160,7 +186,8 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
             # Every source frame (including local filtering/invalid payloads) was
             # dispatched without creating a request. Reconnect opens belong only
             # to the original subscription worker, never the UI/filter callbacks.
-            assert len(dispatch_requests) >= 5 and not any(dispatch_requests)
+            assert all(done.is_set() for done in dispatched.values())
+            assert not any(dispatch_requests)
             assert reconnect_error in app.event_history and invalid in app.event_history
             assert reconnect_error["detail"]["source"] == "llama-swap"
             assert reconnect_error["detail"]["trusted_for_quiet"] is False
