@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import signal
 import subprocess
 import sys
 import time
@@ -263,6 +264,47 @@ class ScopeInspector:
                 'backends_confirmed': False, 'exclusion_confirmed': False,
                 'blockers': ['external_helper_attribution_and_exit_outcomes_required',
                              'independent_backend_and_exclusion_proofs_required']}
+
+
+
+def stop_bound_process(expected, inspector, deadline, *, dry_run=False,
+                       clock=time.monotonic):
+    """Exact-instance SIGTERM primitive for core's durable stop_instance path.
+
+    Not exposed by the CLI until preflight has independent helper/backend facts.
+    Core must persist its submitted fence before invocation; an ACK is not exit.
+    """
+    validate_identity(expected)
+    if clock() >= deadline:
+        raise ExecutorError('stop_deadline_exceeded')
+    before = inspector.inspect(deadline)
+    if before['identity'] != expected:
+        raise ExecutorError('stop_instance_identity_changed')
+    if dry_run:
+        return {'accepted': False, 'dry_run': True, 'would_signal': 'SIGTERM',
+                'identity': expected}
+    if not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
+        raise ExecutorError('pidfd_required_for_exact_instance_stop')
+    try:
+        descriptor = os.pidfd_open(expected['pid'], 0)
+    except OSError as exc:
+        raise ExecutorError('stop_instance_unavailable') from exc
+    try:
+        # Binding a pidfd and then rereading the entire scope prevents PID reuse
+        # or replacement between initial selection and signal submission.
+        current = inspector.inspect(deadline)
+        if current['identity'] != expected or clock() >= deadline:
+            raise ExecutorError('stop_instance_changed_or_deadline_exceeded')
+        signal.pidfd_send_signal(descriptor, signal.SIGTERM, None, 0)
+        if clock() >= deadline:
+            raise ExecutorError('stop_submitted_result_late_observe_only')
+        return {'accepted': True, 'identity': expected, 'observed_at': clock(),
+                'signal': 'SIGTERM', 'exit_confirmed': False,
+                'helpers_settled': False, 'backends_confirmed': False}
+    except OSError as exc:
+        raise ExecutorError('stop_result_unknown_observe_only') from exc
+    finally:
+        os.close(descriptor)
 
 
 def handle(envelope, operation, inspector, *, dry_run=False, clock=time.monotonic):

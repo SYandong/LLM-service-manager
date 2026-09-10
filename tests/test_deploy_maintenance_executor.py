@@ -245,3 +245,52 @@ def test_proxy_settled_field_does_not_certify_helpers_or_complete_transition(tmp
         assert result['helpers_settled'] is False and result['settlement_confirmed'] is False
     finally:
         if proxy.poll() is None:finish(proxy)
+
+
+def test_exact_instance_stop_primitive_signals_only_selected_child(tmp_path):
+    from deploy.maintenance_executor import stop_bound_process
+    proxy,foreign=child(),child()
+    try:
+        f=Fixture(tmp_path,proxy.pid);expected=f.inspector.inspect(time.monotonic()+5)['identity']
+        result=stop_bound_process(expected,f.inspector,time.monotonic()+5)
+        assert result['accepted'] is True and result['exit_confirmed'] is False
+        assert result['helpers_settled'] is False and result['backends_confirmed'] is False
+        assert proxy.wait(timeout=5)==-15
+        assert foreign.poll() is None
+    finally:
+        for p in (proxy,foreign):
+            if p.poll() is None:finish(p)
+            else:p.stdin.close();p.stdout.close()
+
+
+def test_exact_stop_dry_run_and_wrong_identity_never_signal(tmp_path):
+    from deploy.maintenance_executor import stop_bound_process
+    proxy=child()
+    try:
+        f=Fixture(tmp_path,proxy.pid);expected=f.inspector.inspect(time.monotonic()+5)['identity']
+        result=stop_bound_process(expected,f.inspector,time.monotonic()+5,dry_run=True)
+        assert result['dry_run'] and not result['accepted'] and proxy.poll() is None
+        wrong={**expected,'start_ticks':str(int(expected['start_ticks'])+1)}
+        with pytest.raises(ExecutorError,match='identity_changed'):
+            stop_bound_process(wrong,f.inspector,time.monotonic()+5)
+        assert proxy.poll() is None
+    finally:finish(proxy)
+
+
+def test_stop_deadline_and_scope_change_after_pidfd_binding_never_signal(tmp_path):
+    from deploy.maintenance_executor import stop_bound_process
+    proxy=child()
+    try:
+        f=Fixture(tmp_path,proxy.pid);expected=f.inspector.inspect(time.monotonic()+5)['identity']
+        with pytest.raises(ExecutorError,match='deadline'):
+            stop_bound_process(expected,f.inspector,time.monotonic()-1)
+        original=f.inspector.inspect;calls=[]
+        def replacement(deadline):
+            value=original(deadline);calls.append(1)
+            if len(calls)==2:value['identity']={**value['identity'],'scope_sha256':'b'*64}
+            return value
+        f.inspector.inspect=replacement
+        with pytest.raises(ExecutorError,match='changed_or_deadline'):
+            stop_bound_process(expected,f.inspector,time.monotonic()+5)
+        assert proxy.poll() is None
+    finally:finish(proxy)

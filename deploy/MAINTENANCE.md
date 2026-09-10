@@ -37,8 +37,10 @@ Even an empty old cgroup plus absence of its captured actors leaves
 `settlement_confirmed`, `cleanup_confirmed`, `backends_confirmed`, and
 `exclusion_confirmed` false. An asynchronous helper may have escaped the old
 scope; a helper that exited unsuccessfully may have left external resources.
-The full adapter needs the separately agreed attributable-helper exit outcomes,
-backend observations, and exclusion provider before it can report those facts.
+The selected `stop_instance` mode establishes exclusion by positively settling
+the old instance, helpers and address ownership; it does not require a fictional
+pause/socket gate. The full adapter still needs attributable-helper exit outcomes
+and backend observations before it can report those facts.
 No proxy exit, command exit code, or caller-supplied boolean substitutes for them.
 
 CPU regression tests use real temporary child processes and pipe barriers with
@@ -50,6 +52,15 @@ files do not establish a production systemd or network-exclusion result.
 ```sh
 python3.10 -m pytest -q tests/test_deploy_maintenance_executor.py
 ```
+
+The internal `stop_bound_process` primitive implements the selected exact-instance
+SIGTERM action using a Linux pidfd, with full identity/scope checks before and
+after binding the descriptor. Its ACK reports signal submission only. Dry-run
+does not open a pidfd or signal anything; late/unknown results require observation,
+not a resend. Core must durably record submission before calling it. The CLI
+does not expose this primitive until the complete preflight/helper/backend
+protocol is wired. Its CPU tests signal only their own temporary child and
+verify that a separate child remains alive.
 
 The bounded command runner kills and reaps only its own command if it expires.
 It does not guess at descendants or stop other helpers. A timed-out external
