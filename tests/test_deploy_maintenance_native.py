@@ -232,3 +232,82 @@ def test_indented_lifecycle_hook_is_not_hidden_by_whitespace(native):
     fragment.write_text(fragment.read_text()+'  ExecStopPost=/untracked/helper\n')
     with pytest.raises(ExecutorError,match='lifecycle_hook'):
         NativeAdapter(adapter.profile,adapter.profile_path)
+
+
+@pytest.fixture
+def native_observation(native, monkeypatch):
+    """Real observation/backends predicates with deterministic external sources."""
+    from types import SimpleNamespace
+    from llmsvc.reload_witness import NativeGenerationReader
+    adapter, scope, context = native
+    config = {'models': {}, 'macros': {'llmsvc_reload_generation': 'generation'}}
+    adapter.config.write_text(json.dumps(config))
+    config_hash = hashlib.sha256(adapter.config.read_bytes()).hexdigest()
+    identity = {'pid': 42, 'start_ticks': '13', 'scope_sha256': digest(scope)}
+    binding = {'model': 'm', 'unit': 'vllm-m.service', 'lease_id': 'lease',
+               'gpu': 0, 'invocation_id': 'b' * 32}
+    account = {'model': 'm', 'lease_id': 'lease', 'gpu': 0, 'status': 'confirmed'}
+    context.update(old_identity=identity, backend_bindings=[binding],
+                   current_accounts=[[account, binding['unit']]], removed_models=['m'],
+                   base_sha256=config_hash, candidate_sha256=config_hash, generation='generation')
+    adapter.original_scope = lambda c: (scope, [identity])
+    adapter._retired = lambda *a: (True, True, [])
+    adapter.inspect_native = lambda *a: {'identity': identity, 'config_sha256': config_hash}
+    adapter._attempt_binding = lambda *a: True
+    adapter._known_unsubmitted_start = lambda *a: True
+    adapter.backend = lambda *a: binding
+    adapter.unit_exited = lambda *a: True
+    monkeypatch.setattr(NativeGenerationReader, 'read',
+                        lambda *a, **k: SimpleNamespace(error=None, generation='generation'))
+    return adapter, context
+
+
+def test_candidate_adoption_proof_does_not_require_removed_model_cleanup(native_observation):
+    adapter, context = native_observation
+    result = adapter.operation('observe_candidate', context, time.monotonic() + 1)
+    assert result['configuration_confirmed'] and result['attempt_bound']
+    assert result['backends_confirmed']  # Captured, confirmed account remains intact.
+    assert not result['cleanup_confirmed']  # Core must still execute removal.
+    assert context['removed_models'] == ['m']
+
+
+def test_base_rollback_preserves_cancelled_removal_and_current_account(native_observation):
+    adapter, context = native_observation
+    result = adapter.operation('observe_base', context, time.monotonic() + 1)
+    assert result['configuration_confirmed'] and result['backends_confirmed']
+    assert result['cleanup_confirmed'] and result['attempt_settled']
+    assert context['removed_models'] == ['m']  # History is not a new evacuation order.
+    assert context['current_accounts'][0][0]['status'] == 'confirmed'
+
+
+@pytest.mark.parametrize('operation', ['observe_candidate', 'observe_base'])
+@pytest.mark.parametrize('submitted,exited,expected', [
+    (True, True, True), (False, True, False), (True, False, False),
+])
+def test_released_backend_still_needs_bound_submission_and_positive_exit(
+        native_observation, operation, submitted, exited, expected):
+    adapter, context = native_observation
+    context['current_accounts'] = []
+    context['effects'] = {'stop_model:m': {'submitted': submitted}}
+    adapter.unit_exited = lambda *a: exited
+    result = adapter.operation(operation, context, time.monotonic() + 1)
+    assert result['backends_confirmed'] is expected
+    assert result['cleanup_confirmed'] is expected
+    assert context['current_accounts'] == []  # No account resurrection on rollback.
+
+
+@pytest.mark.parametrize('operation', ['observe_candidate', 'observe_base'])
+def test_changed_backend_lease_blocks_both_observation_proofs(native_observation, operation):
+    adapter, context = native_observation
+    context['current_accounts'][0][0]['lease_id'] = 'replacement'
+    result = adapter.operation(operation, context, time.monotonic() + 1)
+    assert not result['backends_confirmed'] and not result['cleanup_confirmed']
+
+
+def test_base_account_integrity_does_not_certify_unknown_attempt_helpers(native_observation):
+    adapter, context = native_observation
+    adapter._retired = lambda *a: (True, False, [])
+    adapter._known_unsubmitted_start = lambda *a: False
+    result = adapter.operation('observe_base', context, time.monotonic() + 1)
+    assert result['backends_confirmed'] and result['cleanup_confirmed']
+    assert not result['helpers_settled'] and not result['attempt_settled']
