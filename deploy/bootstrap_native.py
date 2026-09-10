@@ -485,6 +485,9 @@ class BootstrapAdapter:
         if not absent and record.get('start_submitted') and staged:
             adapter = self._native(); account, binding = self._account(context, adapter, deadline)
             observed = adapter.inspect_native({'current_accounts': [[account, self.unit]]}, deadline)
+            default = observed['helper_models'].get(self.default)
+            if default is None:raise ExecutorError('bootstrap_default_native_not_ready')
+            if default['backend'] != binding:raise ExecutorError('bootstrap_default_native_binding_changed')
             if all(observed['identity'][k] == record['preflight']['identity'][k] for k in ('pid', 'start_ticks')):
                 raise ExecutorError('bootstrap_new_source_identity_required')
             if snapshot(adapter.envfile) != record.get('activation_environment'):
