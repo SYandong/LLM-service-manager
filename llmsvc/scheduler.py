@@ -142,6 +142,7 @@ class Scheduler:
         self.reservation_actions = None
         self.registry = None
         self.catalog = None
+        self.bootstrap = None
         self.catalog_epoch = "0"*32
         self.catalog_fenced = False
         self.automation = None
@@ -198,6 +199,8 @@ class Scheduler:
                         snapshot = replace(snapshot, blocked_by=tuple(dict.fromkeys(snapshot.blocked_by + pending)))
                 except Exception:
                     snapshot = replace(snapshot, errors=snapshot.errors + ("intent_store_unavailable",))
+            if self.store is not None and self.store.bootstrap_pending():
+                snapshot = replace(snapshot, errors=tuple(snapshot.errors)+("bootstrap_reconciliation_required",))
             if self.catalog_fenced or (self.store and self.store.catalog_pending()):
                 from llmsvc.state import Blocker
                 snapshot = replace(snapshot, blocked_by=snapshot.blocked_by+(Blocker(None, "catalog_reconciliation_required"),))
@@ -205,6 +208,8 @@ class Scheduler:
 
     def check_catalog(self, epoch=None):
         from llmsvc.actions import ActionDispatchError
+        if self.store is not None and self.store.bootstrap_pending() and not self.store.bootstrap_authorized():
+            raise ActionDispatchError("bootstrap_reconciliation_required")
         if self.catalog_fenced or (self.store is not None and self.store.catalog_pending()):
             raise ActionDispatchError("catalog_reconciliation_required")
         if epoch is not None and epoch != self.catalog_epoch:
@@ -304,7 +309,26 @@ class Scheduler:
             status = 409 if exc.reason in ("free_in_progress", "operation_in_progress") else 503
             raise IntentWriteError(status, exc.reason) from exc
 
+    def bootstrap_http_scope(self, operation, payload, token, source_ip, *, dry_run=False):
+        from contextlib import nullcontext
+        if dry_run or self.store is None or not self.store.bootstrap_pending():
+            return nullcontext()
+        if self.bootstrap is None:
+            raise IntentWriteError(503, "bootstrap_reconciliation_required")
+        from contextlib import contextmanager
+        from llmsvc.bootstrap import BootstrapError
+        @contextmanager
+        def guarded():
+            try:
+                with self.bootstrap.http_scope(operation, payload, token, source_ip):
+                    yield
+            except BootstrapError as exc:
+                raise IntentWriteError(503, "bootstrap_reconciliation_required") from exc
+        return guarded()
+
     def run_placement(self, operation, payload):
+        if self.store is not None and self.store.bootstrap_pending() and not self.store.bootstrap_authorized():
+            raise IntentWriteError(503, "bootstrap_reconciliation_required")
         if self.placement is None:
             raise IntentWriteError(405, "operation_not_enabled")
         try:
@@ -691,7 +715,7 @@ class Scheduler:
                 LOG.warning(json.dumps({"kind": "catalog_cycle_error", "error_type": type(exc).__name__}))
             self.stopping.wait(self.config.action_poll_seconds)
 
-    def start(self):
+    def start(self, *, sampling_only=False):
         with self.action_lock:
             if self._thread is not None:
                 raise RuntimeError("scheduler already started")
@@ -702,13 +726,13 @@ class Scheduler:
             if self.event_bridge is not None:
                 self.event_bridge.start()
             self._thread.start()
-            if self.automation is not None and self.automation.enabled():
+            if not sampling_only and self.automation is not None and self.automation.enabled():
                 self._automation_thread = threading.Thread(target=self._run_automation, name="llmsvc-automation", daemon=True)
                 self._automation_thread.start()
-            if self.faults is not None and self.faults.enabled():
+            if not sampling_only and self.faults is not None and self.faults.enabled():
                 self._fault_thread = threading.Thread(target=self._run_faults, name="llmsvc-faults", daemon=True)
                 self._fault_thread.start()
-            if self.catalog is not None and self.catalog.can_submit():
+            if not sampling_only and self.catalog is not None and self.catalog.can_submit():
                 self._catalog_thread = threading.Thread(target=self._run_catalog, name="llmsvc-catalog", daemon=True)
                 self._catalog_thread.start()
         except Exception:

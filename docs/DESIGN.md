@@ -171,6 +171,31 @@ LoRA 路径待 M4 调研（base 开 `--enable-lora` + 运行时装载，是否�
 JSON 协议；未完成的适配器必须报告未知。受控进程／loopback 回放证明代码
 边界，现场采用、helper 结清与回滚证据由实际适配器及获准演练单独提供。
 
+### 首次默认模型的受管 bootstrap（#201）
+
+已有 source preload 但没有已确认账户时，普通维护仍须拒绝；不能删除默认项或
+收养已有进程来通过检查。显式、默认关闭的 bootstrap 在同一部署迁移中建立
+持久化放置权威，使用已有 lease-aware launcher 和 place/health/confirm 协议，
+再允许受管 source preload。源、端点、别名及 daemon 环境配置须由固定的迁移
+manifest 保留；空 host 的 listen 绑定不等于 HTTP 探测目的地址，也不能默默
+收窄地址族。具体操作范围仍由已获准的固定 source/unit/文件迁移限定。
+
+首次真实声明惰性建立 schema7 屏障，保留 pins/reserves/已有账户。普通写操作
+被阻塞，仅本次内部 launcher 的能力可为指定默认模型申请/转换租约；租约写入
+与 bootstrap 关联原子完成，完整预算先保留。启动前记录提交并重验当前单元缺席、
+物理 GPU/RAM、预留期限与目标配置，不能驱逐别的模型。只有实际健康、unit/token/GPU
+匹配和已有 confirm 协议通过，才推进默认账户；随后还须验证新 source 的配置、
+实例及默认 preload/账户状态。未知结果不重发，不制造及时 ACK 或假成功。
+
+source 被有证据地隔离时，公开快照仍保留未知。仅 bootstrap 的受限放置/确认
+可以在新鲜、绑定 manifest 的 source 缺席证明下排除确切的 source 连接拒绝错误，
+其余探针错误、活动未知及资源保护不变，不注入零在途或连续 quiet 证明。
+观察恢复不启动未提交动作；显式 resume 只继续尚未提交的阶段或同一真实预留。
+未知启动保持预算；启动提交后不为回滚硬停默认模型。启动前的文件回滚须先证明
+本次预留资源缺席，不启动无租约旧 preload，也不恢复旧账本。旧读取器须拒绝新
+屏障格式，不能删除记录或修改版本号来降级。入口/状态细节见
+[BOOTSTRAP.md](../llmsvc/BOOTSTRAP.md)。
+
 ## 4. 状态机与规则
 
 模型三态：

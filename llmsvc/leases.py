@@ -112,8 +112,16 @@ class PlacementController:
             raise LeaseError(405, "operation_not_enabled")
         if self.scheduler.store is None or self.scheduler.store.read_only:
             raise LeaseError(503, "intent_store_unavailable")
+        if self.scheduler.store.bootstrap_pending():
+            bootstrap = getattr(self.scheduler, "bootstrap", None)
+            if (not self.scheduler.store.bootstrap_authorized() or bootstrap is None
+                    or not bootstrap.busy or bootstrap.clock() >= bootstrap.deadline):
+                raise LeaseError(503, "bootstrap_reconciliation_required")
 
     def _fresh(self, snapshot):
+        bootstrap = getattr(self.scheduler, "bootstrap", None)
+        if bootstrap is not None and self.scheduler.store.bootstrap_authorized():
+            snapshot = bootstrap.policy_snapshot(snapshot)
         value = snapshot.sampled_at
         return (isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
                 and 0 <= self.scheduler.clock() - value <= self.scheduler.config.max_snapshot_age_seconds
@@ -143,6 +151,9 @@ class PlacementController:
                           is_default=metadata.get("is_default") is True)
 
     def _decision(self, snapshot, request, *, waiting):
+        bootstrap = getattr(self.scheduler, "bootstrap", None)
+        if bootstrap is not None and self.scheduler.store.bootstrap_authorized():
+            snapshot = bootstrap.policy_snapshot(snapshot)
         from llmsvc.actions import ActionDispatchError
         try:
             getattr(self.transport, "check_catalog", lambda: None)()
@@ -208,6 +219,9 @@ class PlacementController:
                             if recovery_claim is not None else {})
         decision = plan_placement(protected, request, waiting=waiting, exclusions=guarded, **recovery_options)
         blockers = decision.blocked_by
+        if (self.scheduler.store is not None and self.scheduler.store.bootstrap_pending() and self.scheduler.store.bootstrap_authorized()
+                and any(action.kind != "place" for action in decision.actions)):
+            return None, blockers + (Blocker(request.name, "bootstrap_eviction_forbidden", decision.gpu),)
         if any(action.kind != "place" for action in decision.actions) and not enabled:
             return None, blockers + (Blocker(request.name, "eviction_required", decision.gpu),)
         return decision, blockers

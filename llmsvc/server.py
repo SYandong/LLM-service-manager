@@ -204,18 +204,20 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 if payload != {}:
                     raise ValueError("lease transition accepts an empty body")
                 payload = {"lease_id": lease_id}
-            if operation == "registry":
-                result = self.server.scheduler.registry_request(self.command, registry_path, payload, dry_run=dry_run)
-            elif operation in ("reserve", "unreserve"):
-                result = self.server.scheduler.run_reserve(operation, payload, source_ip=self.client_address[0], dry_run=dry_run)
-            elif dry_run:
-                result = self.server.scheduler.preview(operation, payload)
-            elif operation in ("place", "confirm", "release"):
-                result = self.server.scheduler.run_placement(operation, payload)
-            elif operation in ("free", "wake"):
-                result = self.server.scheduler.run_model_action(operation, payload, source_ip=self.client_address[0])
-            else:
-                result = self.server.scheduler.write_pin(operation, payload, source_ip=self.client_address[0])
+            with self.server.scheduler.bootstrap_http_scope(operation, payload,
+                    self.headers.get("X-LLMSVC-Bootstrap"), self.client_address[0], dry_run=dry_run):
+                if operation == "registry":
+                    result = self.server.scheduler.registry_request(self.command, registry_path, payload, dry_run=dry_run)
+                elif operation in ("reserve", "unreserve"):
+                    result = self.server.scheduler.run_reserve(operation, payload, source_ip=self.client_address[0], dry_run=dry_run)
+                elif dry_run:
+                    result = self.server.scheduler.preview(operation, payload)
+                elif operation in ("place", "confirm", "release"):
+                    result = self.server.scheduler.run_placement(operation, payload)
+                elif operation in ("free", "wake"):
+                    result = self.server.scheduler.run_model_action(operation, payload, source_ip=self.client_address[0])
+                else:
+                    result = self.server.scheduler.write_pin(operation, payload, source_ip=self.client_address[0])
             self._json(200, result)
         except IntentWriteError as exc:
             error = {"error": exc.error}
