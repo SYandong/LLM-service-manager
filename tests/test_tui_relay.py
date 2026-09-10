@@ -156,10 +156,12 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
             # RichLog now wraps at the actual panel width; whitespace at line
             # boundaries is presentation, while every provenance phrase remains.
             log_text = " ".join(" ".join(line.text for line in app.dashboard.query_one("#events", RichLog).lines).split())
-            assert "[llama-swap]" in log_text and "[scheduler]" in log_text
-            assert "unlisted_model" in log_text and "intentional filtering" in log_text
+            assert "[data-plane]" in log_text and "[scheduler]" in log_text
+            details_text = app.event_export_text()
+            assert "[llama-swap]" in details_text
+            assert "unlisted_model" in details_text and "intentional filtering" in details_text
             assert "timeout" in log_text and "invalid_event" in log_text
-            assert "upstream loss unknown" in log_text
+            assert "upstream loss unknown" in details_text
             assert "PRIVATE_MARKER" not in log_text + json.dumps(app.event_history)
             assert "fixture_dispatch_id" not in json.dumps(app.event_history)
             assert "not a daemon stop" in app.format_event(plane).plain
@@ -216,7 +218,8 @@ def test_core_final_source_event_reaches_ui_and_both_readers_close(api, live_bri
             assert not relay.subscription._thread.is_alive()
             assert not scheduler.event_bridge.thread.is_alive()
             assert app.is_running
-            assert "closed" in " ".join(line.text for line in app.dashboard.query_one("#events", RichLog).lines)
+            assert "closed" in str(app.dashboard.query_one("#source-status", Static).render())
+            assert '"status": "closed"' in app.event_export_text()
         assert not app.event_reader.thread.is_alive()
     asyncio.run(scenario())
 

@@ -1,0 +1,181 @@
+{
+  "frames_ms": [
+    [
+      343715.347657191,
+      8.863824012223631
+    ],
+    [
+      343715.351471258,
+      1.9575480255298316
+    ],
+    [
+      343715.352337502,
+      0.29993796488270164
+    ],
+    [
+      343715.352854239,
+      0.005809997674077749
+    ],
+    [
+      343715.384272251,
+      10.360294952988625
+    ],
+    [
+      343715.385358634,
+      1.0149340378120542
+    ],
+    [
+      343715.390172273,
+      1.32356199901551
+    ],
+    [
+      343715.405087549,
+      0.667265965603292
+    ],
+    [
+      343715.79928951,
+      4.014314967207611
+    ],
+    [
+      343715.822386054,
+      1.2605030206032097
+    ],
+    [
+      343716.29004688,
+      0.6804760196246207
+    ],
+    [
+      343716.323510548,
+      1.5101800090633333
+    ],
+    [
+      343716.339982195,
+      1.8890190403908491
+    ],
+    [
+      343718.344133256,
+      0.036838988307863474
+    ],
+    [
+      343718.385379866,
+      0.004089961294084787
+    ],
+    [
+      343718.404326447,
+      0.044109998270869255
+    ],
+    [
+      343718.561145416,
+      27.646225003991276
+    ],
+    [
+      343718.595975256,
+      7.48421298339963
+    ],
+    [
+      343718.5969428,
+      0.9187240502797067
+    ],
+    [
+      343718.605137888,
+      0.7374950218945742
+    ],
+    [
+      343718.622573408,
+      0.672795984428376
+    ],
+    [
+      343718.64121312,
+      1.9302580039948225
+    ],
+    [
+      343718.656760682,
+      1.6672100173309445
+    ],
+    [
+      343718.674164362,
+      1.554699963890016
+    ],
+    [
+      343718.690899216,
+      2.0606579491868615
+    ],
+    [
+      343718.709196851,
+      1.8928780336864293
+    ],
+    [
+      343718.724368385,
+      2.194856002461165
+    ],
+    [
+      343718.740887551,
+      2.1791260223835707
+    ],
+    [
+      343718.758193671,
+      2.5025149807333946
+    ],
+    [
+      343718.773863793,
+      1.9458180177025497
+    ],
+    [
+      343718.789936901,
+      1.7455590423196554
+    ],
+    [
+      343718.809312778,
+      5.427305994089693
+    ]
+  ],
+  "table_clears_after_mount": 0,
+  "selected_at_start": "research-model",
+  "selected_at_end": "research-model",
+  "log_lines": 12,
+  "event_count": 123,
+  "reader_closed": true,
+  "python": "3.10.12",
+  "textual": "8.2.8",
+  "fixture": "synthetic loopback HTTP + real SchedulerClient/EventReader and interactive Textual PTY",
+  "event_storm": true,
+  "details_view_captured": true,
+  "idle_seconds": 2.0001150669995695,
+  "cpu_seconds": 0.009999999999999953,
+  "idle_cpu_one_core_percent": 0.49997123490506185,
+  "cpu_definition": "100% = one logical CPU core; child process user+system / monotonic wall time",
+  "repaint_definition": "one real PTY key write to receipt of the changed Input text in terminal output; excludes terminal emulator/remote network display latency",
+  "key_to_visible_ms": [
+    17.938566976226866,
+    15.523042005952448,
+    17.408740997780114,
+    16.81599300354719,
+    18.32387497415766,
+    15.356743009760976,
+    16.477296012453735,
+    17.317810037638992,
+    15.533392026554793,
+    15.932949027046561
+  ],
+  "idle_frame_count": 2,
+  "idle_frame_max_ms": 1.8890190403908491,
+  "requests": [
+    "/v1/events?since=0",
+    "/v1/state"
+  ],
+  "gpu_or_model_actions": false,
+  "acceptance": {
+    "idle_cpu_lt_2_percent": true,
+    "key_repaint_lt_50ms": true,
+    "no_table_rebuild": true,
+    "selection_preserved": true,
+    "bounded_log": true,
+    "reader_closed": true
+  },
+  "generated_by": "Codex / gpt-6-astra",
+  "runtime_source_sha256": {
+    "tui/app.py": "ffb886911cd5da8ab2d8553187a399bacc13b7f37a911a0c8ce6e5454b03a294",
+    "tui/event_view.py": "7770f4a94ded61a8b41cea0a914996b9a006a17509b6f41cd0e572d732c68c1c"
+  },
+  "scope": "Two-second synthetic UI smoke; not a new60-second idleCPU claim or transport185 validation"
+}
