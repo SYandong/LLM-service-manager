@@ -136,6 +136,8 @@ def test_preflight_is_read_only_and_preserves_unleased_default(site):
     before={str(p):p.read_bytes() for p in site.profile_path.parent.rglob('*') if p.is_file()}
     value=site.adapter.operation('bootstrap_preflight',site.context,time.monotonic()+3)
     assert value['ready'] and value['in_flight']==0 and value['default_preload_preserved']
+    assert value['actors_known'] and value['configuration_confirmed']
+    assert 'external_helpers_confirmed' not in value  # No inherited unmeasured helper claim.
     assert value['legacy_backends_absent'] and not site.root.exists()
     assert before=={str(p):p.read_bytes() for p in site.profile_path.parent.rglob('*') if p.is_file()}
     assert all(call[1]=='show' for call in site.calls)
