@@ -95,10 +95,16 @@ manifest; unresolved or narrowed endpoint mappings are not acceptable.
   unsafe restoration. No ledger is restored and no default is stopped.
 
 Context uses `transaction_id == bootstrap_id`, `manifest_sha256`, `default_model`
-and `default_unit`. `effects[operation]` must contain `submitted: true` and
+and `default_unit`, plus `source_origin`. The origin is canonicalized and checked
+against the pinned source profile before commands; responses return that pinned
+canonical value, never an arbitrary caller echo. `effects[operation]` must contain `submitted: true` and
 `acknowledged: false` before stage, activate or rollback. Activation receives the
 existing confirmed `account` row; rollback additionally requires
-`launch_submitted: false` and `account: null`. `--dry-run` performs no command,
+`launch_submitted: false` and `account: null`. Rollback returns fresh base-config
+hash and legacy-backend absence observations. A retained original source has its
+exact PID/start and fresh zero-in-flight observation; it is not reported absent
+or helper-settled. An absent-source rollback reports those proofs only when
+established. `--dry-run` performs no command,
 lock, file or service mutation. Core's final entrypoint and checkpoint validators
 must bind these fields in the same #201 implementation before deployment.
 

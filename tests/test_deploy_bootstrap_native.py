@@ -119,7 +119,8 @@ def site(tmp_path, monkeypatch):
         return {'accepted':True}
     monkeypatch.setattr(module,'stop_bound_process',stop)
     context={'bootstrap_id':'test','transaction_id':'test','manifest_sha256':profile['manifest_sha256'],
-             'default_model':'m','default_unit':'vllm-m.service','effects':{},'account':None,'launch_submitted':False}
+             'default_model':'m','default_unit':'vllm-m.service','source_origin':source['native_origin'],
+             'effects':{},'account':None,'launch_submitted':False}
     return SimpleNamespace(adapter=adapter,context=context,root=state/'test',rows=rows,calls=calls,
         properties=properties,backend_live=backend_live,snapshot=snapshot_value,proc=proc,group=group,
         manifest=manifest,manifest_path=manifest_path,profile_path=profile_path,profile=profile)
@@ -194,6 +195,9 @@ def test_partial_file_install_stays_observe_only_until_safe_rollback(site,monkey
     site.context['effects']['bootstrap_rollback']={'submitted':True,'acknowledged':False}
     result=site.adapter.operation('bootstrap_rollback',site.context,time.monotonic()+2)
     assert result['rolled_back'] and not result['old_source_restarted'] and not result['ledger_restored']
+    assert result['source_absent'] and result['helpers_settled'] and result['legacy_backends_absent']
+    assert result['identity'] is None and result['in_flight'] is None
+    assert result['source_config_sha256']==site.rows['native_config']['before']['sha256']
     assert site.adapter._files_match('before')
 
 
@@ -332,6 +336,10 @@ def test_before_stop_failure_can_restore_fragment_without_restarting_source(site
     result=site.adapter.operation('bootstrap_rollback',site.context,time.monotonic()+2)
     assert result['original_source_retained'] and not result['old_source_restarted']
     assert not result['source_absent'] and site.properties['MainPID']=='42'
+    assert result['identity']['pid']==42 and result['identity']['start_ticks']=='123'
+    assert result['in_flight']==0 and result['legacy_backends_absent']
+    assert not result['helpers_settled']
+    assert result['source_config_sha256']==site.rows['native_config']['before']['sha256']
     assert site.adapter._files_match('before')
     assert not any(c[1] in ('start','stop') for c in site.calls)
 
@@ -441,3 +449,19 @@ def test_confirmed_backend_without_ready_native_default_does_not_finish_activati
     shutil.rmtree(site.proc/'44');write(site.group/'cgroup.procs','43\n')
     with pytest.raises(ExecutorError,match='default_native_not_ready'):
         site.adapter.operation('bootstrap_observe',site.context,time.monotonic()+2)
+
+
+@pytest.mark.parametrize('origin',[None,'http://127.0.0.1:1','http://localhost:54321',
+                                  'http://127.0.0.1:54321/path','http://u:p@127.0.0.1:54321'])
+def test_source_origin_is_pinned_before_any_commands(site,origin):
+    site.context['source_origin']=origin
+    with pytest.raises(ExecutorError,match='source_origin'):
+        site.adapter.operation('bootstrap_preflight',site.context,time.monotonic()+2)
+    assert not site.calls and not site.root.exists()
+
+
+def test_source_origin_is_returned_canonically_not_echoed(site):
+    site.context['source_origin']='http://127.0.0.1:54321/'
+    value=site.adapter.operation('bootstrap_preflight',site.context,time.monotonic()+2)
+    assert value['source_origin']=='http://127.0.0.1:54321'
+    assert value['source_origin']!=site.context['source_origin']

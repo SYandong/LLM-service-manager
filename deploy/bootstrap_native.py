@@ -139,6 +139,7 @@ class BootstrapAdapter:
         if runner is not None: options['runner'] = runner
         self.options = options
         self.source = ScopeInspector(source, **options)
+        self.source_origin = self._canonical_origin(source['native_origin'])
         self.runner = self.source.runner
         self.command = self.source.command
         self._validate_inputs()
@@ -202,6 +203,14 @@ class BootstrapAdapter:
         if file_bytes(self.rows['attempt_environment']['source']) != b'':
             raise ExecutorError('bootstrap_attempt_environment_must_start_empty')
 
+    @staticmethod
+    def _canonical_origin(value):
+        from llmsvc.reload_witness import NativeGenerationReader
+        try:
+            return NativeGenerationReader(value).endpoint[:-len('/api/mcp')]
+        except (TypeError, ValueError) as exc:
+            raise ExecutorError('bootstrap_source_origin_invalid') from exc
+
     def _context(self, context):
         value = identifier(context['bootstrap_id'])
         if value in ('.','..'):raise ExecutorError('bootstrap_identifier_path_component')
@@ -212,6 +221,8 @@ class BootstrapAdapter:
             raise ExecutorError('bootstrap_manifest_changed')
         if checksum(file_bytes(self.profile_path, 65536)) != self.dispatch_hash:
             raise ExecutorError('bootstrap_dispatch_profile_changed')
+        if self._canonical_origin(context.get('source_origin')) != self.source_origin:
+            raise ExecutorError('bootstrap_source_origin_mismatch')
         self._environment_guard()
         root=self.state/value
         if root.is_symlink():raise ExecutorError('bootstrap_state_directory_symlink')
@@ -317,7 +328,7 @@ class BootstrapAdapter:
 
     def _base(self):
         return {'manifest_sha256': self.manifest_hash, 'default_model': self.default,
-                'default_unit': self.unit, 'observed_at': time.monotonic()}
+                'default_unit': self.unit, 'source_origin': self.source_origin, 'observed_at': time.monotonic()}
 
     def _files_match(self, side, *, ignore_environment=False):
         return all(snapshot(row['target']) == row[side] for kind, row in self.rows.items()
@@ -458,15 +469,22 @@ class BootstrapAdapter:
                 time.sleep(min(.05, max(0, deadline-time.monotonic())))
             raise ExecutorError('bootstrap_activation_unknown_observe_only')
 
-    def _rollback_proof(self, record, context, deadline):
+    def _rollback_observation(self, record, context, deadline):
         if (not record.get('rollback_submitted') or context.get('launch_submitted') is not False
                 or context.get('account') is not None or not self._files_match('before')
                 or not self._legacy_absent(deadline)):
-            return False
-        if self._absent(record,deadline):return True
-        if record['stop_submitted']:return False
+            return None
+        if self._absent(record,deadline):
+            return {'rolled_back':True, 'source_absent':True, 'identity':None,
+                    'original_source_retained':False, 'in_flight':None,
+                    'helpers_settled':record['source_absent_observed']}
+        if record['stop_submitted']:return None
         current=self._capture(deadline)
-        return all(current['identity'][k]==record['preflight']['identity'][k] for k in ('pid','start_ticks'))
+        if not all(current['identity'][k]==record['preflight']['identity'][k] for k in ('pid','start_ticks')):
+            return None
+        return {'rolled_back':True, 'source_absent':False, 'helpers_settled':False,
+                'original_source_retained':True, 'identity':current['identity'],
+                'scope':current['scope'], 'actors':current['actors'], 'in_flight':current['in_flight']}
 
     def _observe(self, root, context, deadline):
         record = self._record(root, context)
@@ -479,7 +497,9 @@ class BootstrapAdapter:
                  'staged': staged and record['source_absent_observed'] and not record['rolled_back'], 'in_flight': None,
                  'legacy_backends_absent': self._legacy_absent(deadline),
                  'active_ready': False, 'default_confirmed': False,
-                 'rolled_back': self._rollback_proof(record,context,deadline)}
+                 'rolled_back':False, 'original_source_retained':False}
+        rollback=self._rollback_observation(record,context,deadline)
+        if rollback is not None:value.update(rollback)
         for kind, key in [('launcher', 'launcher_sha256'), ('launcher_config', 'launcher_config_sha256'),
                           ('native_config', 'source_config_sha256')]:
             actual = snapshot(self.rows[kind]['target'])
@@ -557,8 +577,11 @@ class BootstrapAdapter:
                 if any(restored['identity'][k] != record['preflight']['identity'][k] for k in ('pid','start_ticks')):
                     raise ExecutorError('bootstrap_rollback_original_instance_changed')
             private_update(root/'record.json', record, {'rolled_back': True})
-            return {**self._base(), 'rolled_back': True, 'source_absent': absent,
-                    'original_source_retained': not absent, 'old_source_restarted': False, 'ledger_restored': False}
+            observed=self._observe(root,context,deadline)
+            if (not observed['rolled_back'] or not observed['legacy_backends_absent']
+                    or observed['source_config_sha256']!=self.rows['native_config']['before']['sha256']):
+                raise ExecutorError('bootstrap_rollback_final_observation_changed')
+            return {**observed, 'old_source_restarted':False, 'ledger_restored':False}
 
     def operation(self, operation, context, deadline, dry_run=False):
         root = self._context(context)
