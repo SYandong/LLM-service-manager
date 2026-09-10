@@ -4,7 +4,7 @@ llama-swap 之上的多 GPU 控制面：查看模型与用量、请求释放/唤
 pin 与 GPU reserve，并提供可选终端面板。llama-swap 和 vllm-wrapper
 负责推理路由、排队及后端 sleep/wake；scheduler 负责资源记账、保护和调度。
 
-当前文档面向 [v0.1.0-alpha.9 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.9)。
+当前文档面向 [v0.1.0-alpha.10 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.10)。
 发布功能不等于所在部署已启用它们：scheduler 默认只读，模型动作、放置、
 自动策略、故障恢复及 sleeping recovery 各有独立开关。实现与现场验收进度见 [ROADMAP](docs/ROADMAP.md)。
 
@@ -57,7 +57,7 @@ PYREQUEST
 
 ## 用户：CLI、状态与可选 TUI
 
-从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.9)
+从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.10)
 下载 `llm` 和 `SHA256SUMS`，核对对应 SHA-256 后，将脚本放在当前目录：
 
 ```sh
@@ -90,7 +90,7 @@ RAM   llmsvc 86/200 GiB budget  host available 823 GiB
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install './llmsvc-0.1.0a9-py3-none-any.whl[tui]'
+.venv/bin/python -m pip install './llmsvc-0.1.0a10-py3-none-any.whl[tui]'
 .venv/bin/llm
 ```
 
@@ -132,9 +132,14 @@ free/reserve 默认客户端等待 150 秒，wake 为 930 秒，可用 `--wait` 
 它不唤醒模型，丢失响应时不自动重试。配置过 registry 的 scheduler 还支持
 `models`（临时登记记录及配置 inventory）、`registry`（只读队列/恢复状态）以及 `add PATH --name NAME --base BASE --dry-run` /
 `rm NAME --dry-run`。PATH 必须位于服务可读且允许的共享目录；预览不登记模型、
-不预留端口，合法编辑仍可能因全局条件而不可提交。实际 add/rm 写入仍返回 405，
-`registry` 只读展示已知 job 与恢复状态，未知值保持 null；它不启动 worker、
+不预留端口，合法编辑仍可能因全局条件而不可提交。默认入口不配置完整可信
+目录提交能力，实际 add/rm 仍返回 405；明确接入全部能力后返回 queued 也不等于
+已经采用配置。`registry` 只读展示已知 job 与恢复状态，未知值保持 null；它不启动 worker、
 提交证明、reconcile 或清除 fence。inventory 与预览计划不证明运行时已经采纳配置。
+
+活动读取失败会显示 partial update 及脱敏原因；失败计数保持未知，成功读取
+但来源未知不等于没有请求。SSE 静默不再按连接超时反复重连，但也不证明源健康
+或连续安静。查看全局阻塞原因，不能将队列已清除理解为 catalog 已完成。
 
 ## 管理员：架构、部署与回滚
 
@@ -142,6 +147,8 @@ alpha.8 提供默认关闭的 [sleeping recovery 执行器](llmsvc/RECOVERY.md)�
 首次实际普通恢复 claim 会原子升级状态库到 schema v4；旧 schema-v3 版本拒绝
 该库。不要删除 claim 或覆盖旧备份来强行降级。发布和安装不授权启用该执行器，
 运维边界与回滚要求见 [操作手册](docs/OPERATIONS.md)。
+受控 [catalog 提交](llmsvc/CATALOG.md) 的首次实际 claim 则使用 schema5；
+只读升级不触发该迁移，也不自动挂载可信 proof 或启用登记写入。
 
 ```mermaid
 flowchart LR
