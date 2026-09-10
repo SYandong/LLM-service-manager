@@ -146,3 +146,104 @@ def test_actual_core_and_native_adapter_complete_real_default_account(combined):
     assert record['migration']['activated']['default_binding']['lease_id']==lease.lease_id
     assert c.native._files_match('after',ignore_environment=True)
     assert not c.store.bootstrap_pending()
+
+
+@pytest.mark.parametrize('mode', ['resume', 'rollback'])
+def test_actual_native_prestart_reconstruction_preserves_or_releases_real_lease(combined, monkeypatch, mode):
+    """Reopen SQLite and reconstruct the core owner; never replay native stage."""
+    from llmsvc.bootstrap import BootstrapError
+
+    c = combined
+    save = c.c._save
+    def interrupt_before_start(record, **changes):
+        if changes.get('stage') == 'start_submitted':
+            raise OSError('fixture durable interruption before default start')
+        return save(record, **changes)
+    monkeypatch.setattr(c.c, '_save', interrupt_before_start)
+    with pytest.raises(BootstrapError):
+        c.c.run()
+    old_record = c.store.bootstrap_checkpoint()
+    lease_id = old_record['lease_id']
+    assert old_record['stage'] == 'placed' and 'launch' not in old_record['effects']
+    assert c.world['unit'] is None and c.store.lease(lease_id)[0].budget_gb == 40
+    monkeypatch.setattr(c.c, '_save', save)
+    backend = c.c.backend
+    reopened = IntentStore(c.s.config.state_db_path, action_lock=c.s.action_lock)
+    original = c.s.store
+    try:
+        c.s.store = reopened
+        BootstrapController.__init__(c.c, c.s, backend=backend)
+        assert reopened.bootstrap_checkpoint() == old_record
+        result = c.c.recover(mode)
+        record = reopened.bootstrap_checkpoint()
+        assert record['id'] == old_record['id'] and record['lease_id'] == lease_id
+        assert record['token_sha256'] != old_record['token_sha256']
+        assert len(reopened.leases(include_released=True)) == 1
+        lease = reopened.lease(lease_id)[0]
+        assert not reopened.bootstrap_pending()
+        if mode == 'resume':
+            assert result['stage'] == 'complete'
+            assert lease.status == 'confirmed' and lease.budget_gb == 40
+            assert c.world['calls'].count('systemd-run') == 1
+            assert c.native._files_match('after', ignore_environment=True)
+        else:
+            assert result['stage'] == 'aborted' and lease.status == 'released'
+            assert c.world['unit'] is None and 'systemd-run' not in c.world['calls']
+            assert c.native._files_match('before', ignore_environment=True)
+            proof = record['migration']['rolled_back']
+            assert proof['source_absent'] is True and proof['helpers_settled'] is True
+            assert proof['old_source_restarted'] is False and proof['ledger_restored'] is False
+    finally:
+        c.s.store = original
+        reopened.close()
+
+
+def test_actual_native_lost_activation_reply_observes_without_resending(combined, monkeypatch):
+    c = combined
+    request = c.c.backend.request
+    submitted = []
+    def lost_reply(operation, context, *, deadline):
+        submitted.append(operation)
+        result = request(operation, context, deadline=deadline)
+        if operation == 'bootstrap_activate':
+            raise OSError('fixture activation response lost after actual adapter completed')
+        return result
+    monkeypatch.setattr(c.c.backend, 'request', lost_reply)
+    with pytest.raises(OSError, match='response lost'):
+        c.c.run()
+    before = c.store.bootstrap_checkpoint()
+    assert before['effects']['activate'] == 'submitted'
+    assert c.store.lease(before['lease_id'])[0].status == 'confirmed'
+    assert c.c.recover('observe')['stage'] == 'complete'
+    after = c.store.bootstrap_checkpoint()
+    assert after['effects']['activate'] == 'submitted'  # Observation cannot invent a timely ACK.
+    assert after['lease_id'] == before['lease_id']
+    assert submitted.count('bootstrap_activate') == 1
+    assert c.world['calls'].count('systemd-run') == 1
+    assert not c.store.bootstrap_pending()
+
+
+def test_actual_native_before_stop_rollback_retains_exact_original_source(combined, monkeypatch):
+    c = combined
+    capture = c.native._capture
+    def reject_changed_fragment(deadline, *, staged_fragment=False):
+        if staged_fragment:
+            raise ExecutorError('fixture rejects staged fragment before stop submission')
+        return capture(deadline)
+    monkeypatch.setattr(c.native, '_capture', reject_changed_fragment)
+    with pytest.raises(ExecutorError, match='before stop submission'):
+        c.c.run()
+    record = c.store.bootstrap_checkpoint()
+    assert record['effects'] == {'stage': 'submitted'}
+    assert c.store.leases() == () and c.world['unit'] is None
+    monkeypatch.setattr(c.native, '_capture', capture)
+    assert c.c.recover('rollback')['stage'] == 'aborted'
+    proof = c.store.bootstrap_checkpoint()['migration']['rolled_back']
+    original = record['migration']['preflight']['identity']
+    assert proof['original_source_retained'] is True and proof['source_absent'] is False
+    assert proof['helpers_settled'] is False and proof['in_flight'] == 0
+    assert (proof['identity']['pid'], proof['identity']['start_ticks']) == (original['pid'], original['start_ticks'])
+    assert proof['old_source_restarted'] is False and proof['ledger_restored'] is False
+    assert c.native._files_match('before', ignore_environment=True)
+    assert c.store.leases() == () and not c.store.bootstrap_pending()
+    assert 'systemd-run' not in c.world['calls']
