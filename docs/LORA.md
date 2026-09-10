@@ -244,6 +244,24 @@ ticks、候选 SHA256）与前后 `BindingObservation`：观测须覆盖本次�
 core 后续须在独立集成中提供可靠的前后观测及收尾证据。测试使用 fake HTTP 和
 #91 已提交的原生响应，不重复长实验。
 
+### 显式固定 query 方言（#170）
+
+reader 与 `parse_generation(..., dialect=...)` 的默认值仍为 `"v252-path"`，
+请求 `path: "macros.llmsvc_reload_generation"`，沿用 #91 严格响应前缀。
+显式 `"8fa85899-query"` 仅对应 `QUERY_PINNED_COMMIT` 指定的
+[`8fa85899` 源码](https://github.com/mostlygeek/llama-swap/blob/8fa85899e424d47b81fa60aff08b238a793e2e2b/internal/config/mcpprovider.go#L220)，
+请求 `query: ".macros.llmsvc_reload_generation"` 并要求该版本完整的 jq
+标量文本前缀。未知方言在构造时拒绝；不同方言的响应不能互相接受，没有
+自动探测、降级或重试。RPC/tool 错误即便 HTTP 200 也失败，null、缺失、
+多值、附加文本、截断或超限响应均不能成为有效 generation。
+
+选择方言只决定协议，不能证明执行文件或服务身份。实际调用方必须把选择
+绑定到已验证的 source/executable 与当前实例，继续用前后观测核对摘要、
+PID/start ticks 和 deadline。reader 不接受任意 query，且不会替调用方
+生成身份、采用或结清证明。query 测试响应由该固定源码推导并经 fake HTTP
+传输；它不是已执行的 native 或部署回执。最终兼容集成还需实际选定源绑定
+及维护路径测试；这里不宣称现场切换、可靠 quiet 或旧资源结清已完成。
+
 ### 离线 generation 候选规划（#20 / #60）
 
 `plan_generation_candidate(original, expected_sha256=..., generation=...,
