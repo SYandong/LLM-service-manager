@@ -18,6 +18,9 @@ import subprocess
 import sys
 import time
 
+if __package__ in (None, ''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 MAX_REQUEST = 4 * 1024 * 1024
 MAX_RESPONSE = 65536
 PROPERTIES = ('Id', 'LoadState', 'ActiveState', 'SubState', 'MainPID',
@@ -258,7 +261,9 @@ class ScopeInspector:
                            'scope_sha256': scope_hash})
         second = self.process(pid)
         final_props = self.properties(deadline)
-        if first is None or first != second or final_props != props or pid not in [a['pid'] for a in actors]:
+        if (first is None or second is None or first['start_ticks'] != second['start_ticks']
+                or first['state'] in ('Z','X') or second['state'] in ('Z','X')
+                or final_props != props or pid not in [a['pid'] for a in actors]):
             raise ExecutorError('instance_changed_during_inspection')
         return {'observed_at': time.monotonic(),
                 'identity': {'pid': pid, 'start_ticks': first['start_ticks'],
@@ -363,7 +368,9 @@ def handle(envelope, operation, inspector, *, dry_run=False, clock=time.monotoni
         raise ExecutorError('invalid_context_or_deadline')
     deadline = clock()+seconds
     result = {'request_id': request_id, 'transaction_id': context.get('transaction_id')}
-    if operation == 'validate':
+    if hasattr(inspector, 'operation'):
+        result.update(inspector.operation(operation, context, deadline, dry_run=dry_run))
+    elif operation == 'validate':
         result.update(inspector.validate(context.get('candidate_path'), context.get('candidate_sha256'),
                                         deadline, dry_run=dry_run))
     elif operation in ('inspect', 'preflight', 'observe_candidate', 'observe_base'):
@@ -402,14 +409,22 @@ def main(argv=None):
         if profile_path.stat().st_size > MAX_RESPONSE:
             raise ExecutorError('profile_size_limit')
         profile = json.loads(profile_path.read_text())
-        result = handle(json.loads(raw), args.operation, ScopeInspector(profile), dry_run=args.dry_run)
+        if profile.get('native_adapter') is True:
+            from deploy.maintenance_native import NativeAdapter, private_json
+            profile = private_json(profile_path)
+            inspector = NativeAdapter(profile, profile_path)
+        else:
+            inspector = ScopeInspector(profile)
+        result = handle(json.loads(raw), args.operation, inspector, dry_run=args.dry_run)
         print(canonical(result))
         return 0
-    except (ExecutorError, OSError, ValueError, TypeError) as exc:
+    except (ExecutorError, OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
         # No raw config/context or subprocess output in public diagnostics.
         print(canonical({'error':str(exc) if isinstance(exc,ExecutorError) else 'invalid_input_or_observation'}), file=sys.stderr)
         return 1
 
 
 if __name__ == '__main__':
+    # Native mode imports this module; preserve one error/class identity for CLI.
+    sys.modules['deploy.maintenance_executor'] = sys.modules[__name__]
     raise SystemExit(main())

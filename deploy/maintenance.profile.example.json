@@ -1,0 +1,29 @@
+{
+  "generated_by": "Codex / gpt-6-astra",
+  "native_adapter": true,
+  "unit": "llama-swap.service",
+  "fragment_path": "/etc/systemd/system/llama-swap.service",
+  "fragment_sha256": "REPLACE_WITH_VERIFIED_FRAGMENT_SHA256",
+  "systemctl": "/usr/bin/systemctl",
+  "systemd_run": "/usr/bin/systemd-run",
+  "native_binary": "/opt/llama-swap/llama-swap",
+  "native_binary_sha256": "REPLACE_WITH_VERIFIED_BINARY_SHA256",
+  "native_config_path": "/etc/llama-swap/config.yaml",
+  "native_config_dir": "/etc/llama-swap",
+  "native_origin": "http://127.0.0.1:8000",
+  "listen_host": "127.0.0.1",
+  "listen_port": 8000,
+  "state_dir": "/var/lib/llmsvc-native-maintenance",
+  "launch_environment_file": "/var/lib/llmsvc-native-maintenance/launch.env",
+  "helper_python": "/opt/approved-runtime/bin/python",
+  "helper_program_sha256": "REPLACE_WITH_VERIFIED_MAINTENANCE_NATIVE_PY_SHA256",
+  "helper_timeout_seconds": 120,
+  "source_auxiliaries": [],
+  "models": {
+    "example-model": {
+      "unit": "vllm-example-model.service",
+      "backend_origin": "http://127.0.0.1:9001",
+      "process_argv": ["/absolute/selected/python", "/absolute/native/wrapper.py", "<validated-arguments>"]
+    }
+  }
+}
