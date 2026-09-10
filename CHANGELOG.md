@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.1.0-alpha.8 — 2026-09-09
+
+Incremental preview; Python distribution `0.1.0a8`.
+Includes #154, #156, #163, #162 and #164 since the immutable alpha.7 tag.
+
+### Added and corrected
+
+- Read-only registry queue/recovery status is available through scheduler HTTP,
+  standalone CLI and TUI (#154). Existing jobs, process-local progress, restart
+  nulls and recovery blockers are reported without proof submission, worker
+  activation, reconciliation or fence clearing.
+- Model lists expose configuration inventory and add/rm previews expose bounded,
+  whitelisted plans (#156). Planned ports and digests are not reservations or
+  adopted runtime state; unknown observations remain unknown. Model records and
+  inventory now share one captured config read (#162), preventing mixed-generation
+  responses during an external replacement.
+- Protected sleeping recovery is implemented behind an independent default-off
+  opt-in (#164). Known-unused sleepers may retire; recent-use sleepers relocate
+  only after a feasible different-GPU and cold-RAM preflight using real profile
+  floors and pending start weights. Ordinary default/pin/inflight protections
+  remain. Destination admission is rechecked after probes, and its lease is
+  atomically bound to the durable recovery claim through existing placement.
+- Recovery stop/unload/cold-wake shares one finite budget, at most 900 seconds;
+  placement remains capped at 120 seconds within that budget. Recovery HTTP(S)
+  requires a prepared literal-IP origin, no DNS/proxy/redirect and an absolute
+  socket watchdog. Manual free/wake transport compatibility is unchanged.
+- Relay UI tests now distinguish a later malformed-event error from an earlier
+  timeout by reason and event ID (#163). Deterministic failure/repair coverage
+  preserves both errors and provenance without relaxing production deadlines;
+  the historical timeout cause remains unmeasured.
+
+### Compatibility and limits
+
+No new dependency. The first actual ordinary recovery claim lazily and atomically
+upgrades a v2/v3 ledger to schema v4 while preserving pins, reservations, leases
+and fault records. Default-off/read-only/dry-run does not perform this migration.
+Older schema-v3 binaries reject v4; do not delete claims, change the schema number
+or restore a stale ledger to force binary rollback.
+
+Submitted but unacknowledged or ambiguous recovery operations remain durably
+fenced across restart/disable. Restart may reconcile proven observations but
+never replays old stop/unload/wake effects. A successful HTTP response alone is
+not settlement or confirmed destination readiness. Callback and storage stalls
+are not made preemptible by the network deadline. See `llmsvc/RECOVERY.md` and
+`docs/OPERATIONS.md` before planning any separately authorized activation.
+
+Actual registry writes remain disabled (405). Read-only inventory/planning does
+not install a runtime model catalog or prove quiet, native adoption or independent
+old-resource settlement. No production routing, source upgrade, TTL/reaper,
+model action, observer or legacy retirement is performed by this release.
+Live recovery latency and long-term stability/calibration are **NOT MEASURED**;
+bounded offline/loopback tests are not production acceptance.
+
 ## 0.1.0-alpha.7 — 2026-09-09
 
 Incremental preview; Python distribution `0.1.0a7`.
