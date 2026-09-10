@@ -322,7 +322,10 @@ class CatalogRuntime:
                     self._check_reactivation(manifest, during_claim=owned)
                 except ReloadError:
                     return [{"reason": "catalog_reactivation_blocked"}]
-                return list(precheck()) if precheck is not None else []
+                try:
+                    return list(precheck()) if precheck is not None else []
+                except ReloadError:
+                    return [{"reason": "catalog_removal_protected"}]
             def transform(raw):
                 if digest(raw) != prepared.base_sha256:
                     raise ReloadError("catalog source changed")
