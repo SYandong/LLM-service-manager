@@ -199,9 +199,29 @@ LLM_URL=http://scheduler:8011 python cli/llm
 - 实际 `free --ram` 先弹出二次确认，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。Free/wake 完成后立即刷新，部分结果与错误仍保留；后台执行期间 UI 与事件面板继续响应。
 - Reserve 的预览、只读拒绝与实际回执语义见上节；模型实际写入尚未开放；可使用 models/add/rm 的安全列表和预览。不能用本客户端命令启用生产调度。
 
+### 紧凑界面与真实进度（#168）
+
+深灰配色、暖色资源条和底部一行连接/快捷键替代 Header/Footer。GPU 同时显示
+已用百分比与 GiB；未知量暗显，不用规划值补齐。模型表固定列宽、数值右对齐，
+不变快照不重建，单元格按模型 key 更新。模型增删或源排序变化保留当前有效选择；
+窗口宽度变化才重排列。窄终端上下排列，原有长详情/结果滚动、命令输入与 RAM
+确认行为保留。
+
+等待命令显示目标、实际耗时和可用阶段。`wake` 的新目标事件可显示请求提交、
+放置授予、unit/account 确认、原始 state/swap 观测；标为 `observed`，因为现有事件
+没有 request ID，不能用它完成本次请求。只有 HTTP 回执决定 ready/partial/blocked
+等结果，HTTP 200 本身不是成功。`free` 暂无中间阶段事件，明确显示等待观测释放。
+不会凭耗时生成“loading weights”或进度百分比；配置的 cold-start 秒数如有值只显示
+为估计总时长，剩余 `ETA unknown`，无估计时也不造数。观测/估计不修改服务端期限，
+不触发重试或绕过只读/保护检查。
+
+实现依据 [Textual DataTable 的稳定 key 与 update_cell](https://textual.textualize.io/widgets/data_table/#updating-data)、
+[线程安全消息](https://textual.textualize.io/guide/workers/#posting-messages)，并参考
+[btop 的更新间隔、终端同步输出和跟随选择原则](https://github.com/aristocratos/btop)。
+
 ### Scheduler 与数据面事件流
 
-事件读取在独立线程中进行，界面每 0.1 秒接收已到达的事件。面板标题为 `Events via scheduler`；每行显示 UTC 时间、`[scheduler]` 或 `[llama-swap]` 来源、全局 scheduler 事件 ID 与详情。日志按 scheduler 时间戳/ID 排序并着色，保留最近 200 条；单条可见文本最多 2048 字符，原始字段仍保存在这 200 条本地历史中。连接失败后以 1–30 秒退避重连，携带上次完整接收的 `since` / `Last-Event-ID`，重复事件不会再显示。退出界面会中断活动流并等待读取线程关闭。
+事件读取在独立线程中进行，只在数据/连接变化时通知界面，合并为最多每 0.5 秒更新一次。SSE 注释心跳不进入日志；不变连接状态不重绘。正常事件只追加，明确游标重置或乱序时间戳才重排有界日志。面板标题为 `Events via scheduler`；每行显示 UTC 时间、`[scheduler]` 或 `[llama-swap]` 来源、全局 scheduler 事件 ID 与详情。日志按 scheduler 时间戳/ID 排序并着色，保留最近 200 条；单条可见文本最多 2048 字符，原始字段仍保存在这 200 条本地历史中。连接失败后以 1–30 秒退避重连，携带上次完整接收的 `since` / `Last-Event-ID`，重复事件不会再显示。退出界面会中断活动流并等待读取线程关闭。
 
 当前 daemon 的事件历史有界且仅保存在内存中，游标不跨重启持久化。**确认 daemon 已重启后**按 `Ctrl+R`，仅在本地清空事件历史和游标，从 0 重新订阅。普通网络断线不会自动归零；当前接口没有可用于自动识别重启的实例标识。后端已淘汰的历史不能重建，ID 缺口会提示不可用事件数量；客户端 256 条投递队列超限也会明确提示丢失数量。
 
@@ -222,7 +242,7 @@ CPU loopback 测试验证了两个来源从实际 HTTP、bridge、SSE 到 headle
 ```sh
 python -m pytest -q tests/test_llm.py
 python -m pytest -q tests/test_llm_tui.py tests/test_tui.py
-python -m pytest -q tests/test_llm_events.py tests/test_tui_events.py tests/test_tui_relay.py
+python -m pytest -q tests/test_llm_events.py tests/test_tui_events.py tests/test_tui_relay.py tests/test_tui_incremental.py
 python -m pytest -q tests/test_llm_usage.py tests/test_tui_usage.py
 python -m pytest -q tests/test_llm_pin.py tests/test_tui_pin.py
 python -m pytest -q tests/test_llm_reserve.py tests/test_llm_reserve_http.py tests/test_tui_reserve.py
@@ -237,6 +257,22 @@ python -m pytest -q tests/test_llm_model_details.py tests/test_llm_model_details
 测试使用核心包的状态结构生成 JSON，并在临时 loopback HTTP 服务上验证单文件复制、无 site-packages 的 Python 启动、JSON 保真与窄屏。Python 3.10 可用时直接执行该解释器的复制测试；CI 使用 Python 3.10。客户端测试不访问生产服务或 GPU。
 
 没有安装 Textual 时，headless UI 测试明确跳过；CLI 降级测试仍运行。界面测试使用 Textual 的 [headless Pilot](https://textual.textualize.io/guide/testing/) 检查尺寸、选择、定时刷新、输入与错误恢复。
+
+可用已安装 Textual 的 Python 运行实际 PTY 基准（输出目录必须不存在，防止覆盖旧证据）：
+
+```sh
+python tests/tui_benchmark.py --seconds 60 --output /tmp/llm-tui-measurement
+```
+
+只访问脚本自己创建的 loopback HTTP 服务，不调用模型/GPU。生成 `metrics.json`、
+`screen.svg`、`session.cast` 与 `terminal.raw`。CPU 为子进程 user+system 时间 / 墙钟时间，
+100% 表示一个逻辑核；按键延迟测到包含新输入的 PTY 输出，不包含远程网络和终端绘制。
+逐帧 compositor 耗时保留原始样本；记录清表计数、选择、日志边界和读取线程退出。
+完整 60 秒窗口与两秒调试窗口分别标注，截图使用合成配置，不能当作线上资源证据。
+
+#168 的[实际截图、PTY 录制和逐帧指标](../tests/test_tui_artifacts/168/README.md)记录了
+Python 3.10.12 / Textual 8.2.8 下 60 秒单核 CPU 0.23%、按键输出重绘14.9–28.2ms、
+稳态清表0次。40×24仅作两秒窄屏检查；视觉确认与部署验收分别记录。
 
 SSE 解码按 [事件流格式](https://html.spec.whatwg.org/dev/server-sent-events.html#the-event-stream-format) 处理 UTF-8、BOM、注释、换行和空行提交，并按 scheduler 契约要求每个事件带匹配的数字 ID 与 JSON 记录。单行和单帧上限分别为 64 KiB、256 KiB；不完整尾帧不会提交游标。loopback 测试覆盖重连、明确重启后归零与退出清理。
 
