@@ -3,7 +3,7 @@
 ## 0.1.0-alpha.10 — 2026-09-10
 
 Urgent user-facing repairs; Python distribution `0.1.0a10`.
-Includes #175, #182, #183, #187 and #186 since the immutable alpha.9 tag.
+Includes #175, #182, #183, #187, #186 and #190 since the immutable alpha.9 tag.
 
 ### Added and corrected
 
@@ -15,6 +15,13 @@ Includes #175, #182, #183, #187 and #186 since the immutable alpha.9 tag.
   reads. Silence is not liveness or continuous-quiet evidence. Root's real HTTP
   tests and a bounded source comparison distinguish the fixed behavior from
   the previous idle reconnects without performing a model action.
+- Event presentation now uses compact human-readable changes and stable counters,
+  coalescing repeated snapshots/errors without losing the bounded raw history
+  (#190). Details provides a frozen selectable view; user-triggered Copy requests
+  terminal clipboard access and Save text exports full UTF-8 text to a new file.
+  Default copy uses a compact summary when no selection exists, oversized
+  selections get an explicit fallback, and existing files/symlinks are not
+  overwritten. Clipboard delivery to a remote desktop is not falsely confirmed.
 - Activity failures now report fixed redacted reasons for deadline, locked/schema,
   parse and other read failures (#186). The collector distinguishes parent-round
   expiry from an unfinished prior probe; SQLite budget cancellation cannot be
@@ -59,8 +66,9 @@ contract. Ops uses the single reversible read-only puller and checks the actual
 installed version before the bounded postdeployment observation. Future unattended
 M2 changes still require approval; this publication changes no model routing,
 TTL/reaper or fixed CLI binds. Missing native origin/mapping may still yield
-unknown container attribution (#170). New copy/export and additional #168
-presentation changes are not included until their own reviewed delivery.
+unknown container attribution (#170). Copy depends on terminal clipboard support;
+Save text is the portable fallback. User-visible copy/export availability is
+checked on the installed release, not inferred merely from a merged PR.
 
 Live post-fix behavior is measured separately from candidate tests. Long-term
 stability/calibration remains **NOT MEASURED**; no hour/day/week waiting claim or
