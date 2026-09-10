@@ -96,12 +96,15 @@ class PlacementController:
         finally:
             self.scheduler.action_lock.release()
 
-    def _enabled(self):
+    def _catalog_current(self):
         from llmsvc.actions import ActionDispatchError
         try:
             getattr(self.transport, "check_catalog", lambda: None)()
         except ActionDispatchError as exc:
             raise LeaseError(503, exc.reason) from exc
+
+    def _enabled(self):
+        self._catalog_current()
         config = self.scheduler.config
         if config.read_only:
             raise LeaseError(405, "read_only")
@@ -419,6 +422,7 @@ class PlacementController:
                 and models[0].unit == unit and models[0].unit_active is False and models[0].state == "stopped")
 
     def _transition(self, lease, status):
+        self._catalog_current()
         self.scheduler.store.transition_lease(lease.lease_id, status)
         self.scheduler.emit("lease_" + status, model=lease.model,
                             detail={"lease_id": lease.lease_id, "status": status, "dry_run": False})
@@ -430,6 +434,7 @@ class PlacementController:
         deadline = self.monotonic() + self.scheduler.config.request_timeout_seconds
         self.scheduler.sample_once()
         with self._locked(deadline, timeout_status=503):
+            self._enabled()
             row = self.scheduler.store.lease(lease_id)
             if row is None:
                 raise LeaseError(404, "unknown_lease")

@@ -3,9 +3,7 @@
 `CatalogRuntime` connects the existing reload queue to configured collectors,
 managed transports, placement, automation and event filtering. It grants no
 admission from discovery, a registry record, a pin or an observed generation.
-The unchanged HTTP registry write paths still fail closed until a trusted reload
-execution source is wired; this internal lifecycle is exercised by real temporary
-queue/HTTP/store fixtures.
+The HTTP registry write paths fail closed until a trusted reload execution source and profile/instance providers are wired. Once explicitly connected, the existing add/rm payloads return existing queued job receipts and one scheduler worker drives them; no second llm command is introduced. This lifecycle is exercised by real temporary queue/HTTP/store/copied-CLI fixtures.
 
 `catalog_enabled` is a separate strict boolean, default false. Actual internal
 `enqueue` / `process_once` / `reconcile` also require non-readonly operation, a
@@ -23,7 +21,7 @@ retained for observation and lease reconciliation, while active admission and
 normal transport paths exclude that name. Removed pinned/default names block.
 Global collector/source settings are unchanged by this transaction.
 
-`enqueue` composes existing queue validation/quiet/adoption and optional cleanup.
+`submit_change` connects the existing registry callback, composing its pure model edit with the existing generation planner, explicit trusted profiles and instance. `enqueue` preserves registry descriptions, late prechecks and cleanup as well as catalog membership protection.
 `process_once` claims before config effects, verifies the exact candidate, source
 instance, original marker/job and complete adoption/settlement/cleanup evidence,
 then publishes collector, transport, admission and event generation under the
@@ -46,7 +44,7 @@ v2-v4 pins, reserves, leases, ordinary recovery claims and fault claims. One
 bounded JSON checkpoint in `llmsvc_catalog` records transaction/job IDs, old/new
 epochs and manifests, base/candidate hashes, CandidateBinding and the original
 marker bytes/digest. Phases are `claimed`, `published`, `released`, `aborted`.
-Only a provably uncommitted transaction can abort; published-but-unreleased
+An uncommitted abort retains the previous released checkpoint (one bounded backup, not an unbounded history); static first-transaction aborts keep normal restart behavior. Only a provably uncommitted transaction can abort; published-but-unreleased
 state remains fenced even after marker unlink or failed receipt restoration.
 Older readers reject schema 5. Disabling this feature is not a schema downgrade.
 

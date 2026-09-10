@@ -131,14 +131,23 @@ class IntentStore:
             if initial:
                 if record["phase"] != "claimed":
                     raise ValueError("catalog must begin claimed")
+                previous = expected
+                if previous is not None and previous["phase"] == "aborted":
+                    previous = previous["previous"]
+                if previous is not None:
+                    previous = {**previous, "previous": None}
+                if record["previous"] != previous:
+                    raise ValueError("catalog prior checkpoint mismatch")
                 if expected is not None and record["transaction_id"] == expected["transaction_id"]:
                     raise ValueError("catalog transaction id reused")
             else:
-                immutable = set(record)-{"phase", "marker_sha256", "marker_json"}
+                immutable = set(record)-{"phase", "marker_sha256", "marker_json", "previous"}
                 if any(record[k] != expected[k] for k in immutable):
                     raise ValueError("catalog checkpoint identity changed")
                 if expected["marker_sha256"] is not None and record["marker_sha256"] != expected["marker_sha256"]:
                     raise ValueError("catalog marker changed")
+                if record["previous"] != expected["previous"] and not (record["phase"] == "released" and record["previous"] is None):
+                    raise ValueError("catalog prior checkpoint changed")
                 transitions = {"claimed": {"claimed", "published", "aborted"}, "published": {"published", "released"}}
                 if record["phase"] not in transitions.get(expected["phase"], set()):
                     raise ValueError("catalog phase transition rejected")
@@ -159,6 +168,22 @@ class IntentStore:
                 self._db.execute("PRAGMA user_version=5")
             self._has_catalog = self._has_recoveries = self._has_faults = True
             return record
+
+    def restore_catalog_abort(self, expected):
+        """Restore the prior checkpoint only after a durably proven no-effect abort."""
+        with self.action_lock:
+            if (self.catalog_checkpoint() != expected or expected["phase"] != "aborted"
+                    or expected["previous"] is None):
+                raise ValueError("catalog abort checkpoint mismatch")
+            if self.read_only:
+                raise PermissionError("intent store is read-only")
+            from llmsvc.catalog_state import catalog_json
+            with self._db:
+                self._db.execute("BEGIN IMMEDIATE")
+                if self.catalog_checkpoint() != expected:
+                    raise ValueError("catalog abort changed")
+                self._db.execute("UPDATE llmsvc_catalog SET record=? WHERE singleton=1", (catalog_json(expected["previous"]),))
+            return expected["previous"]
 
     @staticmethod
     def _validate_recovery(claim):

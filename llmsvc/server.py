@@ -144,7 +144,8 @@ class SchedulerHandler(BaseHTTPRequestHandler):
             registry_path = None
             if ((self.command == "POST" and target.path == "/v1/models")
                     or (self.command == "DELETE" and target.path.startswith("/v1/models/"))):
-                if not dry_run:
+                catalog = self.server.scheduler.catalog
+                if not dry_run and (catalog is None or not catalog.can_submit()):
                     self._reject_write()
                     return
                 registry_path = "/v1/models" if self.command == "POST" else "/v1/models/" + unquote(target.path[len("/v1/models/"):])
@@ -168,7 +169,7 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                     if target.path.startswith(prefix):
                         operation = op
                         payload[key] = unquote(target.path[len(prefix):])
-            if operation is None or (not dry_run and operation not in ("pin", "unpin", "free", "wake", "place", "confirm", "release", "reserve", "unreserve")):
+            if operation is None or (not dry_run and operation not in ("pin", "unpin", "free", "wake", "place", "confirm", "release", "reserve", "unreserve", "registry")):
                 self._reject_write()
                 return
             if not dry_run and operation in ("free", "wake") and (not self.server.scheduler.config.model_actions_enabled or self.server.scheduler.model_actions is None):
@@ -204,7 +205,7 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                     raise ValueError("lease transition accepts an empty body")
                 payload = {"lease_id": lease_id}
             if operation == "registry":
-                result = self.server.scheduler.registry_request(self.command, registry_path, payload, dry_run=True)
+                result = self.server.scheduler.registry_request(self.command, registry_path, payload, dry_run=dry_run)
             elif operation in ("reserve", "unreserve"):
                 result = self.server.scheduler.run_reserve(operation, payload, source_ip=self.client_address[0], dry_run=dry_run)
             elif dry_run:

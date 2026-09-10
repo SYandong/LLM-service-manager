@@ -140,6 +140,7 @@ class Scheduler:
         self.faults = None
         self.sleeping_recovery = None
         self._fault_thread = None
+        self._catalog_thread = None
         self._usage = usage
         self._collector_closed = False
         # One lock for action/accounting and publication. Slow read-only probes
@@ -459,7 +460,8 @@ class Scheduler:
         snapshot = self.snapshot()
         marker = self.registry.queue.marker
         reconciliation = [{"reason": "registry_reconciliation_required"}] if self.registry.queue.fenced else []
-        return ([{"reason": "registry_writes_disabled"}] + reconciliation + self.registry.queue.quiet.blockers()
+        disabled = [] if self.catalog is not None and self.catalog.can_submit() else [{"reason": "registry_writes_disabled"}]
+        return (disabled + reconciliation + self.registry.queue.quiet.blockers()
                 + reload_blockers(snapshot, self.clock(), self.config.max_snapshot_age_seconds)
                 + [asdict(blocker) for blocker in snapshot.blocked_by])
 
@@ -467,19 +469,29 @@ class Scheduler:
         from llmsvc.registry import RegistryError
         from llmsvc.reload import ReloadError
         if method != "GET" and not dry_run:
-            raise IntentWriteError(405, "read_only" if self.config.read_only else "operation_not_enabled")
+            if self.config.read_only or self.catalog is None or not self.catalog.can_submit():
+                raise IntentWriteError(405, "read_only" if self.config.read_only else "operation_not_enabled")
         if self.registry is None:
             raise IntentWriteError(503, "registry_not_configured")
         try:
             with self.action_lock:
+                writable = self.catalog is not None and self.catalog.can_submit()
+                if method != "GET" and not dry_run:
+                    if self.catalog_fenced or (self.store and self.store.catalog_pending()):
+                        raise IntentWriteError(409, "registry_reconciliation_required")
+                    if self.registry.submit_change != self.catalog.submit_change:
+                        raise IntentWriteError(503, "catalog_not_connected")
+                    result = self.registry.handle(method, path, body, dry_run=False)
+                    json.dumps(result, allow_nan=False)
+                    return result
                 if method == "GET" and path == "/v1/models":
                     inventory = self.registry.inventory(include_records=True)
                     records = inventory.pop("records")
-                    result = {"records": records, "writes_enabled": False,
+                    result = {"records": records, "writes_enabled": writable,
                               "inventory": inventory,
                               "blocked_by": self.registry_blockers()}
                 elif method == "GET" and path == "/v1/registry":
-                    result = {"queue": self.registry.queue_snapshot(), "writes_enabled": False,
+                    result = {"queue": self.registry.queue_snapshot(), "writes_enabled": writable,
                               "blocked_by": self.registry_blockers()}
                 else:
                     if not isinstance(body, dict):
@@ -661,6 +673,15 @@ class Scheduler:
                 LOG.warning(json.dumps({"kind": "fault_error", "error_type": type(exc).__name__}))
             self.stopping.wait(self.config.fault_interval_seconds)
 
+    def _run_catalog(self):
+        while not self.stopping.is_set():
+            try:
+                if self.catalog is not None and self.catalog.can_submit():
+                    self.catalog.process_once()
+            except Exception as exc:
+                LOG.warning(json.dumps({"kind": "catalog_cycle_error", "error_type": type(exc).__name__}))
+            self.stopping.wait(self.config.action_poll_seconds)
+
     def start(self):
         with self.action_lock:
             if self._thread is not None:
@@ -678,6 +699,9 @@ class Scheduler:
             if self.faults is not None and self.faults.enabled():
                 self._fault_thread = threading.Thread(target=self._run_faults, name="llmsvc-faults", daemon=True)
                 self._fault_thread.start()
+            if self.catalog is not None and self.catalog.can_submit():
+                self._catalog_thread = threading.Thread(target=self._run_catalog, name="llmsvc-catalog", daemon=True)
+                self._catalog_thread.start()
         except Exception:
             self.stop()
             raise
@@ -692,6 +716,10 @@ class Scheduler:
         try:
             try:
                 try:
+                    if self._catalog_thread is not None and self._catalog_thread.is_alive():
+                        self._catalog_thread.join(timeout=self.catalog.queue.operation_timeout+self.config.request_timeout_seconds)
+                        if self._catalog_thread.is_alive():
+                            raise RuntimeError("catalog worker did not stop")
                     if self._automation_thread is not None and self._automation_thread.is_alive():
                         budget = self.config.automation_cycle_timeout_seconds
                         if self.sleeping_recovery is not None and self.sleeping_recovery.active:
