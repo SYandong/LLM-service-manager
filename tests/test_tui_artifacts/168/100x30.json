@@ -1,0 +1,167 @@
+{
+  "frames_ms": [
+    [
+      333607.844893268,
+      20.19481296883896
+    ],
+    [
+      333607.848074218,
+      1.680729037616402
+    ],
+    [
+      333607.848743484,
+      0.2614579861983657
+    ],
+    [
+      333607.85250574,
+      0.007269962225109339
+    ],
+    [
+      333607.881327459,
+      8.623215020634234
+    ],
+    [
+      333607.882072125,
+      0.7098459755070508
+    ],
+    [
+      333607.889514598,
+      1.5209700213745236
+    ],
+    [
+      333607.904815652,
+      0.9687939891591668
+    ],
+    [
+      333608.365022511,
+      3.048591024708003
+    ],
+    [
+      333608.387707878,
+      1.0653830249793828
+    ],
+    [
+      333608.822527567,
+      0.6696159834973514
+    ],
+    [
+      333608.854050549,
+      0.39364700205624104
+    ],
+    [
+      333608.871669538,
+      1.2804520083591342
+    ],
+    [
+      333668.836457494,
+      7.548833033069968
+    ],
+    [
+      333668.946433002,
+      1.0421539773233235
+    ],
+    [
+      333668.974880743,
+      3.0637909658253193
+    ],
+    [
+      333668.991050281,
+      2.3014050093479455
+    ],
+    [
+      333669.006774402,
+      2.1326870191842318
+    ],
+    [
+      333669.023675086,
+      2.251486002933234
+    ],
+    [
+      333669.039658665,
+      2.1833059727214277
+    ],
+    [
+      333669.055899373,
+      1.9564380054362118
+    ],
+    [
+      333669.075343081,
+      2.984351012855768
+    ],
+    [
+      333669.090245277,
+      2.249606011901051
+    ],
+    [
+      333669.106559394,
+      2.319165039807558
+    ],
+    [
+      333669.122951211,
+      2.038467035163194
+    ],
+    [
+      333669.143649691,
+      6.5584389958530664
+    ]
+  ],
+  "table_clears_after_mount": 0,
+  "selected_at_start": "research-model",
+  "selected_at_end": "research-model",
+  "log_lines": 4,
+  "event_count": 2,
+  "reader_closed": true,
+  "python": "3.10.12",
+  "textual": "8.2.8",
+  "fixture": "synthetic loopback HTTP + real SchedulerClient/EventReader and interactive Textual PTY",
+  "idle_seconds": 60.00006974401185,
+  "cpu_seconds": 0.14,
+  "idle_cpu_one_core_percent": 0.23333306210693588,
+  "cpu_definition": "100% = one logical CPU core; child process user+system / monotonic wall time",
+  "repaint_definition": "one real PTY key write to receipt of the changed Input text in terminal output; excludes terminal emulator/remote network display latency",
+  "key_to_visible_ms": [
+    28.222393011674285,
+    15.968138992320746,
+    15.634711948223412,
+    17.068642016965896,
+    15.86350001161918,
+    16.191189002711326,
+    19.50370700797066,
+    14.91818600334227,
+    16.241728037130088,
+    16.360706998966634
+  ],
+  "idle_frame_count": 2,
+  "idle_frame_max_ms": 1.2804520083591342,
+  "requests": [
+    "/v1/events?since=0",
+    "/v1/state",
+    "/v1/state",
+    "/v1/state",
+    "/v1/state",
+    "/v1/state",
+    "/v1/state",
+    "/v1/state",
+    "/v1/state",
+    "/v1/state",
+    "/v1/state",
+    "/v1/state",
+    "/v1/state",
+    "/v1/state"
+  ],
+  "gpu_or_model_actions": false,
+  "acceptance": {
+    "idle_cpu_lt_2_percent": true,
+    "key_repaint_lt_50ms": true,
+    "no_table_rebuild": true,
+    "selection_preserved": true,
+    "bounded_log": true,
+    "reader_closed": true
+  },
+  "generated_by": "Codex / gpt-6-astra",
+  "runtime_source_sha256": {
+    "tui/app.py": "acc073b95d158bb2a812834d97ee93a4134e42950dbf53925973a976232407b2",
+    "cli/llm": "1ae6775c132ee0f210b13bc5edc2f71e816b7e52dba951a84a7cb552b626529d"
+  },
+  "window_scope": "60-second acceptance measurement"
+}

@@ -239,6 +239,16 @@ class EventReader:
         self._status = "SSE connecting"
         self._socket = None
         self.thread = None
+        self._notify_callback = None
+
+    def set_notify(self, callback):
+        """Optional thread-safe UI wake-up; callbacks must not touch widgets."""
+        self._notify_callback = callback
+
+    def _notify(self):
+        callback = self._notify_callback
+        if callback is not None:
+            callback()
 
     def start(self):
         if self.thread is not None:
@@ -274,6 +284,7 @@ class EventReader:
             self._status = "SSE cursor reset after known restart"
         self._wake.set()
         self._interrupt()
+        self._notify()
 
     def close(self):
         self._stop.set()
@@ -306,6 +317,7 @@ class EventReader:
                         continue
                     self._socket = connection
                     self._status = "SSE connected"
+                self._notify()
                 for item in iter_events(response):
                     with self._lock:
                         if generation != self._generation or self._stop.is_set():
@@ -318,6 +330,7 @@ class EventReader:
                         self._queue.append(item)
                         self._cursor = item["id"]
                         delay = self.retry_delay
+                    self._notify()
                 with self._lock:
                     if generation == self._generation:
                         self._status = "SSE disconnected; reconnecting"
@@ -332,6 +345,7 @@ class EventReader:
                     self._socket = None
                 if response is not None:
                     response.close()
+            self._notify()
             self._wake.wait(delay)
             self._wake.clear()
             delay = min(self.max_retry_delay, delay * 2)

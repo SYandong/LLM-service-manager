@@ -35,7 +35,7 @@ def profile(name, port):
 def catalog(tmp_path):
     clock = Clock()
     world = {"units": {}, "calls": [], "collectors": [], "fail_proof": False}
-    original_models = {"base": profile("base", 8101)}
+    original_models = {"base": profile("base", 21000)}
     path = tmp_path/"swap.yaml"
     path.write_text(yaml.safe_dump({"models": {"base": {}}}))
     cfg = SchedulerConfig("127.0.0.1", 8011, read_only=False, catalog_enabled=True,
@@ -405,11 +405,11 @@ def test_pending_start_prevents_catalog_commit(catalog):
 def registry_catalog(catalog,registry_fixture):
     from llmsvc.registry import ModelRegistry
     c=catalog;_,old_queue,weights,*_=registry_fixture
-    c.path.write_bytes(old_queue.path.read_bytes())
-    trusted={"base":profile("base",8101),"fine":profile("fine",8102)}
+    c.path.write_bytes(old_queue.path.read_bytes().replace(b"8101", b"21000"))
+    trusted={"base":profile("base",21000),"fine":profile("fine",21001)}
     c.runtime.profile_provider=lambda raw: {name:trusted[name] for name in ModelRegistry._decode(raw)[0]["models"]}
     c.runtime.instance_provider=lambda **kwargs: InstanceIdentity(123,"456")
-    api=ModelRegistry(c.q,shared_roots=(weights.parent,),daemon_port_range=(8101,8110),now=c.clock,
+    api=ModelRegistry(c.q,shared_roots=(weights.parent,),daemon_port_range=(21000,21010),now=c.clock,
         stop_model=lambda *a,**kw:pytest.fail("fixture removed model was already absent"),
         unit_absent=lambda name,**kw:not c.world["units"].get(name,UnitObservation(False,True)).exists)
     c.s.registry=api;c.runtime.connect_registry(api)
@@ -457,7 +457,8 @@ def test_registry_remove_keeps_both_late_precheck_and_absent_cleanup(registry_ca
     c.store.remove_pin("fine")
     result=c.runtime.process_once()
     assert result["status"]=="applied" and "fine" not in api.records()
-    assert "fine" in c.s.collect.models and "fine" not in c.s.placement.transport.active_models
+    assert "fine" not in c.s.placement.transport.active_models
+    assert "fine" not in c.s.collect.models  # Positive cleanup and no durable resource references.
 
 
 def test_temporary_metadata_port_mismatch_cannot_enter_runtime(registry_catalog):

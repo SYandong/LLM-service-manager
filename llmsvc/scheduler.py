@@ -44,10 +44,11 @@ class DataPlaneBridge:
         self.thread = None
         self.stopping = threading.Event()
         self.closed = False
+        self._close_lock = threading.Lock()
         self.shutdown_discard = None
 
     def start(self):
-        if self.closed or self.thread is not None:
+        if self.closed or self.stopping.is_set() or self.thread is not None:
             raise RuntimeError("data-plane bridge already started or closed")
         self.relay.start()
         self.thread = threading.Thread(target=self._run, name="llmsvc-event-relay", daemon=True)
@@ -89,9 +90,17 @@ class DataPlaneBridge:
             self.stopping.wait(self.scheduler.config.data_plane_event_interval_seconds)
 
     def close(self):
-        if self.closed:
-            return
-        self.closed = True
+        if not self._close_lock.acquire(blocking=False):
+            raise RuntimeError("data-plane bridge close is already in progress")
+        try:
+            if self.closed:
+                return
+            self._close_once()
+            self.closed = True
+        finally:
+            self._close_lock.release()
+
+    def _close_once(self):
         self.stopping.set()
         try:
             self.relay.close()  # Interrupt and join the upstream reader first.
@@ -100,8 +109,8 @@ class DataPlaneBridge:
                 self.thread.join(timeout=self.scheduler.config.request_timeout_seconds)
                 if self.thread.is_alive():
                     raise RuntimeError("data-plane bridge consumer did not stop")
-            # Producer is closed. At most one pending batch plus one full source
-            # buffer is forwarded; never loop waiting for the action lock.
+            # Drain a bounded tail even if producer close failed. Only a fully
+            # successful close is terminal; never wait for the action lock.
             self.drain_once()
             if self.pending is None:
                 self.drain_once(max_events=self.scheduler.config.data_plane_event_capacity)
@@ -733,8 +742,12 @@ class Scheduler:
                         if self._fault_thread.is_alive():
                             raise RuntimeError("fault worker did not stop")
             finally:
-                if self.event_bridge is not None:
-                    self.event_bridge.close()
+                try:
+                    if self.catalog is not None:
+                        self.catalog.retire()
+                finally:
+                    if self.event_bridge is not None:
+                        self.event_bridge.close()
         finally:
             try:
                 if self._thread is not None and self._thread.is_alive():
