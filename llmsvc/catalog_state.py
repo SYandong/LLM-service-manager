@@ -16,7 +16,7 @@ def catalog_json(value):
 
 def validate_checkpoint(record):
     required = {"transaction_id", "job_id", "old_epoch", "new_epoch", "phase", "base_sha256", "candidate_sha256",
-                "marker_sha256", "marker_json", "binding", "old_manifest", "new_manifest"}
+                "marker_sha256", "marker_json", "binding", "old_manifest", "new_manifest", "previous"}
     if not isinstance(record, dict) or set(record) != required:
         raise ValueError("invalid catalog checkpoint")
     catalog_json(record)
@@ -61,3 +61,9 @@ def validate_checkpoint(record):
                 or receipt.get("witness_binding") != record["binding"]
                 or not isinstance(receipt.get("job"), dict) or receipt["job"].get("id") != record["job_id"]):
             raise ValueError("catalog marker transaction mismatch")
+
+    previous = record["previous"]
+    if previous is not None:
+        if not isinstance(previous, dict) or previous.get("previous") is not None or previous.get("phase") != "released":
+            raise ValueError("invalid prior catalog checkpoint")
+        validate_checkpoint(previous)

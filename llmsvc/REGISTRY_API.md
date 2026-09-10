@@ -78,9 +78,19 @@ submission must compute its own candidate again. Protected/invalid remove still
 returns HTTP400, including when the internal preview helper reports blockers
 with an empty `would`; it is not converted into a successful response.
 
-Actual POST/DELETE remains rejected in every mode: HTTP405 `read_only`, or
-`operation_not_enabled` when ordinary intent writes are enabled. There is no
-registry write-enabling setting in this slice. Other responses are:
+Without the complete trusted catalog capability, actual POST/DELETE returns
+HTTP405 `read_only`, or `operation_not_enabled` even when ordinary intents are
+writable. The default remains unchanged. With `catalog_enabled`, a writable
+store and explicitly connected profile/instance/verification adapters, the same
+paths return the existing registry job envelope (`id`, `description`, `status`,
+`blocked_by`, `config_committed`, `error`, `apply_seconds`). `queued` is incomplete;
+the existing CLI keeps its nonzero incomplete exit convention. One bounded
+scheduler worker drives the queue. `writes_enabled` then means submission
+capability, not commit readiness. A durable catalog fence independently blocks
+conflicting actions after partial publication, even if the raw configuration
+queue phase says `applied`. See [CATALOG.md](CATALOG.md). Normal entrypoint config
+does not invent the missing proof adapters or expose a client proof endpoint.
+Other responses are:
 
 - HTTP503 `registry_not_configured` when no registry is configured.
 - HTTP400 `registry_invalid_request` plus the registry's validation message.

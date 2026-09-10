@@ -369,12 +369,30 @@ ID、不持久化、不追加动作事件、不启动清退传输，也不因预
 | `GET /v1/usage?days=7&by=container` | 按来源汇总 |
 
 
+### 已配置的目录提交能力（#157）
+
+上述实际登记/注销接口只有在 `catalog_enabled`、非只读账本以及明确注入的
+可信 profile/进程身份/采用与结清 verifier 和队列 adapter 同时存在时才接纳。
+此时沿用 registry 既有 job 回执：`{id, description, status, blocked_by,
+config_committed, error, apply_seconds}`；首次返回 `queued` 只表示入队。
+既有 `GET /v1/registry` 展示队列状态，`GET /v1/models` 与 registry 诊断的
+`writes_enabled` 表示提交能力，不代表 quiet、采用、结清或运行期目录已经就绪。
+`blocked_by` 继续展示当前技术和保护阻塞。缺少能力时默认仍是 `405`，
+切换 pin/模型动作开关不能替代这些条件；正常入口不伪造 verifier。
+
+有能力的 scheduler 使用一个有界队列 worker 驱动既有提交链，保留 registry
+原有 late precheck、expiry 和 removal cleanup，不回退绕过 catalog 的普通队列。
+全局持久化 catalog fence 未结清时拒绝新提交与冲突动作；即使配置阶段显示
+`applied`，仍须以目录 fence 与后续观测区分运行期安装是否已完成。恢复是内部
+显式验证流程，不增加客户端 proof、强制清理或重放接口。原有 dry-run 不入队、
+不创建目录对象或账本记录，实际模型名和推理 URL 契约不变。
+
 ### 临时模型列表与预览（#137）
 
 安全接入阶段先提供配置过的只读列表与编辑预览，真实提交仍需 §3 的
 quiet、配置采用及旧资源结清证明。列表与预览可用不代表提交链路已启用。
 
-- `GET /v1/models` 返回 `200 {records, writes_enabled:false, blocked_by}`。
+- 默认未启用提交时，`GET /v1/models` 返回 `200 {records, writes_enabled:false, blocked_by}`。
   `records` 是按名称索引的现有 `llmsvc_registry` 临时登记元数据；常驻模型的
   观测仍从 `/v1/state` 读取，不能把该列表当作数据面 `/v1/models`。
 - `POST /v1/models?dry_run=1` 使用 `{name,path,base}`；
@@ -391,7 +409,7 @@ quiet、配置采用及旧资源结清证明。列表与预览可用不代表提
   已有待核查事务标记时，仍可读取的 GET 返回 `200` 与 `records`，在
   `blocked_by` 中包含 `registry_reconciliation_required`；编辑预览则返回
   `409 registry_reconciliation_required`。读取/重试不清除标记或推断结清。
-- 该阶段所有非 dry-run 登记/注销请求仍返回 `405`，依据当前模式使用
+- 未注入上述 #157 完整提交能力时，所有非 dry-run 登记/注销请求仍返回 `405`，依据当前模式使用
   `read_only` 或 `operation_not_enabled`；切换其他动作开关也不能启用它。
   不启动 reload worker，不借助空成功回调伪造验证、采用或资源结清。
   后续 job 查询与真实提交按对应实现另行接入，不在本约定中生成占位 job。

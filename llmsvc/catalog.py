@@ -14,8 +14,6 @@ import uuid
 from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
-import yaml
-
 from llmsvc.catalog_state import catalog_json
 from llmsvc.reload import RecoveryProof, ReloadError
 from llmsvc.reload_witness import CandidateBinding
@@ -41,12 +39,13 @@ class PreparedCatalog:
 
 class CatalogRuntime:
     def __init__(self, scheduler, queue, *, verifier=None, collector_factory=None,
-                 relay_factory=None, transport_factory=None):
+                 relay_factory=None, transport_factory=None, profile_provider=None, instance_provider=None):
         from llmsvc.__main__ import build_collector, build_event_relay
         from llmsvc.actions import ManagedModelTransport
         if queue.action_lock is not scheduler.action_lock:
             raise ValueError("catalog requires the scheduler action lock")
         self.scheduler, self.queue, self.verifier = scheduler, queue, verifier
+        self.profile_provider, self.instance_provider = profile_provider, instance_provider
         self.collector_factory = collector_factory or build_collector
         self.relay_factory = relay_factory or build_event_relay
         self.transport_factory = transport_factory or (lambda config, models: ManagedModelTransport(
@@ -70,6 +69,12 @@ class CatalogRuntime:
         # A checkpoint always survives disabled options. Restore observation
         # metadata now; a fresh bound verifier must establish restart authority.
         if record is not None:
+            if record["phase"] == "aborted" and record["previous"] is None:
+                if (record["old_manifest"] != self.manifest or digest(queue._read()[0]) != record["base_sha256"] or queue.fenced):
+                    scheduler.catalog_fenced = True
+                return
+            if record["phase"] == "aborted":
+                record = record["previous"]
             scheduler.catalog_fenced = True
             self.pending = record
             manifest = record["new_manifest"] if record["phase"] in ("published", "released") else record["old_manifest"]
@@ -80,6 +85,17 @@ class CatalogRuntime:
             with scheduler.action_lock:
                 self._publish(manifest, epoch, bundle)
             self.retire()
+
+    def can_submit(self):
+        s = self.scheduler
+        return (s.config.catalog_enabled and not s.config.read_only and s.store is not None
+                and not s.store.read_only and callable(self.verifier) and callable(self.profile_provider)
+                and callable(self.instance_provider) and not s.stopping.is_set())
+
+    def connect_registry(self, registry):
+        if registry.queue is not self.queue or not self.can_submit():
+            raise ReloadError("trusted catalog submission is unavailable")
+        registry.submit_change = self.submit_change
 
     def _enabled(self):
         s = self.scheduler
@@ -92,7 +108,8 @@ class CatalogRuntime:
 
     def _idle(self):
         s = self.scheduler
-        if ((s.model_actions and (s.model_actions.pending or s.model_actions.free_active))
+        if ((s.store and any(lease.status in ("pending", "stale") for lease, _ in s.store.leases()))
+                or (s.model_actions and (s.model_actions.pending or s.model_actions.free_active))
                 or any(c is not None and c.active for c in (s.automation, s.faults, s.sleeping_recovery))):
             raise ReloadError("catalog conflicts with an active operation")
 
@@ -105,7 +122,8 @@ class CatalogRuntime:
         binding.to_dict()
         if binding.endpoint != self.scheduler.config.collectors.get("swap_url", "").rstrip("/")+"/api/mcp":
             raise ValueError("catalog binding uses another proxy origin")
-        document = yaml.safe_load(candidate)
+        from llmsvc.registry import ModelRegistry
+        document, records = ModelRegistry._decode(candidate)
         if not isinstance(document, dict) or not isinstance(document.get("models"), dict):
             raise ValueError("catalog candidate requires models")
         if not isinstance(trusted_profiles, dict) or set(trusted_profiles) != set(document["models"]):
@@ -122,6 +140,10 @@ class CatalogRuntime:
                 if not isinstance(profile, dict):
                     raise ValueError("invalid trusted model profile")
                 port = profile.get("port")
+                record = records.get(name)
+                if record is not None and (record.get("daemon_port") != port or record.get("base") not in document["models"]
+                                           or record.get("base") == name or profile.get("is_default") is not False):
+                    raise ValueError("catalog profile disagrees with temporary model identity")
                 if type(port) is not int or not 1 <= port <= 65535 or port in ports:
                     raise ValueError("catalog daemon ports must be unique")
                 parts = urlsplit(profile.get("daemon_url", ""))
@@ -236,7 +258,7 @@ class CatalogRuntime:
             s.event_bridge.start()
         s.request_sample()
 
-    def enqueue(self, prepared, *, cleanup=None, dry_run=False):
+    def enqueue(self, prepared, *, cleanup=None, dry_run=False, precheck=None, description=None):
         with self.scheduler.action_lock:
             if not isinstance(prepared, PreparedCatalog) or prepared.epoch != self.epoch:
                 raise ReloadError("stale prepared catalog")
@@ -251,10 +273,10 @@ class CatalogRuntime:
             if dry_run:
                 return {"would": [{"kind": "install_catalog", "models": sorted(json.loads(prepared.manifest_json)["active"])}]}
             self._enabled(); self._idle()
-            def precheck():
+            def combined_precheck():
                 try:
                     self._check_membership(json.loads(prepared.manifest_json)["active"])
-                    return []
+                    return list(precheck()) if precheck is not None else []
                 except ReloadError:
                     return [{"reason": "catalog_removal_protected"}]
             def transform(raw):
@@ -265,10 +287,32 @@ class CatalogRuntime:
                 if cleanup is not None:
                     cleanup(deadline=deadline)
                 self._after_apply(deadline)
-            result = self.queue.enqueue(transform, description={"kind": "install_catalog"},
-                after_apply=after, precheck=precheck, witness_binding=prepared.binding)
+            result = self.queue.enqueue(transform, description=description or {"kind": "install_catalog"},
+                after_apply=after, precheck=combined_precheck, witness_binding=prepared.binding)
             self.jobs[result["id"]] = prepared
             return result
+
+    def submit_change(self, transform, *, description, dry_run=False, precheck=None, after_apply=None):
+        """Existing registry callback shape; no fallback around a catalog error."""
+        if dry_run:
+            raise ReloadError("registry previews must use the pure queue preview")
+        from llmsvc.registry import plan_generation_candidate
+        with self.scheduler.action_lock:
+            self._enabled()
+            if not callable(self.profile_provider) or not callable(self.instance_provider):
+                raise ReloadError("trusted catalog profile or instance source is unavailable")
+            original, _ = self.queue._read()
+            edited = transform(original)
+            deadline = self.queue.clock()+self.queue.operation_timeout
+            instance = self.instance_provider(deadline=deadline)
+            if self.queue.clock() >= deadline:
+                raise ReloadError("catalog instance source exceeded deadline")
+            generated = plan_generation_candidate(edited, expected_sha256=digest(edited),
+                generation="gen_"+uuid.uuid4().hex,
+                endpoint=self.scheduler.config.collectors["swap_url"].rstrip("/")+"/api/mcp", instance=instance)
+            profiles = self.profile_provider(generated.candidate)
+            prepared = self.prepare(generated.candidate, profiles, binding=generated.binding)
+            return self.enqueue(prepared, cleanup=after_apply, precheck=precheck, description=description)
 
     def _proof(self, record, marker_record, *, deadline):
         self._enabled()
@@ -314,6 +358,7 @@ class CatalogRuntime:
     def process_once(self):
         s = self.scheduler
         result = None
+        owned = False
         try:
             with s.action_lock:
                 self._enabled(); self._idle()
@@ -333,11 +378,17 @@ class CatalogRuntime:
                 self.deadline = min(job.submitted_at+self.queue.timeout, self.queue.clock()+self.queue.operation_timeout)
                 self.staged = self._construct(manifest)
                 self.busy = True
+                owned = True
                 s.catalog_fenced = True
+                previous = s.store.catalog_checkpoint()
+                if previous is not None and previous["phase"] == "aborted":
+                    previous = previous["previous"]
+                if previous is not None:
+                    previous = {**previous, "previous": None}
                 record = {"transaction_id": uuid.uuid4().hex, "job_id": job.id, "old_epoch": self.epoch,
                     "new_epoch": uuid.uuid4().hex, "phase": "claimed", "base_sha256": prepared.base_sha256,
                     "candidate_sha256": prepared.binding.candidate_sha256, "marker_sha256": None, "marker_json": None,
-                    "binding": prepared.binding.to_dict(), "old_manifest": self.manifest, "new_manifest": manifest}
+                    "binding": prepared.binding.to_dict(), "old_manifest": self.manifest, "new_manifest": manifest, "previous": previous}
                 s.store.save_catalog(s.store.catalog_checkpoint(), record)
                 self.pending = record
                 result = self.queue.process_once()
@@ -358,20 +409,23 @@ class CatalogRuntime:
                     raise ReloadError("catalog retirement is not complete")
                 marker = json.loads(record["marker_json"])
                 self._proof(record, marker, deadline=self.deadline)
-                s.store.save_catalog(record, {**record, "phase": "released"})
+                s.store.save_catalog(record, {**record, "phase": "released", "previous": None})
                 self.pending = None
                 s.catalog_fenced = False
                 s.emit("catalog_installed", detail={"catalog_epoch": self.epoch})
                 return result
         finally:
-            self.busy = False
-            if self.retired:
-                self.retire()
-            if self.staged is not None:
-                collector, relay, _ = self.staged
-                self.staged = None
-                if relay is not None: relay.close()
-                if collector is not None and hasattr(collector, "close"): collector.close()
+            if owned:
+                try:
+                    if self.retired:
+                        self.retire()
+                    if self.staged is not None:
+                        collector, relay, _ = self.staged
+                        self.staged = None
+                        if relay is not None: relay.close()
+                        if collector is not None and hasattr(collector, "close"): collector.close()
+                finally:
+                    self.busy = False
 
     def reconcile(self, *, dry_run=False):
         """Explicit proof/install/retirement; never resubmit an old config job."""
@@ -384,6 +438,8 @@ class CatalogRuntime:
             if self.busy:
                 raise ReloadError("catalog operation in progress")
             record = s.store.catalog_checkpoint()
+            if record is not None and record["phase"] == "aborted" and record["previous"] is not None:
+                record = s.store.restore_catalog_abort(record)
             if record is None or record["phase"] == "aborted":
                 raise ReloadError("no catalog transaction to reconcile")
             self.busy = True
@@ -429,7 +485,7 @@ class CatalogRuntime:
                     raise ReloadError("catalog receipt retirement verifier unavailable")
                 self._proof(record, marker, deadline=deadline)
                 if record["phase"] != "released":
-                    s.store.save_catalog(record, {**record, "phase": "released"})
+                    s.store.save_catalog(record, {**record, "phase": "released", "previous": None})
                 s.catalog_fenced = False
                 self.pending = None
                 return {"status": "reconciled", "catalog_epoch": self.epoch}
