@@ -110,6 +110,48 @@ class ScopeInspector:
             raise ExecutorError('systemctl_must_be_absolute')
         self.command = command
 
+    def validate(self, path, expected_sha256, deadline, *, dry_run=False):
+        """Invoke the pinned native validate-only command on an exact staged file."""
+        root = self.profile.get('native_config_dir')
+        binary = self.profile.get('native_binary')
+        pin = self.profile.get('native_binary_sha256')
+        if (not isinstance(root, str) or not Path(root).is_absolute()
+                or not isinstance(binary, str) or not Path(binary).is_absolute()
+                or not isinstance(pin, str) or not re.fullmatch(r'[0-9a-f]{64}', pin)
+                or not isinstance(path, str) or not Path(path).is_absolute()
+                or not isinstance(expected_sha256, str)
+                or not re.fullmatch(r'[0-9a-f]{64}', expected_sha256)):
+            raise ExecutorError('native_validation_profile_missing_or_invalid')
+        candidate, executable, root = Path(path), Path(binary), Path(root)
+        if (root.resolve() != root or candidate.resolve() != candidate
+                or candidate.parent != root or executable.resolve() != executable
+                or not candidate.is_file() or not executable.is_file()):
+            raise ExecutorError('native_validation_path_outside_owned_scope')
+        if candidate.stat().st_size > MAX_REQUEST or executable.stat().st_size > 256*1024*1024:
+            raise ExecutorError('native_validation_file_limit')
+        content = candidate.read_bytes()
+        if hashlib.sha256(content).hexdigest() != expected_sha256:
+            raise ExecutorError('native_candidate_digest_changed')
+        binary_hash = hashlib.sha256()
+        with executable.open('rb') as stream:
+            for chunk in iter(lambda: stream.read(1024*1024), b''):
+                binary_hash.update(chunk)
+        if binary_hash.hexdigest() != pin:
+            raise ExecutorError('native_binary_digest_changed')
+        before = executable.stat()
+        argv = [str(executable), '-config', str(candidate), '-validate']
+        if dry_run:
+            return {'accepted': False, 'dry_run': True, 'planned_argv': argv,
+                    'config_sha256': expected_sha256, 'observed_at': time.monotonic()}
+        self.runner(argv, deadline)
+        after = executable.stat()
+        if (candidate.read_bytes() != content
+                or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+            raise ExecutorError('native_validation_inputs_changed')
+        return {'accepted': True, 'config_sha256': expected_sha256,
+                'observed_at': time.monotonic()}
+
     def process(self, pid):
         p = self.proc / str(pid)
         try:
@@ -321,7 +363,10 @@ def handle(envelope, operation, inspector, *, dry_run=False, clock=time.monotoni
         raise ExecutorError('invalid_context_or_deadline')
     deadline = clock()+seconds
     result = {'request_id': request_id, 'transaction_id': context.get('transaction_id')}
-    if operation in ('inspect', 'preflight', 'observe_candidate', 'observe_base'):
+    if operation == 'validate':
+        result.update(inspector.validate(context.get('candidate_path'), context.get('candidate_sha256'),
+                                        deadline, dry_run=dry_run))
+    elif operation in ('inspect', 'preflight', 'observe_candidate', 'observe_base'):
         result.update(inspector.inspect(deadline))
         if operation == 'preflight':
             result.update(ready=False, actors_known=False, in_flight=None,

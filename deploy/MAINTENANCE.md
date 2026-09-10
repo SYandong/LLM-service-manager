@@ -1,7 +1,7 @@
 # Maintenance executor observations
 
 `maintenance_executor.py` is the ops contribution to the combined #60 instance
-transition implementation. Its current executable surface is read-only: `inspect`,
+transition implementation. Its current executable surface is read-only: `validate`, `inspect`,
 `preflight`, `observe_old`, `observe_candidate`, `observe_base`, and
 `observe_candidate_absent`. **It cannot perform a maintenance
 transition yet.** Other operations return an error; `--dry-run` reports an
@@ -67,5 +67,23 @@ It does not guess at descendants or stop other helpers. A timed-out external
 effect must therefore keep the core's durable submitted fence. There is no
 resend, forced-clear, rollback, ledger mutation, or old-backup restoration in
 this observation contribution.
+
+## Native configuration validation
+
+The `validate` operation uses the pinned native binary with exactly
+`-config <candidate_path> -validate`. Configure `native_binary`, its
+`native_binary_sha256`, and `native_config_dir` in the operator profile. The
+candidate must be a regular, nonsymlink file directly within that directory,
+with the exact request `candidate_sha256`. The binary is hash checked before
+execution; input bytes and binary file identity are rechecked afterward.
+Output is bounded and native errors stay out of public diagnostics. Dry-run
+prints the planned argv and does not invoke the binary.
+
+This adds actual native parsing to the combined controller's validate callback.
+It does not complete helper/backend settlement or arm stop/start dispatch.
+A bounded validation-only check against the retained pinned v252 binary used an
+empty-model temporary configuration, created no additional files, and started
+no listener, backend or model. Whole-transition native rehearsal remains a
+separate required part of this same feature.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
