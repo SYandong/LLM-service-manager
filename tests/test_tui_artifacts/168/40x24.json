@@ -1,0 +1,155 @@
+{
+  "frames_ms": [
+    [
+      333722.229785984,
+      14.77088697720319
+    ],
+    [
+      333722.236516661,
+      4.764950019307435
+    ],
+    [
+      333722.238592488,
+      0.9511940297670662
+    ],
+    [
+      333722.248495985,
+      0.018619000911712646
+    ],
+    [
+      333722.274614651,
+      6.017022009473294
+    ],
+    [
+      333722.275328307,
+      0.6560450419783592
+    ],
+    [
+      333722.288092766,
+      2.325145003851503
+    ],
+    [
+      333722.301021465,
+      0.832084973808378
+    ],
+    [
+      333722.76682168,
+      2.1145669743418694
+    ],
+    [
+      333722.800973495,
+      1.3358519645407796
+    ],
+    [
+      333723.216759795,
+      4.925779008772224
+    ],
+    [
+      333723.251030199,
+      0.4698470002040267
+    ],
+    [
+      333723.267317706,
+      0.8944339933805168
+    ],
+    [
+      333725.221230965,
+      4.630520998034626
+    ],
+    [
+      333725.376583096,
+      0.8002649992704391
+    ],
+    [
+      333725.402482403,
+      1.571880013216287
+    ],
+    [
+      333725.419976433,
+      1.3327220221981406
+    ],
+    [
+      333725.435552455,
+      1.3627719599753618
+    ],
+    [
+      333725.453503661,
+      1.6536700422875583
+    ],
+    [
+      333725.468984994,
+      1.3938209740445018
+    ],
+    [
+      333725.486757882,
+      1.4884709962643683
+    ],
+    [
+      333725.50140465,
+      1.4432810130529106
+    ],
+    [
+      333725.518324103,
+      1.1920830002054572
+    ],
+    [
+      333725.535359086,
+      1.1957729584537446
+    ],
+    [
+      333725.552301609,
+      1.1677329894155264
+    ],
+    [
+      333725.571972375,
+      5.176206992473453
+    ]
+  ],
+  "table_clears_after_mount": 0,
+  "selected_at_start": "research-model",
+  "selected_at_end": "research-model",
+  "log_lines": 4,
+  "event_count": 2,
+  "reader_closed": true,
+  "python": "3.10.12",
+  "textual": "8.2.8",
+  "fixture": "synthetic loopback HTTP + real SchedulerClient/EventReader and interactive Textual PTY",
+  "idle_seconds": 2.000122116995044,
+  "cpu_seconds": 0.0,
+  "idle_cpu_one_core_percent": 0.0,
+  "cpu_definition": "100% = one logical CPU core; child process user+system / monotonic wall time",
+  "repaint_definition": "one real PTY key write to receipt of the changed Input text in terminal output; excludes terminal emulator/remote network display latency",
+  "key_to_visible_ms": [
+    25.707748951390386,
+    17.41231995401904,
+    15.624521009158343,
+    17.84620701801032,
+    15.630061039701104,
+    17.741888004820794,
+    14.497788972221315,
+    16.933172999415547,
+    17.139671952463686,
+    16.978792962618172
+  ],
+  "idle_frame_count": 3,
+  "idle_frame_max_ms": 4.925779008772224,
+  "requests": [
+    "/v1/events?since=0",
+    "/v1/state"
+  ],
+  "gpu_or_model_actions": false,
+  "acceptance": {
+    "idle_cpu_lt_2_percent": true,
+    "key_repaint_lt_50ms": true,
+    "no_table_rebuild": true,
+    "selection_preserved": true,
+    "bounded_log": true,
+    "reader_closed": true
+  },
+  "generated_by": "Codex / gpt-6-astra",
+  "runtime_source_sha256": {
+    "tui/app.py": "acc073b95d158bb2a812834d97ee93a4134e42950dbf53925973a976232407b2",
+    "cli/llm": "1ae6775c132ee0f210b13bc5edc2f71e816b7e52dba951a84a7cb552b626529d"
+  },
+  "window_scope": "2-second narrow-layout smoke, not idle60s acceptance"
+}

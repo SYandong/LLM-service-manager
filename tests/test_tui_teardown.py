@@ -169,6 +169,11 @@ def test_mounted_widget_errors_are_not_suppressed(api, snapshot, monkeypatch):
                 raise NoMatches("mounted structural error")
 
             with monkeypatch.context() as patch:
+                # A dirty status must still expose mounted structural errors;
+                # unchanged status is intentionally a no-op after #168.
+                update = app.event_reader.drain()
+                update["status"] = "disconnected"
+                patch.setattr(app.event_reader, "drain", lambda: update)
                 patch.setattr(status, "update", broken_update)
                 assert app.is_running
                 with pytest.raises(NoMatches, match="mounted structural error"):

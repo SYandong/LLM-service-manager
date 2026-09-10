@@ -7,3 +7,5 @@ graft tests
 graft config
 graft vllm_service
 global-exclude __pycache__ *.py[cod] .DS_Store
+
+graft release
