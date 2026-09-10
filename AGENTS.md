@@ -62,10 +62,12 @@ Generated-By: <harness> / <model-id>
 
 ## 6. 线上安全红线
 
-- **不要在运行期改 `/etc/llama-swap/config.yaml`**，除非通过调度器的"安静时刻"机制（零在途请求时落盘），或本节限定的显式维护协议。常规 llama-swap reload 会让所有醒着的模型进入 sleep，并中断在途请求；维护模式不得绕过其独立的实例退出、采用与结清证明。
+- **不要在运行期改 `/etc/llama-swap/config.yaml`**，除非通过调度器的"安静时刻"机制（零在途请求时落盘），或本节限定的显式维护／首次受管启动协议。常规 llama-swap reload 会让所有醒着的模型进入 sleep，并中断在途请求；维护模式不得绕过其独立的实例退出、采用与结清证明。
 - 调度器只允许操作 `vllm-*.service` 这些 transient unit 和 llama-swap 的 `/api/models/unload/{id}`、`/upstream/{id}/`。不碰其他用户的进程。
 - **显式维护模式的限定例外（#60）**：仅当已有该次维护的操作授权，且同时配置 `catalog_mode: maintenance`、`catalog_enabled: true`、`model_actions_enabled: true`、`read_only: false`、绝对路径的 `maintenance_command` 和已核实的固定私有 profile 时，才可按 [DESIGN 的显式实例维护协议](docs/DESIGN.md#显式实例维护模式60) 扩展上述操作范围。适配器仅可对 profile 固定的 llama-swap unit（绑定 fragment SHA-256、可执行文件和当前实例，`Restart=no`）的精确主进程发送受身份保护的 SIGTERM，并启动该固定 unit；仅可创建和管理本次维护自有的 `llmsvc-maint-helper-*` oneshot jobs，以已核实的 helper/后端身份完成 level-1 sleep 后停止对应 wrapper。后端 unit 仍限于 `vllm-*.service`，不包括其他用户的进程。默认模型后端只允许 level-1 sleep，不允许硬停；wrapper 或代理退出不能当作后端退出或释放记账的证明。
 - 该例外仍要求维护 preflight 及 `stop_old` / `stop_candidate` 前重新取得新鲜的零在途观察，保留 `reload_blockers` 的默认模型、pin 和 RAM 保护；未知或失败的实例、helper、清理及回滚结果保留持久化屏障与当前账户，不重发不明结果的动作。它不把两次零观察变成连续 quiet 证明，常规热重载仍须满足自身连续 quiet 门槛。只读自动升级器不得启用维护模式；每次实际维护按本节的生产操作记录规则留痕，并须通过当前配置、身份、保护与回滚条件核对。
+- **首次受管启动的限定例外（#201）**：仅在已有该次迁移授权，且 `bootstrap_enabled`、`placement_enabled`、`catalog_enabled`、`model_actions_enabled` 均为 true、`read_only: false`、`catalog_mode: maintenance`、真实可写账本及经过核实的固定 bootstrap 配置同时具备时，才可按 [DESIGN 的首次受管启动协议](docs/DESIGN.md#首次默认模型的受管-bootstrap201) 执行迁移。固定配置须约束绝对路径的迁移命令、launcher 及其配置摘要、manifest 摘要、源配置前后摘要和唯一默认模型。先持久化声明及每次副作用的提交记录；只可改动已核实 manifest 列明的自有 source unit、native 配置、受管 launcher/helper/profile 及独立环境文件，不修改其他 unit、其他用户文件或固定 llm 挂载。初次 stage 仅把原 source unit 的 Restart 改为 no 并加入独立 attempt EnvironmentFile，保留其余字节；允许为该定义执行 daemon-reload，但必须重绑同一进程与批准的 fragment，并重验零在途及相关旧后端/任务缺席后，才可停止该精确 source。其余文件的原子暂存须在旧 source、actors、cgroup、相关后端及 helper 已被正面确认退出或缺席后进行；native 环境不得冒充 daemon 环境。
+- bootstrap 仅通过既有 place／lease-aware launcher／health／confirm 路径启动并确认该默认模型，完整预算和声明关联须原子保留，沿用 unit/token/GPU/预留期限等检查；不收养旧进程、伪造账户、移除默认 preload 或驱逐其他模型。源暂时缺席不产生公开的零在途或健康值，只有绑定新鲜缺席证明的受限内部路径可使用独立物理观察。确认默认账户后才可提交 source 激活，并核对实际新实例、配置、wrapper 就绪及同一后端绑定；不明启动不重发。启动前的文件回滚也须证明相关资源缺席或原实例确实未停止且保持安全，不启动无租约旧 preload、不硬停运行中的默认模型、不恢复旧账本。dry-run 不建立账本或执行迁移；只读自动升级器不得启用 bootstrap。现场预检、已审核产物、回滚和操作留痕条件仍按本节执行，测试回执不代替现场证明。
 - 默认模型永远不被硬停；pin 住的模型不被任何自动策略碰。
 - 新版本先在容器内的另一个端口（历史上用 8010）验证，再切生产。切换步骤写在 `deploy/` 的脚本里，可回滚。
 - 对生产做手工操作（stop unit、改 TTL）要在 issue 或 PR 里留记录。
