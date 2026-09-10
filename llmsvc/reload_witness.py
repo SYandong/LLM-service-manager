@@ -1,7 +1,7 @@
 # Generated-By: Codex / gpt-6-astra
-"""Read-only pinned-v252 active-generation evidence; never a reload notifier.
+"""Read-only explicitly pinned generation dialects; never a reload notifier.
 
-Request/envelope semantics come from deploy/watcher_witness.py and #91. The
+The default v252 semantics come from deploy/watcher_witness.py and #91. The
 transport accepts direct HTTP IP endpoints only: no DNS, proxies or redirects.
 A socket watchdog bounds headers/body, including a peer that trickles bytes.
 No file/process inspection is implicit; binding observations belong to the caller.
@@ -26,12 +26,27 @@ import yaml
 PINNED_COMMIT = "e31a1adee494bb7a578e2a97ec891b3e809899dc"
 PROTOCOL_VERSION = "2026-07-28"
 GENERATION_PATH = "macros.llmsvc_reload_generation"
+GENERATION_QUERY = "." + GENERATION_PATH
+V252_DIALECT = "v252-path"
+QUERY_DIALECT = "8fa85899-query"
+QUERY_PINNED_COMMIT = "8fa85899e424d47b81fa60aff08b238a793e2e2b"
 TOOL_NAME = "config__get_config"
 _GENERATION = re.compile(r"gen_[0-9a-f]{32}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _PREFIX = ('Current llama-swap configuration at "' + GENERATION_PATH
            + '" (credentials redacted, values resolved):\n\n```yaml\n')
+_QUERY_PREFIX = ("Current llama-swap configuration, jq query " + GENERATION_QUERY
+                 + " (credentials redacted, values resolved):\n\n```yaml\n")
 _SUFFIX = "\n```\n"
+
+
+def _dialect_parts(dialect: str) -> tuple[str, str, str]:
+    # Closed pinned set, not protocol negotiation or executable verification.
+    if dialect == V252_DIALECT:
+        return "path", GENERATION_PATH, _PREFIX
+    if dialect == QUERY_DIALECT:
+        return "query", GENERATION_QUERY, _QUERY_PREFIX
+    raise ValueError("unsupported generation witness dialect")
 
 
 class WitnessError(ValueError):
@@ -42,8 +57,9 @@ def _finite(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def parse_generation(envelope: object, request_id: str) -> str:
-    """Extract only the complete native scalar, matching the proven #91 parser."""
+def parse_generation(envelope: object, request_id: str, *, dialect: str = V252_DIALECT) -> str:
+    """Extract a complete scalar for the selected pin, without dialect fallback."""
+    _, _, prefix = _dialect_parts(dialect)
     if (not isinstance(request_id, str) or not request_id or not isinstance(envelope, dict)
             or envelope.get("jsonrpc") != "2.0" or envelope.get("id") != request_id
             or "error" in envelope):
@@ -62,10 +78,10 @@ def parse_generation(envelope: object, request_id: str) -> str:
         encoded_size = len(text.encode("utf-8"))
     except UnicodeError as exc:
         raise WitnessError("invalid_yaml_envelope") from exc
-    if encoded_size > 32768 or not text.startswith(_PREFIX) or not text.endswith(_SUFFIX):
+    if encoded_size > 32768 or not text.startswith(prefix) or not text.endswith(_SUFFIX):
         raise WitnessError("invalid_yaml_envelope")
     try:
-        generation = yaml.safe_load(text[len(_PREFIX):-len(_SUFFIX)])
+        generation = yaml.safe_load(text[len(prefix):-len(_SUFFIX)])
     except (yaml.YAMLError, RecursionError) as exc:
         raise WitnessError("invalid_generation_scalar") from exc
     if not isinstance(generation, str) or not _GENERATION.fullmatch(generation):
@@ -104,10 +120,15 @@ class NativeGenerationReader:
     `deadline` uses time.monotonic; request_timeout is a per-read total budget,
     defaulting to the existing fixture's 0.5 seconds. Callers may choose a longer
     read budget explicitly; it never extends the supplied transaction deadline.
+    `dialect` is an explicit source compatibility selection, not identity proof.
+    The caller must bind it to the expected executable/source and current instance.
     """
 
     def __init__(self, base_url: str, *, request_timeout: float = 0.5,
-                 max_response_bytes: int = 65536, clock: Callable[[], float] = time.monotonic):
+                 max_response_bytes: int = 65536, clock: Callable[[], float] = time.monotonic,
+                 dialect: str = V252_DIALECT):
+        _dialect_parts(dialect)
+        self._dialect = dialect
         if not isinstance(base_url, str) or any(char.isspace() for char in base_url):
             raise ValueError("base_url must be a direct HTTP IP URL")
         parsed = urlsplit(base_url)
@@ -134,9 +155,14 @@ class NativeGenerationReader:
         self._family = socket.AF_INET6 if address.version == 6 else socket.AF_INET
         self.request_timeout, self.max_response_bytes, self.clock = request_timeout, max_response_bytes, clock
 
+    @property
+    def dialect(self) -> str:
+        return self._dialect
+
     def read(self, *, deadline: float) -> GenerationRead:
         if not _finite(deadline):
             raise ValueError("deadline must be finite monotonic time")
+        dialect = self.dialect
         started = self.clock()
         end = min(deadline, started + self.request_timeout)
         request_id = uuid.uuid4().hex
@@ -151,8 +177,9 @@ class NativeGenerationReader:
 
         try:
             remaining()  # An expired deadline opens no socket.
+            argument, selector, _ = _dialect_parts(dialect)
             body = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": "tools/call",
-                               "params": {"name": TOOL_NAME, "arguments": {"path": GENERATION_PATH}}}).encode()
+                               "params": {"name": TOOL_NAME, "arguments": {argument: selector}}}).encode()
             headers = ("POST /api/mcp HTTP/1.1\r\n"
                        f"Host: {self._host_header}\r\nContent-Type: application/json\r\n"
                        f"Mcp-Protocol-Version: {PROTOCOL_VERSION}\r\n"
@@ -203,7 +230,7 @@ class NativeGenerationReader:
                             raise WitnessError("truncated_response")
                     envelope = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_object,
                                           parse_constant=_invalid_constant)
-                    generation = parse_generation(envelope, request_id)
+                    generation = parse_generation(envelope, request_id, dialect=dialect)
                     remaining()
                 finally:
                     timer.cancel()
