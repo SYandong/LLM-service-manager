@@ -7,6 +7,8 @@ Actual interactive Textual PTY captures using synthetic scheduler SSE records. T
 - `*-session.cast`: actual asciicastv2 output, including opening and closing details. No Copy or Save action is sent by the recorder.
 - `*-metrics.json`: short-run frame/input/selection/cleanup measurements and runtime hashes. These are2-second UI smoke windows, NOT new60-second CPU acceptance or #185 transport evidence. Key-to-output samples are15.36–18.32ms wide and14.66–28.26ms narrow;0table rebuilds, stable selection and reader cleanup passed.
 
+The recordings were captured before the final export-path Enter isolation follow-up; that follow-up changes only Input submission guards, not layout/rendering, and has separate current/minimum UI regression coverage. Recorded runtime hashes are retained rather than relabelled as the follow-up.
+
 The original SVGs are Textual exports; PNGs are rendered by installed librsvg/cairo. Rich adds the screenshot title/window chrome; the application does not restore a Header. Filesystem/clipboard product behavior is covered by actual UI tests on Textual0.70.0 and8.2.8: Shift+arrow selection, explicit OSC52 request, no-selection compact copy with200records whose raw export exceeds64KiB, oversized-selection fallback, fullUTF8 save0600, existing-file/symlink refusal and close-during-save guards. The real laptop clipboard is not acknowledged or claimed; the message is a request, with Save text as fallback.
 
 Reproduce in an installed Textual environment:
