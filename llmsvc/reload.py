@@ -160,11 +160,16 @@ class ReloadJob:
     config_committed: bool = False
     error: str | None = None
     apply_seconds: float | None = None
+    maintenance: dict | None = field(default=None, repr=False)
+    external_effects_started: bool = False
 
     def to_dict(self) -> dict:
-        return copy.deepcopy({"id": self.id, "description": self.description, "status": self.status,
-                              "blocked_by": self.blocked_by, "error": self.error,
-                              "config_committed": self.config_committed, "apply_seconds": self.apply_seconds})
+        result = {"id": self.id, "description": self.description, "status": self.status,
+                  "blocked_by": self.blocked_by, "error": self.error,
+                  "config_committed": self.config_committed, "apply_seconds": self.apply_seconds}
+        if self.maintenance is not None or self.external_effects_started:
+            result["external_effects_started"] = self.external_effects_started
+        return copy.deepcopy(result)
 
 
 @dataclass(frozen=True)
@@ -181,6 +186,37 @@ class RecoveryProof:
     settlement_confirmed: bool = False
     cleanup_confirmed: bool = False
     instance: InstanceIdentity | None = None
+
+
+@dataclass(frozen=True)
+class InstanceTransitionProof:
+    """Explicit old/new-instance attestation from the trusted core verifier."""
+    marker_sha256: str
+    old_instance: InstanceIdentity
+    new_instance: InstanceIdentity
+    old_scope_sha256: str
+    new_scope_sha256: str
+    current_sha256: str
+    generation_confirmed: bool = False
+    instance_confirmed: bool = False
+    settlement_confirmed: bool = False
+    cleanup_confirmed: bool = False
+    backends_confirmed: bool = False
+    exclusion_confirmed: bool = False
+    restored_base: bool = False
+    attempt_instance: InstanceIdentity | None = None
+    attempt_settled: bool = False
+
+
+def _maintenance_descriptor(value: object) -> dict:
+    keys = {"mode", "transaction_id", "base_sha256", "old_scope_sha256"}
+    if not isinstance(value, dict) or set(value) != keys or value["mode"] != "maintenance":
+        raise ReloadError("invalid maintenance descriptor")
+    for key in ("transaction_id", "base_sha256", "old_scope_sha256"):
+        length = 32 if key == "transaction_id" else 64
+        if not isinstance(value[key], str) or not re.fullmatch(r"[0-9a-f]{%d}" % length, value[key]):
+            raise ReloadError("invalid maintenance descriptor")
+    return copy.deepcopy(value)
 
 
 # Source caps bound allocation, not filesystem latency on a stalled mount.
@@ -252,7 +288,8 @@ class ReloadQueue:
                  clock: Callable[[], float] = time.monotonic,
                  wall_clock: Callable[[], float] = time.time, timeout: float = 600,
                  max_snapshot_age: float = 30, operation_timeout: float = 10,
-                 config_max_bytes: int = DEFAULT_CONFIG_MAX_BYTES):
+                 config_max_bytes: int = DEFAULT_CONFIG_MAX_BYTES,
+                 maintenance_adapter: Any = None):
         if not _number(timeout) or not 0 < timeout <= 600:
             raise ValueError("timeout must be positive and at most 600 seconds")
         if not isinstance(action_lock, type(threading.RLock())):
@@ -260,6 +297,7 @@ class ReloadQueue:
         if not _number(operation_timeout) or not 0 < operation_timeout <= 60:
             raise ValueError("operation_timeout must be positive and at most 60 seconds")
         self.operation_timeout = operation_timeout
+        self.maintenance_adapter = maintenance_adapter
         self.config_max_bytes = _source_byte_limit(config_max_bytes, "config_max_bytes")
         self.path = Path(config_path)
         self.marker = self.path.with_name(self.path.name + ".llmsvc-pending")
@@ -339,14 +377,21 @@ class ReloadQueue:
     def enqueue(self, transform: Callable[[bytes], bytes], *, description: dict,
                 dry_run: bool = False, precheck: Callable[[], list[dict]] | None = None,
                 after_apply: Callable[..., None] | None = None,
-                witness_binding: CandidateBinding | None = None) -> dict:
+                witness_binding: CandidateBinding | None = None,
+                maintenance: dict | None = None) -> dict:
         """Pure transforms only. Dry-run creates no staging files or queue entries."""
         with self.action_lock:
             if self.fenced:
                 raise ReloadError("previous transaction requires reconciliation")
+            if maintenance is not None:
+                maintenance = _maintenance_descriptor(maintenance)
+                if witness_binding is None or not self._maintenance_available():
+                    raise ReloadError("maintenance adapter and binding are required")
             data, info = self._read()
             for job in self._pending:
                 data = job.transform(data)
+            if maintenance is not None and hashlib.sha256(data).hexdigest() != maintenance["base_sha256"]:
+                raise ReloadError("maintenance base configuration changed")
             candidate = transform(data)
             if not isinstance(candidate, bytes):
                 raise TypeError("config transform must return bytes")
@@ -358,7 +403,7 @@ class ReloadQueue:
             staged = self._stage(candidate, info)
             staged.unlink()
             job = ReloadJob(uuid.uuid4().hex, copy.deepcopy(description), self.clock(), transform,
-                            precheck, after_apply, witness_binding)
+                            precheck, after_apply, witness_binding, maintenance=maintenance)
             self._pending.append(job)
             self._jobs[job.id] = job
             self.log({"kind": "config_change_queued", "dry_run": False, **job.to_dict()})
@@ -368,8 +413,30 @@ class ReloadQueue:
         with self.action_lock:
             return self._jobs[job_id].to_dict()
 
+    def _maintenance_available(self) -> bool:
+        return all(callable(getattr(self.maintenance_adapter, name, None))
+                   for name in ("blockers", "before_replace", "after_replace"))
+
     def _blockers(self, job: ReloadJob) -> list[dict]:
-        return (self.quiet.blockers()
+        if job.maintenance is None:
+            quiet = self.quiet.blockers()
+        else:
+            descriptor = None
+            try:
+                descriptor = _maintenance_descriptor(job.maintenance)
+                if not self._maintenance_available():
+                    raise ReloadError("maintenance adapter unavailable")
+                quiet = self.maintenance_adapter.blockers(job)
+                if job.maintenance != descriptor:
+                    job.maintenance = descriptor
+                    raise ReloadError("maintenance descriptor changed during preflight")
+                if not isinstance(quiet, list) or not all(isinstance(item, dict) for item in quiet):
+                    raise ReloadError("invalid maintenance blockers")
+            except Exception:
+                if descriptor is not None:
+                    job.maintenance = descriptor
+                quiet = [{"reason": "maintenance_preflight_unavailable"}]
+        return (quiet
                 + reload_blockers(self.snapshot(), self.wall_clock(), self.max_snapshot_age)
                 + (job.precheck() if job.precheck else []))
 
@@ -388,8 +455,15 @@ class ReloadQueue:
                 return job.to_dict()
             staged = None
             marker_created = False
+            maintenance = job.maintenance is not None
             try:
                 original, info = self._read()
+                if job.maintenance is not None:
+                    _maintenance_descriptor(job.maintenance)
+                    if job.witness_binding is None:
+                        raise ReloadError("maintenance binding is required")
+                    if hashlib.sha256(original).hexdigest() != job.maintenance["base_sha256"]:
+                        raise ReloadError("maintenance base configuration changed")
                 candidate = job.transform(original)
                 self._validate_candidate_binding(job.witness_binding, candidate)
                 staged = self._stage(candidate, info)
@@ -406,6 +480,8 @@ class ReloadQueue:
                         raise ReloadError("config changed during validation")
                     digest = hashlib.sha256(candidate).hexdigest()
                     record = {"schema_version": 1, "sha256": digest, "job": job.to_dict()}
+                    if job.maintenance is not None:
+                        record.update(schema_version=2, maintenance=copy.deepcopy(job.maintenance))
                     if job.witness_binding is not None:
                         record["witness_binding"] = job.witness_binding.to_dict()
                     marker_bytes = json.dumps(record, allow_nan=False).encode("utf-8")
@@ -429,13 +505,34 @@ class ReloadQueue:
                             self.log({"kind": "config_change_timeout", **job.to_dict()})
                         return job.to_dict()
                     started = self.clock()
+                    deadline = min(job.submitted_at + self.timeout, started + self.operation_timeout)
+                    if job.maintenance is not None:
+                        self._check_deadline(deadline)
+                        if not self._maintenance_available():
+                            raise ReloadError("maintenance adapter unavailable")
+                        # The durable mode marker represents possible effects on
+                        # restart; the live flag is set before calling any actuator.
+                        adapter = self.maintenance_adapter
+                        job.external_effects_started = True
+                        self._completion_marker = marker_bytes
+                        adapter.before_replace(job, marker_bytes, deadline=deadline)
+                        self._check_deadline(deadline)
+                        if (job.maintenance != record["maintenance"] or self.maintenance_adapter is not adapter
+                                or job.witness_binding is None or job.witness_binding.to_dict() != record["witness_binding"]):
+                            raise ReloadError("maintenance adapter or binding changed")
+                        latest, latest_info = self._read()
+                        if latest != original or self._record_identity(latest_info) != self._record_identity(info):
+                            raise ReloadError("configuration changed during maintenance preparation")
+                        self._read_marker()  # Exact latched receipt must still exist.
                     os.replace(staged, self.path)
                     staged = None
                     job.config_committed = True
                     self._sync_directory()
-                    deadline = min(job.submitted_at + self.timeout, started + self.operation_timeout)
                     self._check_deadline(deadline)
-                    self.notify_reload(deadline=deadline)
+                    if not maintenance:
+                        self.notify_reload(deadline=deadline)
+                    else:
+                        adapter.after_replace(job, marker_bytes, deadline=deadline)
                     self._check_deadline(deadline)
                     job.apply_seconds = self.clock() - started
                     if job.after_apply:
@@ -445,9 +542,9 @@ class ReloadQueue:
                     marker_created = False
                     job.status = "applied"
             except Exception as exc:
-                job.status = "reconciliation_required" if job.config_committed else "failed"
+                job.status = "reconciliation_required" if job.config_committed or job.external_effects_started else "failed"
                 job.error = f"{type(exc).__name__}: configuration transaction failed"
-                if marker_created and not job.config_committed:
+                if marker_created and not job.config_committed and not job.external_effects_started:
                     self.marker.unlink(missing_ok=True)
                     self._sync_directory()
             finally:
@@ -507,15 +604,26 @@ class ReloadQueue:
             raise ValueError("nonfinite marker value")
         try:
             record = json.loads(raw, object_pairs_hook=unique, parse_constant=invalid_constant)
-            if not isinstance(record, dict) or not {"sha256", "job"} <= set(record) <= {"schema_version", "sha256", "job", "witness_binding"}:
+            if not isinstance(record, dict) or not {"sha256", "job"} <= set(record) <= {"schema_version", "sha256", "job", "witness_binding", "maintenance"}:
                 raise ValueError("invalid record")
             version = record.get("schema_version", 0)
-            if type(version) is not int or version not in (0, 1):
+            if type(version) is not int or version not in (0, 1, 2):
                 raise ValueError("unsupported marker version")
+            if version == 2:
+                _maintenance_descriptor(record.get("maintenance"))
+                if "witness_binding" not in record:
+                    raise ValueError("maintenance binding missing")
+            elif "maintenance" in record:
+                raise ValueError("unexpected maintenance descriptor")
             if not isinstance(record["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"]):
                 raise ValueError("invalid digest")
             job = record["job"]
-            if (not isinstance(job, dict) or set(job) != {"id", "description", "status", "blocked_by", "error", "config_committed", "apply_seconds"}
+            job_keys = {"id", "description", "status", "blocked_by", "error", "config_committed", "apply_seconds"}
+            if version == 2:
+                job_keys.add("external_effects_started")
+                if not isinstance(job, dict) or type(job.get("external_effects_started")) is not bool:
+                    raise ValueError("invalid maintenance effect flag")
+            if (not isinstance(job, dict) or set(job) != job_keys
                     or not isinstance(job["id"], str) or not re.fullmatch(r"[0-9a-f]{32}", job["id"])
                     or not isinstance(job["description"], dict)
                     or job["status"] not in ("queued", "applied", "failed", "timed_out", "reconciliation_required")
@@ -556,6 +664,8 @@ class ReloadQueue:
             except (OSError, ReloadError):
                 result["blocked_by"] = [{"reason": "invalid_or_unreadable_recovery_marker"}]
                 return result
+            if "maintenance" in record:
+                result["external_effects_started"] = None
             result.update(marker_valid=True, marker_sha256=hashlib.sha256(raw).hexdigest(),
                           candidate_sha256=record["sha256"], job_id=record["job"]["id"],
                           description=copy.deepcopy(record["job"]["description"]),
@@ -620,11 +730,13 @@ class ReloadQueue:
                              "elapsed_seconds": None, "remaining_seconds": None,
                              "blocked_by": copy.deepcopy(recovery["blocked_by"]), "error": None,
                              "apply_seconds": None})
+                if "external_effects_started" in recovery:
+                    rows[-1]["external_effects_started"] = None
             return {"schema_version": 1, "observed_at_monotonic": now, "jobs": rows,
                     "pending_ids": [job.id for job in self._pending if now - job.submitted_at < self.timeout],
                     "fenced": recovery["fenced"], "recovery": recovery}
 
-    def reconcile(self, confirm: Callable[[dict], RecoveryProof], *, dry_run: bool = False) -> dict:
+    def reconcile(self, confirm: Callable[[dict], RecoveryProof | InstanceTransitionProof], *, dry_run: bool = False) -> dict:
         """Clear only with explicit full proof, bound to an unchanged valid marker.
 
         Native visibility/inspection results, booleans and partial truthy objects
@@ -640,32 +752,82 @@ class ReloadQueue:
                 data, _ = self._read()
             except (OSError, ReloadError) as exc:
                 raise ReloadError("invalid or unavailable recovery state") from exc
-            if hashlib.sha256(data).hexdigest() != record["sha256"]:
-                raise ReloadError("adoption and cleanup not confirmed")
+            self._check_recovery_source(record, data)
             proof = confirm(copy.deepcopy(record))
-            self._confirm_proof(record, raw, proof)
+            expected = self._confirm_proof(record, raw, proof)
+            if hashlib.sha256(data).hexdigest() != expected:
+                raise ReloadError("confirmed recovery source does not match")
             try:
                 _, current_raw, current_identity = self._read_marker()
                 current_data, _ = self._read()
             except (OSError, ReloadError) as exc:
                 raise ReloadError("recovery state changed during confirmation") from exc
             if (current_raw != raw or current_identity != identity
-                    or hashlib.sha256(current_data).hexdigest() != record["sha256"]):
+                    or hashlib.sha256(current_data).hexdigest() != expected):
                 raise ReloadError("recovery state changed during confirmation")
             self._retire_marker(raw)
             self.log({"kind": "config_reconcile", "dry_run": False})
             return {"status": "reconciled"}
 
     @staticmethod
-    def _confirm_proof(record: dict, raw: bytes, proof: RecoveryProof) -> None:
+    def _check_recovery_source(record: dict, data: bytes) -> None:
+        allowed = {record["sha256"]}
+        if "maintenance" in record:
+            allowed.add(record["maintenance"]["base_sha256"])
+        if hashlib.sha256(data).hexdigest() not in allowed:
+            raise ReloadError("adoption and cleanup not confirmed")
+
+    @staticmethod
+    def _confirm_proof(record: dict, raw: bytes, proof: RecoveryProof | InstanceTransitionProof) -> str:
+        if "maintenance" in record:
+            return ReloadQueue._confirm_transition(record, raw, proof)
         if (not isinstance(proof, RecoveryProof) or proof.marker_sha256 != hashlib.sha256(raw).hexdigest()
                 or not all(value is True for value in (proof.generation_confirmed, proof.instance_confirmed,
                                                        proof.settlement_confirmed, proof.cleanup_confirmed))):
             raise ReloadError("adoption and cleanup not confirmed")
         if "witness_binding" in record and proof.instance != CandidateBinding.from_dict(record["witness_binding"]).instance:
             raise ReloadError("recovery instance not confirmed")
+        return record["sha256"]
 
-    def confirm_retired_receipt(self, raw: bytes, confirm: Callable[[dict], RecoveryProof], *,
+    @staticmethod
+    def _confirm_transition(record: dict, raw: bytes, proof: InstanceTransitionProof) -> str:
+        descriptor = _maintenance_descriptor(record["maintenance"])
+        binding = CandidateBinding.from_dict(record["witness_binding"])
+        flags = ("generation_confirmed", "instance_confirmed", "settlement_confirmed", "cleanup_confirmed",
+                 "backends_confirmed", "exclusion_confirmed")
+        if (not isinstance(proof, InstanceTransitionProof)
+                or proof.marker_sha256 != hashlib.sha256(raw).hexdigest()
+                or not all(getattr(proof, key) is True for key in flags)
+                or proof.old_instance != binding.instance or proof.new_instance == proof.old_instance
+                or proof.old_scope_sha256 != descriptor["old_scope_sha256"]
+                or type(proof.restored_base) is not bool or type(proof.attempt_settled) is not bool):
+            raise ReloadError("instance transition not confirmed")
+        try:
+            for instance in (proof.old_instance, proof.new_instance):
+                CandidateBinding(binding.endpoint, binding.generation, instance, binding.candidate_sha256).to_dict()
+            if (proof.old_instance.pid == proof.new_instance.pid
+                    and proof.old_instance.start_ticks.lstrip("0") == proof.new_instance.start_ticks.lstrip("0")):
+                raise ValueError("transition did not change process identity")
+            if proof.attempt_instance is not None:
+                CandidateBinding(binding.endpoint, binding.generation, proof.attempt_instance, binding.candidate_sha256).to_dict()
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ReloadError("invalid transition instance") from exc
+        for value in (proof.new_scope_sha256, proof.current_sha256):
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ReloadError("invalid transition scope or digest")
+        if proof.restored_base:
+            if proof.attempt_settled is not True:
+                raise ReloadError("rollback attempt settlement not confirmed")
+            expected = descriptor["base_sha256"]
+        else:
+            if proof.attempt_instance is not None or proof.attempt_settled is not False:
+                raise ReloadError("rollback evidence on a normal transition")
+            expected = record["sha256"]
+        if proof.current_sha256 != expected:
+            raise ReloadError("transition source digest not confirmed")
+        return expected
+
+    def confirm_retired_receipt(self, raw: bytes, confirm: Callable[[dict], RecoveryProof | InstanceTransitionProof], *,
                                 dry_run: bool = False) -> dict:
         """Confirm core's durable receipt without deriving authority from absence.
 
@@ -691,10 +853,11 @@ class ReloadQueue:
                         raise ReloadError("recovery marker changed")
                     return self.reconcile(confirm)
                 data, info = self._read()
-                if hashlib.sha256(data).hexdigest() != record["sha256"]:
-                    raise ReloadError("adoption and cleanup not confirmed")
+                self._check_recovery_source(record, data)
                 proof = confirm(copy.deepcopy(record))
-                self._confirm_proof(record, raw, proof)
+                expected = self._confirm_proof(record, raw, proof)
+                if hashlib.sha256(data).hexdigest() != expected:
+                    raise ReloadError("confirmed recovery source does not match")
                 current, current_info = self._read()
                 if (current != data or self._record_identity(current_info) != self._record_identity(info)
                         or self._completion_marker != raw):
