@@ -22,6 +22,65 @@ LoRA 装载接口，没有启动 GPU 工作负载，也没有修改线上配置�
 吞吐/首 token/唤醒延迟、完整权重首次冷启动、reload 窗口内被中断的请求数。
 离线 mock 通过不等于这些验收完成。
 
+## 2026-09-10：当前授权、正式版兼容性与维护选项
+
+当前用户已授权本次空闲窗口内经审核、演练并可回滚的部署；此前的全面
+production-disabled 表述不再是授权阻塞。部署仍由 coordinator/ops 唯一执行，
+每次切换前重新检查实际推理使用，保留现有 endpoint、模型名和单一 `llm`
+入口；未来无人值守的 M2 行为仍遵循 #169 审批门槛。以下方案不自动改动服务。
+
+**重新观察到的现场事实：** 2026-09-10 只读查询运行服务的 executable 后执行
+`-version` / SHA256：仍是 v252 (`e31a1ad`)，摘要为
+`32aea60b5c1be987c27dde6ea4aaa84f9be7ad93eaede011295fad1e276e80ea`，
+与 #91 的固定二进制相同。没有重复 GPU、shutdown 或 watcher 实验。
+
+**正式上游的源码结论，未宣称实测 v255：** 查询时最新正式版是
+[v255](https://github.com/mostlygeek/llama-swap/releases/tag/v255)，发布于
+2026-09-06，固定提交 `7761aa13360ea379cb89366d07c2d08aa9f1ed10`。
+[版本差异](https://github.com/mostlygeek/llama-swap/compare/v252...v255)及下列路径
+表明，直接升级不能解除当前证明门槛：
+
+- [SSE handler](https://github.com/mostlygeek/llama-swap/blob/7761aa13360ea379cb89366d07c2d08aa9f1ed10/internal/server/apigroup.go#L495)
+  仍可在 sendBuffer 满时丢弃事件；输出不提供足以核对完整请求历史的序号/
+  watermark。连接或定期收到其他事件仍不能认证连续 quiet。
+- [reload 顺序](https://github.com/mostlygeek/llama-swap/blob/7761aa13360ea379cb89366d07c2d08aa9f1ed10/llama-swap.go#L363)
+  仍先替换 activeSrv，再调用 old.Shutdown；失败仅记录 warning 后仍可打印
+  通用完成日志。因此新 G 可见或该日志仍不能证明旧资源结清。
+- [MCP provider](https://github.com/mostlygeek/llama-swap/blob/7761aa13360ea379cb89366d07c2d08aa9f1ed10/internal/config/mcpprovider.go#L162)
+  改用 `query`（例如 `.macros.llmsvc_reload_generation`）；旧 `path` 参数
+  明确返回工具错误。现有 #111 reader 固定 v252，应继续拒绝不匹配的响应；
+  不为尝试升级静默放宽解析或把错误当作采用成功。
+
+**给 coordinator 的具体选择：** 保留 v252 的普通 hot-reload 路径时，继续
+实现 registry/catalog 内部提交、保护和恢复逻辑，实际提交仍要求 #53/#60
+证明。当前核对的 v255 路径没有提供可直接替换该证明的能力，不建议仅为了
+绕过这两个门槛升级。另一条兼容选项是本次窗口的显式、可逆 maintenance
+restart，需在 #53/#60/#157 的同一生命周期 DESIGN/code 中单独定义模式：
+
+1. 先备份原始配置字节/摘要、二进制与服务启动配置、runtime catalog/账本
+   检查点；确认候选通过相同二进制校验、名称/端口/profile 校验、pin/default/
+   在用保护和 RAM 准入。准备保持相同 endpoint/模型参数的原版启动及回滚。
+2. 持久化 maintenance claim，保持全局动作屏障；fresh idle/drain 检查只作为
+   窗口前置，不冒充连续 quiet。由唯一部署者执行已演练的原生停止流程，
+   关闭旧入口并验证旧进程身份、所属 cgroup 及其 stop helpers 已退出。
+   监听器消失和完整旧实例退出构成维护隔离条件；不能用日志或 PID 名字猜测。
+   默认/pin 的独立后端及其他计算任务不因此获得 stop 授权。
+3. 旧入口已停止期间，按已有局部编辑/原子替换提交候选并按相同地址启动。
+   记录新实例身份与候选摘要，读取固定版本 native G，分别核对服务健康、
+   旧 helpers 结清、保留后端状态及目标删除清理，再安装/发布 catalog。
+   maintenance 是有意的新实例转换，不能伪造普通 reload 的“同实例”证明。
+4. 全部明确证据、catalog 检查点及 marker/claim 退休均成功后才开放动作。
+   缺证据、退出超时或部分发布保留 claim。失败回滚仅在确认本次新实例已停止、
+   原地址可安全复用后恢复备份并重新验证；账本不能直接降级/清空，保留资源
+   身份与全额预算。无法安全回滚时保留屏障，报告准确失败点。
+5. ops 先用现有隔离 fake backend 演练成功、native 错误、晚到请求、旧 helper
+   未退出、新实例失败和回滚，目标分钟级、只清理本次资源。现场执行前再次
+   核对 idle/保护/可回滚条件。记录窗口与失败请求，不能承诺零中断。
+
+这是供 coordinator 选择并审核的维护模式，不是通过给 QuietPeriod 填假零
+绕过旧协议；也不授权新 fork、代理架构、依赖或第二套 CLI/部署者。当前 rollout
+授权真实有效，剩余的是具体模式与证明的工程审核，不是再次等待用户概括授权。
+
 ## 固定版本的上游证据
 
 llama-swap 源码固定于
@@ -207,6 +266,16 @@ endpoint=..., instance=...)` 是纯函数：输入已有候选字节、其精确
 HTTP/CLI dry-run。缺失旧标识仅表示这些输入字节未定义它，不是旧服务不存在。
 即使后来 fixture 读数与该绑定匹配，仍只有可见性，收尾保持未知。生产提交须
 重新核对源、绑定、quiet、保护、内存、采用及独立收尾证据；此规划器不授予写权限。
+
+### 目录提交回调（#157）
+
+core 可向现有 `ModelRegistry` 注入 `submit_change(transform, **options)`。
+仅非 dry-run add/rm/expiry 走该回调；预览始终走原 queue dry-run。回调在
+同一 RLock 下接收原 description、precheck 与 after_apply cleanup；拒绝或
+抛错不会降级为普通 queue 提交。core 必须将原 precheck 与目录自身保护同时
+转交给实际 CatalogRuntime enqueue，cleanup 在目录发布前执行。可信 profile、
+当前实例/候选绑定、证明能力与 catalog 安装由 core 负责，不能从宏或回调
+存在本身推导。此内部接线不更改 HTTP 写入开关，也不提供成功占位 notifier。
 
 ### 队列快照与重建后的恢复检查
 
