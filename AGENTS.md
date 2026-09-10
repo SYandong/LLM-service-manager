@@ -4,7 +4,7 @@
 
 ## 1. 项目是什么
 
-LLM-service-manager 正在从"单后端 vLLM 代理"（`vllm_service/`，legacy）转型为 **llama-swap 之上的控制面**：
+LLM-service-manager 是 **llama-swap 之上的控制面**：
 
 - llama-swap + 官方 vllm-wrapper 负责按 `model` 路由、请求排队、sleep/wake。这些不重做。
 - 本仓库负责 llama-swap 没有的部分：**多 GPU 放置、按显存/内存压力决定谁休眠、保底模型、用户显式意图（free / pin / reserve）**，以及一个终端 UI。
@@ -21,7 +21,6 @@ LLM-service-manager 正在从"单后端 vLLM 代理"（`vllm_service/`，legacy�
 | `tui/` | 全屏 TUI（textual） | 已有实现；完整 M5 验收以 issue 为准 |
 | `deploy/` | systemd unit、安装脚本、llama-swap 配置模板 | 已有工具；现场启用与观察验收单独记录 |
 | `tests/` | pytest；策略回放夹具放 `tests/fixtures/` | 现有 |
-| `vllm_service/`、`tools/dashboard.py`、`config/server.yaml` | legacy，M6 下线 | 冻结，只修 bug |
 
 ## 3. 工作流：issue 先行，PR 合并
 
@@ -73,7 +72,7 @@ Generated-By: <harness> / <model-id>
 
 - 进容器看现场：`sudo lxc exec llmsvc -- bash -lc '<cmd>'`（宿主机上执行）。只读命令随便跑；会改状态的命令先向人确认。
 - 线上真实数据源：`journalctl -t vllm-launch -t vllm-reaper`、`/var/lib/llama-swap/activity.sqlite`、`systemctl list-units 'vllm-*'`、`nvidia-smi --query-compute-apps`。
-- 不要修改 `vllm_service/` 下的 legacy 代码，除非 issue 明确要求。
+- 旧单后端代理源码已按 #27 退役；不要恢复旧命令、示例或依赖。历史发布与路线图记录保留，但不是现行部署入口。现场的停用定义、归档副本和其他用户服务仍按各自操作授权处理。
 - 完成一个 issue 的标准：验收标准逐条满足、测试通过、`docs/` 与代码一致、PR 描述写明验证方式、水印齐全。
 - 交接或让出回合前，核对实际 PR/commit 状态并更新任务记录；已合并依赖不得继续标为待审核。目录已存在、部分 PR 已合并与完整验收完成分别记录。
 
