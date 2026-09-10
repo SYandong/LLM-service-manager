@@ -32,6 +32,7 @@ class SchedulerConfig:
     read_only: bool = True
     collectors: dict[str, Any] = field(default_factory=dict)
     registry: dict[str, Any] = field(default_factory=dict)
+    native_witness: dict[str, Any] = field(default_factory=dict)
     catalog_enabled: bool = False
     state_db_path: str = ""
     data_plane_events_enabled: bool = False
@@ -68,6 +69,8 @@ class SchedulerConfig:
     action_poll_seconds: float = 0.2
 
     def __post_init__(self):
+        from llmsvc.native_binding import validate_settings
+        validate_settings(self.native_witness)
         try:
             address = ipaddress.ip_address(self.listen_host)
         except ValueError as exc:
