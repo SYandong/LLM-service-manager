@@ -262,3 +262,29 @@ def test_maintenance_source_hash_is_revalidated_before_external_effects(harness)
     result = queue.process_once()
     assert result['status'] == 'failed' and not result['external_effects_started']
     assert trace == [] and not queue.marker.exists()
+
+
+def test_failed_preflight_cannot_erase_explicit_mode_and_enable_fallback(harness):
+    context = setup(harness);queue, _, _, original, _, trace, adapter = context
+    def invalid_preflight(job):
+        job.maintenance = None
+        raise OSError('fixture adapter error after forbidden mutation')
+    adapter.blockers = invalid_preflight
+    enqueue(context)
+    make_quiet(harness[1], harness[2])
+    for _ in range(2):
+        result = queue.process_once()
+        assert result['status'] == 'queued'
+        assert result['blocked_by'] == [{'reason':'maintenance_preflight_unavailable'}]
+        assert queue._pending[0].maintenance['mode'] == 'maintenance'
+    assert trace == [] and queue.path.read_bytes() == original
+    assert 'reload' not in [kind for kind, _ in harness[3]]
+
+
+def test_missing_binding_after_enqueue_stops_before_external_hook(harness):
+    context = setup(harness);queue, _, _, original, _, trace, _ = context
+    enqueue(context)
+    queue._pending[0].witness_binding = None
+    result = queue.process_once()
+    assert result['status'] == 'failed' and not result['external_effects_started']
+    assert trace == [] and queue.path.read_bytes() == original and not queue.marker.exists()
