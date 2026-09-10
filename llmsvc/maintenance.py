@@ -292,6 +292,7 @@ class MaintenanceController:
             self._enabled()
             record, state = self._state()
             result = self._request(operation, self._context(record, state), deadline)
+            self._enabled()
             if predicate(result):
                 record_now, state_now = self._state()
                 if state_now != state or record_now != record:
@@ -452,14 +453,16 @@ class MaintenanceController:
             if runtime.busy:
                 raise MaintenanceError("maintenance owner is active")
             record, state = self._state()
-            if record["phase"] == "rolled_back" or state["effects"].get("start_base", {}).get("submitted"):
-                return self._reconcile_base(deadline)
-            if not state["effects"]:
-                return self.abort_unstarted()
-            if not state["effects"].get("start_candidate", {}).get("submitted"):
-                raise MaintenanceError("candidate was not started; explicit rollback is required")
-            runtime.busy = True
-            s.catalog_fenced = True
+            resume_base = record["phase"] == "rolled_back" or state["effects"].get("start_base", {}).get("submitted")
+            if not resume_base:
+                if not state["effects"]:
+                    return self.abort_unstarted()
+                if not state["effects"].get("start_candidate", {}).get("submitted"):
+                    raise MaintenanceError("candidate was not started; explicit rollback is required")
+                runtime.busy = True
+                s.catalog_fenced = True
+        if resume_base:
+            return self._reconcile_base(deadline)
         try:
             with s.action_lock:
                 if record["marker_json"] is None:
@@ -643,7 +646,13 @@ class MaintenanceController:
 
     def _base_proof(self, record, state, *, deadline):
         from llmsvc.reload import InstanceTransitionProof
+        self._enabled()
+        if self._state() != (record, state):
+            raise MaintenanceError("rollback checkpoint changed before confirmation")
         observed = self._request("observe_base", self._context(record, state), deadline)
+        self._enabled()
+        if self._state() != (record, state):
+            raise MaintenanceError("rollback checkpoint changed during confirmation")
         if not self._base_valid(observed, state):
             raise MaintenanceError("restored instance or attempt settlement is unconfirmed")
         proof = InstanceTransitionProof(marker_sha256=record["marker_sha256"],
@@ -698,9 +707,11 @@ class MaintenanceController:
                 return self.abort_unstarted()
             if not state["effects"].get("stop_old",{}).get("submitted"):
                 raise MaintenanceError("unbound native effects prevent rollback")
-            if state["effects"].get("start_base",{}).get("submitted"):
-                return self._reconcile_base(deadline)
-            runtime.busy=True;s.catalog_fenced=True
+            resume_base = state["effects"].get("start_base",{}).get("submitted")
+            if not resume_base:
+                runtime.busy=True;s.catalog_fenced=True
+        if resume_base:
+            return self._reconcile_base(deadline)
         try:
             with s.action_lock:
                 if not state["effects"].get("start_candidate",{}).get("submitted"):
@@ -769,6 +780,9 @@ class MaintenanceController:
                 raise MaintenanceError("rollback checkpoint changed during publication")
             self.queue.confirm_retired_receipt(record["marker_json"].encode(),lambda saved:self._base_proof(record,state,deadline=deadline))
             self._base_proof(record,state,deadline=deadline)
+            self._enabled()
+            if self._state() != (record, state):
+                raise MaintenanceError("rollback checkpoint changed before release")
             if (runtime.retired or self.queue.fenced or self.queue.clock()>=deadline
                     or hashlib.sha256(self.queue._read()[0]).hexdigest()!=state["base_sha256"]):
                 raise MaintenanceError("rollback retirement is incomplete")
@@ -778,25 +792,36 @@ class MaintenanceController:
             s.emit("catalog_rolled_back",detail={"job_id":record["job_id"],"catalog_epoch":runtime.epoch})
             return {"status":"rolled_back","catalog_epoch":runtime.epoch}
 
-    def _reconcile_base(self,deadline):
-        s,runtime=self.scheduler,self.runtime
-        record,state=self._state()
-        if runtime.busy:
-            raise MaintenanceError("maintenance owner is active")
-        runtime.busy=True;s.catalog_fenced=True
+    def _reconcile_base(self, deadline):
+        s, runtime = self.scheduler, self.runtime
+        with s.action_lock:
+            self._enabled()
+            record, state = self._state()
+            if runtime.busy:
+                raise MaintenanceError("maintenance owner is active")
+            runtime.busy = True
+            s.catalog_fenced = True
         try:
-            if state["rollback_identity"] is None:
-                observed=self._request("observe_base",self._context(record,state),deadline)
-                restored=identity(observed.get("identity"))
-                if (observed.get("attempt_bound") is not True or observed.get("operation_id")!=state["operation_id"]
-                        or not self._base_valid(observed,{**state,"rollback_identity":restored})):
-                    raise MaintenanceError("unknown rollback start is not positively bound")
-                state=self._save(state,rollback_identity=restored)
-            observed=self._request("observe_base",self._context(record,state),deadline)
-            if not self._base_valid(observed,state):
-                raise MaintenanceError("rollback observation is incomplete")
-            if record["phase"]!="rolled_back":
-                state=self._save(state,stage="base_verified",observations={**state["observations"],"base":observed})
-            return self._finish_base(record,state,deadline)
+            with s.action_lock:
+                if state["rollback_identity"] is None:
+                    observed = self._request("observe_base", self._context(record, state), deadline)
+                    restored = identity(observed.get("identity"))
+                    if (observed.get("attempt_bound") is not True or observed.get("operation_id") != state["operation_id"]
+                            or not self._base_valid(observed, {**state, "rollback_identity": restored})):
+                        raise MaintenanceError("unknown rollback start is not positively bound")
+                    state = self._save(state, rollback_identity=restored)
+                if state["rollback_scope"] is None:
+                    captured = self._request("inspect", self._context(record, state), deadline)
+                    if captured.get("identity") != state["rollback_identity"]:
+                        raise MaintenanceError("rollback identity changed during recovery inspection")
+                    scope, actors = self._capture_scope(state["rollback_identity"], captured)
+                    state = self._save(state, rollback_scope=scope, rollback_actors=actors)
+                observed = self._request("observe_base", self._context(record, state), deadline)
+                if not self._base_valid(observed, state):
+                    raise MaintenanceError("rollback observation is incomplete")
+                if record["phase"] != "rolled_back":
+                    state = self._save(state, stage="base_verified", observations={**state["observations"], "base": observed})
+            return self._finish_base(record, state, deadline)
         finally:
-            runtime.busy=False
+            with s.action_lock:
+                runtime.busy = False

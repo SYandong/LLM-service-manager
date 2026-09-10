@@ -61,6 +61,8 @@ def validate_maintenance(record):
         scope, actors = record[prefix+"_scope"], record[prefix+"_actors"]
         if not isinstance(actors, list) or len(actors) > 4096:
             raise ValueError("invalid transition actor inventory")
+        if scope is None and actors:
+            raise ValueError("transition actor inventory lacks a bound scope")
         if scope is not None:
             expected_identity = record[prefix+"_identity"]
             if (expected_identity is None or not isinstance(scope, dict)

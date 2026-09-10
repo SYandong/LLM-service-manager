@@ -420,3 +420,68 @@ def test_late_pin_blocks_running_target_cleanup(maintenance):
     assert process.poll() is None and 'stop_model' not in c.backend.calls
     assert c.store.lease('unit-lease')[0].status=='confirmed' and c.store.lease('unit-lease')[0].budget_gb==40
     assert c.s.catalog_fenced
+
+
+def test_rollback_recovery_retires_sources_without_holding_action_lock(maintenance, monkeypatch):
+    import threading
+    c = maintenance
+    c.backend.start_failure = True
+    enqueue(c)
+    assert c.runtime.process_once()['status'] == 'reconciliation_required'
+    save = c.store.save_catalog
+    def fail_final(expected, record, **kwargs):
+        if record['phase'] == 'rolled_back':
+            raise OSError('fixture interrupted final rollback checkpoint')
+        return save(expected, record, **kwargs)
+    monkeypatch.setattr(c.store, 'save_catalog', fail_final)
+    with pytest.raises(OSError):
+        c.controller.rollback()
+    monkeypatch.setattr(c.store, 'save_catalog', save)
+    acquired = threading.Event()
+    readers = []
+    original = c.runtime.retire
+    def retire():
+        def reader():
+            with c.s.action_lock:
+                acquired.set()
+        thread = threading.Thread(target=reader)
+        readers.append(thread)
+        thread.start()
+        assert acquired.wait(2), 'retirement held the action lock against the source reader'
+        original()
+    monkeypatch.setattr(c.runtime, 'retire', retire)
+    try:
+        assert c.controller.reconcile()['status'] == 'rolled_back'
+    finally:
+        for thread in readers:
+            thread.join(timeout=2)
+    assert c.backend.calls.count('start_base') == 1
+
+
+def test_durable_actor_inventory_cannot_drop_previously_observed_helper(maintenance):
+    c = maintenance
+    enqueue(c)
+    assert c.runtime.process_once()['status'] == 'applied'
+    state = c.store.maintenance_checkpoint(c.store.catalog_checkpoint()['transaction_id'])
+    actor = {**state['new_identity'], 'pid': state['new_identity']['pid'] + 1}
+    expanded = {**state, 'new_actors': state['new_actors'] + [actor]}
+    c.store.save_maintenance(state, expanded)
+    with pytest.raises(ValueError, match='actor inventory'):
+        c.store.save_maintenance(expanded, state)
+
+
+def test_shutdown_during_final_base_observation_keeps_durable_gate(maintenance, monkeypatch):
+    c = maintenance
+    c.backend.start_failure = True
+    enqueue(c)
+    assert c.runtime.process_once()['status'] == 'reconciliation_required'
+    original = c.q.confirm_retired_receipt
+    def retire(*args, **kwargs):
+        result = original(*args, **kwargs)
+        c.s.stopping.set()
+        return result
+    monkeypatch.setattr(c.q, 'confirm_retired_receipt', retire)
+    with pytest.raises(MaintenanceError, match='stopping'):
+        c.controller.rollback()
+    assert c.s.catalog_fenced and c.store.catalog_pending()
+    assert c.store.catalog_checkpoint()['phase'] != 'rolled_back'

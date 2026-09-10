@@ -240,6 +240,13 @@ class IntentStore:
         for key in ("new_identity", "rollback_identity"):
             if expected[key] is not None and expected[key] != record[key]:
                 raise ValueError("maintenance instance changed")
+        for prefix in ("new", "rollback"):
+            key = prefix + "_scope"
+            if expected[key] is not None and record[key] != expected[key]:
+                raise ValueError("maintenance process scope changed")
+            key = prefix + "_actors"
+            if any(actor not in record[key] for actor in expected[key]):
+                raise ValueError("maintenance actor inventory regressed")
         for key, old in expected["effects"].items():
             if key not in record["effects"] or (old["acknowledged"] and not record["effects"][key]["acknowledged"]):
                 raise ValueError("maintenance effect receipt regressed")

@@ -70,7 +70,10 @@ transaction. It verifies this attempt's exit before staging/restoring the exact
 base bytes, and requires a distinct restored instance and actual base adoption.
 The old manifest is republished under a fresh rollback epoch. Current ledger
 rows are never restored from the configuration backup. Failed or uncertain
-rollback stays fenced.
+rollback stays fenced. Source retirement releases the action lock so readers can
+finish. Final release rechecks shutdown, checkpoint, source and marker after the
+last proof. Persisted actor inventories can grow as attributable helpers are
+observed, but cannot discard an earlier actor or change a bound process scope.
 
 An unstarted claim can be aborted only when its durable effect map is empty,
 its own exact receipt remains bound, and the base bytes are unchanged. It uses
