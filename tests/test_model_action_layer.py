@@ -301,15 +301,48 @@ def test_release_measurement_is_sampled_after_effect_confirmation(tmp_path):
     assert backend.calls == [("sleep", "a")]
 
 
-def test_new_activity_and_ram_pressure_after_first_action_block_further_effects(tmp_path):
-    _, controller, backend = setup(tmp_path)
+@pytest.mark.parametrize("observation_seconds", [0.5, 0.06])
+def test_new_activity_and_ram_pressure_after_first_action_block_further_effects(tmp_path, observation_seconds):
+    service, controller, backend = setup(tmp_path)
+    service.config = replace(service.config, action_observe_seconds=observation_seconds)
+    # Functional confirmation and deadline rejection use the same observations.
+    # Advance the fixture clock at the real condition-wait boundary; never make
+    # either result depend on a shared host scheduling within 60 milliseconds.
+    clock = [100.0]
+    wall_origin = time.time()
+    service.clock = lambda: wall_origin + clock[0] - 100.0
+    controller.monotonic = lambda: clock[0]
+    controller.dispatcher.monotonic = controller.monotonic
+    controller.dispatcher.wall_clock = service.clock
+    trace = []
+    collect = backend.collect
+    def observed_sample():
+        snapshot = replace(collect(), sampled_at=service.clock())
+        trace.append((clock[0], snapshot.models[0].state, snapshot.gpus[0].free_gb))
+        return snapshot
+    service.collect = observed_sample
+    def observation_gap(timeout=None):
+        assert timeout == service.config.action_poll_seconds
+        clock[0] += 0.08
+        return False
+    service.changed.wait = observation_gap
     def changing_conditions(kind, name):
         backend.inflight["b"] = 1
         backend.available = 150
     backend.after_apply = changing_conditions
     result = controller.free({"need_gb": 80}, by="caller")
-    assert backend.calls == [("sleep", "a")]
-    assert result["status"] == "partial" and result["freed_gb"] == 30
+    assert backend.calls == [("sleep", "a")], (result, trace)
+    assert trace[0] == (100.0, "awake", 20.0)
+    assert trace[1] == (100.0, "sleeping", 50.0)
+    if observation_seconds == 0.06:
+        assert trace == [(100.0, "awake", 20.0), (100.0, "sleeping", 50.0)]
+        assert result["status"] == "no_progress" and result["error"] == "effect_not_confirmed"
+        assert result["freed_gb"] == 0 and result["slept"] == []
+        assert result["measurement_complete"] is False
+        return
+    assert len(trace) == 3 and trace[2][0] > trace[1][0], (result, trace)
+    assert result["status"] == "partial" and result["freed_gb"] == 30, (result, trace)
+    assert result["slept"] == ["a"] and result["measurement_complete"] is True
     assert any(item["model"] == "b" and item["reason"] == "in_flight" for item in result["skipped"])
 
 
