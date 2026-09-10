@@ -93,7 +93,9 @@ deploy/upgrade.sh rollback --root /path/to/disposable/root \
 For an authorized installed-site upgrade use `--root /` after rehearsal. Both
 candidate `--check-config` and `--once` must pass. Configured live host memory
 must remain available. Before each cutover the updater checks fresh inference
-activity; this is a scheduler-restart guard, not a new trusted reload/quiet proof.
+activity; v252 omits `requests` for an empty explicit `snapshot`, which is
+accepted under the existing collector contract. Missing/invalid snapshots still
+block. This is a scheduler-restart guard, not a new trusted reload/quiet proof.
 Only `llmsvc-scheduler.service` is restarted. Health requires a sampled read-only
 state, the selected runtime in the service process, shared CLI version/status,
 and unchanged active llama-swap/reaper. No inference endpoint, alias, data-plane
