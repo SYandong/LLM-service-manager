@@ -137,6 +137,8 @@ class ScopeInspector:
         props = dict(rows)
         if len(props) != len(rows) or any(name not in props for name in PROPERTIES):
             raise ExecutorError('incomplete_unit_properties')
+        if not props['MainPID'].isdecimal():
+            raise ExecutorError('main_pid_invalid')
         if props['Id'] != self.profile['unit'] or props['LoadState'] != 'loaded':
             raise ExecutorError('configured_unit_not_loaded')
         if not re.fullmatch(r'[0-9a-f]{32}', props['InvocationID']) or not int(props['InvocationID'], 16):
@@ -215,9 +217,11 @@ class ScopeInspector:
         final_props = self.properties(deadline)
         if first is None or first != second or final_props != props or pid not in [a['pid'] for a in actors]:
             raise ExecutorError('instance_changed_during_inspection')
-        return {'identity': {'pid': pid, 'start_ticks': first['start_ticks'],
+        return {'observed_at': time.monotonic(),
+                'identity': {'pid': pid, 'start_ticks': first['start_ticks'],
                              'scope_sha256': scope_hash}, 'scope': scope, 'actors': actors,
-                'external_helpers_confirmed': False, 'exclusion_confirmed': False}
+                'external_helpers_confirmed': False, 'actors_known': False,
+                'ingress_state': 'unknown', 'exclusion_confirmed': False}
 
     def observe_absence(self, expected, scope, actors, deadline):
         validate_identity(expected)
@@ -245,7 +249,14 @@ class ScopeInspector:
         final_props = self.properties(deadline)
         empty = not first and not second and props == final_props
         absent = all(not row['old_identity_present'] for row in details)
-        return {'old_process_absent': not self.compare(expected)['old_identity_present'],
+        old_absent = not self.compare(expected)['old_identity_present']
+        current = self.process(int(props['MainPID'])) if props['MainPID'].isdecimal() and int(props['MainPID']) > 0 else None
+        current_identity = ({'pid': current['pid'], 'start_ticks': current['start_ticks'],
+                             'scope_sha256': current_hash} if current is not None else None)
+        return {'observed_at': time.monotonic(), 'identity': current_identity,
+                'old_identity': expected, 'old_process_absent': old_absent,
+                'old_settled': old_absent and empty, 'helpers_settled': False,
+                'ingress_state': 'unknown',
                 'observed_actors_absent': absent, 'scope_empty': empty,
                 'scope_processes': second, 'actor_observations': details,
                 'settlement_confirmed': False, 'cleanup_confirmed': False,
@@ -268,8 +279,12 @@ def handle(envelope, operation, inspector, *, dry_run=False, clock=time.monotoni
         raise ExecutorError('invalid_context_or_deadline')
     deadline = clock()+seconds
     result = {'request_id': request_id, 'transaction_id': context.get('transaction_id')}
-    if operation == 'inspect':
+    if operation in ('inspect', 'preflight', 'observe_candidate', 'observe_base'):
         result.update(inspector.inspect(deadline))
+        if operation == 'preflight':
+            result.update(ready=False, actors_known=False, in_flight=None,
+                          blockers=['exclusion_provider_and_helper_outcomes_required',
+                                    'fresh_inflight_observation_required'])
     elif operation in ('observe_old', 'observe_candidate_absent'):
         key = 'old_identity' if operation == 'observe_old' else 'new_identity'
         result.update(inspector.observe_absence(context.get(key), context.get('observed_scope'),

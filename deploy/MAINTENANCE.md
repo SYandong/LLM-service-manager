@@ -2,7 +2,8 @@
 
 `maintenance_executor.py` is the ops contribution to the combined #60 instance
 transition implementation. Its current executable surface is read-only: `inspect`,
-`observe_old`, and `observe_candidate_absent`. **It cannot perform a maintenance
+`preflight`, `observe_old`, `observe_candidate`, `observe_base`, and
+`observe_candidate_absent`. **It cannot perform a maintenance
 transition yet.** Other operations return an error; `--dry-run` reports an
 unaccepted planned operation without invoking a command or writing files. Do not
 install this intermediate contribution as a production maintenance adapter.
@@ -17,7 +18,12 @@ preserve the returned scope and actor set when requesting a later observation.
 The JSON command envelope uses `operation`, `context`, `timeout_seconds`, and
 `request_id` (SHA256 of canonical sorted compact JSON for the other three fields).
 Responses echo the request and transaction IDs. Observation context includes the
-expected instance identity, `observed_scope`, and `observed_actors`. Limits are
+expected instance identity, `observed_scope`, and `observed_actors`. Observations
+include `observed_at` from the host monotonic clock and `ingress_state=unknown`.
+Preflight is explicitly not ready: unknown inflight and external helpers cannot
+be replaced by empty/zero/true values. `old_settled` describes only old proxy
+identity absence plus the stable empty scope; `helpers_settled=false` continues
+to block complete transition proof. Limits are
 4 MiB of input, 64 KiB of output, and a finite remaining timeout up to 900 seconds.
 The caller's absolute operation deadline remains authoritative.
 

@@ -219,3 +219,29 @@ def test_real_cli_dry_run_envelope_and_no_effect(tmp_path):
     assert value['request_id']==request['request_id']
     assert value['transaction_id']=='fixture' and value['accepted'] is False
     assert sorted(p.name for p in tmp_path.iterdir())==['profile.json']
+
+
+def test_current_abi_preflight_unknowns_block_without_fabricating_zero(tmp_path):
+    import os
+    f=Fixture(tmp_path,os.getpid())
+    before=time.monotonic()
+    result=handle(envelope('preflight'),'preflight',f.inspector)
+    after=time.monotonic()
+    assert before <= result['observed_at'] <= after
+    assert result['ready'] is False and result['actors_known'] is False
+    assert result['in_flight'] is None and result['ingress_state']=='unknown'
+
+
+def test_proxy_settled_field_does_not_certify_helpers_or_complete_transition(tmp_path):
+    proxy=child()
+    try:
+        f=Fixture(tmp_path,proxy.pid);seen=f.inspector.inspect(time.monotonic()+5)
+        finish(proxy);f.props['MainPID']='0';(f.cg/'cgroup.procs').write_text('')
+        context={'transaction_id':'fixture','old_identity':seen['identity'],
+                 'observed_scope':seen['scope'],'observed_actors':seen['actors']}
+        result=handle(envelope('observe_old',context),'observe_old',f.inspector)
+        assert result['identity'] is None and result['old_identity']==seen['identity']
+        assert result['old_settled'] is True
+        assert result['helpers_settled'] is False and result['settlement_confirmed'] is False
+    finally:
+        if proxy.poll() is None:finish(proxy)
