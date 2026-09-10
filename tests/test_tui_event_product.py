@@ -258,3 +258,25 @@ def test_export_refuses_an_existing_symlink(tmp_path):
     with pytest.raises(FileExistsError):
         EventDetails.write_text(str(link), 'replacement')
     assert original.read_text() == 'keep' and link.is_symlink()
+
+
+def test_export_path_enter_never_runs_a_scheduler_command(snapshot):
+    async def scenario():
+        app, client = make_app(snapshot)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.press('e')
+            await pilot.pause()
+            dialog = app.screen
+            path = dialog.query_one('#export-path', Input)
+            path.value = 'free --ram'
+            path.focus()
+            before = list(client.calls)
+            await pilot.press('enter')
+            await pilot.pause()
+            assert app.screen is dialog
+            assert path.value == 'free --ram'
+            assert client.calls == before
+            assert not app._write_busy
+            await pilot.press('escape')
+    asyncio.run(scenario())

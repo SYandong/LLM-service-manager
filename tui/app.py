@@ -801,6 +801,9 @@ class SchedulerApp(App):
         return Text(self.api.clean_text(line), style=color)
 
     def on_input_submitted(self, event):
+        if (not self.is_running or self.screen is not self.dashboard
+                or event.input.id != "command"):
+            return
         try:
             args = self.api.build_parser(UIParser).parse_args(shlex.split(event.value))
             if args.url or args.config or args.timeout:

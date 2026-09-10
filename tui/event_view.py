@@ -213,6 +213,10 @@ class EventDetails(ModalScreen):
                 and self.is_attached and self._status_widget.is_attached):
             self._status_widget.update(message)
 
+    def on_input_submitted(self, event):
+        event.stop()  # A filename must never bubble into the scheduler command parser.
+        self.say('Use Save text to save this path.')
+
     def on_button_pressed(self, event):
         event.stop()
         if event.button.id == 'event-copy':
