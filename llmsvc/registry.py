@@ -1012,12 +1012,25 @@ class ModelRegistry:
                  unit_absent: Callable[..., bool] | None = None,
                  now: Callable[[], float] = time.time,
                  model_config_max_bytes: int = DEFAULT_MODEL_CONFIG_MAX_BYTES,
-                 weight_index_max_bytes: int = DEFAULT_WEIGHT_INDEX_MAX_BYTES):
+                 weight_index_max_bytes: int = DEFAULT_WEIGHT_INDEX_MAX_BYTES,
+                 submit_change: Callable[..., dict] | None = None):
+        if submit_change is not None and not callable(submit_change):
+            raise ValueError("submit_change must be callable")
+        self.submit_change = submit_change
         self.queue, self.shared_roots, self.daemon_port_range = queue, tuple(shared_roots), daemon_port_range
         self.reserved_ports, self.stop_model, self.unit_absent, self.now = reserved_ports, stop_model, unit_absent, now
         self.model_config_max_bytes = _source_byte_limit(model_config_max_bytes, "model_config_max_bytes")
         self.weight_index_max_bytes = _source_byte_limit(weight_index_max_bytes, "weight_index_max_bytes")
         self._removals: dict[str, str] = {}
+
+    def _enqueue(self, transform: Callable[[bytes], bytes], **options: Any) -> dict:
+        # Public previews never invoke a catalog installer or capability probe.
+        # The trusted core callback must retain these same queue protections.
+        with self.queue.action_lock:
+            if self.queue.fenced:
+                raise ReloadError("previous transaction requires reconciliation")
+            submit = self.queue.enqueue if options.get("dry_run") or self.submit_change is None else self.submit_change
+            return submit(transform, **options)
 
     @staticmethod
     def _decode(data: bytes) -> tuple[dict, dict]:
@@ -1103,7 +1116,7 @@ class ModelRegistry:
                               projected_base_sha256=hashlib.sha256(data).hexdigest(),
                               candidate_sha256=hashlib.sha256(candidate).hexdigest(), blocked_by=[])
             return candidate
-        return self.queue.enqueue(transform, description={"kind": "add_model", "model": name, "base": base}, dry_run=dry_run)
+        return self._enqueue(transform, description={"kind": "add_model", "model": name, "base": base}, dry_run=dry_run)
 
     def remove(self, name: str, *, dry_run: bool = False, require_expired: bool = False) -> dict:
         return self._remove(name, dry_run=dry_run, require_expired=require_expired)
@@ -1159,7 +1172,7 @@ class ModelRegistry:
                 self.queue._check_deadline(deadline)
                 if not self.unit_absent(name, deadline=deadline):
                     raise RegistryError("target unit absence not confirmed")
-            result = self.queue.enqueue(transform, description={"kind": "remove_model", "model": name,
+            result = self._enqueue(transform, description={"kind": "remove_model", "model": name,
                                                                "unit": f"vllm-{name}.service"},
                                         dry_run=dry_run, precheck=precheck, after_apply=cleanup)
             if not dry_run:
