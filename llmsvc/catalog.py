@@ -172,6 +172,8 @@ class CatalogRuntime:
                     raise ValueError("temporary catalog model cannot become default")
                 if name in old and old[name] != profile:
                     raise ValueError("existing catalog profile changes require separate configuration reconciliation")
+                if name in retained and self._retained_required(name, retained[name]):
+                    raise ReloadError("retained model cannot be reactivated before resource reconciliation")
                 ports.add(port); units.add(unit); retained.pop(name, None)
             for name, profile in old.items():
                 if name not in active:
@@ -189,14 +191,13 @@ class CatalogRuntime:
             manifest = {"sources": sources(self.scheduler.config), "active": active, "retained": retained}
             return PreparedCatalog(digest(original), candidate, catalog_json(manifest), binding, self.epoch)
 
-    def _retained_required(self, name, profile):
+    def _retained_required(self, name, profile, *, during_claim=False):
         """Read-only eligibility for retiring an already-retained descriptor."""
         from llmsvc.actions import _known
         s, store = self.scheduler, self.scheduler.store
-        if s.catalog_fenced or s.catalog_epoch != self.epoch or store is None:
+        if (s.catalog_fenced and not during_claim) or s.catalog_epoch != self.epoch or store is None:
             return True
-        if (any(lease.model == name for lease, _ in store.leases())
-                or store.fault(name) is not None or store.recovery(name) is not None):
+        if self._has_resource_reference(name):
             return True
         raw = s._snapshot
         if (not s._sample_source_time_provided or s._sample_bounds is None or raw.errors
@@ -206,6 +207,17 @@ class CatalogRuntime:
         models = [model for model in raw.models if model.name == name]
         return not (len(models) == 1 and models[0].unit == profile.get("unit")
                     and models[0].unit_active is False and models[0].state == "stopped")
+
+    def _has_resource_reference(self, name):
+        store = self.scheduler.store
+        return (store is None or any(lease.model == name for lease, _ in store.leases())
+                or store.fault(name) is not None or store.recovery(name) is not None)
+
+    def _check_reactivation(self, manifest, previous=None, *, during_claim=False):
+        previous = self.manifest if previous is None else previous
+        for name in previous["retained"].keys() & manifest["active"].keys():
+            if self._retained_required(name, previous["retained"][name], during_claim=during_claim):
+                raise ReloadError("retained model cannot be reactivated before resource reconciliation")
 
     def _check_membership(self, active, previous=None):
         previous = self.manifest["active"] if previous is None else previous
@@ -298,12 +310,19 @@ class CatalogRuntime:
             if dry_run:
                 return {"would": [{"kind": "install_catalog", "models": sorted(json.loads(prepared.manifest_json)["active"])}]}
             self._enabled(); self._idle()
+            job_id = None
             def combined_precheck():
+                manifest = json.loads(prepared.manifest_json)
                 try:
-                    self._check_membership(json.loads(prepared.manifest_json)["active"])
-                    return list(precheck()) if precheck is not None else []
+                    self._check_membership(manifest["active"])
                 except ReloadError:
                     return [{"reason": "catalog_removal_protected"}]
+                owned = self.busy and self.pending is not None and self.pending["job_id"] == job_id
+                try:
+                    self._check_reactivation(manifest, during_claim=owned)
+                except ReloadError:
+                    return [{"reason": "catalog_reactivation_blocked"}]
+                return list(precheck()) if precheck is not None else []
             def transform(raw):
                 if digest(raw) != prepared.base_sha256:
                     raise ReloadError("catalog source changed")
@@ -314,7 +333,8 @@ class CatalogRuntime:
                 self._after_apply(deadline)
             result = self.queue.enqueue(transform, description=description or {"kind": "install_catalog"},
                 after_apply=after, precheck=combined_precheck, witness_binding=prepared.binding)
-            self.jobs[result["id"]] = prepared
+            job_id = result["id"]
+            self.jobs[job_id] = prepared
             return result
 
     def submit_change(self, transform, *, description, dry_run=False, precheck=None, after_apply=None):
@@ -372,6 +392,9 @@ class CatalogRuntime:
                 or digest(self.queue._read()[0]) != record["candidate_sha256"]):
             raise ReloadError("catalog receipt or configuration changed before release")
         self._check_membership(record["new_manifest"]["active"], record["old_manifest"]["active"])
+        for name in record["old_manifest"]["retained"].keys() & record["new_manifest"]["active"].keys():
+            if self._has_resource_reference(name):
+                raise ReloadError("retained model resource reference changed before release")
 
     def _after_apply(self, deadline):
         record = self.scheduler.store.catalog_checkpoint()
@@ -384,6 +407,7 @@ class CatalogRuntime:
         self.pending = bound
         self._proof(bound, marker, deadline=min(deadline,self.deadline))
         self._check_membership(bound["new_manifest"]["active"], bound["old_manifest"]["active"])
+        self._check_reactivation(bound["new_manifest"], bound["old_manifest"], during_claim=True)
         published = {**bound, "phase": "published"}
         self.scheduler.store.save_catalog(bound, published)
         self.pending = published
@@ -408,6 +432,7 @@ class CatalogRuntime:
                 if self.queue._blockers(job):
                     return self.queue.process_once()
                 manifest = json.loads(prepared.manifest_json)
+                self._check_reactivation(manifest)
                 if manifest["sources"] != sources(s.config):
                     raise ReloadError("catalog source settings changed")
                 self.deadline = min(job.submitted_at+self.queue.timeout, self.queue.clock()+self.queue.operation_timeout)
@@ -492,6 +517,7 @@ class CatalogRuntime:
                 marker = json.loads(record["marker_json"])
                 self._proof(record, marker, deadline=deadline)
                 self._check_membership(record["new_manifest"]["active"], record["old_manifest"]["active"])
+                self._check_reactivation(record["new_manifest"], record["old_manifest"], during_claim=True)
                 if self.epoch != record["new_epoch"]:
                     bundle = self._construct(record["new_manifest"])
                     try:
