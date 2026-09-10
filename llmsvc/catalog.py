@@ -86,6 +86,11 @@ class CatalogRuntime:
             self.pending = record
             manifest = record["new_manifest"] if record["phase"] in ("published", "released") else record["old_manifest"]
             epoch = record["new_epoch"] if record["phase"] in ("published", "released") else record["old_epoch"]
+            if record["phase"] == "rolled_back":
+                maintenance = scheduler.store.maintenance_checkpoint(record["transaction_id"])
+                if maintenance is None:
+                    raise ValueError("rolled-back catalog lacks its transition proof")
+                epoch = maintenance["rollback_epoch"]
             if manifest["sources"] != sources(scheduler.config):
                 raise ValueError("catalog source settings changed; reconciliation required")
             bundle = self._construct(manifest)

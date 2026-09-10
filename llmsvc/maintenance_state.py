@@ -5,14 +5,14 @@ import hashlib
 import json
 
 MAX_MAINTENANCE_BYTES = 4 * 1024 * 1024
-EFFECTS = {"exclude", "stop_old", "start_candidate", "resume", "stop_candidate", "start_base"}
+EFFECTS = {"exclude", "stop_old", "start_candidate", "resume", "stop_candidate", "start_base", "restore_config"}
 
 
 def validate_maintenance(record):
     from llmsvc.maintenance import identity
     expected = {"transaction_id", "job_id", "mode", "old_identity", "new_identity", "rollback_identity",
                 "base_bytes", "candidate_sha256", "base_sha256", "generation", "stage", "effects",
-                "observations", "error", "accounts", "rollback_epoch", "backend_bindings", "exclusion_method", "backend_sha256", "operation_id", "observed_scope", "observed_actors"}
+                "observations", "error", "accounts", "rollback_epoch", "backend_bindings", "exclusion_method", "backend_sha256", "operation_id", "observed_scope", "observed_actors", "new_scope", "new_actors", "rollback_scope", "rollback_actors"}
     if not isinstance(record, dict) or set(record) != expected or record["mode"] != "maintenance":
         raise ValueError("invalid maintenance checkpoint")
     raw = json.dumps(record, allow_nan=False)
@@ -46,7 +46,7 @@ def validate_maintenance(record):
         identity(actor)
     if record["old_identity"] not in record["observed_actors"]:
         raise ValueError("maintenance source missing from actor inventory")
-    if record["stage"] not in EFFECTS | {"claimed", "old_settled", "adopted", "released", "rollback_settled", "rolled_back", "stop_model", "aborted"}:
+    if record["stage"] not in EFFECTS | {"claimed", "old_settled", "adopted", "released", "rollback_settled", "rolled_back", "stop_model", "aborted", "base_verified"}:
         raise ValueError("invalid maintenance stage")
     if not isinstance(record["effects"], dict) or not isinstance(record["observations"], dict) or not isinstance(record["accounts"], list) or not isinstance(record["backend_bindings"], list):
         raise ValueError("invalid maintenance progress")
@@ -56,3 +56,16 @@ def validate_maintenance(record):
         if (not isinstance(value, dict) or set(value) != {"submitted", "acknowledged"}
                 or value["submitted"] is not True or type(value["acknowledged"]) is not bool):
             raise ValueError("invalid maintenance effect receipt")
+
+    for prefix in ("new", "rollback"):
+        scope, actors = record[prefix+"_scope"], record[prefix+"_actors"]
+        if not isinstance(actors, list) or len(actors) > 4096:
+            raise ValueError("invalid transition actor inventory")
+        if scope is not None:
+            expected_identity = record[prefix+"_identity"]
+            if (expected_identity is None or not isinstance(scope, dict)
+                    or hashlib.sha256(json.dumps(scope,sort_keys=True,separators=(",", ":"),allow_nan=False).encode()).hexdigest() != expected_identity["scope_sha256"]
+                    or expected_identity not in actors):
+                raise ValueError("invalid transition scope binding")
+            for actor in actors:
+                identity(actor)

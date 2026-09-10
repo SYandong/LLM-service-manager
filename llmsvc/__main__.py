@@ -150,7 +150,11 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="force read-only operation and never create or write the intent database")
     parser.add_argument("--check-config", action="store_true", help="validate configuration and exit")
     parser.add_argument("--once", action="store_true", help="collect one JSON snapshot and exit")
+    parser.add_argument("--maintenance-recover", choices=("observe", "rollback"),
+                        help="exclusive operator recovery using the configured maintenance adapter")
     args = parser.parse_args()
+    if args.maintenance_recover and (args.once or args.check_config):
+        parser.error("maintenance recovery cannot be combined with once/check-config")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     store = None
     collector = None
@@ -210,6 +214,13 @@ def main():
             if store is not None:
                 store.close()
 
+    if args.maintenance_recover and args.dry_run:
+        try:
+            operation = "rollback_maintenance" if args.maintenance_recover == "rollback" else "reconcile_maintenance"
+            print(json.dumps({"would": [{"kind": operation}]}))
+        finally:
+            close_scheduler()
+        return 0
     if args.check_config:
         close_scheduler()
         return 0
@@ -228,6 +239,22 @@ def main():
     except OSError as exc:
         close_scheduler()
         parser.error(str(exc))
+    if args.maintenance_recover:
+        # Binding the normal control endpoint precedes recovery effects, so a
+        # running normal scheduler cannot be bypassed by a second operator CLI.
+        try:
+            if scheduler.catalog is None or scheduler.catalog.transition is None:
+                raise ValueError("maintenance recovery requires the configured transition mode")
+            scheduler.sample_once()
+            controller = scheduler.catalog.transition
+            result = controller.rollback() if args.maintenance_recover == "rollback" else controller.reconcile()
+            print(json.dumps(result, allow_nan=False))
+            return 0
+        finally:
+            try:
+                close_scheduler()
+            finally:
+                server.server_close()
     # Signal handlers only notify. HTTP shutdown must run outside serve_forever.
     exit_requested = threading.Event()
     previous = {}

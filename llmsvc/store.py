@@ -146,7 +146,7 @@ class IntentStore:
         with self.action_lock:
             if self.catalog_checkpoint() != expected:
                 raise ValueError("catalog checkpoint changed")
-            initial = expected is None or expected["phase"] in ("released", "aborted")
+            initial = expected is None or expected["phase"] in ("released", "aborted", "rolled_back")
             if initial:
                 if record["phase"] != "claimed":
                     raise ValueError("catalog must begin claimed")
@@ -165,11 +165,18 @@ class IntentStore:
                     raise ValueError("catalog checkpoint identity changed")
                 if expected["marker_sha256"] is not None and record["marker_sha256"] != expected["marker_sha256"]:
                     raise ValueError("catalog marker changed")
-                if record["previous"] != expected["previous"] and not (record["phase"] == "released" and record["previous"] is None):
+                if record["previous"] != expected["previous"] and not (record["phase"] in ("released", "rolled_back") and record["previous"] is None):
                     raise ValueError("catalog prior checkpoint changed")
-                transitions = {"claimed": {"claimed", "published", "aborted"}, "published": {"published", "released"}}
+                transitions = {"claimed": {"claimed", "published", "aborted", "rolled_back"},
+                               "published": {"published", "released", "rolled_back"}}
                 if record["phase"] not in transitions.get(expected["phase"], set()):
                     raise ValueError("catalog phase transition rejected")
+            if record["phase"] == "rolled_back":
+                rollback = self.maintenance_checkpoint(record["transaction_id"])
+                if (rollback is None or rollback["stage"] != "base_verified" or rollback["rollback_identity"] is None
+                        or rollback["observations"].get("candidate_absence", {}).get("attempt_settled") is not True
+                        or not rollback["effects"].get("start_base", {}).get("submitted")):
+                    raise ValueError("maintenance rollback has not been positively verified")
             if dry_run:
                 return {"would": [{"kind": "catalog_"+record["phase"]}]}
             if self.read_only:
@@ -184,6 +191,9 @@ class IntentStore:
                 self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS llmsvc_one_recovery ON llmsvc_recoveries(model) WHERE stage != 'complete'")
                 self._db.execute("CREATE TABLE IF NOT EXISTS llmsvc_catalog (singleton INTEGER PRIMARY KEY CHECK(singleton=1), record TEXT NOT NULL)")
                 self._db.execute("INSERT OR REPLACE INTO llmsvc_catalog VALUES (1, ?)", (catalog_json(record),))
+                if record["phase"] == "rolled_back":
+                    self._db.execute("UPDATE llmsvc_maintenance SET record=? WHERE transaction_id=?",
+                        (json.dumps({**rollback, "stage": "rolled_back"}, allow_nan=False), record["transaction_id"]))
                 if record["phase"] == "aborted" and self._has_maintenance:
                     old_maintenance = self.maintenance_checkpoint(record["transaction_id"])
                     if old_maintenance is not None:
@@ -224,7 +234,7 @@ class IntentStore:
     def save_maintenance(self, expected, record):
         from llmsvc.maintenance_state import validate_maintenance
         validate_maintenance(record)
-        mutable = {"stage", "effects", "observations", "new_identity", "rollback_identity", "error"}
+        mutable = {"stage", "effects", "observations", "new_identity", "rollback_identity", "error", "new_scope", "new_actors", "rollback_scope", "rollback_actors"}
         if any(record[key] != expected[key] for key in set(record)-mutable):
             raise ValueError("maintenance identity changed")
         for key in ("new_identity", "rollback_identity"):
@@ -262,6 +272,11 @@ class IntentStore:
                     or not state["effects"].get("stop_model:"+row[0].model, {}).get("submitted")
                     or self.fault(row[0].model) or self.recovery(row[0].model)):
                 raise ValueError("maintenance cleanup account is unbound")
+            captured = [(lease, captured_unit) for lease, captured_unit in state["accounts"]
+                        if lease.get("lease_id") == lease_id and captured_unit == unit]
+            if (len(captured) != 1 or any(captured[0][0].get(key) != getattr(row[0], key)
+                    for key in ("model", "gpu", "util", "budget_gb"))):
+                raise ValueError("maintenance cleanup lease is not the captured account")
             with self._db:
                 self._db.execute("BEGIN IMMEDIATE")
                 if self.lease(lease_id) != row or self.maintenance_checkpoint(transaction_id) != state:
