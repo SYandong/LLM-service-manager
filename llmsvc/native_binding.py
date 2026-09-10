@@ -54,7 +54,7 @@ def validate_settings(value):
         raise ValueError('native_witness must be a mapping')
     if not value:
         return ()
-    if set(value) - {'images', 'request_timeout_seconds', 'max_image_bytes'} or 'images' not in value:
+    if set(value) - {'images', 'request_timeout_seconds', 'max_image_bytes', 'phase_images'} or 'images' not in value:
         raise ValueError('invalid native_witness keys')
     images = value['images']
     if not isinstance(images, list) or not 1 <= len(images) <= 16:
@@ -71,6 +71,11 @@ def validate_settings(value):
         if any(old.executable_sha256 == pin.executable_sha256 for old in pins):
             raise ValueError('duplicate native_witness image digest')
         pins.append(pin)
+    phases = value.get('phase_images')
+    if phases is not None:
+        if (not isinstance(phases, dict) or set(phases) != {'old', 'candidate', 'restored'}
+                or any(not isinstance(v, str) or v not in {p.executable_sha256 for p in pins} for v in phases.values())):
+            raise ValueError('native_witness phase_images must bind old/candidate/restored to configured images')
     timeout = value.get('request_timeout_seconds', 0.5)
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 60:
         raise ValueError('native_witness timeout must be in (0,60]')

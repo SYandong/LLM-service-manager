@@ -99,4 +99,42 @@ late protection, observed model-account release and endpoint exclusion. Those
 fixtures are not production quiet/settlement or long-term calibration evidence.
 No production migration or site action is performed by installing these modules.
 
+## Explicit native witness phases
+
+Optional `native_witness` pins supported source revisions, executable digests and
+dialects. When enabled for maintenance it additionally requires `phase_images`
+with `old`, `candidate` and `restored` image digests from that allowlist. The normal
+catalog factory mounts `BoundNativeGenerationReader` through its maintenance
+controller; construction performs no I/O. Unconfigured maintenance retains its
+existing adapter protocol.
+
+Before effects the durable maintenance record includes immutable
+`native_provenance`: the canonical endpoint, complete checked witness settings
+and the base generation. Old, candidate and restored instances use their own
+saved identities and intended image, with configuration bytes and reader results
+checked within the existing deadline. Successful candidate observations retain
+the actual pin and sampled identity; `settlement_confirmed` remains null in that
+visibility receipt. Independent helper, backend and cleanup proof is still
+mandatory.
+
+The adapter's opt-in `configuration_file_confirmed` reports only its own fresh
+file/instance evidence. Core obtains generation from the bound reader; an adapter
+must not claim that file bytes alone prove native generation visibility. The
+legacy unconfigured adapter path is unchanged. Site adapters must explicitly
+support the new context before enabling these settings.
+
+The new strict maintenance-record field is rejected by older readers, including
+on restart; it is never hidden in an extensible observations dictionary that an
+old writer could ignore. Records without the field remain readable, but changing
+witness mode/settings while a transaction is pending blocks execution. Preserve
+the full ledger for rollback; do not remove the field or rebuild it from current
+settings. Default-off and dry-run create no new provenance record.
+
+The base must already contain a valid generation scalar. An untagged base cannot
+provide a rollback witness with the existing strict reader, so this mode refuses
+before source effects. This implementation does not silently stamp a live source,
+change a binary or provide a source installer. A phase allowlist is not proof that
+a site adapter can install another image; actual source transition and rollback
+still require the designated deployment owner's reviewed implementation/proofs.
+
 <!-- Generated-By: Codex / gpt-6-astra -->

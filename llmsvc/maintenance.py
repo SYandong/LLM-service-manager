@@ -137,6 +137,10 @@ class MaintenanceController:
         self.scheduler, self.queue, self.backend = scheduler, queue, backend
         self.runtime = None
         self._inspection = None
+        from llmsvc.native_binding import build_bound_generation_reader
+        self.native_reader = build_bound_generation_reader(scheduler.config,
+            instance_provider=self.inspect_instance, config_reader=queue._read,
+            config_provider=lambda: scheduler.config, clock=queue.clock)
 
     def _enabled(self):
         s = self.scheduler
@@ -167,6 +171,22 @@ class MaintenanceController:
                 identity(result[key])
         if result.get("transaction_id") != context.get("transaction_id"):
             raise MaintenanceError("maintenance observation transaction mismatch")
+        if operation in ("observe_candidate", "observe_base") and "native_provenance" in context:
+            record, state = self._state()
+            phase = "candidate" if operation == "observe_candidate" else "restored"
+            key = "new_identity" if phase == "candidate" else "rollback_identity"
+            if (result.get("identity") != state[key] or state[key] is None
+                    or result.get("configuration_file_confirmed") is not True):
+                raise MaintenanceError("native independent file/instance proof is unavailable")
+            visible = self._native_visibility(state, phase, deadline)
+            if self._state() != (record, state):
+                raise MaintenanceError("native phase checkpoint changed during read")
+            result = {**result, "configuration_confirmed": True,
+                      "generation": visible.reading.generation,
+                      "native_visibility": {"pin": asdict(visible.pin), "instance": asdict(visible.instance),
+                          "endpoint": visible.reading.endpoint, "generation": visible.reading.generation,
+                          "candidate_sha256": state["candidate_sha256"] if phase == "candidate" else state["base_sha256"],
+                          "settlement_confirmed": None}}
         return result
 
     def inspect_instance(self, *, deadline):
@@ -206,7 +226,7 @@ class MaintenanceController:
                     or matches[0].get("gpu") != lease["gpu"] or not matches[0].get("invocation_id")):
                 raise MaintenanceError("maintenance backend identity differs from accounting")
         import uuid
-        return {"transaction_id": record["transaction_id"], "job_id": job.id,
+        state = {"transaction_id": record["transaction_id"], "job_id": job.id,
                 "mode": "maintenance", "operation_id": descriptor["transaction_id"], "old_identity": self._inspection,
                 "new_identity": None, "rollback_identity": None, "new_scope": None, "new_actors": [],
                 "rollback_scope": None, "rollback_actors": [],
@@ -220,10 +240,53 @@ class MaintenanceController:
                 "stage": "claimed", "effects": {}, "observations": {}, "error": None,
                 "accounts": [[asdict(lease), unit] for lease, unit in self.scheduler.store.leases()]}
 
+        if self.native_reader is not None:
+            import yaml
+            document = yaml.safe_load(original)
+            generation = document.get("macros", {}).get("llmsvc_reload_generation")
+            settings = copy.deepcopy(self.scheduler.config.native_witness)
+            if "phase_images" not in settings:
+                raise MaintenanceError("native witness phase targets are not configured")
+            state["native_provenance"] = {"endpoint": self.native_reader.endpoint,
+                "settings": settings, "base_generation": generation}
+            from llmsvc.maintenance_state import validate_maintenance
+            validate_maintenance(state)  # Untagged rollback base is rejected before effects.
+            self._native_visibility(state, "old", self.runtime.deadline)
+        return state
+
+    def _native_visibility(self, state, phase, deadline):
+        from llmsvc.reload_witness import CandidateBinding, WitnessError
+        provenance = state.get("native_provenance")
+        if provenance is None:
+            if self.native_reader is not None:
+                raise MaintenanceError("existing claim lacks native phase provenance")
+            return None
+        if (self.native_reader is None or provenance["settings"] != self.scheduler.config.native_witness
+                or provenance["endpoint"] != self.native_reader.endpoint):
+            raise MaintenanceError("native phase configuration changed")
+        key = {"old": "old_identity", "candidate": "new_identity", "restored": "rollback_identity"}[phase]
+        candidate = phase == "candidate"
+        expected = CandidateBinding(endpoint=provenance["endpoint"],
+            generation=state["generation"] if candidate else provenance["base_generation"],
+            instance=instance(state[key]),
+            candidate_sha256=state["candidate_sha256"] if candidate else state["base_sha256"])
+        image = provenance["settings"]["phase_images"][phase]
+        try:
+            result = self.native_reader.read(expected, expected_image_sha256=image, deadline=deadline)
+        except WitnessError as exc:
+            raise MaintenanceError("native phase visibility is unconfirmed") from exc
+        if (result.visibility.candidate_generation_visible is not True
+                or result.visibility.settlement_confirmed is not None):
+            raise MaintenanceError("native visibility cannot establish settlement")
+        return result
+
     def _backend_fingerprint(self):
         config = self.scheduler.config
-        return fingerprint({"command": config.maintenance_command, "registry": config.registry,
-                            "sources": {k:v for k,v in config.collectors.items() if k != "models"}})
+        value = {"command": config.maintenance_command, "registry": config.registry,
+                 "sources": {k:v for k,v in config.collectors.items() if k != "models"}}
+        if config.native_witness:
+            value["native_witness"] = config.native_witness
+        return fingerprint(value)
 
     def _state(self):
         record = self.scheduler.store.catalog_checkpoint()
@@ -234,6 +297,8 @@ class MaintenanceController:
             raise MaintenanceError("maintenance claim mismatch")
         if state["stage"] not in ("released", "rolled_back", "aborted") and state["backend_sha256"] != self._backend_fingerprint():
             raise MaintenanceError("maintenance adapter configuration changed")
+        if ("native_provenance" in state) != (self.native_reader is not None):
+            raise MaintenanceError("native phase execution mode changed")
         return record, state
 
     def _save(self, state, **changes):
@@ -264,7 +329,8 @@ class MaintenanceController:
                 "rollback_scope": state["rollback_scope"], "rollback_actors": state["rollback_actors"],
                 "exclusion_method": state["exclusion_method"],
                 "removed_models": sorted(record["old_manifest"]["active"].keys()-record["new_manifest"]["active"].keys()),
-                "current_accounts": [[asdict(lease), unit] for lease, unit in self.scheduler.store.leases()]}
+                "current_accounts": [[asdict(lease), unit] for lease, unit in self.scheduler.store.leases()],
+                **({"native_provenance": copy.deepcopy(state["native_provenance"])} if "native_provenance" in state else {})}
 
     def _effect(self, operation, deadline, *, extra=None):
         self._enabled()
@@ -375,6 +441,8 @@ class MaintenanceController:
         self.scheduler.store.save_catalog(record, bound)
         self.runtime.pending = bound
         self._protection()
+        if "native_provenance" in state:
+            self._native_visibility(state, "old", deadline)
         self._effect("stop_old", deadline)
         record, state = self._state()
         settled = self._wait("observe_old", deadline, lambda r: self._old_settled(r, state))

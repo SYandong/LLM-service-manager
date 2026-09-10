@@ -13,8 +13,24 @@ def validate_maintenance(record):
     expected = {"transaction_id", "job_id", "mode", "old_identity", "new_identity", "rollback_identity",
                 "base_bytes", "candidate_sha256", "base_sha256", "generation", "stage", "effects",
                 "observations", "error", "accounts", "rollback_epoch", "backend_bindings", "exclusion_method", "backend_sha256", "operation_id", "observed_scope", "observed_actors", "new_scope", "new_actors", "rollback_scope", "rollback_actors"}
-    if not isinstance(record, dict) or set(record) != expected or record["mode"] != "maintenance":
+    if not isinstance(record, dict) or set(record) not in (expected, expected | {"native_provenance"}) or record["mode"] != "maintenance":
         raise ValueError("invalid maintenance checkpoint")
+    if "native_provenance" in record:
+        from llmsvc.native_binding import validate_settings
+        proof = record["native_provenance"]
+        if (not isinstance(proof, dict) or set(proof) != {"endpoint", "settings", "base_generation"}
+                or not isinstance(proof["base_generation"], str)):
+            raise ValueError("invalid native phase provenance")
+        from llmsvc.reload_witness import CandidateBinding, NativeGenerationReader
+        pins = validate_settings(proof["settings"])
+        if not pins or "phase_images" not in proof["settings"]:
+            raise ValueError("native phase provenance lacks explicit targets")
+        endpoint = proof["endpoint"]
+        if (not isinstance(endpoint, str) or not endpoint.endswith('/api/mcp')
+                or NativeGenerationReader(endpoint[:-8]).endpoint != endpoint):
+            raise ValueError("invalid native provenance endpoint")
+        from llmsvc.maintenance import instance
+        CandidateBinding(endpoint=endpoint, generation=proof["base_generation"], instance=instance(record["old_identity"]), candidate_sha256=record["base_sha256"]).to_dict()
     raw = json.dumps(record, allow_nan=False)
     if len(raw.encode()) > MAX_MAINTENANCE_BYTES:
         raise ValueError("maintenance checkpoint exceeds limit")
