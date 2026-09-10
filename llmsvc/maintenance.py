@@ -398,17 +398,19 @@ class MaintenanceController:
             raise MaintenanceError("candidate identity changed while capturing its scope")
         scope, actors = self._capture_scope(new, captured)
         state = self._save(state, new_scope=scope, new_actors=actors)
-        observed = self._wait("observe_candidate", deadline, lambda r: self._candidate_valid(r, state))
+        observed = self._wait("observe_candidate", deadline, lambda r: self._candidate_valid(r, state, cleanup_required=False))
         self._save(state, stage="adopted", observations={**state["observations"], "candidate": observed})
 
-    def _candidate_valid(self, result, state, *, opened=False):
+    def _candidate_valid(self, result, state, *, opened=False, cleanup_required=True):
         return (state["new_identity"] is not None and result.get("identity") == state["new_identity"]
                 and result.get("old_identity") == state["old_identity"]
                 and result.get("old_settled") is True and result.get("helpers_settled") is True
                 and result.get("configuration_confirmed") is True
                 and result.get("config_sha256") == state["candidate_sha256"]
                 and result.get("generation") == state["generation"]
-                and result.get("backends_confirmed") is True and result.get("cleanup_confirmed") is True
+                and result.get("backends_confirmed") is True
+                and (result.get("cleanup_confirmed") is True
+                     or (not cleanup_required and result.get("cleanup_confirmed") is False))
                 and result.get("ingress_state") == ("open" if opened or state["exclusion_method"] == "stop_instance" else "excluded"))
 
     def verify(self, marker_record, *, deadline):
@@ -479,7 +481,7 @@ class MaintenanceController:
                     if (observed.get("attempt_bound") is not True or observed.get("operation_id") != state["operation_id"]
                             or instance(new) == instance(state["old_identity"])
                             or new["scope_sha256"] == state["old_identity"]["scope_sha256"]
-                            or not self._candidate_valid(observed, {**state, "new_identity": new})):
+                            or not self._candidate_valid(observed, {**state, "new_identity": new}, cleanup_required=False)):
                         raise MaintenanceError("unknown candidate start is not positively bound")
                     state = self._save(state, new_identity=new, stage="adopted",
                                        observations={**state["observations"], "candidate": observed})
@@ -490,8 +492,11 @@ class MaintenanceController:
                     scope, actors = self._capture_scope(state["new_identity"], captured)
                     state = self._save(state, new_scope=scope, new_actors=actors)
                 marker = json.loads(record["marker_json"])
-                runtime._proof(record, marker, deadline=deadline)
+                # A submitted model stop may have exited before its ledger
+                # write survived. Reconcile only that exact captured account
+                # from fresh positive exit before asking for full cleanup proof.
                 self._settle_model_accounts(deadline)
+                runtime._proof(record, marker, deadline=deadline)
                 runtime._check_membership(record["new_manifest"]["active"], record["old_manifest"]["active"])
                 runtime._check_reactivation(record["new_manifest"], record["old_manifest"], during_claim=True)
                 if runtime.epoch != record["new_epoch"]:
@@ -724,7 +729,7 @@ class MaintenanceController:
                         observed=self._request("observe_candidate",self._context(record,state),deadline)
                         new=identity(observed.get("identity"))
                         if (observed.get("attempt_bound") is not True or observed.get("operation_id") != state["operation_id"]
-                                or not self._candidate_valid(observed,{**state,"new_identity":new})):
+                                or not self._candidate_valid(observed,{**state,"new_identity":new},cleanup_required=False)):
                             raise MaintenanceError("candidate ownership is unknown; rollback cannot stop it")
                         state=self._save(state,new_identity=new)
                     current=self._request("preflight",self._context(record,state),deadline)

@@ -41,7 +41,12 @@ The selected `stop_instance` method is an explicit controlled interruption. It
 does not pretend a socket activation or pause API exists. Old process/scope,
 attributable helpers/native jobs, retained backend identities and current
 configuration require independent positive observations. The new verified
-instance may listen while the catalog/placement gate remains held. The final
+instance may listen while the catalog/placement gate remains held. Pre-cleanup
+adoption requires known retained-backend integrity; it may report cleanup=false
+until the protected removal callback runs. Final proof/release still requires
+cleanup=true. A submitted cleanup stop that already exited can reconcile only
+its exact captured account from fresh exit evidence before final cleanup proof;
+this does not resend the stop or release an unobserved account. The final
 proof's exclusion fact concerns the retired old instance, not an invented gate
 on the new listener. The normal QuietPeriod is never filled with synthetic zeros.
 
