@@ -127,3 +127,38 @@ single #157 lifecycle code/DESIGN PR. They do not activate a registered model
 by themselves or satisfy the full #19 cold-load acceptance.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+
+## Activity failure reasons (#167)
+
+Activity failures retain unknown counts and report bounded codes in snapshot
+`errors`: `activity: deadline`, `locked`, `schema`, `parse`, `unavailable`,
+`corrupt`, `interrupted`, `io`, or `read_failed` (each with the same `activity:`
+prefix). `ActivityReader.last_error_code` is an internal cause; `last_error` and
+unknown usage responses contain fixed redacted descriptions, never the original
+SQLite exception/SQL/path/source IP. Python 3.10 falls back to narrowly matched
+SQLite diagnostics when structured exception metadata is unavailable.
+
+The SQLite progress callback records a budget cancellation explicitly. A later
+empty schema result or schema-looking exception from that same interrupted
+attempt remains `deadline`; a missing required table/column without cancellation
+is `schema`. Invalid required data is `parse`. Missing optional source metadata
+or an unmapped origin is **not** a database read failure: known request counts
+can coexist with an unknown source. Unknown source never means zero requests.
+
+Budgets remain unchanged: the reader defaults to 80ms for its SQLite progress
+handler and busy timeout; the collector defaults to 1.8s total, with the first
+half for shared probes including activity. Queueing/slow I/O can exhaust the
+parent round independently (`activity: round_deadline`). An unfinished old probe
+is reported as `activity: previous_probe_running`. Neither its late result nor
+previous successful counts are reused as a fresh observation. A later successful
+read resets both reader error attributes. SQLite progress checks are cooperative;
+these budgets are not a hard OS preemption guarantee and no automatic retry is
+added.
+
+Cause reporting does **not** eliminate real high-load deadline failures. The
+fixtures replay SQLite interrupts, locks, schema/parse failures and delayed
+results deterministically without increasing production deadlines. They prove
+classification, redaction and freshness behavior, not an hour of zero errors or
+long-term stability. Any live acceptance must record its actual bounded window.
+
+<!-- Generated-By: Codex / gpt-6-astra -->

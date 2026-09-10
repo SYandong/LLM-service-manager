@@ -189,7 +189,7 @@ def test_fixture_scheduling_delay_preserves_production_deadline(usage_service, m
         patch.setattr(activity_module, "time", delayed_clock())
         production = ActivityReader(usage_service.database).usage(days=30, by="model")
     assert production["known"] is False
-    assert production["error"] == "interrupted"
+    assert production["error"] == "activity read deadline exceeded"
     assert all(value is None for value in production["totals"].values())
 
     with monkeypatch.context() as patch:
@@ -199,5 +199,5 @@ def test_fixture_scheduling_delay_preserves_production_deadline(usage_service, m
     if known:
         assert result["totals"] == {"requests": 3, "input_tokens": 118, "output_tokens": 225}
     else:
-        assert result["error"] == "interrupted"
+        assert result["error"] == "activity read deadline exceeded"
         assert all(value is None for value in result["totals"].values())

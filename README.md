@@ -4,7 +4,7 @@ llama-swap 之上的多 GPU 控制面：查看模型与用量、请求释放/唤
 pin 与 GPU reserve，并提供可选终端面板。llama-swap 和 vllm-wrapper
 负责推理路由、排队及后端 sleep/wake；scheduler 负责资源记账、保护和调度。
 
-当前文档面向 [v0.1.0-alpha.9 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.9)。
+当前文档面向 [v0.1.0-alpha.10 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.10)。
 发布功能不等于所在部署已启用它们：scheduler 默认只读，模型动作、放置、
 自动策略、故障恢复及 sleeping recovery 各有独立开关。实现与现场验收进度见 [ROADMAP](docs/ROADMAP.md)。
 
@@ -57,7 +57,7 @@ PYREQUEST
 
 ## 用户：CLI、状态与可选 TUI
 
-从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.9)
+从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v0.1.0-alpha.10)
 下载 `llm` 和 `SHA256SUMS`，核对对应 SHA-256 后，将脚本放在当前目录：
 
 ```sh
@@ -90,7 +90,7 @@ RAM   llmsvc 86/200 GiB budget  host available 823 GiB
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install './llmsvc-0.1.0a9-py3-none-any.whl[tui]'
+.venv/bin/python -m pip install './llmsvc-0.1.0a10-py3-none-any.whl[tui]'
 .venv/bin/llm
 ```
 
@@ -102,6 +102,11 @@ python3 -m venv .venv
 新版面板按变化更新模型单元格和事件，保留当前选择，心跳仅更新连接状态。
 等待操作展示目标、已用时间及可用的已观测阶段；没有可信估计时显示 ETA unknown，
 配置中的冷启动总时长不会冒充实时剩余时间。
+事件栏默认显示精简变化，连接/在途/错误计数固定显示；重复快照不会逐条刷屏。
+点 `Details`（或在输入框外按 `e`）查看冻结详情并选择文本。`Copy` 仅在你点击时
+请求终端剪贴板；无选区时复制精简摘要，过大选区会提示改用导出，不静默截断。
+若 SSH/终端不支持剪贴板，用 `Save text` 将全文保存到指定的新 UTF-8 文件；
+不会覆盖已有文件或符号链接，也不会声称已确认远端桌面的剪贴板内容。
 
 ## 用户：释放、保护、预约与唤醒
 
@@ -132,9 +137,14 @@ free/reserve 默认客户端等待 150 秒，wake 为 930 秒，可用 `--wait` 
 它不唤醒模型，丢失响应时不自动重试。配置过 registry 的 scheduler 还支持
 `models`（临时登记记录及配置 inventory）、`registry`（只读队列/恢复状态）以及 `add PATH --name NAME --base BASE --dry-run` /
 `rm NAME --dry-run`。PATH 必须位于服务可读且允许的共享目录；预览不登记模型、
-不预留端口，合法编辑仍可能因全局条件而不可提交。实际 add/rm 写入仍返回 405，
-`registry` 只读展示已知 job 与恢复状态，未知值保持 null；它不启动 worker、
+不预留端口，合法编辑仍可能因全局条件而不可提交。默认入口不配置完整可信
+目录提交能力，实际 add/rm 仍返回 405；明确接入全部能力后返回 queued 也不等于
+已经采用配置。`registry` 只读展示已知 job 与恢复状态，未知值保持 null；它不启动 worker、
 提交证明、reconcile 或清除 fence。inventory 与预览计划不证明运行时已经采纳配置。
+
+活动读取失败会显示 partial update 及脱敏原因；失败计数保持未知，成功读取
+但来源未知不等于没有请求。SSE 静默不再按连接超时反复重连，但也不证明源健康
+或连续安静。查看全局阻塞原因，不能将队列已清除理解为 catalog 已完成。
 
 ## 管理员：架构、部署与回滚
 
@@ -142,6 +152,8 @@ alpha.8 提供默认关闭的 [sleeping recovery 执行器](llmsvc/RECOVERY.md)�
 首次实际普通恢复 claim 会原子升级状态库到 schema v4；旧 schema-v3 版本拒绝
 该库。不要删除 claim 或覆盖旧备份来强行降级。发布和安装不授权启用该执行器，
 运维边界与回滚要求见 [操作手册](docs/OPERATIONS.md)。
+受控 [catalog 提交](llmsvc/CATALOG.md) 的首次实际 claim 则使用 schema5；
+只读升级不触发该迁移，也不自动挂载可信 proof 或启用登记写入。
 
 ```mermaid
 flowchart LR
@@ -205,119 +217,5 @@ SIGHUP。生产策略、TTL/reaper、宿主来源及其他用户服务的变更�
 长期稳定性与阈值校准 **NOT MEASURED**，没有强制一天/一周日历等待。
 发布不自动完成 milestone 或启用生产；开发遵循 [AGENTS.md](AGENTS.md)，
 先 issue、再 PR，当前提交须通过独立审核与 CI。
-
-## Legacy：历史维护附录（非新部署入口）
-
-以下保留旧单后端代理的历史安装与行为说明，仅供已存在的 legacy 部署维护。
-它不是当前 `llmsvc` 的安装方式；旧依赖/模型示例不代表当前发布支持矩阵。
-`vllm_service/`、`tools/dashboard.py`、`config/server.yaml` 及旧测试仍冻结，
-直到 #27 的部署及零消费者门槛满足。不要与新控制面并行安装或据此重启共享服务。
-
-<details>
-<summary>展开历史 vLLM Service Manager 指南</summary>
-
-
-A local tool to start and manage a vLLM model server for a group sharing one machine.
-
-### Requirements
-
-- conda environment `vllm` with vLLM 0.19.0 and transformers >= 5.5.0
-- `LD_LIBRARY_PATH` set to include the conda env's lib directory (see Setup)
-
-### Setup
-
-```bash
-conda create -n vllm python=3.11 -y
-conda activate vllm
-pip install vllm==0.19.0
-pip install "transformers>=5.5.0"
-
-# Fix libstdc++ version mismatch
-conda install -c conda-forge libstdcxx-ng -y
-mkdir -p $CONDA_PREFIX/etc/conda/activate.d
-echo 'export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH' > $CONDA_PREFIX/etc/conda/activate.d/env_vars.sh
-```
-
-### Configuration
-
-`config/server.yaml` defines the default model and serving parameters:
-
-```yaml
-model: "google/gemma-4-31B-it"
-host: "0.0.0.0"
-port: 8000
-backend_port: 8001
-gpu_memory_utilization: 0.9
-max_model_len: 32768
-enable_reasoning: false
-reasoning_parser: "deepseek_r1"
-```
-
-Supported model IDs:
-
-- `google/gemma-4-31B-it`
-- `Qwen/Qwen3-4B-Instruct-2507`
-
-### Usage
-
-```bash
-conda activate vllm
-cd <project-directory>
-
-python -m vllm_service start
-python -m vllm_service stop
-python -m vllm_service status
-python -m vllm_service restart --model <model-id-or-service-visible-path>
-```
-
-`start` starts the proxy as a background service on the user-facing port, loads
-the default model, shows the backend vLLM startup output, and returns after the
-model is ready. The proxy reads the OpenAI request body's `model` field. If that model is not
-currently running, it restarts vLLM on `backend_port`, waits for readiness, and
-then forwards the original request. If the request omits `model`, the proxy uses
-the default `model` from `config/server.yaml`. `restart --model ...` restarts
-the background proxy, overrides that default for the current service run, loads
-that model, shows the backend vLLM startup output, and returns after the model
-is ready. It does not start raw vLLM on the user-facing port.
-
-The `model` value may be either:
-
-- a Hugging Face model ID, such as `Qwen/Qwen3-4B-Instruct-2507`
-- a model path that is readable from the service host, such as a path in shared
-  storage mounted on the service host
-
-For fine-tuned local models, use the path as it exists on the service host. Do
-not use a path that only exists on the user's laptop or workstation.
-
-### Connecting to the service
-
-For an existing legacy deployment only, obtain its OpenAI-compatible base URL
-from its administrator and set `LEGACY_OPENAI_BASE_URL`. Do not use the scheduler URL.
-
-```python
-import os
-from openai import OpenAI
-
-client = OpenAI(base_url=os.environ["LEGACY_OPENAI_BASE_URL"], api_key="unused")
-
-response = client.chat.completions.create(
-    model="Qwen/Qwen3-4B-Instruct-2507",
-    messages=[{"role": "user", "content": "Hello!"}],
-)
-print(response.choices[0].message.content)
-
-# Fine-tuned/local model: replace this with the path visible to the service host.
-response = client.chat.completions.create(
-    model="<path-visible-to-vllm-service>",
-    messages=[{"role": "user", "content": "Hello from my fine-tuned model!"}],
-)
-print(response.choices[0].message.content)
-```
-
-### Logs
-
-Server logs are written to `var/log/vllm.log`.
-
-</details>
 
 <!-- Generated-By: Codex / gpt-6-astra -->

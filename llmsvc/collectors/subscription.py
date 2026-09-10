@@ -12,6 +12,12 @@ from .events import EventSnapshot
 
 
 class _HTTPEventStream:
+    """Bound connection setup; an established SSE stream may remain silent.
+
+    Socket shutdown in close() interrupts reads, including incomplete lines.
+    Silence alone is neither a connection error nor a liveness/quiet proof.
+    """
+
     def __init__(self, url, timeout):
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
@@ -29,6 +35,14 @@ class _HTTPEventStream:
             self.response = self.conn.getresponse()
             if self.response.status != 200:
                 raise ConnectionError("event subscription rejected")
+            sock = self._socket()
+            if sock is None:
+                raise ConnectionError("event subscription socket unavailable")
+            # v252 does not send idle heartbeats. A read timeout would turn
+            # every quiet interval into a reconnect and full snapshot replay.
+            # Keep the finite timeout for connect/headers, then wait for data
+            # or EOF; close() wakes this blocking read via socket shutdown.
+            sock.settimeout(None)
         except Exception:
             self.close()
             raise

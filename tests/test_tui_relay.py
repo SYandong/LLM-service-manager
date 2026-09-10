@@ -21,11 +21,177 @@ from test_tui import FakeClient, snapshot
 from test_tui_events import BufferedEvents
 
 
-async def visible(app, pilot, predicate):
-    deadline = time.monotonic() + 3
+async def visible(app, pilot, predicate, timeout=3):
+    deadline = time.monotonic() + timeout
     while not predicate(app.event_history):
-        assert time.monotonic() < deadline, (app.event_history, str(app.dashboard.query_one("#event-status", Static).render()))
+        if time.monotonic() >= deadline:
+            probe = getattr(app, "_relay_pipeline_probe", None)
+            report = {"status": str(app.dashboard.query_one("#event-status", Static).render()),
+                      "pipeline": probe.diagnostics(app) if probe is not None else None,
+                      "visible_events": [(item["id"], item["kind"]) for item in app.event_history]}
+            raise AssertionError("Relay visibility stalled:\n" + json.dumps(report, indent=2))
         await pilot.pause(0.02)
+
+
+class RelayPipelineProbe:
+    """Test-only receipts at existing boundaries; never changes production budgets."""
+    def __init__(self, monkeypatch, scheduler, relay):
+        self.scheduler, self.relay = scheduler, relay
+        self.frames, self.details, self.delivered = {}, {}, set()
+        self.local = threading.local()
+        self.lock, self.drain_lock = threading.RLock(), threading.Lock()
+        self.drain_paused = False
+        self.room_changed = threading.Event()
+        self.hold_publication = None
+        self.publication_entered = threading.Event()
+        self.release_publication = threading.Event()
+        append, drop, drain, emit = (relay.buffer._append_locked, relay.buffer._drop_locked,
+                                      relay.drain, scheduler.emit)
+
+        def tracked_append(kind, model, detail, received_at):
+            accepted = append(kind, model, detail, received_at)
+            name = getattr(self.local, "frame", None)
+            if name is not None:
+                with self.lock:
+                    admission = {"kind": kind, "accepted": accepted, "drained": False,
+                                 "publication_entered": False, "scheduler_ids": []}
+                    self.frames[name]["admissions"].append(admission)
+                    if accepted:
+                        # Called with the buffer mutex held: retain the actual
+                        # queued object so identity cannot be reused before emit.
+                        entry = relay.buffer._queue[-1]
+                        self.details[id(entry["detail"])] = (entry, name, admission)
+            return accepted
+
+        def tracked_drop(reason, count=1):
+            drop(reason, count)
+            name = getattr(self.local, "frame", None)
+            if name is not None:
+                with self.lock:
+                    reasons = self.frames[name]["discard_reasons"]
+                    reasons[reason] = reasons.get(reason, 0) + count
+
+        def tracked_drain(max_events=128):
+            with self.drain_lock:
+                if self.drain_paused:
+                    return {"events": [], "dropped": 0, "dropped_by_reason": {}, "upstream_loss_unknown": True}
+                batch = drain(max_events=max_events)
+                with self.lock:
+                    for item in batch["events"]:
+                        receipt = self.details.get(id(item["detail"]))
+                        if receipt is not None:
+                            receipt[2]["drained"] = True
+            self.room_changed.set()
+            return batch
+
+        def tracked_emit(kind, **kwargs):
+            with self.lock:
+                receipt = self.details.get(id(kwargs.get("detail")))
+                if receipt is not None:
+                    receipt[2]["publication_entered"] = True
+            if receipt is not None and receipt[1] == self.hold_publication:
+                self.publication_entered.set()
+                assert self.release_publication.wait(5), "test did not release publication"
+            event = emit(kind, **kwargs)
+            if receipt is not None:
+                with self.lock:
+                    receipt[2]["scheduler_ids"].append(event.id)
+            return event
+
+        monkeypatch.setattr(relay.buffer, "_append_locked", tracked_append)
+        monkeypatch.setattr(relay.buffer, "_drop_locked", tracked_drop)
+        monkeypatch.setattr(relay, "drain", tracked_drain)
+        monkeypatch.setattr(scheduler, "emit", tracked_emit)
+
+    def attach(self, monkeypatch, app):
+        app._relay_pipeline_probe = self
+        drain = app.event_reader.drain
+        def delivered():
+            update = drain()
+            with self.lock:
+                self.delivered.update(item["id"] for item in update["events"])
+            return update
+        monkeypatch.setattr(app.event_reader, "drain", delivered)
+
+    def pause_drain(self):
+        # Synchronize with any in-progress drain before filling the buffer.
+        with self.drain_lock:
+            self.drain_paused = True
+
+    def resume_drain(self):
+        with self.drain_lock:
+            self.drain_paused = False
+        self.room_changed.set()
+
+    def release_all(self):
+        self.resume_drain()
+        self.release_publication.set()
+
+    def wait_for_room(self):
+        deadline = time.monotonic() + 3
+        while True:
+            self.room_changed.clear()
+            with self.relay.buffer._lock:
+                if len(self.relay.buffer._queue) < self.relay.buffer.capacity:
+                    return
+            remaining = deadline - time.monotonic()
+            assert remaining > 0 and self.room_changed.wait(remaining), "test admission wait expired"
+
+    @staticmethod
+    def new_frame(origin):
+        return {"origin": origin, "source_sent": False, "source_received": False,
+                "dispatch_entered": False, "dispatch_returned": False, "dispatch_completed": False,
+                "admissions": [], "discard_reasons": {}}
+
+    def sent(self, name):
+        with self.lock:
+            assert name not in self.frames, "fixture frame IDs must be unique"
+            self.frames[name] = self.new_frame("source")
+            self.frames[name]["source_sent"] = True
+
+    def run(self, name, operation, *, admit=True, after=None, origin="source"):
+        with self.lock:
+            frame = self.frames.setdefault(name, self.new_frame(origin))
+            assert not frame["source_received"] and not frame["dispatch_entered"], "duplicate fixture dispatch"
+            frame["source_received"] = origin == "source"
+        self.local.frame = name
+        try:
+            if admit:
+                # Delay only this test's next input at the existing producer
+                # boundary. The sole producer cannot fill the freed slot while
+                # its own dispatch is here; the real consumer remains running.
+                self.wait_for_room()
+            with self.lock:
+                frame["dispatch_entered"] = True
+            try:
+                return operation()
+            finally:
+                with self.lock:
+                    frame["dispatch_returned"] = True
+                if after is not None:
+                    after()
+                with self.lock:
+                    frame["dispatch_completed"] = True
+        finally:
+            self.local.frame = None
+
+    def frame(self, name):
+        with self.lock:
+            return copy.deepcopy(self.frames.get(name, {}))
+
+    def published_ids(self, name):
+        return [event_id for item in self.frame(name).get("admissions", []) for event_id in item["scheduler_ids"]]
+
+    def diagnostics(self, app):
+        with self.lock:
+            frames, delivered = copy.deepcopy(self.frames), sorted(self.delivered)
+        with self.relay.buffer._lock:
+            buffer = {"queued": len(self.relay.buffer._queue), "capacity": self.relay.buffer.capacity,
+                      "discard_reasons": dict(self.relay.buffer._dropped)}
+        with app.event_reader._lock:
+            queued = [item["id"] for item in app.event_reader._queue]
+        return {"frames": frames, "buffer": buffer, "client_queued_ids": queued,
+                "client_delivered_ids": delivered, "ui_visible_ids": [item["id"] for item in app.event_history]}
 
 
 def event_of(app, kind):
@@ -55,7 +221,8 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
         opened_by, dispatch_requests = [], []
         frame_ids = ("ignored-log", "state", "inflight", "filtered-model", "invalid-payload")
         dispatched = {name: threading.Event() for name in frame_ids}
-        invalid_published, release_invalid = threading.Event(), threading.Event()
+        invalid_dispatch_returned, release_invalid = threading.Event(), threading.Event()
+        probe = RelayPipelineProbe(monkeypatch, scheduler, relay)
         force_timeout, timeout_raised = threading.Event(), threading.Event()
         open_stream, read_line = _HTTPEventStream.__init__, _HTTPEventStream.readline
         dispatch = relay.subscription._dispatch
@@ -74,19 +241,21 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
             payload = json.loads(b"\n".join(line[5:].lstrip() for line in lines if line.startswith(b"data:")))
             frame_id = payload.get("fixture_dispatch_id")
             before = len(opened_by)
-            try:
-                return dispatch(lines, state)
-            finally:
+            def hold_bookkeeping():
                 if frame_id == "invalid-payload":
-                    # The real error is published before the dispatch returns.
-                    # Hold only test bookkeeping to exercise that interleaving.
-                    invalid_published.set()
+                    invalid_dispatch_returned.set()
                     assert release_invalid.wait(5), "test did not release invalid dispatch"
+            try:
+                if frame_id not in dispatched:
+                    return dispatch(lines, state)
+                return probe.run(frame_id, lambda: dispatch(lines, state), after=hold_bookkeeping)
+            finally:
                 dispatch_requests.append(len(opened_by) - before)
                 if frame_id in dispatched:
                     dispatched[frame_id].set()
 
         async def send_frame(app, pilot, frame_id, payload, *, wait=True):
+            probe.sent(frame_id)
             outgoing.put({**payload, "fixture_dispatch_id": frame_id})
             if wait:
                 await visible(app, pilot, lambda events: dispatched[frame_id].is_set())
@@ -95,6 +264,7 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
         monkeypatch.setattr(_HTTPEventStream, "readline", controlled_read)
         monkeypatch.setattr(relay.subscription, "_dispatch", tracked_dispatch)
         app, requests, url = app_for(api, address)
+        probe.attach(monkeypatch, app)
         async with app.run_test(size=size) as pilot:
             await app.workers.wait_for_complete()
             await send_frame(app, pilot, "ignored-log", {"type": "logData", "data": "PRIVATE_MARKER raw log/request body"})
@@ -115,18 +285,16 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
             await visible(app, pilot, lambda events: any(e["kind"] == "data_plane_dropped" for e in events))
             # Deterministically reproduce an earlier unrelated error without
             # waiting for a socket timeout or changing the shared fixture budget.
-            relay.buffer.error("timeout")
-            await visible(app, pilot, lambda events: any(e["kind"] == "data_plane_error"
-                          and e["detail"]["reason"] == "timeout" for e in events))
-            timeout = next(e for e in app.event_history if e["kind"] == "data_plane_error"
-                           and e["detail"]["reason"] == "timeout")
+            probe.run("earlier-timeout", lambda: relay.buffer.error("timeout"), origin="buffer injection")
+            await visible(app, pilot, lambda events: any(e["id"] in probe.published_ids("earlier-timeout") for e in events))
+            timeout = next(e for e in app.event_history if e["id"] in probe.published_ids("earlier-timeout"))
             await send_frame(app, pilot, "invalid-payload", {"type": "modelStatus", "data": "PRIVATE_MARKER invalid JSON"}, wait=False)
             def intended_error(event):
-                return (event["kind"] == "data_plane_error" and event["id"] > timeout["id"]
-                        and event["detail"]["reason"] == "invalid_event")
+                return (event["id"] in probe.published_ids("invalid-payload")
+                        and event["kind"] == "data_plane_error" and event["detail"]["reason"] == "invalid_event")
 
             try:
-                await visible(app, pilot, lambda events: invalid_published.is_set()
+                await visible(app, pilot, lambda events: invalid_dispatch_returned.is_set()
                               and any(intended_error(e) for e in events))
                 assert not dispatched["invalid-payload"].is_set()
                 assert all(dispatched[name].is_set() for name in frame_ids if name != "invalid-payload")
@@ -135,6 +303,11 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
                 release_invalid.set()
             await visible(app, pilot, lambda events: all(done.is_set() for done in dispatched.values()))
             invalid = next(e for e in app.event_history if intended_error(e))
+            receipt = probe.frame("invalid-payload")
+            assert receipt["admissions"] == [{"kind": "data_plane_error", "accepted": True,
+                                                "drained": True, "publication_entered": True,
+                                                "scheduler_ids": [invalid["id"]]}]
+            assert invalid["id"] in probe.delivered
             assert timeout in app.event_history  # Unrelated errors are retained, not filtered away.
             assert event_of(app, "data_plane_error")["detail"]["reason"] == "timeout"
             plane = event_of(app, "data_plane_state")
@@ -156,10 +329,12 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
             # RichLog now wraps at the actual panel width; whitespace at line
             # boundaries is presentation, while every provenance phrase remains.
             log_text = " ".join(" ".join(line.text for line in app.dashboard.query_one("#events", RichLog).lines).split())
-            assert "[llama-swap]" in log_text and "[scheduler]" in log_text
-            assert "unlisted_model" in log_text and "intentional filtering" in log_text
+            assert "[data-plane]" in log_text and "[scheduler]" in log_text
+            details_text = app.event_export_text()
+            assert "[llama-swap]" in details_text
+            assert "unlisted_model" in details_text and "intentional filtering" in details_text
             assert "timeout" in log_text and "invalid_event" in log_text
-            assert "upstream loss unknown" in log_text
+            assert "upstream loss unknown" in details_text
             assert "PRIVATE_MARKER" not in log_text + json.dumps(app.event_history)
             assert "fixture_dispatch_id" not in json.dumps(app.event_history)
             assert "not a daemon stop" in app.format_event(plane).plain
@@ -201,6 +376,96 @@ def test_real_two_source_panel_preserves_provenance_and_local_filtering(api, liv
     asyncio.run(scenario())
 
 
+
+@pytest.mark.parametrize("size", [(100, 30), (40, 24)])
+@pytest.mark.parametrize("accepted", [True, False], ids=["accepted", "discarded"])
+def test_pipeline_distinguishes_admission_publication_and_discard(api, live_bridge, monkeypatch, size, accepted):
+    async def scenario():
+        scheduler, relay, outgoing, address, _ = live_bridge
+        probe = RelayPipelineProbe(monkeypatch, scheduler, relay)
+        dispatch = relay.subscription._dispatch
+        name = "admission-target"
+        def tracked_dispatch(lines, state):
+            payload = json.loads(b"\n".join(line[5:].lstrip() for line in lines if line.startswith(b"data:")))
+            if payload.get("fixture_dispatch_id") != name:
+                return dispatch(lines, state)
+            return probe.run(name, lambda: dispatch(lines, state), admit=accepted)
+        monkeypatch.setattr(relay.subscription, "_dispatch", tracked_dispatch)
+        app, _, _ = app_for(api, address)
+        probe.attach(monkeypatch, app)
+        async with app.run_test(size=size) as pilot:
+            await app.workers.wait_for_complete()
+            await visible(app, pilot, lambda events: any(e["kind"] == "data_plane_connection"
+                          and e["detail"]["status"] == "connected" for e in events))
+            probe.pause_drain()
+            try:
+                with relay.buffer._lock:
+                    assert not relay.buffer._queue
+                for number in range(relay.buffer.capacity):
+                    probe.run("filler-%s" % number, lambda: relay.buffer.error("timeout"),
+                              admit=False, origin="buffer injection")
+                if accepted:
+                    probe.hold_publication = name
+                probe.sent(name)
+                outgoing.put({"type": "modelStatus", "data": "PRIVATE_MARKER invalid JSON", "fixture_dispatch_id": name})
+                await visible(app, pilot, lambda events: probe.frame(name).get("source_received", False))
+                if accepted:
+                    # Full buffer: this input must wait at the test-controlled
+                    # admission boundary, rather than promising a dropped event.
+                    assert not probe.frame(name)["admissions"]
+                    probe.resume_drain()
+                    await visible(app, pilot, lambda events: probe.publication_entered.is_set()
+                                  and probe.frame(name)["dispatch_completed"])
+                    receipt = probe.frame(name)
+                    assert receipt["admissions"] == [{"kind": "data_plane_error", "accepted": True,
+                                                        "drained": True, "publication_entered": True, "scheduler_ids": []}]
+                    assert not probe.published_ids(name)  # Drained is not yet published.
+                    probe.release_publication.set()
+                    await visible(app, pilot, lambda events: any(e["id"] in probe.published_ids(name) for e in events))
+                    ids = probe.published_ids(name)
+                    assert len(ids) == 1 and ids[0] in probe.delivered
+                    event = next(e for e in app.event_history if e["id"] == ids[0])
+                    assert event["detail"]["reason"] == "invalid_event"
+                    assert event["detail"]["source"] == "llama-swap"
+                    assert event["detail"]["trusted_for_quiet"] is False
+                else:
+                    await visible(app, pilot, lambda events: probe.frame(name).get("dispatch_completed", False))
+                    receipt = probe.frame(name)
+                    assert receipt["admissions"] == [{"kind": "data_plane_error", "accepted": False,
+                                                        "drained": False, "publication_entered": False, "scheduler_ids": []}]
+                    assert receipt["discard_reasons"] == {"invalid_event": 1, "buffer_full": 1}
+                    # Ensure a future failure exposes each phase, without another
+                    # wall-clock timeout or an elided raw-event tuple.
+                    with pytest.raises(AssertionError, match="Relay visibility stalled") as failure:
+                        await visible(app, pilot, lambda events: False, timeout=0)
+                    diagnostics = json.loads(str(failure.value).split("\n", 1)[1])["pipeline"]
+                    assert diagnostics["frames"][name] == receipt
+                    assert "client_queued_ids" in diagnostics and "client_delivered_ids" in diagnostics
+                    assert "ui_visible_ids" in diagnostics
+                    probe.resume_drain()
+                    await visible(app, pilot, lambda events: any(e["kind"] == "data_plane_dropped"
+                                  and e["detail"]["dropped_by_reason"].get("buffer_full") == 1 for e in events))
+                    # The actual consumer has now drained the filled buffer and
+                    # published its discard summary. A rejected notification does
+                    # not magically become the missing error at any later stage.
+                    assert not probe.published_ids(name)
+                    assert not any(e.kind == "data_plane_error" and e.detail["reason"] == "invalid_event"
+                                   for e in scheduler.events_since(0))
+                    assert not any(e["kind"] == "data_plane_error" and e["detail"]["reason"] == "invalid_event"
+                                   for e in app.event_history)
+                    summary = next(e for e in app.event_history if e["kind"] == "data_plane_dropped"
+                                   and e["detail"]["dropped_by_reason"].get("buffer_full") == 1)
+                    assert summary["detail"]["trusted_for_quiet"] is False
+                    assert summary["detail"]["upstream_loss_unknown"] is True
+                assert "PRIVATE_MARKER" not in json.dumps(app.event_history)
+                assert "fixture_dispatch_id" not in json.dumps(app.event_history)
+                assert app.snapshot["models"][0]["state"] == "awake"
+            finally:
+                probe.release_all()
+        assert not app.event_reader.thread.is_alive()
+        assert relay.subscription._thread.is_alive()
+    asyncio.run(scenario())
+
 def test_core_final_source_event_reaches_ui_and_both_readers_close(api, live_bridge):
     async def scenario():
         scheduler, relay, outgoing, address, _ = live_bridge
@@ -216,7 +481,8 @@ def test_core_final_source_event_reaches_ui_and_both_readers_close(api, live_bri
             assert not relay.subscription._thread.is_alive()
             assert not scheduler.event_bridge.thread.is_alive()
             assert app.is_running
-            assert "closed" in " ".join(line.text for line in app.dashboard.query_one("#events", RichLog).lines)
+            assert "closed" in str(app.dashboard.query_one("#source-status", Static).render())
+            assert '"status": "closed"' in app.event_export_text()
         assert not app.event_reader.thread.is_alive()
     asyncio.run(scenario())
 

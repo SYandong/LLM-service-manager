@@ -1,5 +1,79 @@
 # Changelog
 
+## 0.1.0-alpha.10 — 2026-09-10
+
+Urgent user-facing repairs; Python distribution `0.1.0a10`.
+Includes #175, #182, #183, #187, #186 and #190 since the immutable alpha.9 tag.
+
+### Added and corrected
+
+- Quiet SSE connections remain open after successful response headers instead
+  of treating normal idle time as a read failure (#187). This prevents idle
+  timeout/reconnect cycles from replaying all initial model snapshots. Connection
+  and header I/O retain the configured timeout; EOF/network errors reconnect,
+  line/frame memory limits remain, and explicit close interrupts idle or partial
+  reads. Silence is not liveness or continuous-quiet evidence. Root's real HTTP
+  tests and a bounded source comparison distinguish the fixed behavior from
+  the previous idle reconnects without performing a model action.
+- Event presentation now uses compact human-readable changes and stable counters,
+  coalescing repeated snapshots/errors without losing the bounded raw history
+  (#190). Details provides a frozen selectable view; user-triggered Copy requests
+  terminal clipboard access and Save text exports full UTF-8 text to a new file.
+  Default copy uses a compact summary when no selection exists, oversized
+  selections get an explicit fallback, and existing files/symlinks are not
+  overwritten. Clipboard delivery to a remote desktop is not falsely confirmed.
+- Activity failures now report fixed redacted reasons for deadline, locked/schema,
+  parse and other read failures (#186). The collector distinguishes parent-round
+  expiry from an unfinished prior probe; SQLite budget cancellation cannot be
+  mistaken for missing schema, empty success or known zero totals. The UI labels
+  partial updates and separates unavailable reads from valid unattributed counts.
+  Reader80ms/collector1.8s budgets are unchanged; no retry, stale-count cache or
+  source-identity guess was introduced. High load may still cause real deadlines;
+  successful reads do not establish a historical failure's cause.
+- Trusted catalog transactions install collector, transport, admission and event
+  generations coherently (#175). Explicit profile/instance/quiet/adoption/
+  settlement/cleanup capabilities are required; ordinary entrypoint defaults do
+  not invent them. Source binding, old-generation results, failed retirement,
+  foreign/missing receipts and same-name reactivation cannot bypass durable
+  catalog fences. Removed resources retain observation/accounting metadata until
+  fresh absence and resolved references permit retirement; queue stage is not
+  global action readiness. Existing configured add/rm payloads return queued jobs,
+  not a claim of successful live installation.
+- Relay tests await each specifically injected frame's dispatch completion rather
+  than an arbitrary lifetime count (#182), preserving reader ownership, actual
+  reconnect, no-request dispatch and provenance/redaction assertions. The
+  controlled synchronization proof is not an exact historical scheduling replay.
+- Retire the old single-backend proxy source, dashboard/configuration and their
+  dedicated tests and example (#27). The retirement itself leaves current CLI/TUI, scheduler, model protection
+  and deployment behavior unchanged. Active documentation and package source
+  selection use the current control plane. Historical release/roadmap records and
+  previously published immutable artifacts remain available for provenance.
+- Source retirement performs no additional site shutdown, uninstall, dormant-unit
+  deletion or change to the shared CLI mounts. Current bounded consumer evidence
+  and the previously authorized stop are recorded separately; arbitrary renamed
+  consumers or future manual invocations are not certified absent forever.
+
+### Compatibility and limits
+
+The first actual catalog claim lazily and atomically upgrades a v2-v4 intent
+ledger to schema5 while preserving prior protections/accounts. Read-only,
+default-off and dry-run do not migrate it. Older readers reject5; no stale-ledger
+restore, forced marker/claim clear or unproved replay is a rollback mechanism.
+Schema6 and the proposed maintenance-transition executor are not included.
+
+The reviewed automatic publisher supplies the same six-asset offline deployment
+contract. Ops uses the single reversible read-only puller and checks the actual
+installed version before the bounded postdeployment observation. Future unattended
+M2 changes still require approval; this publication changes no model routing,
+TTL/reaper or fixed CLI binds. Missing native origin/mapping may still yield
+unknown container attribution (#170). Copy depends on terminal clipboard support;
+Save text is the portable fallback. User-visible copy/export availability is
+checked on the installed release, not inferred merely from a merged PR.
+
+Live post-fix behavior is measured separately from candidate tests. Long-term
+stability/calibration remains **NOT MEASURED**; no hour/day/week waiting claim or
+zero-loss/quiet/settlement promise is inferred from a silent event connection.
+
 ## 0.1.0-alpha.9 — 2026-09-10
 
 Incremental preview; Python distribution `0.1.0a9`.

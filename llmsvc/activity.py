@@ -18,6 +18,65 @@ from .config import canonical_ip
 
 UNKNOWN_SOURCE = "unknown"
 
+_ERROR_MESSAGES = {
+    "deadline": "activity read deadline exceeded",
+    "locked": "activity database locked",
+    "schema": "activity schema missing required columns or incompatible",
+    "parse": "activity parse failed: finite timestamp and non-negative integer tokens required",
+    "unavailable": "activity database unavailable",
+    "corrupt": "activity database corrupt or not SQLite",
+    "interrupted": "activity read interrupted",
+    "io": "activity database I/O failed",
+    "read_failed": "activity read failed",
+}
+
+
+class ActivityReadError(ValueError):
+    """Only fixed, redacted reasons cross the collector boundary."""
+
+    def __init__(self, reason):
+        self.reason = reason if isinstance(reason, str) and reason in _ERROR_MESSAGES else "read_failed"
+        super().__init__(_ERROR_MESSAGES[self.reason])
+
+
+def activity_error_reason(exc, *, deadline_expired=False):
+    if deadline_expired:
+        return "deadline"
+    if isinstance(exc, ActivityReadError):
+        return exc.reason if isinstance(exc.reason, str) and exc.reason in _ERROR_MESSAGES else "read_failed"
+    if isinstance(exc, sqlite3.Error):
+        # Structured exception metadata is not available on Python 3.10.
+        # Match known SQLite diagnostics locally; never return their text.
+        name = getattr(exc, "sqlite_errorname", "")
+        name = name if isinstance(name, str) else ""
+        message = str(exc)[:256].lower()
+        if name.startswith(("SQLITE_BUSY", "SQLITE_LOCKED")) or message in (
+            "database is locked", "database table is locked", "database schema is locked"
+        ) or message.startswith(("database table is locked:", "database schema is locked:")):
+            return "locked"
+        if name == "SQLITE_INTERRUPT" or message == "interrupted":
+            return "interrupted"
+        if name.startswith(("SQLITE_CORRUPT", "SQLITE_NOTADB")) or message in (
+            "database disk image is malformed", "file is not a database"
+        ):
+            return "corrupt"
+        if name == "SQLITE_SCHEMA" or message == "database schema has changed" or message.startswith((
+            "no such table:", "no such column:"
+        )):
+            return "schema"
+        if name.startswith("SQLITE_CANTOPEN") or message == "unable to open database file":
+            return "unavailable"
+        if name.startswith("SQLITE_IOERR") or message == "disk i/o error":
+            return "io"
+        if message.startswith("could not decode to utf-8"):
+            return "parse"
+        return "read_failed"
+    if isinstance(exc, (ValueError, TypeError, OverflowError)):
+        return "parse"
+    if isinstance(exc, OSError):
+        return "unavailable"
+    return "read_failed"
+
 
 class ActivityReader:
     """Bounded read-only access to llama-swap ``activity.sqlite``."""
@@ -37,6 +96,16 @@ class ActivityReader:
             self.ip_containers[source] = container
         self.deadline_ms = deadline_ms
         self.last_error: Optional[str] = None
+        self.last_error_code: Optional[str] = None
+        self._deadline_expired = False
+
+    def _reset_error(self):
+        self.last_error = self.last_error_code = None
+        self._deadline_expired = False
+
+    def _fail(self, exc):
+        self.last_error_code = activity_error_reason(exc, deadline_expired=self._deadline_expired)
+        self.last_error = _ERROR_MESSAGES[self.last_error_code]
 
     def read(self, now: Optional[float] = None) -> dict[str, dict[str, Any]]:
         """Return recent activity keyed by model id.
@@ -47,7 +116,7 @@ class ActivityReader:
         unknown rather than zero.
         """
 
-        self.last_error = None
+        self._reset_error()
         try:
             now_ts = _coerce_now(now)
             with closing(self._connect()) as conn:
@@ -87,27 +156,28 @@ class ActivityReader:
                     """,
                     (int(now_ts),),
                 ).fetchall()
-        except (OSError, sqlite3.Error, ValueError) as exc:
-            self.last_error = str(exc)
+            latest_by_model: dict[str, tuple[Optional[str], Optional[str]]] = {}
+            for row in latest_rows:
+                model = row["model_id"]
+                if model not in latest_by_model:
+                    latest_by_model[model] = (row["src"], row["metadata_json"])
+
+            result: dict[str, dict[str, Any]] = {}
+            for row in summary_rows:
+                source = self._source_from_row(*latest_by_model.get(row["model_id"], (None, None)))
+                result[row["model_id"]] = {
+                    "last_used": row["last_used"],
+                    "requests_last_hour": int(row["requests_last_hour"]),
+                    "requests_last_10m": int(row["requests_last_10m"]),
+                    "source_ip": source["source_ip"],
+                    "source_container": source["source_container"],
+                }
+            if self._deadline_expired:
+                raise ActivityReadError("deadline")
+            return result
+        except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError) as exc:
+            self._fail(exc)
             return {}
-
-        latest_by_model: dict[str, tuple[Optional[str], Optional[str]]] = {}
-        for row in latest_rows:
-            model = row["model_id"]
-            if model not in latest_by_model:
-                latest_by_model[model] = (row["src"], row["metadata_json"])
-
-        result: dict[str, dict[str, Any]] = {}
-        for row in summary_rows:
-            source = self._source_from_row(*latest_by_model.get(row["model_id"], (None, None)))
-            result[row["model_id"]] = {
-                "last_used": row["last_used"],
-                "requests_last_hour": int(row["requests_last_hour"]),
-                "requests_last_10m": int(row["requests_last_10m"]),
-                "source_ip": source["source_ip"],
-                "source_container": source["source_container"],
-            }
-        return result
 
     def usage(
         self,
@@ -117,36 +187,42 @@ class ActivityReader:
     ) -> dict[str, Any]:
         """Return request and token usage totals grouped by source."""
 
+        self._reset_error()
         if not isinstance(days, int) or isinstance(days, bool) or days < 1:
+            self._fail(ActivityReadError("parse"))
             return _unknown_usage(days, by, "days must be a positive integer")
-        if by not in {"container", "ip", "model"}:
+        if not isinstance(by, str) or by not in {"container", "ip", "model"}:
+            self._fail(ActivityReadError("parse"))
             return _unknown_usage(days, by, "by must be one of: container, ip, model")
 
-        self.last_error = None
         try:
             now_ts = _coerce_now(now)
             with closing(self._connect()) as conn:
                 columns = _activity_columns(conn)
                 _require_columns(columns, {"id", "ts_created", "model_id"})
                 if "input_tokens" not in columns or "output_tokens" not in columns:
-                    raise ValueError("activity schema missing token columns: input_tokens, output_tokens")
+                    raise ActivityReadError("schema")
                 src_expr = "src" if "src" in columns else "NULL"
                 metadata_expr = "metadata_json" if "metadata_json" in columns else "NULL"
                 since = int(now_ts - days * 86400)
                 if by == "model":
-                    return self._usage_by_model(conn, days, by, since, int(now_ts))
-                return self._usage_by_source(
-                    conn,
-                    days,
-                    by,
-                    since,
-                    int(now_ts),
-                    src_expr,
-                    metadata_expr,
-                )
-        except (OSError, sqlite3.Error, ValueError) as exc:
-            self.last_error = str(exc)
-            return _unknown_usage(days, by, str(exc))
+                    result = self._usage_by_model(conn, days, by, since, int(now_ts))
+                else:
+                    result = self._usage_by_source(
+                        conn,
+                        days,
+                        by,
+                        since,
+                        int(now_ts),
+                        src_expr,
+                        metadata_expr,
+                    )
+                if self._deadline_expired:
+                    raise ActivityReadError("deadline")
+                return result
+        except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError) as exc:
+            self._fail(exc)
+            return _unknown_usage(days, by, self.last_error)
 
     def _usage_by_source(
         self,
@@ -185,9 +261,7 @@ class ActivityReader:
         totals = {"requests": 0, "input_tokens": 0, "output_tokens": 0}
         for row in rows:
             if int(row["invalid_tokens"]):
-                raise ValueError(
-                    "activity token columns contain null, non-numeric, or negative values"
-                )
+                raise ActivityReadError("parse")
             source = self._source_from_row(row["src"], row["metadata_json"])
             group = _group_value(by, "", source)
             bucket = aggregates.setdefault(
@@ -267,9 +341,7 @@ class ActivityReader:
         usage_rows = []
         for row in rows:
             if int(row["invalid_tokens"]):
-                raise ValueError(
-                    "activity token columns contain null, non-numeric, or negative values"
-                )
+                raise ActivityReadError("parse")
             item = {
                 "model": row["model"],
                 "requests": int(row["requests"]),
@@ -299,7 +371,10 @@ class ActivityReader:
         deadline = time.monotonic() + self.deadline_ms / 1000
 
         def stop_when_late() -> int:
-            return 1 if time.monotonic() > deadline else 0
+            if time.monotonic() > deadline:
+                self._deadline_expired = True
+                return 1
+            return 0
 
         conn.set_progress_handler(stop_when_late, 100)
         try:
@@ -325,23 +400,23 @@ class ActivityReader:
 def _activity_columns(conn: sqlite3.Connection) -> set[str]:
     columns = {row["name"] for row in conn.execute("PRAGMA table_info(activity)").fetchall()}
     if not columns:
-        raise ValueError("activity table not found")
+        raise ActivityReadError("schema")
     return columns
 
 
 def _require_columns(columns: set[str], required: set[str]) -> None:
     missing = sorted(required - columns)
     if missing:
-        raise ValueError("activity schema missing required columns: {}".format(", ".join(missing)))
+        raise ActivityReadError("schema")
 
 
 def _coerce_now(now: Optional[float]) -> float:
     try:
         value = float(time.time() if now is None else now)
     except (TypeError, OverflowError) as exc:
-        raise ValueError("now must be a finite timestamp") from exc
+        raise ActivityReadError("parse") from exc
     if not math.isfinite(value):
-        raise ValueError("now must be a finite timestamp")
+        raise ActivityReadError("parse")
     return value
 
 
