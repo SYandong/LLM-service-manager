@@ -8,7 +8,7 @@ import yaml
 from llmsvc.registry import ModelRegistry
 from llmsvc.reload import ReloadError
 from llmsvc.leases import UnitObservation
-from llmsvc.state import Pin
+from llmsvc.state import Lease, Pin
 from test_catalog_lifecycle import catalog, profile
 from test_registry_api import registry
 from test_registry_http_preview import request
@@ -116,3 +116,37 @@ def test_source_change_during_registry_prepare_never_queues_stale_candidate(brid
         api.add({'name':'fine', 'path':str(weights), 'base':'base'})
     assert c.path.read_bytes() == changed and not c.q._pending
     assert c.store.catalog_checkpoint() is None and c.world['calls'] == []
+
+
+def test_readding_a_referenced_retained_name_cannot_restore_active_admission(catalog):
+    c = catalog
+    c.store.create_lease(Lease('old', 'base', 0, .4, 20000, 40), 'vllm-base.service')
+    c.store.transition_lease('old', 'confirmed')
+    c.world['units']['base'] = UnitObservation(True, False, True, 'old', '2'*32)
+    c.s.sample_once()
+    def prepare_names(names, generation):
+        candidate = yaml.safe_dump({'macros': {'llmsvc_reload_generation': generation},
+                                    'models': {name: {} for name in names}}).encode()
+        from dataclasses import replace
+        binding = replace(c.binding, generation=generation, candidate_sha256=digest(candidate))
+        return c.runtime.prepare(candidate, {name: profile(name, port) for name, port in names.items()}, binding=binding)
+    c.runtime.enqueue(prepare_names({'new': 21001}, 'gen_'+'1'*32))
+    make_quiet(c.q.quiet, c.clock)
+    assert c.runtime.process_once()['status'] == 'applied'
+    c.s.sample_once()
+    assert c.runtime._retained_required('base', profile('base', 21000))
+    assert request(c.address, 'POST', '/v1/place', {'model': 'base', 'util': .2})[0] == 404
+    before = c.path.read_bytes(), c.store.lease('old')
+    # Rejection may happen at preparation, enqueue, or a queued guard. None may
+    # publish a retained name back into active admission while its reference lives.
+    try:
+        c.runtime.enqueue(prepare_names({'base': 21000, 'new': 21001}, 'gen_'+'2'*32))
+        make_quiet(c.q.quiet, c.clock)
+        c.runtime.process_once()
+    except (ValueError, ReloadError):
+        pass
+    assert 'base' not in c.runtime.manifest['active']
+    assert 'base' in c.runtime.manifest['retained']
+    assert before == (c.path.read_bytes(), c.store.lease('old'))
+    assert c.store.lease('old')[0].budget_gb == 40
+    assert request(c.address, 'POST', '/v1/place', {'model': 'base', 'util': .2})[0] == 404
