@@ -32,6 +32,10 @@ class EvidenceError(RuntimeError):
         self.evidence = evidence
 
 
+class _CleanupObservationUnknown(RuntimeError):
+    """A bounded post-exit read is inconclusive and may be retried read-only."""
+
+
 def validate(config):
     for key in ('native_binary', 'wrapper_binary', 'scheduler_python', 'host_meminfo_path', 'nvidia_smi'):
         value=config.get(key)
@@ -555,7 +559,52 @@ class ActionRun(lifecycle.Run):
         super().__init__(config)
         self.scheduler_unit='llmsvc-ops-action-scheduler-'+self.token+'.service'
         self.source_unit='llmsvc-ops-action-source-'+self.token+'.service'
-        self.units=[];self.lease=None;self.preserve=False
+        self.units=[];self.lease=None;self.preserve=False;self.measured_phases=set()
+
+    def _cleanup_state(self, binding):
+        try:
+            observed=self.daemon_binding(cleanup=True)
+        except lifecycle.SmokeError as exc:
+            raise _CleanupObservationUnknown('daemon exit observation unavailable') from exc
+        if observed.get('lease_id')!=binding.get('lease_id'):
+            raise lifecycle.SmokeError('account cleanup lease identity mismatch')
+        if observed.get('absent') is not True:
+            expected=binding.get('identity'); current=observed.get('identity')
+            if expected is None or current!=expected:
+                raise lifecycle.SmokeError('daemon identity changed during cleanup')
+            raise _CleanupObservationUnknown('daemon reappeared during cleanup')
+        try:
+            state=self.json_at(self.profile['scheduler_url'],'/v1/state',cleanup=True)
+        except (lifecycle.SmokeError, OSError, subprocess.SubprocessError, ValueError, TypeError) as exc:
+            raise _CleanupObservationUnknown('account cleanup snapshot unavailable') from exc
+        if (not isinstance(state,dict) or state.get('schema_version')!=1
+                or not isinstance(state.get('leases'),list) or state.get('errors')):
+            raise _CleanupObservationUnknown('account cleanup snapshot unknown')
+        models=state.get('models')
+        if models is not None:
+            if not isinstance(models,list):
+                raise _CleanupObservationUnknown('account cleanup model snapshot unknown')
+            matching=[row for row in models if isinstance(row,dict) and row.get('name')==self.model]
+            if len(matching)>1 or (matching and matching[0].get('unit') not in (None,self.unit)):
+                raise lifecycle.SmokeError('account cleanup model identity mismatch')
+        rows=[row for row in state['leases'] if isinstance(row,dict)]
+        for row in rows:
+            if row.get('lease_id')==binding.get('lease_id') and (row.get('model')!=self.model or row.get('unit') not in (None,self.unit)):
+                raise lifecycle.SmokeError('account cleanup lease identity mismatch')
+        active=[row for row in rows if row.get('status')!='released']
+        leases=[row for row in active if row.get('model')==self.model]
+        if len(leases)>1:
+            raise lifecycle.SmokeError('account cleanup lease identity mismatch')
+        for lease in leases:
+            if lease.get('lease_id')!=binding.get('lease_id') or lease.get('unit') not in (None,self.unit):
+                raise lifecycle.SmokeError('account cleanup lease identity mismatch')
+        return leases
+
+    def _completion_fields(self, result, cleanup_succeeded):
+        return {'result':result,'scope':self.scope,
+                'live_chain_measured':bool(self.measured_phases),
+                'measured_phases':sorted(self.measured_phases),
+                'cleanup_succeeded':cleanup_succeeded}
 
     def control(self,unit,argv,limit):
         self.units.append(unit)
@@ -652,6 +701,7 @@ print('{}')
                 self.log('scheduler_action_phase',phase=name,receipt=value)
                 if value.get('status')!='passed':raise lifecycle.SmokeError('action phase failed: '+str(value.get('error')))
                 if name=='cold':self.lease=value['lease']
+                self.measured_phases.add(name)
                 return value
             state=self.container(['systemctl','is-active',unit],check=False).stdout.strip()
             if state not in ('active','activating'):
@@ -738,14 +788,16 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity,'control_g
                         # The stop request was already submitted. Observe the
                         # same identity until the original deadline; never resend it.
                     self.wait_daemon_exit(binding)
-                state=self.json_at(self.profile['scheduler_url'],'/v1/state',cleanup=True)
-                if (not isinstance(state.get('leases'),list) or state.get('schema_version')!=1
-                        or state.get('errors')):
-                    raise lifecycle.SmokeError('account cleanup snapshot unknown: '+str(state.get('errors',[]))[:300])
-                leases=[r for r in state.get('leases',[]) if r.get('model')==self.model and r.get('status')!='released']
+                while True:
+                    try:
+                        leases=self._cleanup_state(binding)
+                        break
+                    except _CleanupObservationUnknown as exc:
+                        remaining=self.deadline-time.monotonic()
+                        if remaining<=0:
+                            raise lifecycle.SmokeError('account cleanup snapshot unknown: '+str(exc)) from exc
+                        time.sleep(min(.2,remaining))
                 for lease in leases:
-                    if lease.get('lease_id')!=binding.get('lease_id'):
-                        raise lifecycle.SmokeError('account cleanup lease identity mismatch')
                     released=self.json_at(self.profile['scheduler_url'],'/v1/place/'+quote(lease['lease_id'],safe='')+'/release',{},cleanup=True)
                     if released.get('status')!='released' or released.get('lease_id')!=lease['lease_id']:
                         raise lifecycle.SmokeError('lease release unconfirmed')
@@ -788,10 +840,11 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity,'control_g
             self.python("import json,sys,shutil;from pathlib import Path;x=json.load(sys.stdin);p=Path(x['root']);\nif p.exists():\n assert not p.is_symlink() and (p/'owner').read_text()==x['token'];shutil.rmtree(p)\nprint('{}')",
                         {'root':self.temp,'token':self.token},cleanup=True)
         self.log('action_cleanup',errors=errors,files_preserved=self.preserve)
-        if errors:raise lifecycle.SmokeError('owned cleanup incomplete')
+        if errors:raise lifecycle.SmokeError('owned cleanup incomplete: '+ '; '.join(errors[:2]))
 
     def execute(self):
         result='failed'
+        cleanup_succeeded=True
         try:
             gpu=self.inventory();self.gpu_uuid=gpu[1]
             if self.container(['systemctl','show',self.unit,'-p','LoadState','--value']).stdout.strip()!='not-found':
@@ -819,8 +872,8 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity,'control_g
         except Exception as exc:self.log('failure',error=type(exc).__name__+': '+str(exc))
         finally:
             try:self.cleanup_actions()
-            except Exception as exc:result='failed';self.log('cleanup_failure',error=str(exc))
-        self.log('complete',result=result,scope=self.scope,live_chain_measured=result=='passed')
+            except Exception as exc:cleanup_succeeded=False;result='failed';self.log('cleanup_failure',error=str(exc))
+        self.log('complete',**self._completion_fields(result,cleanup_succeeded))
         return result
 
 

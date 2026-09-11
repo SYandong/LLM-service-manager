@@ -360,7 +360,7 @@ def test_cleanup_releases_only_proven_owned_lease_after_absent_daemon():
 def test_cleanup_stop_timeout_observes_exit_then_releases_once():
     run=smoke.ActionRun.__new__(smoke.ActionRun)
     run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+5
-    run.profile={'scheduler_url':'http://fixture'};run.daemon_binding=lambda **_: {'absent':False,'lease_id':'lease-1'};run.log=lambda *a,**k:None
+    run.profile={'scheduler_url':'http://fixture'};readings=iter(({'absent':False,'lease_id':'lease-1'},{'absent':True,'lease_id':'lease-1'}));run.daemon_binding=lambda **_:next(readings);run.log=lambda *a,**k:None
     calls=[]
     def container(argv,**kwargs):
         calls.append(argv)
@@ -372,6 +372,79 @@ def test_cleanup_stop_timeout_observes_exit_then_releases_once():
         released.append(path);return {'status':'released','lease_id':'lease-1'}
     run.json_at=json_at;run.cleanup_actions()
     assert len([x for x in calls if x[1]=='stop'])==1 and released==['/v1/place/lease-1/release']
+
+
+def test_cleanup_transient_snapshot_error_then_fresh_valid_releases_once():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+3
+    run.profile={'scheduler_url':'http://fixture'};run.log=lambda *a,**k:None
+    binding={'absent':False,'lease_id':'lease-1','identity':{'unit':run.unit,'pid':42,'start_ticks':'1','invocation_id':'a'*32}}
+    readings=[0]
+    def daemon_binding(**_):
+        readings[0]+=1;return {'absent':readings[0]>1,'lease_id':'lease-1'}
+    run.daemon_binding=daemon_binding
+    calls=[];run.container=lambda argv,**kwargs:(calls.append(argv) or subprocess.CompletedProcess(argv,0,'LoadState=not-found\nActiveState=inactive\nMainPID=0\n',''))
+    snapshots=iter(({'schema_version':1,'errors':['collector unavailable'],'leases':[]},
+                    {'schema_version':1,'errors':[],'leases':[{'model':'fixture','status':'confirmed','lease_id':'lease-1','unit':run.unit}]}))
+    released=[]
+    run.json_at=lambda url,path,body=None,**kwargs: next(snapshots) if path=='/v1/state' else (released.append(path) or {'status':'released','lease_id':'lease-1'})
+    run.cleanup_actions()
+    assert len([x for x in calls if x[1]=='stop'])==1 and released==['/v1/place/lease-1/release']
+
+
+def test_cleanup_persistent_unknown_preserves_ledger_without_second_stop():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+.25
+    run.profile={'scheduler_url':'http://fixture'};run.log=lambda *a,**k:None
+    readings=[0]
+    def daemon_binding(**_):
+        readings[0]+=1;return {'absent':readings[0]>1,'lease_id':'lease-1'}
+    run.daemon_binding=daemon_binding
+    calls=[];run.container=lambda argv,**kwargs:(calls.append(argv) or subprocess.CompletedProcess(argv,0,'LoadState=not-found\nActiveState=inactive\nMainPID=0\n',''))
+    reads=[];run.json_at=lambda *a,**k:(reads.append(a[1]) or {'schema_version':1,'errors':['still unknown'],'leases':[]})
+    with pytest.raises(life.SmokeError,match='account cleanup snapshot unknown'):
+        run.cleanup_actions()
+    assert run.preserve and len([x for x in calls if x[1]=='stop'])==1 and reads.count('/v1/state')>1
+
+
+def test_cleanup_replacement_after_exit_preserves_without_release():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+3
+    run.profile={'scheduler_url':'http://fixture'};run.log=lambda *a,**k:None
+    initial={'absent':False,'lease_id':'lease-1','identity':{'unit':run.unit,'pid':42,'start_ticks':'1','invocation_id':'a'*32}}
+    replacement={'absent':False,'lease_id':'lease-1','identity':{'unit':run.unit,'pid':43,'start_ticks':'2','invocation_id':'b'*32}}
+    readings=iter((initial,replacement));run.daemon_binding=lambda **_:next(readings)
+    calls=[];run.container=lambda argv,**kwargs:(calls.append(argv) or subprocess.CompletedProcess(argv,0,'LoadState=not-found\nActiveState=inactive\nMainPID=0\n',''))
+    run.json_at=lambda *a,**k:pytest.fail('replacement must not be released')
+    with pytest.raises(life.SmokeError,match='daemon identity changed'):
+        run.cleanup_actions()
+    assert run.preserve and len([x for x in calls if x[1]=='stop'])==1
+
+
+def test_cleanup_already_released_reconciles_without_second_release():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+3
+    run.profile={'scheduler_url':'http://fixture'};run.log=lambda *a,**k:None
+    readings=iter(({'absent':False,'lease_id':'lease-1'},{'absent':True,'lease_id':'lease-1'}));run.daemon_binding=lambda **_:next(readings)
+    calls=[];run.container=lambda argv,**kwargs:(calls.append(argv) or subprocess.CompletedProcess(argv,0,'LoadState=not-found\nActiveState=inactive\nMainPID=0\n',''))
+    released=[]
+    run.json_at=lambda url,path,body=None,**kwargs: ({'schema_version':1,'errors':[],'leases':[{'model':'fixture','status':'released','lease_id':'lease-1','unit':run.unit}]} if path=='/v1/state' else (released.append(path) or {'status':'released','lease_id':'lease-1'}))
+    run.cleanup_actions()
+    assert len([x for x in calls if x[1]=='stop'])==1 and released==[]
+
+
+def test_completion_keeps_measured_phases_when_cleanup_fails():
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.scope='fixture';run.measured_phases={'cold','free','wake'}
+    value=run._completion_fields('failed',False)
+    assert value['result']=='failed' and value['cleanup_succeeded'] is False
+    assert value['live_chain_measured'] is True and value['measured_phases']==['cold','free','wake']
+
+
+def test_completion_reports_no_measurements_after_preflight_failure():
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.scope='fixture';run.measured_phases=set()
+    value=run._completion_fields('failed',False)
+    assert value['result']=='failed' and value['cleanup_succeeded'] is False
+    assert value['live_chain_measured'] is False and value['measured_phases']==[]
 
 
 def test_cleanup_stop_timeout_without_exit_preserves_ledger_and_does_not_release():
@@ -412,7 +485,7 @@ def test_cleanup_stop_timeout_cleared_terminal_identity_releases_once():
     run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+5
     run.profile={'scheduler_url':'http://fixture'};run.log=lambda *a,**k:None
     binding={'absent':False,'lease_id':'lease-1','identity':{'unit':run.unit,'pid':42,'start_ticks':'100','invocation_id':'a'*32},'control_group':'/system.slice/'+run.unit}
-    run.daemon_binding=lambda **_:binding
+    readings=iter((binding,{'absent':True,'lease_id':'lease-1'}));run.daemon_binding=lambda **_:next(readings)
     calls=[]
     def container(argv,**kwargs):
         calls.append(argv)
