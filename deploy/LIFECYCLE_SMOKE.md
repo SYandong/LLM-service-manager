@@ -115,9 +115,11 @@ The action sequence uses actual `POST /v1/free`, a fresh observed sleeping state
 and residual GPU memory, then actual `POST /v1/wake/<model>`. Before and after each
 action the same confirmed lease, full budget and exact daemon PID/start/invocation
 must remain bound. Normal unload invokes a test-local guard around the official
-wrapper sleep command: it verifies the daemon token/lease/listener and wrapper
-scope, confirms sleeping, then signals only the wrapper's pidfd. No unverified
-numeric stop-pid is passed to another process.
+wrapper `sleep --vllm-url` command: it verifies the daemon token/lease/listener
+and wrapper scope, confirms sleeping, then signals only the wrapper's pidfd. No
+unverified numeric `stop-pid` is passed to another process. Scheduler-actions
+mode allows stable primary-model bystanders only after selected-GPU/process/RAM
+guards; direct lifecycle mode keeps its strict all-model quiet preflight.
 
 The existing standalone CLI's `SchedulerClient` and `EventReader` collect the
 scheduler result event. Evidence includes a **local** request UUID, model, actual
@@ -149,3 +151,4 @@ No old direct-lifecycle, LoRA, native-maintenance or UI receipt is relabeled as
 this mode's acceptance; long-term stability/calibration remain NOT MEASURED.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+<!-- Generated-By: Codex / gpt-5.6-luna -->

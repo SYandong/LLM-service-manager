@@ -2,6 +2,7 @@
 # Generated-By: Codex / gpt-5.6-luna
 """CPU contract tests: real scheduler/lease HTTP and launcher, fixture hardware."""
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -526,6 +527,38 @@ def test_stop_helper_rejects_unowned_daemon_before_any_sleep(tmp_path,monkeypatc
     monkeypatch.setattr(smoke.subprocess,'run',lambda *a,**k:pytest.fail('must not issue sleep'))
     with pytest.raises(smoke.EvidenceError,match='ownership'):
         smoke.stop_wrapper(profile,123)
+
+
+def test_stop_wrapper_uses_supported_sleep_and_proves_before_pidfd_signal(tmp_path, monkeypatch):
+    pid=os.getpid(); process=Path('/proc')/str(pid)
+    wrapper_binary=str((process/'exe').resolve())
+    wrapper_argv=[value.decode() for value in (process/'cmdline').read_bytes().split(b'\0') if value]
+    ticks=(process/'stat').read_text().rsplit(') ',1)[1].split()[19]
+    marker=tmp_path/'launch-lease.json';marker.write_text(json.dumps({'lease_id':'lease-1'}))
+    identity={'unit':'vllm-fixture.service','pid':pid,'start_ticks':ticks,'invocation_id':'a'*32}
+    profile={'root':str(tmp_path),'token':'run-token','unit':'vllm-fixture.service',
+             'model':'fixture','backend_url':'http://127.0.0.1:8101',
+             'source_unit':'fixture-source.service','wrapper_binary':wrapper_binary,
+             'wrapper_sha256':hashlib.sha256(Path(wrapper_binary).read_bytes()).hexdigest(),
+             'wrapper_argv':wrapper_argv,'work_deadline':time.monotonic()+5}
+    events=[]
+    monkeypatch.setattr(smoke.lifecycle,'cgroup_owned',lambda *args:True)
+    monkeypatch.setattr(smoke,'unit_identity',lambda *args,**kwargs:(events.append('identity') or identity))
+    monkeypatch.setattr(smoke.os,'pidfd_open',lambda value:99)
+    monkeypatch.setattr(smoke.os,'close',lambda value:events.append(('close',value)))
+    monkeypatch.setattr(smoke.signal,'pidfd_send_signal',lambda fd,signal:events.append('pidfd'))
+    class Native:
+        def __init__(self,*args):pass
+        def json(self,*args):events.append('sleep_confirm');return {'is_sleeping':True}
+    import deploy.maintenance_native as native
+    monkeypatch.setattr(native,'NativeHTTP',Native)
+    def wrapper(argv,**kwargs):
+        if argv[1]=='stop':raise AssertionError('unsupported stop command was used')
+        assert argv[1:]==['sleep','--vllm-url',profile['backend_url']]
+        events.append('sleep');return subprocess.CompletedProcess(argv,0,'','')
+    monkeypatch.setattr(smoke.subprocess,'run',wrapper)
+    assert smoke.stop_wrapper(profile,pid)==0
+    assert events.index('sleep') < events.index('sleep_confirm') < events.index('pidfd')
 
 
 @pytest.mark.parametrize('key,value',[('startup_seconds',0),('startup_seconds',float('inf')),

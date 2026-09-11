@@ -320,7 +320,7 @@ def stop_wrapper(profile, pid):
         if unit_identity(profile['unit'],profile['token'],lease=marker['lease_id'],model=profile.get('model'),origin=profile['backend_url'])!=before:
             raise EvidenceError('daemon changed before sleep')
         # Never let an external stop-pid argument target a reused process ID.
-        result=subprocess.run([profile['wrapper_binary'],'stop','--vllm-url',profile['backend_url']],
+        result=subprocess.run([profile['wrapper_binary'],'sleep','--vllm-url',profile['backend_url']],
                               timeout=lifecycle.remaining(profile['work_deadline'],15),check=False)
         if result.returncode:raise EvidenceError('owned wrapper sleep failed')
         from deploy.maintenance_native import NativeHTTP
