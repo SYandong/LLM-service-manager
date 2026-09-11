@@ -651,7 +651,7 @@ class Scheduler:
             with self.action_lock:
                 if catalog_epoch == self.catalog_epoch:
                     self.emit("collection_error", detail={"error_type": type(exc).__name__})
-        if "collector: concurrent round" in snapshot.errors:
+        if snapshot.errors == ("collector: concurrent round",):
             # Collector contention means this call did not perform a measurement.
             # Keep the last published observation, including its sampled_at and
             # private bounds, and do not run action reconciliation for this call.
