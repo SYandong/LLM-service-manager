@@ -3,6 +3,7 @@
 """CPU contract tests: real scheduler/lease HTTP and launcher, fixture hardware."""
 import importlib.util
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
@@ -700,44 +702,93 @@ def test_wake_partial_response_preserves_failure_evidence():
     assert exc.value.evidence['response_received'] is True
 
 
-def test_http_error_payload_is_distinguished_from_no_response():
-    class HTTPErrorFixture(RuntimeError):
-        status = 503
-        payload = {'error': 'placement_busy', 'status': 'blocked'}
+class _JSONResponse:
+    def __init__(self, body):
+        self.body = body
 
-    api, profile = _action_evidence_fixture(HTTPErrorFixture('scheduler rejected'))
-    with pytest.raises(smoke.EvidenceError) as exc:
-        smoke.action_probe(api, profile, 'free', 'http-error',
-                           deadline=time.monotonic() + 2,
-                           identity_reader=lambda *args, **kwargs: {
-                               'unit': 'vllm-fixture.service', 'pid': 1,
-                               'start_ticks': '2', 'invocation_id': 'a' * 32})
-    evidence = exc.value.evidence
-    assert evidence['response'] == HTTPErrorFixture.payload
-    assert evidence['http_status'] == 503
-    assert evidence['response_received'] is True
-    assert evidence['response_parsed'] is True
-    assert evidence['request_error_kind'] == 'http'
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, limit=-1):
+        return self.body if limit < 0 else self.body[:limit]
 
 
-def test_http_error_non_object_payload_is_preserved():
-    class HTTPErrorList(RuntimeError):
-        status = 409
-        payload = ['placement_busy', 'model']
+def _actual_client_http_error_fixture(body):
+    state = {'read_only': False, 'sampled_at': time.time(), 'errors': [],
+             'models': [{'name': 'fixture', 'gpu': 0, 'unit': 'vllm-fixture.service',
+                         'state': 'awake', 'resident_gb': 80}],
+             'leases': [{'model': 'fixture', 'gpu': 0, 'unit': 'vllm-fixture.service',
+                         'lease_id': 'lease-1', 'status': 'confirmed', 'budget_gb': 80}]}
+    def opener(request, timeout):
+        if request.get_method() == 'GET':
+            return _JSONResponse(json.dumps(state).encode())
+        raise HTTPError(request.full_url, 409, 'Conflict', {}, BytesIO(body))
+    class Client:
+        def __new__(cls, url, timeout=10):
+            return API['SchedulerClient'](url, timeout=timeout, opener=opener)
+    return {'SchedulerClient': Client, 'EventReader': _EvidenceReader}, {
+        'scheduler_url': 'http://fixture', 'model': 'fixture', 'gpu': 0,
+        'unit': 'vllm-fixture.service', 'token': 'token',
+        'backend_url': 'http://127.0.0.1:8101',
+    }
 
-    api, profile = _action_evidence_fixture(HTTPErrorList('scheduler rejected'))
+
+@pytest.mark.parametrize('body,available,expected_response', [
+    (b'{"error":"placement_busy"}', True, {'error': 'placement_busy'}),
+    (b'["placement_busy"]', False, None),
+    (b'7', False, None),
+    (b'null', False, None),
+    (b'not-json', False, None),
+])
+def test_real_scheduler_client_http_error_boundary(body, available, expected_response):
+    api, profile = _actual_client_http_error_fixture(body)
     with pytest.raises(smoke.EvidenceError, match='HTTP error') as exc:
-        smoke.action_probe(api, profile, 'free', 'http-list-error',
+        smoke.action_probe(api, profile, 'free', 'real-http-error',
                            deadline=time.monotonic() + 2,
                            identity_reader=lambda *args, **kwargs: {
                                'unit': 'vllm-fixture.service', 'pid': 1,
                                'start_ticks': '2', 'invocation_id': 'a' * 32})
     evidence = exc.value.evidence
-    assert evidence['response'] == HTTPErrorList.payload
-    assert evidence['response_parsed'] is True
     assert evidence['http_status'] == 409
     assert evidence['response_received'] is True
     assert evidence['request_error_kind'] == 'http'
+    assert evidence['response_payload_available'] is available
+    assert evidence['response'] == expected_response
+    assert evidence['response_parsed'] is (True if available else None)
+    assert 'HTTP 409:' in evidence['transport_error_message']
+
+
+def test_helper_receipt_serializes_real_client_http_error_evidence(tmp_path, monkeypatch):
+    api, profile = _actual_client_http_error_fixture(b'["placement_busy"]')
+    with pytest.raises(smoke.EvidenceError) as exc:
+        smoke.action_probe(api, profile, 'free', 'real-http-receipt',
+                           deadline=time.monotonic() + 2,
+                           identity_reader=lambda *args, **kwargs: {
+                               'unit': 'vllm-fixture.service', 'pid': 1,
+                               'start_ticks': '2', 'invocation_id': 'a' * 32})
+    evidence = exc.value.evidence
+    root = tmp_path / 'run'; root.mkdir(); (root / 'owner').write_text('token')
+    deadline = time.monotonic() + 2
+    (root / 'request.json').write_text(json.dumps({
+        'id': 'real-http-receipt', 'operation': 'free', 'output': 'result.json',
+        'deadline': deadline}))
+    cli = tmp_path / 'cli.py'; cli.write_text('')
+    (root / 'profile.json').write_text(json.dumps({
+        'root': str(root), 'token': 'token', 'control_instances': {},
+        'cli': str(cli), 'model': 'fixture', 'work_deadline': deadline + 1}))
+    monkeypatch.setattr(smoke, 'action_probe', lambda *args, **kwargs:
+                        (_ for _ in ()).throw(smoke.EvidenceError(
+                            'action request HTTP error', evidence=evidence)))
+    assert smoke.helper_main(['request', str(root / 'profile.json'), 'request.json']) == 1
+    receipt = json.loads((root / 'result.json').read_text())
+    assert receipt['status'] == 'failed'
+    assert receipt['evidence']['http_status'] == 409
+    assert receipt['evidence']['response_payload_available'] is False
+    assert receipt['evidence']['response_parsed'] is None
+    assert receipt['evidence']['request_error_kind'] == 'http'
 
 
 def test_post_response_stream_failure_preserves_response_and_passed_checks():

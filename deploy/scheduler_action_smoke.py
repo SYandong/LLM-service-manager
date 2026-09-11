@@ -247,23 +247,28 @@ def action_probe(api, profile, operation, request_id, *, deadline, identity_read
         except Exception as exc:
             returned=time.monotonic()
             evidence['client_returned_monotonic']=returned
-            payload=getattr(exc,'payload',None)
+            payload_marker=object()
+            payload=getattr(exc,'payload',payload_marker)
             status=getattr(exc,'status',None)
-            if payload is not None:
+            if payload is not payload_marker and payload is not None:
                 evidence['response']=payload
                 evidence['response_parsed']=True
-            elif status is not None:evidence['response_parsed']=False
+                evidence['response_payload_available']=True
+            elif status is not None:
+                evidence['response_parsed']=None
+                evidence['response_payload_available']=False
             if status is not None:
                 evidence['http_status']=status
                 evidence['response_received']=True
                 evidence['request_error_kind']='http'
-            elif payload is not None:
+            elif payload is not payload_marker and payload is not None:
                 evidence['response_received']=True
                 evidence['request_error_kind']='client'
             else:
                 evidence['response_received']=None
                 evidence['request_error_kind']='transport'
             evidence['transport_error_type']=type(exc).__name__
+            evidence['transport_error_message']=str(exc)
             message='action request HTTP error' if status is not None else 'action request transport error'
             raise EvidenceError(message, evidence=evidence) from exc
         evidence['client_returned_monotonic']=http_done

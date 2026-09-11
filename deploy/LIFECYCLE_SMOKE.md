@@ -138,6 +138,9 @@ client timing/deadline, parsed HTTP status/payload when available, and completed
 identity checks in the private phase receipt. A transport error remains a failed
 nonzero result; missing evidence stays unknown, and the receipt does not invent native acknowledgement,
 settlement, or cleanup confirmation.
+The current standalone client exposes a parsed error payload only when its
+`ClientError` carries one; otherwise a known HTTP status and sanitized error text
+are retained while payload availability and parsing remain unknown.
 
 All helper requests run in bounded token-tagged units so the host runner can keep
 checking GPU/serving conditions during long requests. The total remains at most
