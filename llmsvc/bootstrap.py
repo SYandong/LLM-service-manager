@@ -367,8 +367,11 @@ class BootstrapController:
         module=None
         try:
             module=self._launcher()
-            s.sample_once()
+            s.await_initial_sample(self.deadline)
             with s.action_lock:
+                self._enabled()
+                if self.clock() >= self.deadline:
+                    raise BootstrapError('bootstrap deadline exceeded')
                 request=s.placement._request({'model':self.model,'util':self.spec['util']})
                 decision,blocked=s.placement._decision(s.snapshot(),request,waiting=False)
                 if decision is None or not decision.actions or any(action.kind!='place' for action in decision.actions):

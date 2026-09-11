@@ -682,6 +682,26 @@ class Scheduler:
         """Wake the existing sampler; callers never wait for collector I/O here."""
         self.sample_requested.set()
 
+    def await_initial_sample(self, deadline: float) -> StateSnapshot:
+        """Wait for the running sampler's first publication without doing I/O."""
+        with self.changed:
+            thread = self._thread
+            stopping = self.stopping.is_set()
+        if thread is None or not thread.is_alive():
+            if stopping or deadline <= self.monotonic():
+                return self.snapshot()
+            self.sample_once()
+            return self.snapshot()
+        with self.changed:
+            if self._sample_published:
+                return self.snapshot()
+            while not self._sample_published and not self.stopping.is_set():
+                remaining = deadline - self.monotonic()
+                if remaining <= 0:
+                    break
+                self.changed.wait(timeout=remaining)
+            return self.snapshot()
+
     def _run(self):
         while not self.stopping.is_set():
             self.sample_requested.clear()
