@@ -529,7 +529,8 @@ def test_stop_helper_rejects_unowned_daemon_before_any_sleep(tmp_path,monkeypatc
         smoke.stop_wrapper(profile,123)
 
 
-def test_stop_wrapper_uses_supported_sleep_and_proves_before_pidfd_signal(tmp_path, monkeypatch):
+@pytest.mark.parametrize('scenario', ['success', 'wrapper_failure', 'sleep_unconfirmed', 'identity_changed'])
+def test_stop_wrapper_uses_supported_sleep_and_proves_before_pidfd_signal(tmp_path, monkeypatch, scenario):
     pid=os.getpid(); process=Path('/proc')/str(pid)
     wrapper_binary=str((process/'exe').resolve())
     wrapper_argv=[value.decode() for value in (process/'cmdline').read_bytes().split(b'\0') if value]
@@ -543,22 +544,42 @@ def test_stop_wrapper_uses_supported_sleep_and_proves_before_pidfd_signal(tmp_pa
              'wrapper_argv':wrapper_argv,'work_deadline':time.monotonic()+5}
     events=[]
     monkeypatch.setattr(smoke.lifecycle,'cgroup_owned',lambda *args:True)
-    monkeypatch.setattr(smoke,'unit_identity',lambda *args,**kwargs:(events.append('identity') or identity))
+    def observe_identity(*args, **kwargs):
+        events.append('identity')
+        if scenario == 'identity_changed' and 'sleep_confirm' in events:
+            return {**identity, 'invocation_id': 'b'*32}
+        return identity
+    monkeypatch.setattr(smoke,'unit_identity',observe_identity)
     monkeypatch.setattr(smoke.os,'pidfd_open',lambda value:99)
     monkeypatch.setattr(smoke.os,'close',lambda value:events.append(('close',value)))
-    monkeypatch.setattr(smoke.signal,'pidfd_send_signal',lambda fd,signal:events.append('pidfd'))
+    def signal_bound(fd, sig):
+        assert fd == 99 and sig == smoke.signal.SIGTERM
+        events.append('pidfd')
+    monkeypatch.setattr(smoke.signal,'pidfd_send_signal',signal_bound)
     class Native:
         def __init__(self,*args):pass
-        def json(self,*args):events.append('sleep_confirm');return {'is_sleeping':True}
+        def json(self,*args):
+            events.append('sleep_confirm')
+            return {'is_sleeping':scenario != 'sleep_unconfirmed'}
     import deploy.maintenance_native as native
     monkeypatch.setattr(native,'NativeHTTP',Native)
     def wrapper(argv,**kwargs):
         if argv[1]=='stop':raise AssertionError('unsupported stop command was used')
         assert argv[1:]==['sleep','--vllm-url',profile['backend_url']]
-        events.append('sleep');return subprocess.CompletedProcess(argv,0,'','')
+        events.append('sleep')
+        return subprocess.CompletedProcess(argv,1 if scenario == 'wrapper_failure' else 0,'','')
     monkeypatch.setattr(smoke.subprocess,'run',wrapper)
-    assert smoke.stop_wrapper(profile,pid)==0
-    assert events.index('sleep') < events.index('sleep_confirm') < events.index('pidfd')
+    if scenario == 'success':
+        assert smoke.stop_wrapper(profile,pid)==0
+        assert events == ['identity', 'identity', 'sleep', 'sleep_confirm', 'identity', 'pidfd', ('close', 99)]
+    else:
+        message = {'wrapper_failure':'owned wrapper sleep failed',
+                   'sleep_unconfirmed':'daemon sleep not confirmed',
+                   'identity_changed':'daemon changed during sleep'}[scenario]
+        with pytest.raises(smoke.EvidenceError, match=message):
+            smoke.stop_wrapper(profile,pid)
+        assert 'pidfd' not in events
+        assert events[-1] == ('close', 99)
 
 
 @pytest.mark.parametrize('key,value',[('startup_seconds',0),('startup_seconds',float('inf')),
