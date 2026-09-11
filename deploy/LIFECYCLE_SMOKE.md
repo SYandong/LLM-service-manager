@@ -82,6 +82,11 @@ and SHA256-pinned. The scheduler interpreter and reviewed source must exist;
 there are no package or model downloads. `--dry-run` validates inputs without
 creating locks, files, units, sockets or requests.
 
+The generated isolated wrapper command does not forward a journal-unit option.
+The managed launch and stop commands, identity checks, deadlines, and journal
+storage remain unchanged; diagnostics stay in the systemd journal so lifecycle
+command pipes can close when the wrapper returns.
+
 This mode creates one isolated native source, scheduler, profile, empty ledger
 and UUID model namespace. It stages only owner-marked temporary files. Native
 configuration has no preload and retains only this test model. A single bounded

@@ -475,7 +475,7 @@ def artifacts(run, ports, weights_bytes):
     launch=[python,'-B',helper,'launch',profile_path,'--',str(c.get('util',.2)),run.unit,
             '--config',root+'/launcher.json','--',*daemon]
     wrapper=[c['wrapper_binary'],'serve','--vllm-url',backend_url,'--listen','127.0.0.1:'+str(wrapper_port),
-             '--wait-timeout','150s','--journal-unit',run.unit,'--',*launch]
+             '--wait-timeout','150s','--',*launch]
     stop=[python,'-B',helper,'stop',profile_path,'${PID}']
     environment={'LLMSVC_OPS_RUN_ID':run.token,'VLLM_SERVER_DEV_MODE':'1','HF_HUB_OFFLINE':'1',
                  'TRANSFORMERS_OFFLINE':'1','VLLM_NO_USAGE_STATS':'1','DO_NOT_TRACK':'1',
