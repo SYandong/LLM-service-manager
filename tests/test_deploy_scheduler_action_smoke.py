@@ -1,10 +1,12 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-5.6-luna
 """CPU contract tests: real scheduler/lease HTTP and launcher, fixture hardware."""
 import importlib.util
 import json
 import os
 from pathlib import Path
 import runpy
+import shutil
 import socket
 import subprocess
 import sys
@@ -226,6 +228,117 @@ def test_foreign_control_unit_is_not_killed_and_files_are_retained():
     run.container=container;run.python=lambda *a,**k:pytest.fail('preserve files')
     with pytest.raises(life.SmokeError):run.cleanup_actions()
     assert all(call[1]=='show' for call in calls) and run.preserve
+
+
+def _identity_observation():
+    unit='vllm-fixture.service'
+    return unit, 'run-token', {
+        'Id': unit, 'MainPID': '42', 'InvocationID': 'a'*32,
+        'Environment': 'CUDA_VISIBLE_DEVICES=0',
+        'ControlGroup': '/system.slice/'+unit,
+    }, {
+        'CUDA_VISIBLE_DEVICES': '0', 'LLMSVC_MODEL': 'fixture',
+        'LLMSVC_LEASE_ID': 'lease-1',
+    }, '0::/system.slice/'+unit+'\n'
+
+
+def test_daemon_identity_uses_proc_environment_and_exact_instance_contract():
+    unit, token, values, proc_env, cgroup = _identity_observation()
+    identity=smoke.validate_unit_observation(unit,token,values,proc_env,'123',cgroup,
+        lease='lease-1',model='fixture')
+    assert identity == {'unit':unit,'pid':42,'start_ticks':'123','invocation_id':'a'*32}
+    with pytest.raises(smoke.EvidenceError,match='unit lease mismatch'):
+        smoke.validate_unit_observation(unit,token,values,{**proc_env,'LLMSVC_LEASE_ID':'forged'},'123',cgroup,lease='lease-1',model='fixture')
+    with pytest.raises(smoke.EvidenceError,match='daemon model environment mismatch'):
+        smoke.validate_unit_observation(unit,token,values,{**proc_env,'LLMSVC_MODEL':'other'},'123',cgroup,lease='lease-1',model='fixture')
+    with pytest.raises(smoke.EvidenceError,match='unit instance changed'):
+        smoke.validate_unit_observation(unit,token,values,proc_env,'123',cgroup,lease='lease-1',model='fixture',expected={**identity,'pid':43})
+    with pytest.raises(smoke.EvidenceError,match='unit exited'):
+        smoke.validate_unit_observation(unit,token,{**values,'MainPID':'0'},proc_env,'123',cgroup,lease='lease-1',model='fixture')
+    with pytest.raises(smoke.EvidenceError,match='daemon model environment mismatch'):
+        smoke.validate_unit_observation(unit,token,values,{'CUDA_VISIBLE_DEVICES':'0','LLMSVC_LEASE_ID':'lease-1'},'123',cgroup,lease='lease-1',model='fixture')
+
+
+def test_unit_identity_rechecks_systemd_and_process_instance(tmp_path, monkeypatch):
+    proc=tmp_path/'proc';entry=proc/'42';entry.mkdir(parents=True)
+    (entry/'stat').write_text('42 (fixture) '+' '.join(['S']+['0']*18+['123']))
+    (entry/'environ').write_bytes(b'CUDA_VISIBLE_DEVICES=0\0LLMSVC_MODEL=fixture\0LLMSVC_LEASE_ID=lease-1\0')
+    (entry/'cgroup').write_text('0::/system.slice/vllm-fixture.service\n')
+    unit='vllm-fixture.service';base='Id='+unit+'\nMainPID=42\nInvocationID='+'a'*32+'\nEnvironment=CUDA_VISIBLE_DEVICES=0\nControlGroup=/system.slice/'+unit+'\n'
+    calls=[]
+    def runner(argv,**kwargs):
+        calls.append(1);return subprocess.CompletedProcess(argv,0,base,'')
+    monkeypatch.setattr(smoke.subprocess,'run',runner)
+    result=smoke.unit_identity(unit,'ignored',lease='lease-1',model='fixture',proc_root=proc)
+    assert result['start_ticks']=='123' and len(calls)==2
+    replacement='Id='+unit+'\nMainPID=43\nInvocationID='+'b'*32+'\nEnvironment=CUDA_VISIBLE_DEVICES=0\nControlGroup=/system.slice/'+unit+'\n'
+    calls.clear()
+    def changing_runner(argv,**kwargs):
+        calls.append(1);return subprocess.CompletedProcess(argv,0,base if len(calls)==1 else replacement,'')
+    monkeypatch.setattr(smoke.subprocess,'run',changing_runner)
+    with pytest.raises(smoke.EvidenceError,match='unit instance changed'):
+        smoke.unit_identity(unit,'ignored',lease='lease-1',model='fixture',proc_root=proc)
+    assert len(calls)==2
+
+
+def test_control_unit_keeps_explicit_run_id_contract():
+    unit='llmsvc-ops-action-source-run.service';values={
+        'Id':unit,'MainPID':'7','InvocationID':'b'*32,
+        'Environment':'LLMSVC_OPS_RUN_ID=run-token','ControlGroup':'/system.slice/'+unit}
+    identity=smoke.validate_unit_observation(unit,'run-token',values,
+        {'LLMSVC_OPS_RUN_ID':'run-token'},'456','0::/system.slice/'+unit+'\n',control=True)
+    assert identity['pid']==7
+    with pytest.raises(smoke.EvidenceError,match='control unit owner mismatch'):
+        smoke.validate_unit_observation(unit,'run-token',values,
+            {'LLMSVC_OPS_RUN_ID':'other'},'456','0::/system.slice/'+unit+'\n',control=True)
+
+
+def test_cold_error_reports_collector_reason():
+    with pytest.raises(smoke.EvidenceError,match='collector: concurrent round'):
+        smoke.account({'errors':['collector: concurrent round']},{'model':'fixture','gpu':0,'unit':'vllm-fixture.service'})
+
+
+def test_cleanup_releases_only_proven_owned_lease_after_absent_daemon():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+5
+    run.profile={'scheduler_url':'http://fixture'}
+    run.daemon_binding=lambda **_: {'absent':True,'lease_id':'lease-1'}
+    run.json_at=lambda url,path,body=None,**kwargs: (
+        {'schema_version':1,'errors':[],'leases':[{'model':'fixture','status':'confirmed','lease_id':'lease-1'}]}
+        if path=='/v1/state' else {'status':'released','lease_id':'lease-1'})
+    run.log=lambda *a,**k:None
+    run.cleanup_actions()
+
+
+def test_daemon_binding_runs_through_remote_runtime_entrypoint(tmp_path):
+    root=tmp_path/'run';(root/'runtime').mkdir(parents=True);(root/'owner').write_text('token')
+    (root/'launch-lease.json').write_text(json.dumps({'lease_id':'lease-1'}))
+    shutil.copytree(ROOT/'deploy',root/'runtime'/'deploy',dirs_exist_ok=True)
+    fakebin=root/'bin';fakebin.mkdir();systemctl=fakebin/'systemctl'
+    systemctl.write_text('#!/usr/bin/env python3\nprint("Id=vllm-fixture.service\\nLoadState=loaded\\nActiveState=inactive\\nMainPID=0\\nInvocationID=\\nEnvironment=\\nControlGroup=/system.slice/vllm-fixture.service")\n')
+    systemctl.chmod(0o700)
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.temp=str(root);run.unit='vllm-fixture.service';run.model='fixture';run.token='token'
+    def remote_python(code,data,**kwargs):
+        env={**os.environ,'PATH':str(fakebin)+':'+os.environ.get('PATH',''),
+             'PYTHONPATH':str(root/'runtime')+':'+str(ROOT)}
+        value=subprocess.run([sys.executable,'-B','-c',code],input=json.dumps(data),text=True,
+                             capture_output=True,env=env,check=True,timeout=5)
+        return json.loads(value.stdout)
+    run.python=remote_python
+    result=run.daemon_binding(cleanup=True)
+    assert result=={'absent':True,'exit_proven':True,'lease_id':'lease-1'}
+
+
+def test_cleanup_preserves_files_when_exit_observation_deadline_expires():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=True;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+.2
+    run.daemon_binding=lambda **_: {'absent':False,'lease_id':'lease-1'}
+    run.container=lambda *a,**k: subprocess.CompletedProcess(a,0,'LoadState=loaded\nActiveState=active\nMainPID=42\n','')
+    run.log=lambda *a,**k:None
+    run.json_at=lambda *a,**k:pytest.fail('must not release before proven exit')
+    with pytest.raises(life.SmokeError,match='cleanup incomplete'):
+        run.cleanup_actions()
+    assert run.preserve
 
 
 def test_generated_profile_has_empty_ledger_and_scoped_hardware(tmp_path):
