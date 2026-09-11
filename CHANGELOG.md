@@ -17,8 +17,8 @@ and #235.
   witnesses without repeating stop/release; malformed or unknown state remains
   preserved and partial phase evidence stays truthful (#231).
 - Stopped-model cold wake can expose bounded advisory per-model progress from the
-  pinned log stream; source loss, readiness, quiet and settlement remain unknown
-  unless the final scheduler response proves them (#233).
+  pinned log stream. Progress does not prove source continuity, quiet or settlement;
+  the final controller response determines readiness (#233).
 - The isolated harness has an explicit opt-in `scheduler_wake` cold route with one
   wake request, full original cold deadline, fresh state baseline and final
   account/unit proof; `native_chat` remains the default and warm latency is checked
