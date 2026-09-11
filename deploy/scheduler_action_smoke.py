@@ -636,7 +636,12 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity}))
             try:
                 binding=self.daemon_binding(cleanup=True)
                 if not binding.get('absent'):
-                    self.container(['systemctl','stop',self.unit],limit=12,cleanup=True)
+                    try:
+                        self.container(['systemctl','stop',self.unit],limit=12,cleanup=True)
+                    except subprocess.TimeoutExpired as exc:
+                        self.log('owned_stop_timeout',unit=self.unit,error=str(exc))
+                        # The stop request was already submitted. Observe the
+                        # same identity until the original deadline; never resend it.
                     self.wait_daemon_exit()
                 state=self.json_at(self.profile['scheduler_url'],'/v1/state',cleanup=True)
                 if (not isinstance(state.get('leases'),list) or state.get('schema_version')!=1
@@ -658,7 +663,18 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity}))
                 env=next((line.split('=',1)[1] for line in values.splitlines() if line.startswith('Environment=')), '')
                 if not lifecycle.owned(env,self.token):raise lifecycle.SmokeError('control unit ownership unknown')
                 self.container(['systemctl','kill','--kill-whom=all','--signal=KILL',unit],cleanup=True,check=False)
-                self.container(['systemctl','stop',unit],cleanup=True,limit=5)
+                try:
+                    self.container(['systemctl','stop',unit],cleanup=True,limit=5)
+                except subprocess.TimeoutExpired as exc:
+                    self.log('control_stop_timeout',unit=unit,error=str(exc))
+                    end=min(self.deadline,time.monotonic()+5)
+                    while time.monotonic()<end:
+                        state=self.container(['systemctl','show',unit,'-p','LoadState','-p','ActiveState','-p','MainPID'],cleanup=True,check=False).stdout
+                        fields=dict(line.split('=',1) for line in state.splitlines() if '=' in line)
+                        if fields.get('LoadState')=='not-found' or (fields.get('ActiveState') in ('inactive','failed','dead') and fields.get('MainPID')=='0'):
+                            break
+                        lifecycle.remaining(end,2);time.sleep(.2)
+                    else:raise lifecycle.SmokeError('control unit did not exit before cleanup deadline')
             except Exception as exc:errors.append(str(exc));self.preserve=True
         if self.temp_created and not self.preserve:
             self.python("import json,sys,shutil;from pathlib import Path;x=json.load(sys.stdin);p=Path(x['root']);\nif p.exists():\n assert not p.is_symlink() and (p/'owner').read_text()==x['token'];shutil.rmtree(p)\nprint('{}')",
