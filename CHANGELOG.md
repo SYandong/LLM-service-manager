@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.1.0-alpha.14 — 2026-09-11
+
+Incremental startup and isolated scheduler-action safety release; Python distribution
+`0.1.0a14`. The five qualifying PRs since alpha13 are #215, #217, #219, #221
+and #223.
+
+### Corrected and added
+
+- Bootstrap waits for the first valid scheduler observation before initial
+  placement, while genuine probe errors, expired deadlines and shutdown still
+  fail closed without retrying indefinitely (#215).
+- Scheduler-action preflight permits only proven selected-GPU isolation with
+  stable primary bystanders; direct lifecycle quiet checks remain strict (#217).
+- The isolated stop wrapper uses the supported `sleep --vllm-url` command and
+  preserves identity checks before its bound signal (#219).
+- Failed action receipts retain available response/status, local request/model,
+  client timing/deadline and completed identity checks; unknown acknowledgement,
+  effect settlement and cleanup remain explicit (#221).
+- The isolated harness no longer forwards optional journal-unit metadata into the
+  wrapper command, so lifecycle pipes can close while diagnostics remain in the
+  systemd journal (#223).
+
+### Compatibility and validation limits
+
+Bootstrap, native-witness, maintenance and scheduler-action modes remain
+default-off. This release does not claim free/wake native acknowledgement, live
+GPU behavior, managed-site adoption, automatic upgrade, continuous quiet,
+settlement, producer upgrade, TTL/reaper replacement or production routing.
+Existing inference endpoints, model IDs/aliases, default, pin and inflight
+protections, and the single `llm` command remain unchanged.
+
+Maintenance schema-v6 records containing `native_provenance` are rejected by
+alpha12 and older readers; schema7 bootstrap records retain the same older-reader
+refusal. An old binary plus the current ledger is not a general rollback path.
+The candidate uses bounded CPU/loopback validation only; long-term
+stability/calibration and live deployment acceptance remain **NOT MEASURED**.
+
 ## 0.1.0-alpha.13 — 2026-09-11
 
 Incremental scheduler and maintenance safety release; Python distribution
