@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shlex
 import shutil
 import socket
 import subprocess
@@ -503,6 +504,7 @@ def test_generated_profile_has_empty_ledger_and_scoped_hardware(tmp_path):
         source={},source_unit='llmsvc-ops-source-token.service',gpu_uuid='GPU-actual-2',work_deadline=time.monotonic()+200)
     files,profile=smoke.artifacts(run,[9002,9003,9004],10*1024**3)
     scheduler=json.loads(files[run.temp+'/scheduler.json'])
+    native=json.loads(files[run.temp+'/native.json'])
     assert scheduler['state_db_path']==run.temp+'/ledger.sqlite'
     assert not any('INSERT' in text or 'create_lease' in text for name,text in files.items() if not name.endswith('.py') and '/deploy/' not in name)
     assert scheduler['placement_enabled'] and scheduler['model_actions_enabled'] and not scheduler['automation_enabled']
@@ -510,6 +512,15 @@ def test_generated_profile_has_empty_ledger_and_scoped_hardware(tmp_path):
     assert 'ledger.sqlite' not in files
     compile(files[run.temp+'/nvidia-smi'],'<scoped nvidia wrapper>','exec')
     assert profile['gpu']==2 and profile['control_instances']=={}
+    wrapper=profile['wrapper_argv']
+    assert '--journal-unit' not in wrapper
+    assert wrapper[:2]==[run.config['wrapper_binary'],'serve']
+    assert wrapper[wrapper.index('--')+1:wrapper.index('--')+4] == [run.config['scheduler_python'],'-B',run.temp+'/runtime/deploy/scheduler_action_smoke.py']
+    assert shlex.split(native['models'][run.model]['cmd'])==wrapper
+    assert shlex.split(native['models'][run.model]['cmdStop']) == [
+        run.config['scheduler_python'], '-B', run.temp+'/runtime/deploy/scheduler_action_smoke.py',
+        'stop', run.temp+'/profile.json', '${PID}',
+    ]
 
 
 @pytest.mark.parametrize('chain',['unstarted'],indirect=True)
