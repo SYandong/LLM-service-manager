@@ -106,6 +106,8 @@ class PlacementController:
     def _enabled(self):
         self._catalog_current()
         config = self.scheduler.config
+        if self.scheduler.stopping.is_set():
+            raise LeaseError(503, "scheduler_stopping")
         if config.read_only:
             raise LeaseError(405, "read_only")
         if not config.placement_enabled:

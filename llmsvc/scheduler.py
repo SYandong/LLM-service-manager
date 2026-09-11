@@ -215,6 +215,11 @@ class Scheduler:
         if epoch is not None and epoch != self.catalog_epoch:
             raise ActionDispatchError("catalog_generation_changed")
 
+    def _check_stopping(self):
+        """Reject a new mutating admission while preserving accepted work."""
+        if self.stopping.is_set():
+            raise IntentWriteError(503, "scheduler_stopping")
+
     def preview(self, operation: str, payload: dict) -> dict:
         """Pure policy/intent preview; no executor, event append or store writer."""
         if operation in ("place", "confirm", "release"):
@@ -343,6 +348,7 @@ class Scheduler:
         if not isinstance(payload, dict):
             raise ValueError("request body must be a JSON object")
         with self.changed:
+            self._check_stopping()
             if self.config.read_only:
                 raise IntentWriteError(405, "read_only")
             if operation not in ("pin", "unpin"):
@@ -393,6 +399,7 @@ class Scheduler:
         if remaining <= 0 or not self.action_lock.acquire(timeout=remaining):
             raise IntentWriteError(503, "reserve_timeout")
         try:
+            self._check_stopping()
             yield
         finally:
             self.action_lock.release()
@@ -510,6 +517,7 @@ class Scheduler:
             with self.action_lock:
                 writable = self.catalog is not None and self.catalog.can_submit()
                 if method != "GET" and not dry_run:
+                    self._check_stopping()
                     if self.catalog_fenced or (self.store and self.store.catalog_pending()):
                         raise IntentWriteError(409, "registry_reconciliation_required")
                     if self.registry.submit_change != self.catalog.submit_change:
