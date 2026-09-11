@@ -603,13 +603,20 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity}))
         return self.python(code,{'root':self.temp,'unit':self.unit,'model':self.model,
                                  'token':self.token},limit=5,cleanup=cleanup)
 
-    def wait_daemon_exit(self):
+    def wait_daemon_exit(self, binding):
         end=min(self.deadline,time.monotonic()+18)
         while time.monotonic()<end:
             value=self.container(['systemctl','show',self.unit,'-p','LoadState','-p','ActiveState','-p','MainPID'],cleanup=True,check=False).stdout
             fields=dict(line.split('=',1) for line in value.splitlines() if '=' in line)
             if fields.get('LoadState')=='not-found' or (fields.get('ActiveState') in ('inactive','failed','dead') and fields.get('MainPID')=='0'):
                 return
+            current=self.daemon_binding(cleanup=True)
+            if current.get('absent'):
+                if current.get('exit_proven') is not True:raise lifecycle.SmokeError('daemon exit proof unavailable')
+                return
+            if (current.get('lease_id')!=binding.get('lease_id')
+                    or current.get('identity')!=binding.get('identity')):
+                raise lifecycle.SmokeError('daemon identity changed during cleanup')
             lifecycle.remaining(end,2);time.sleep(.2)
         raise lifecycle.SmokeError('owned daemon did not exit before cleanup deadline')
 
@@ -636,8 +643,13 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity}))
             try:
                 binding=self.daemon_binding(cleanup=True)
                 if not binding.get('absent'):
-                    self.container(['systemctl','stop',self.unit],limit=12,cleanup=True)
-                    self.wait_daemon_exit()
+                    try:
+                        self.container(['systemctl','stop',self.unit],limit=12,cleanup=True)
+                    except subprocess.TimeoutExpired as exc:
+                        self.log('owned_stop_timeout',unit=self.unit,error=str(exc))
+                        # The stop request was already submitted. Observe the
+                        # same identity until the original deadline; never resend it.
+                    self.wait_daemon_exit(binding)
                 state=self.json_at(self.profile['scheduler_url'],'/v1/state',cleanup=True)
                 if (not isinstance(state.get('leases'),list) or state.get('schema_version')!=1
                         or state.get('errors')):
@@ -653,12 +665,29 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity}))
             except Exception as exc:errors.append(str(exc));self.preserve=True
         for unit in reversed(self.units):
             try:
-                values=self.container(['systemctl','show',unit,'-p','LoadState','-p','Environment'],cleanup=True).stdout
+                values=self.container(['systemctl','show',unit,'-p','Id','-p','LoadState','-p','Environment','-p','MainPID','-p','InvocationID','-p','ControlGroup'],cleanup=True).stdout
                 if 'LoadState=not-found' in values:continue
+                initial=dict(line.split('=',1) for line in values.splitlines() if '=' in line)
                 env=next((line.split('=',1)[1] for line in values.splitlines() if line.startswith('Environment=')), '')
                 if not lifecycle.owned(env,self.token):raise lifecycle.SmokeError('control unit ownership unknown')
                 self.container(['systemctl','kill','--kill-whom=all','--signal=KILL',unit],cleanup=True,check=False)
-                self.container(['systemctl','stop',unit],cleanup=True,limit=5)
+                try:
+                    self.container(['systemctl','stop',unit],cleanup=True,limit=5)
+                except subprocess.TimeoutExpired as exc:
+                    self.log('control_stop_timeout',unit=unit,error=str(exc))
+                    end=min(self.deadline,time.monotonic()+5)
+                    while time.monotonic()<end:
+                        state=self.container(['systemctl','show',unit,'-p','Id','-p','LoadState','-p','ActiveState','-p','MainPID','-p','InvocationID','-p','ControlGroup'],cleanup=True,check=False).stdout
+                        fields=dict(line.split('=',1) for line in state.splitlines() if '=' in line)
+                        if fields.get('LoadState')=='not-found' or (fields.get('ActiveState') in ('inactive','failed','dead') and fields.get('MainPID')=='0'):
+                            break
+                        for key in ('Id','InvocationID','ControlGroup'):
+                            if fields.get(key)!=initial.get(key):
+                                raise lifecycle.SmokeError('control unit identity changed during cleanup')
+                        if fields.get('MainPID')!=initial.get('MainPID'):
+                            raise lifecycle.SmokeError('control unit PID changed during cleanup')
+                        lifecycle.remaining(end,2);time.sleep(.2)
+                    else:raise lifecycle.SmokeError('control unit did not exit before cleanup deadline')
             except Exception as exc:errors.append(str(exc));self.preserve=True
         if self.temp_created and not self.preserve:
             self.python("import json,sys,shutil;from pathlib import Path;x=json.load(sys.stdin);p=Path(x['root']);\nif p.exists():\n assert not p.is_symlink() and (p/'owner').read_text()==x['token'];shutil.rmtree(p)\nprint('{}')",

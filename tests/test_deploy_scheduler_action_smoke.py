@@ -310,6 +310,56 @@ def test_cleanup_releases_only_proven_owned_lease_after_absent_daemon():
     run.cleanup_actions()
 
 
+def test_cleanup_stop_timeout_observes_exit_then_releases_once():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+5
+    run.profile={'scheduler_url':'http://fixture'};run.daemon_binding=lambda **_: {'absent':False,'lease_id':'lease-1'};run.log=lambda *a,**k:None
+    calls=[]
+    def container(argv,**kwargs):
+        calls.append(argv)
+        if argv[1]=='stop':raise subprocess.TimeoutExpired(argv,1)
+        return subprocess.CompletedProcess(argv,0,'LoadState=not-found\nActiveState=inactive\nMainPID=0\n','')
+    run.container=container;released=[]
+    def json_at(url,path,body=None,**kwargs):
+        if path=='/v1/state':return {'schema_version':1,'errors':[],'leases':[{'model':'fixture','status':'confirmed','lease_id':'lease-1'}]}
+        released.append(path);return {'status':'released','lease_id':'lease-1'}
+    run.json_at=json_at;run.cleanup_actions()
+    assert len([x for x in calls if x[1]=='stop'])==1 and released==['/v1/place/lease-1/release']
+
+
+def test_cleanup_stop_timeout_without_exit_preserves_ledger_and_does_not_release():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+.2
+    run.profile={'scheduler_url':'http://fixture'};run.daemon_binding=lambda **_: {'absent':False,'lease_id':'lease-1'};run.log=lambda *a,**k:None
+    calls=[]
+    def container(argv,**kwargs):
+        calls.append(argv)
+        if argv[1]=='stop':raise subprocess.TimeoutExpired(argv,1)
+        return subprocess.CompletedProcess(argv,0,'LoadState=loaded\nActiveState=active\nMainPID=42\n','')
+    run.container=container;run.json_at=lambda *a,**k:pytest.fail('must not release uncertain lease')
+    with pytest.raises(life.SmokeError,match='cleanup incomplete'):run.cleanup_actions()
+    assert run.preserve and len([x for x in calls if x[1]=='stop'])==1
+
+
+def test_cleanup_stop_timeout_replacement_identity_preserves_ledger_and_no_repeat_stop():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+5
+    run.profile={'scheduler_url':'http://fixture'};run.log=lambda *a,**k:None
+    first={'unit':run.unit,'pid':42,'start_ticks':'100','invocation_id':'a'*32}
+    replacement={'unit':run.unit,'pid':43,'start_ticks':'200','invocation_id':'b'*32}
+    readings=iter(({'absent':False,'lease_id':'lease-1','identity':first},
+                   {'absent':False,'lease_id':'lease-1','identity':replacement}))
+    run.daemon_binding=lambda **_:next(readings)
+    calls=[]
+    def container(argv,**kwargs):
+        calls.append(argv)
+        if argv[1]=='stop':raise subprocess.TimeoutExpired(argv,1)
+        return subprocess.CompletedProcess(argv,0,'LoadState=loaded\nActiveState=active\nMainPID=42\n','')
+    run.container=container;run.json_at=lambda *a,**k:pytest.fail('replacement must not release')
+    with pytest.raises(life.SmokeError,match='cleanup incomplete'):run.cleanup_actions()
+    assert run.preserve and len([x for x in calls if x[1]=='stop'])==1
+
+
 def test_daemon_binding_runs_through_remote_runtime_entrypoint(tmp_path):
     root=tmp_path/'run';(root/'runtime').mkdir(parents=True);(root/'owner').write_text('token')
     (root/'launch-lease.json').write_text(json.dumps({'lease_id':'lease-1'}))
