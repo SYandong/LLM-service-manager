@@ -133,7 +133,14 @@ LLM_URL=http://scheduler:8011 python3 llm wake --wait 1200 -- '-model'
 
 响应等待独立于普通 `--timeout` / `LLM_TIMEOUT`：free 默认 `--wait 150` 秒，wake 默认 `--wait 930` 秒，为服务器默认 120/900 秒动作期限各留 30 秒返回余量。`--wait` 是客户端 HTTP 等待时间，不修改服务器期限；部署方延长期限时需相应调整。显式缩短等待、断线或退出客户端不能撤销已受理的操作。未知结果会提示先检查 `status` 与事件；客户端不自动重试，刷新失败也不重放写入。
 
-当前只消费 scheduler 事件，冷启动原始 llama-swap 日志转发与真实 sleeping-wake <3 秒、显存释放实测仍需 ops/integration 验收。命令发布不代表生产动作获准。
+唤醒 stopped 模型时，客户端仍只消费同一个 scheduler `/v1/events` 订阅；服务端可把该模型的
+llama-swap `ProcessLogger` 中少量固定启动阶段转成 `wake_progress`。这些阶段是带
+`source=llama-swap` 的不可信观察（可能丢失、断线或因 `no-history` 竞态而不可用），不会显示原始日志、
+URL、PID、错误文本、百分比或 ETA，也不代表 ready、daemon 已停止或资源已释放。重连/过期事件会显示
+`progress unavailable`；本地 epoch/sequence/cursor 只用于抑制重放和过期阶段，不证明源连续或请求因果。最终
+ready/partial/failed/timeout 仍只取原始 wake 回执。`--json` 保持只在 stdout
+输出机器可读回执，进度提示不写入 stdout。真实 sleeping-wake <3 秒与显存释放实测仍需 ops/integration
+验收；命令发布不代表生产动作获准。
 
 ## Reserve
 
@@ -321,3 +328,4 @@ Free/wake 验证使用实际 core HTTP、临时 SQLite 和显式模拟的模型�
 Reserve 测试直接请求当前 SchedulerHTTPServer 的预览/默认只读 405 路径，并以临时 SQLite 字节、状态、事件和采集次数及写入陷阱验证零副作用。实际挂载的 POST/DELETE 通过 core 的临时 HTTP/SQLite 与模拟受管 unit 夹具验证：complete/blocked/partial、伪造标签后的权威 owner、保存 ID、不完整 evacuation 后保留意图、幂等删除、响应前删除/到期及真实保存后丢失回复不重试。TUI 也使用此实际 API 刷新预约；额外的响应夹具仅保留为无效响应/格式化单测，不代替实际链路。预览保留纯策略计划；它不是执行保证。实际执行时，未登记租约的 sleeping 模型会以 `unleased_model` 阻塞；即使此前预览成功，也不能跳过实际回执的 evacuation 状态。单文件 `-I -S`、非法参数、丢失响应无重试、线程屏障和退出回调也纳入检查。
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+<!-- Generated-By: Codex / gpt-5.6-luna -->

@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-5.6-luna
 """Dirty rendering preserves model identity, cursor and event delivery semantics."""
 import asyncio
 import copy
@@ -130,5 +131,29 @@ def test_progress_ignores_stale_other_model_and_dataplane_stages(snapshot):
             app.observe_progress(item)
             assert app._progress["stage"] == "observed: state starting, swap unknown"
             assert app._progress is not None  # An event never completes the local HTTP operation.
+            app._progress = None
+    asyncio.run(scenario())
+
+
+def test_cold_wake_progress_uses_sanitized_model_log_stage_only(snapshot):
+    async def scenario():
+        app, _ = make_app(snapshot)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            app._progress = {"command": "wake", "target": "cold-model", "started": 0,
+                             "stage": "awaiting scheduler response", "estimate": None,
+                             "after_id": 10, "since": 100}
+            valid = {"id": 11, "timestamp": 101, "kind": "wake_progress", "model": "cold-model",
+                     "detail": {"stage": "health_wait", "source": "llama-swap",
+                                "source_model": "cold-model", "progress_source": "per_model_log",
+                                "log_epoch": "epoch", "sequence": 1, "received_at": 101,
+                                "trusted_for_quiet": False}}
+            app.observe_progress(valid)
+            assert app._progress["stage"] == "observed: waiting for health (source: llama-swap; advisory)"
+            stale_epoch = {**valid, "detail": {**valid["detail"], "log_epoch": "old", "sequence": 9}}
+            app.observe_progress(stale_epoch)
+            assert "source epoch replayed or changed" in app._progress["stage"]
+            app.observe_progress({**valid, "detail": {**valid["detail"], "source_model": "other"}})
+            assert "source epoch replayed or changed" in app._progress["stage"]
             app._progress = None
     asyncio.run(scenario())

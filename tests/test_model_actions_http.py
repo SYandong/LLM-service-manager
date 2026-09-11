@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-5.6-luna
 """Actual loopback transport/reentry tests; placement and GPU effects are fixtures."""
 
 import http.client
@@ -60,6 +61,11 @@ def system(tmp_path):
             pass
         def do_GET(self):
             state["http_calls"].append(("GET", self.path))
+            if self.path.startswith("/logs/stream/"):
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             assert self.path == "/upstream/model/"
             if state["mode"] == "reenter":
                 status, response = request(core.server_address, "POST", "/v1/place", {"model": "model"})
@@ -113,10 +119,98 @@ def test_wake_reenters_real_loopback_place_without_holding_global_lock(system):
     assert status == 200 and result["status"] == "ready" and result["ready"] is True
     assert result["cold_start"] is True
     assert state["reentries"] == 1  # The fixture /v1/place handler acquired the SAME lock.
-    assert state["http_calls"] == [("GET", "/upstream/model/")]
+    assert state["http_calls"].count(("GET", "/upstream/model/")) == 1
     assert not scheduler.model_actions.pending
     assert not state["stop_calls"]
     # This proves reentry/unblocking, not a production lease/placement protocol.
+
+
+def test_stopped_wake_progress_reader_is_advisory_and_closed_before_result(system):
+    scheduler, address, transport, state = system
+    seen = []
+
+    class FixtureReader:
+        def __init__(self, **kwargs):
+            seen.append(("init", kwargs["model"], kwargs["base_url"], kwargs["deadline"]))
+            self.emit = kwargs["emit"]
+            self.closed = False
+
+        def start(self):
+            seen.append(("lock_owned", scheduler.action_lock._is_owned()))
+            self.emit({"stage": "process_started", "source": "llama-swap",
+                       "source_model": "model", "progress_source": "per_model_log",
+                       "log_epoch": "fixture", "sequence": 1, "received_at": 1.0,
+                       "trusted_for_quiet": False})
+            seen.append("started")
+
+        def close(self, timeout=2.0):
+            self.closed = True
+            seen.append(("closed", timeout))
+            return True
+
+    scheduler.model_actions.progress_reader_factory = FixtureReader
+    status, result = request(address, "POST", "/v1/wake/model")
+    assert status == 200 and result["ready"] is True
+    assert seen[0][0] == "init" and ("lock_owned", False) in seen and "started" in seen and seen[-1][0] == "closed"
+    progress = [item for item in scheduler.events_since(0) if item.kind == "wake_progress"]
+    assert len(progress) == 1
+    assert progress[0].detail["source_model"] == "model"
+    assert state["http_calls"] == [("GET", "/upstream/model/")]
+    assert transport.swap_url.startswith("http://127.0.0.1:")
+
+
+def test_reserved_model_cold_wake_keeps_original_transport_without_log_stream(tmp_path):
+    state = {"model": ModelState("proxy", state="stopped", unit="vllm-proxy.service",
+                                  unit_active=False, health_ok=None, is_sleeping=None,
+                                  swap_state="stopped", weights_gb=40, budget_gb=80,
+                                  resident_gb=None), "calls": []}
+
+    def collect():
+        return StateSnapshot(sampled_at=time.time(),
+            gpus=(GPUState(0, total_gb=200, free_gb=150, external_gb=0),),
+            models=(state["model"],), memory=MemoryState(500, 40),
+            activity=(Activity("proxy", time.time() - 1000, 0, 0, 0),))
+
+    scheduler = Scheduler(SchedulerConfig("127.0.0.1", 8011, read_only=False,
+        model_actions_enabled=True, state_db_path=str(tmp_path / "state.sqlite"),
+        wake_timeout_seconds=1, action_poll_seconds=0.005), collect)
+    core = SchedulerHTTPServer(("127.0.0.1", 0), scheduler)
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            state["calls"].append(self.path)
+            assert self.path == "/upstream/proxy/"
+            state["model"] = replace(state["model"], state="awake", unit_active=True,
+                                      health_ok=True, is_sleeping=False, swap_state="ready",
+                                      gpu=0, resident_gb=80)
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    transport = ManagedModelTransport(
+        swap_url="http://127.0.0.1:" + str(upstream.server_port),
+        models={"proxy": {"unit": "vllm-proxy.service"}}, systemctl="configured-systemctl")
+    scheduler.model_actions = ModelActionController(scheduler, transport)
+    scheduler.sample_once()
+    threads = [threading.Thread(target=lambda: core.serve_forever(poll_interval=0.01)),
+               threading.Thread(target=lambda: upstream.serve_forever(poll_interval=0.01))]
+    for thread in threads:
+        thread.start()
+    try:
+        status, result = request(core.server_address, "POST", "/v1/wake/proxy")
+        assert status == 200 and result["ready"] is True
+        assert state["calls"] == ["/upstream/proxy/"]
+        assert not any(path.startswith("/logs/stream/") for path in state["calls"])
+    finally:
+        scheduler.stop()
+        core.shutdown(); upstream.shutdown()
+        core.server_close(); upstream.server_close()
+        for thread in threads:
+            thread.join(2)
 
 
 def test_wake_wait_releases_lock_and_observes_later_readiness(system):

@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-5.6-luna
 """Scheduler dashboard; command semantics come from the standalone CLI."""
 
 import argparse
@@ -137,7 +138,7 @@ class SchedulerApp(App):
         self.terminal_width = 100
         self.event_reader = event_reader if event_reader is not None else api.EventReader(client)
         self.event_history = []
-        self.event_presentation = EventPresentation(api.clean_text)
+        self.event_presentation = EventPresentation(api.clean_text, api.format_wake_progress)
         self.event_generation = 0
         self.event_delivery = {}
         self._ui_timers = []
@@ -330,7 +331,8 @@ class SchedulerApp(App):
         self._progress = {"command": args.command, "target": target, "started": time.monotonic(),
                           "stage": "waiting for observed release" if args.command == "free" else "awaiting scheduler response",
                           "estimate": estimate, "after_id": max((e["id"] for e in self.event_history), default=0),
-                          "since": time.time()}
+                          "since": time.time(), "log_epoch": None, "progress_sequence": 0,
+                          "retired_epochs": set()}
         self.render_progress()
         self._progress_timer.resume()
         try:
@@ -677,6 +679,10 @@ class SchedulerApp(App):
             self.event_generation = update["generation"]
             self.event_history.clear()
             self.event_presentation.reset()
+            if self._progress is not None:
+                self._progress["log_epoch"] = None
+                self._progress["progress_sequence"] = 0
+                self._progress["retired_epochs"] = set()
         status = update["status"]
         if update.get("missed"):
             status += " · %s events unavailable in server history" % update["missed"]
@@ -724,7 +730,7 @@ class SchedulerApp(App):
         return header + "\n" + "\n".join(self.format_event(item).plain for item in self.event_history) + "\n\nRaw JSON:\n" + json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False)
 
     def event_summary_text(self):
-        projection = EventPresentation(self.api.clean_text)
+        projection = EventPresentation(self.api.clean_text, self.api.format_wake_progress)
         lines = ["Events summary · retained history (up to 200 records)",
                  "Data-plane observations are not daemon state or proof of released resources."]
         for item in self.event_history:
@@ -754,7 +760,22 @@ class SchedulerApp(App):
         elif item["kind"] == "lease_confirmed":
             stage = "unit/account confirmed; awaiting readiness"
         elif item["kind"] == "wake_progress":
-            stage = "state %s, swap %s" % (detail.get("state") or "unknown", detail.get("swap_state") or "unknown")
+            observed = self.api.parse_wake_progress(
+                item, progress["target"], after_id=progress.get("after_id", 0),
+                since=progress.get("since"))
+            if observed is not None:
+                tracker = {"log_epoch": progress.get("log_epoch"),
+                           "sequence": progress.get("progress_sequence", 0),
+                           "retired_epochs": progress.setdefault("retired_epochs", set())}
+                if not self.api.accept_wake_progress(observed, tracker):
+                    progress["stage"] = "observed: progress unavailable (source epoch replayed or changed)"
+                    return
+                progress["log_epoch"] = tracker["log_epoch"]
+                progress["progress_sequence"] = tracker["sequence"]
+                stage = "%s (source: llama-swap; advisory)" % observed["label"]
+            elif "state" in detail or "swap_state" in detail:
+                # Preserve the existing scheduler-state progress envelope.
+                stage = "state %s, swap %s" % (detail.get("state") or "unknown", detail.get("swap_state") or "unknown")
         if stage is not None:
             # Existing events have no request ID. Label this as a fresh target
             # observation; only the HTTP result can complete our own operation.
@@ -793,6 +814,10 @@ class SchedulerApp(App):
         except (ValueError, OverflowError, OSError):
             timestamp = "?"
         payload = json.dumps(detail, ensure_ascii=False, sort_keys=True)
+        if kind == "wake_progress" and isinstance(detail, dict) and detail.get("progress_source") == "per_model_log":
+            observed = self.api.format_wake_progress(detail)
+            note = "observed %s; advisory only" % observed
+            payload = "{}"
         line = "%s [%s] #%s %s %s %s %s" % (
             timestamp, "llama-swap" if relayed else "scheduler", item["id"],
             kind, item.get("model") or "", note, payload)
