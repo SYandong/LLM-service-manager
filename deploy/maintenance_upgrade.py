@@ -53,7 +53,7 @@ class MaintenanceUpgrade(Upgrade):
         if expected is not None and record["commit"] != expected:
             raise Error("staged candidate commit differs")
         python = self.candidate_root / "venv/bin/python"
-        if python.is_symlink() or not python.is_file():
+        if not python.is_file() or not python.resolve().is_file() or not os.access(python.resolve(), os.X_OK):
             raise Error("staged candidate interpreter is unavailable")
         return record, python
 

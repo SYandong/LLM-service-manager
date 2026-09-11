@@ -56,7 +56,7 @@ def make_bundle(path, version="0.1.0a14"):
 
 def make_candidate(root, db):
     staged=root/"staged"; (staged/"venv/bin").mkdir(parents=True)
-    shutil.copy2(sys.executable, staged/"venv/bin/python")
+    (staged/"venv/bin/python").symlink_to(sys.executable)
     shutil.copytree(ROOT/"llmsvc", staged/"llmsvc")
     (staged/"release.json").write_text(json.dumps({"version":"0.1.0a14","commit":"a"*40}))
     config=root/"scheduler.yaml"; config.write_text("listen_host: 127.0.0.1\nlisten_port: 8011\nread_only: false\nstate_db_path: %s\n" % db)
