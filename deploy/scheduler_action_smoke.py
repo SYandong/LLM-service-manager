@@ -61,6 +61,9 @@ def validate(config):
     root=Path(config['source'])
     for name in ('cli/llm','deploy/vllm-launch','deploy/maintenance_native.py','deploy/maintenance_executor.py'):
         if not (root/name).is_file():raise lifecycle.SmokeError('reviewed source missing '+name)
+    route=config.get('cold_route','native_chat')
+    if route not in ('native_chat','scheduler_wake'):
+        raise lifecycle.SmokeError('cold_route must be native_chat or scheduler_wake')
 
 
 def _parse_environment(raw):
@@ -412,6 +415,138 @@ def stop_wrapper(profile, pid):
     return 0
 
 
+def scheduler_wake_request(api, profile, deadline, *, identity_reader=unit_identity):
+    """Own one scheduler wake POST while a separate reader observes SSE only."""
+    reader=None;request=None;active_error=None
+    evidence={'operation':'cold','local_request_id':profile.get('request_id'),'model':profile['model'],
+              'response':None,'progress':[],'progress_truncated':False,'progress_before_response':False,
+              'progress_attribution_unavailable':False,'identity_checks':{},
+              'started_monotonic':None,'started_wall':None,'post_started_monotonic':None,
+              'post_started_wall':None,'post_returned_monotonic':None}
+    outcome={};started=time.monotonic();started_wall=time.time()
+    evidence['started_monotonic']=started;evidence['started_wall']=started_wall
+    generation=None;after_id=0;baseline_ready=False;baseline_sampled_at=None
+    progress_state={'log_epoch':None,'sequence':0,'retired_epochs':set()}
+    progress_observed=[];progress_bytes=0;max_progress_entries=64;max_progress_bytes=32768
+    def invoke():
+        try:
+            remaining=deadline-time.monotonic()
+            if remaining<=0:
+                outcome['error']=lifecycle.SmokeError('test deadline expired')
+                return
+            evidence['post_started_monotonic']=time.monotonic();evidence['post_started_wall']=time.time()
+            outcome['response']=request_client.request('POST','/v1/wake/'+quote(profile['model'],safe=''),{},timeout=remaining)
+        except Exception as exc:outcome['error']=exc
+        finally:outcome['returned_monotonic']=time.monotonic()
+    def collect(update,observed_at,*,allow_progress):
+        nonlocal generation,after_id,baseline_ready,baseline_sampled_at,progress_state,progress_bytes
+        incoming_generation=update.get('generation')
+        if generation is None:generation=incoming_generation
+        elif incoming_generation!=generation:
+            generation=incoming_generation;progress_state={'log_epoch':None,'sequence':0,'retired_epochs':set()}
+            evidence['progress_attribution_unavailable']=True;baseline_ready=False;allow_progress=False
+        for item in update.get('events',[]):
+            detail=item.get('detail') if isinstance(item,dict) else None
+            sample=detail.get('sampled_at') if isinstance(detail,dict) else None
+            if not baseline_ready:
+                if (item.get('kind')=='state' and type(sample) in (int,float) and math.isfinite(sample)
+                        and sample>baseline_sampled_at and type(item.get('timestamp')) in (int,float)
+                        and item['timestamp']>=evidence['post_started_wall']):
+                    baseline_sampled_at=sample;baseline_ready=True;after_id=item['id']
+                    progress_state={'log_epoch':None,'sequence':0,'retired_epochs':set()};evidence['baseline_event_id']=item['id'];evidence['baseline_generation']=generation;allow_progress=False
+                else:allow_progress=False
+                continue
+            if not allow_progress or evidence['post_started_wall'] is None or not isinstance(item,dict):
+                continue
+            progress=api['parse_wake_progress'](item,profile['model'],after_id=after_id,since=evidence['post_started_wall'])
+            if progress is not None and api['accept_wake_progress'](progress,progress_state):
+                safe={**progress,'event_id':item['id'],'source_event_timestamp':item['timestamp'],
+                      'model':item['model'],'local_observed_monotonic':observed_at}
+                size=len(json.dumps(safe,separators=(',',':')))
+                if len(evidence['progress'])<max_progress_entries and progress_bytes+size<=max_progress_bytes:
+                    evidence['progress'].append(safe);progress_observed.append(observed_at);progress_bytes+=size
+                else:evidence['progress_truncated']=True
+                after_id=max(after_id,item['id'])
+    def baseline_state_event(update,observed_at):
+        nonlocal generation,after_id,progress_state
+        if generation is None:generation=update.get('generation')
+        for item in update.get('events',[]):
+            detail=item.get('detail') if isinstance(item,dict) else None
+            sample=detail.get('sampled_at') if isinstance(detail,dict) else None
+            if (item.get('kind')=='state' and type(sample) in (int,float) and math.isfinite(sample)
+                    and sample>baseline_sampled_at and type(item.get('timestamp')) in (int,float)
+                    and item['timestamp']>=started_wall):
+                generation=update.get('generation');after_id=item['id'];progress_state={'log_epoch':None,'sequence':0,'retired_epochs':set()}
+                evidence['baseline_event_id']=item['id'];evidence['baseline_generation']=generation;evidence['baseline_sampled_at']=sample
+                return True
+        return False
+    try:
+        request_timeout=deadline-time.monotonic()
+        if request_timeout<=0:raise EvidenceError('scheduler wake deadline',evidence=evidence)
+        request_client=api['SchedulerClient'](profile['scheduler_url'],timeout=request_timeout)
+        event_client=api['SchedulerClient'](profile['scheduler_url'],timeout=1)
+        reader=api['EventReader'](event_client,stream_timeout=.5,retry_delay=.1,max_retry_delay=1,queue_size=64)
+        reader.start();baseline=request_client.request('GET','/v1/state',timeout=lifecycle.remaining(deadline,2))
+        baseline_sampled_at=baseline.get('sampled_at') if isinstance(baseline,dict) else None
+        if (type(baseline_sampled_at) not in (int,float) or not math.isfinite(baseline_sampled_at)
+                or baseline.get('errors')):raise EvidenceError('scheduler state baseline unavailable',evidence=evidence)
+        baseline_deadline=min(deadline,time.monotonic()+2);baseline_ready=False
+        while not baseline_ready and time.monotonic()<baseline_deadline:
+            baseline_ready=baseline_state_event(reader.drain(),time.monotonic())
+            if not baseline_ready:time.sleep(.01)
+        if not baseline_ready:raise EvidenceError('scheduler state baseline unavailable',evidence=evidence)
+        if deadline-time.monotonic()<=0:raise EvidenceError('scheduler wake deadline',evidence=evidence)
+        request=threading.Thread(target=invoke,name='ops-cold-scheduler-wake',daemon=True);request.start()
+        while request.is_alive():
+            collect(reader.drain(),time.monotonic(),allow_progress=True)
+            if time.monotonic()>=deadline:break
+            time.sleep(.01)
+        request.join(timeout=max(0,deadline-time.monotonic()));collect(reader.drain(),time.monotonic(),allow_progress=True)
+        if request.is_alive():raise EvidenceError('scheduler wake deadline',evidence=evidence)
+        evidence['post_returned_monotonic']=outcome.get('returned_monotonic')
+        returned=evidence['post_returned_monotonic'];evidence['progress_before_response']=bool(returned is not None and any(value<=returned for value in progress_observed))
+        if 'error' in outcome:
+            error=outcome['error'];details={**evidence,'error':type(error).__name__+': '+str(error)};status=getattr(error,'status',None);payload=getattr(error,'payload',None)
+            if isinstance(error,lifecycle.SmokeError):
+                error.evidence=evidence
+                raise error
+            if status is not None:details.update(http_status=status,response_received=True,request_error_kind='http')
+            if payload is not None:details.update(response=payload,response_parsed=True,response_payload_available=True)
+            raise EvidenceError('scheduler wake request failed',evidence=details)
+        response=outcome.get('response');evidence['response']=response
+        if (not isinstance(response,dict) or response.get('status')!='ready' or response.get('ready') is not True
+                or response.get('model')!=profile['model'] or response.get('cold_start') is not True
+                or type(response.get('elapsed_seconds')) not in (int,float) or not math.isfinite(response['elapsed_seconds'])
+                or response['elapsed_seconds']<0):raise EvidenceError('scheduler wake did not reach ready',evidence=evidence)
+        state=request_client.request('GET','/v1/state',timeout=lifecycle.remaining(deadline,2));model,lease=account(state,profile,state='awake');evidence['identity_checks']['account']=True
+        evidence['identity_checks']['unit']=identity_reader(profile['unit'],profile['token'],lease=lease['lease_id'],model=profile['model'],deadline=deadline)
+        return {**evidence,'lease':lease,'unit_identity':evidence['identity_checks']['unit'],'seconds':time.monotonic()-started}
+    except EvidenceError as exc:
+        active_error=exc
+        if exc.evidence is None:exc.evidence=evidence
+        raise
+    except Exception as exc:
+        active_error=exc
+        try:
+            if getattr(exc,'evidence',None) is None:exc.evidence=evidence
+        except Exception:pass
+        raise
+    finally:
+        cleanup_timeout=max(.1,min(2,max(.1,deadline-time.monotonic())));cleanup_error=None
+        if reader is not None:
+            try:
+                if not reader.close(timeout=cleanup_timeout):cleanup_error='event reader did not stop'
+            except Exception as exc:cleanup_error=type(exc).__name__+': '+str(exc)
+        if request is not None and request.is_alive():
+            request.join(timeout=cleanup_timeout)
+            if request.is_alive():cleanup_error='wake request worker did not stop'
+        if cleanup_error:
+            if active_error is not None:
+                try:active_error.evidence=(getattr(active_error,'evidence',None) or evidence);active_error.evidence['observer_cleanup_error']=cleanup_error
+                except Exception:pass
+            else:raise EvidenceError('scheduler wake observer cleanup incomplete',evidence={**evidence,'observer_cleanup_error':cleanup_error})
+
+
 def helper_main(argv):
     parser=argparse.ArgumentParser();parser.add_argument('mode',choices=('request','launch','stop'));parser.add_argument('profile')
     parser.add_argument('rest',nargs=argparse.REMAINDER);args=parser.parse_args(argv)
@@ -430,7 +565,11 @@ def helper_main(argv):
         for key,expected in profile['control_instances'].items():
             if unit_identity(key,profile['token'],deadline=deadline)!=expected:raise EvidenceError('control instance changed')
         api=runpy.run_path(profile['cli'])
-        if request['operation']=='cold':
+        if request['operation']=='cold' and profile.get('cold_route','native_chat')=='scheduler_wake':
+            profile['request_id']=request['id']
+            value=scheduler_wake_request(api,profile,deadline,identity_reader=unit_identity)
+            result.update(status='passed',evidence=value,lease=value['lease'],seconds=value['seconds'],cold_start=True)
+        elif request['operation']=='cold':
             from urllib.request import Request,build_opener,ProxyHandler
             from urllib.error import HTTPError
             started=time.monotonic()
@@ -499,12 +638,13 @@ def artifacts(run, ports, weights_bytes):
               'systemd_run':{'environment_file':root+'/daemon.env','collect':True,'properties':{
                   'Restart':'no','RuntimeMaxSec':max(1,int(run.work_deadline-time.monotonic())),
                   'TimeoutStopSec':15}}}
+    cold_route=c.get('cold_route','native_chat');cold_budget=c.get('startup_seconds',150)
     scheduler={'listen_host':'127.0.0.1','listen_port':scheduler_port,'read_only':False,
                'state_db_path':root+'/ledger.sqlite','placement_enabled':True,'model_actions_enabled':True,
                'automation_enabled':False,'fault_recovery_enabled':False,'catalog_enabled':False,
                'sample_interval_seconds':.25,'event_history_size':4096,'event_heartbeat_seconds':.25,
                'max_snapshot_age_seconds':5,'placement_wait_seconds':20,'lease_timeout_seconds':240,
-               'free_timeout_seconds':20,'wake_timeout_seconds':20,'action_observe_seconds':8,'action_poll_seconds':.1,
+               'free_timeout_seconds':20,'wake_timeout_seconds':cold_budget if cold_route=='scheduler_wake' else 20,'action_observe_seconds':8,'action_poll_seconds':.1,
                'collectors':{'swap_url':native_url,'activity_path':root+'/activity.sqlite',
                    'host_meminfo_path':c['host_meminfo_path'],'nvidia_smi':root+'/nvidia-smi',
                    'systemctl':root+'/systemctl-read',
@@ -540,6 +680,7 @@ print(r.stdout,end="")
     profile={'root':root,'token':run.token,'model':run.model,'unit':run.unit,'gpu':c['gpu'],
              'scheduler_url':scheduler_url,'native_url':native_url,'cli':runtime+'/cli/llm',
              'launcher':runtime+'/deploy/vllm-launch','control_instances':{},'work_deadline':run.work_deadline,
+             'cold_route':cold_route,'cold_budget_seconds':cold_budget,
              'source_unit':run.source_unit,'wrapper_argv':wrapper,'wrapper_binary':c['wrapper_binary'],
              'wrapper_sha256':c['wrapper_sha256'],'backend_url':backend_url}
     files={root+'/native.json':json.dumps(native),root+'/scheduler.json':json.dumps(scheduler),
@@ -794,6 +935,17 @@ print('{}')
                 self._record_phase_result(name,value)
                 self.log('scheduler_action_phase',phase=name,receipt=value)
                 if value.get('status')!='passed':raise lifecycle.SmokeError('action phase failed: '+str(value.get('error')))
+                if name=='wake' and self.config.get('cold_route','native_chat')=='scheduler_wake':
+                    warm_seconds=(value.get('evidence') or {}).get('http_seconds')
+                    if (type(warm_seconds) not in (int,float) or not math.isfinite(warm_seconds)
+                            or warm_seconds<0):
+                        self.phase_measurements[name]={'quality':'unmeasured','measured':False}
+                        self.measured_phases.discard(name)
+                        raise lifecycle.SmokeError('warm wake latency unavailable')
+                    if warm_seconds>3:
+                        self.phase_measurements[name]={'quality':'measured_over_target','measured':True}
+                        self.measured_phases.add(name)
+                        raise lifecycle.SmokeError('warm wake exceeded three-second target')
                 if name=='cold':self.lease=value['lease']
                 return value
             state=self.container(['systemctl','is-active',unit],check=False).stdout.strip()

@@ -1,5 +1,5 @@
 {
-  "_comment": "Generated-By: Codex / gpt-6-astra. Isolated GPU validation only after current approval, fresh shared-lock guards and reviewed harness; no production driver.",
+  "_comment": "Generated-By: Codex / gpt-6-astra; Generated-By: Codex / gpt-5.6-luna. Isolated GPU validation only after current approval, fresh shared-lock guards and reviewed harness; no production driver.",
   "mode": "scheduler-actions",
   "container": "llmsvc",
   "lock_path": "/path/to/shared/gpu-test.lock",
@@ -19,6 +19,7 @@
   "gpu": 0,
   "wall_seconds": 300,
   "startup_seconds": 150,
+  "cold_route": "native_chat",
   "cold_start_cost_seconds": 120,
   "util": 0.2,
   "flashinfer_sampler": false
