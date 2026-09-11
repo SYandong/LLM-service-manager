@@ -215,6 +215,55 @@ def test_direct_initial_wait_resamples_after_transient_published_failure(tmp_pat
         store.close()
 
 
+def test_bootstrap_stop_during_initial_wait_keeps_claim_and_effects_empty(tmp_path):
+    scheduler, store, collector, probes, controller, calls = bootstrap_fixture(tmp_path)
+    worker = threading.Thread(target=lambda: scheduler.start(sampling_only=True))
+    worker.start()
+    attempt = None
+    stopper = None
+    try:
+        assert probes.entered.wait(2)
+        waiter_entered = threading.Event()
+        original_wait = scheduler.await_initial_sample
+
+        def wait_with_receipt(deadline):
+            waiter_entered.set()
+            return original_wait(deadline)
+
+        scheduler.await_initial_sample = wait_with_receipt
+        result = {}
+
+        def run_bootstrap():
+            try:
+                controller.run()
+            except BootstrapError as exc:
+                result["error"] = str(exc)
+
+        attempt = threading.Thread(target=run_bootstrap)
+        attempt.start()
+        assert waiter_entered.wait(2)
+        stopper = threading.Thread(target=scheduler.stop)
+        stopper.start()
+        assert scheduler.stopping.wait(2)
+        probes.release.set()
+        attempt.join(3)
+        stopper.join(3)
+        assert not attempt.is_alive() and not stopper.is_alive()
+        assert result["error"] == "bootstrap is disabled or stopping"
+        assert store.bootstrap_checkpoint() is None and calls == []
+    finally:
+        probes.release.set()
+        if attempt is not None:
+            attempt.join(3)
+        if stopper is not None:
+            stopper.join(3)
+        if not scheduler.stopping.is_set():
+            scheduler.stop()
+        worker.join(3)
+        assert not worker.is_alive()
+        store.close()
+
+
 @pytest.mark.parametrize("reason", ["expired", "stopping"])
 def test_initial_wait_does_not_start_new_io_after_expiry_or_shutdown(tmp_path, reason):
     scheduler, store, collector, probes, controller, calls = bootstrap_fixture(tmp_path)
