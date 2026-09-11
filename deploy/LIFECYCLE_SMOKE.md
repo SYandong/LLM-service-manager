@@ -132,6 +132,13 @@ gaps, disconnects, resets, partial/refused operations and unknown measurements
 fail validation. Event receipt can precede HTTP return; its signed offset is kept.
 These measurements do not certify continuous quiet or old-server settlement.
 
+If an action returns a partial measured response or no response at all, the
+helper preserves the raw response (when present), local request/model context,
+client timing/deadline, and completed identity checks in the private phase
+receipt. A transport error remains a failed nonzero result; missing evidence
+stays unknown, and the receipt does not invent native acknowledgement,
+settlement, or cleanup confirmation.
+
 All helper requests run in bounded token-tagged units so the host runner can keep
 checking GPU/serving conditions during long requests. The total remains at most
 300 seconds with45 seconds reserved for cleanup. Runtime caps and stop limits are

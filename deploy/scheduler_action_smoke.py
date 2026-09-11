@@ -27,7 +27,9 @@ from deploy import lifecycle_smoke as lifecycle
 
 
 class EvidenceError(RuntimeError):
-    pass
+    def __init__(self, message, *, evidence=None):
+        super().__init__(message)
+        self.evidence = evidence
 
 
 def validate(config):
@@ -230,14 +232,34 @@ def action_probe(api, profile, operation, request_id, *, deadline, identity_read
         with lock:cursor=max((item['id'] for item,_ in events),default=0)
         path='/v1/free' if operation=='free' else '/v1/wake/'+quote(profile['model'],safe='')
         payload={'gpu':profile['gpu'],'ram':False,'need_gb':1} if operation=='free' else {}
-        started=time.monotonic();response=client.request('POST',path,payload);http_done=time.monotonic()
+        started=time.monotonic()
+        try:
+            response=client.request('POST',path,payload)
+            http_done=time.monotonic()
+        except Exception as exc:
+            raise EvidenceError('action request transport error', evidence={
+                'operation':operation,'local_request_id':request_id,'model':profile['model'],
+                'response':None,'client_started_monotonic':started,
+                'client_returned_monotonic':time.monotonic(),'deadline':deadline,
+                'identity_checks':{'sse_connected':True,'before_account':True,
+                                   'before_unit':unit_before,'cursor_before':cursor,
+                                   'result_event':None,'after_account':None,'after_unit':None},
+                'transport_error_type':type(exc).__name__}) from exc
+        evidence={
+            'operation':operation,'local_request_id':request_id,'model':profile['model'],
+            'response':response,'client_started_monotonic':started,
+            'client_returned_monotonic':http_done,'deadline':deadline,
+            'identity_checks':{'sse_connected':True,'before_account':True,
+                               'before_unit':unit_before,'cursor_before':cursor,
+                               'result_event':None,'after_account':None,'after_unit':None},
+        }
         if operation=='free':
             if (response.get('status')!='complete' or response.get('measurement_complete') is not True
                     or response.get('slept')!=[profile['model']] or response.get('stopped')):
-                raise EvidenceError('free refused, partial or unmeasured')
+                raise EvidenceError('free refused, partial or unmeasured', evidence=evidence)
             value=response.get('freed_gb')
             if type(value) not in (int,float) or not math.isfinite(value) or value<=0:
-                raise EvidenceError('free has no positive measured release')
+                raise EvidenceError('free has no positive measured release', evidence=evidence)
         elif response.get('status')!='ready' or response.get('ready') is not True or response.get('model')!=profile['model']:
             raise EvidenceError('wake did not reach ready')
         kind=operation+'_result'
@@ -375,6 +397,10 @@ def helper_main(argv):
             result.update(status='passed',evidence=value)
         for key,expected in profile['control_instances'].items():
             if unit_identity(key,profile['token'],deadline=deadline)!=expected:raise EvidenceError('control instance changed')
+    except EvidenceError as exc:
+        result.update(status='failed',error=type(exc).__name__+': '+str(exc))
+        if exc.evidence is not None:
+            result['evidence']=exc.evidence
     except Exception as exc:result.update(status='failed',error=type(exc).__name__+': '+str(exc))
     temporary=output.with_name('.result-'+uuid.uuid4().hex)
     with temporary.open('x') as stream:

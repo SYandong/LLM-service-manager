@@ -601,6 +601,100 @@ def test_http200_unknown_release_preserves_ledger():
     assert run.preserve
 
 
+class _EvidenceReader:
+    def __init__(self, *args, **kwargs):
+        self.callback = None
+
+    def set_notify(self, callback):
+        self.callback = callback
+
+    def start(self):
+        if self.callback:
+            self.callback()
+
+    def drain(self):
+        return {'status': 'SSE connected', 'generation': 0, 'dropped': 0,
+                'missed': 0, 'cursor': 0, 'events': []}
+
+    def close(self):
+        return True
+
+
+def _action_evidence_fixture(response):
+    state = {'read_only': False, 'sampled_at': time.time(), 'errors': [],
+             'models': [{'name': 'fixture', 'gpu': 0, 'unit': 'vllm-fixture.service',
+                         'state': 'awake', 'resident_gb': 80}],
+             'leases': [{'model': 'fixture', 'gpu': 0, 'unit': 'vllm-fixture.service',
+                         'lease_id': 'lease-1', 'status': 'confirmed', 'budget_gb': 80}]}
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def request(self, method, path, payload=None):
+            if method == 'GET':
+                return state
+            if isinstance(response, BaseException):
+                raise response
+            return response
+    api = {'SchedulerClient': Client, 'EventReader': _EvidenceReader}
+    profile = {'scheduler_url': 'http://fixture', 'model': 'fixture', 'gpu': 0,
+               'unit': 'vllm-fixture.service', 'token': 'token',
+               'backend_url': 'http://127.0.0.1:8101'}
+    return api, profile
+
+
+@pytest.mark.parametrize('response,expected_response', [
+    ({'status': 'partial', 'measurement_complete': True, 'freed_gb': 27.6,
+      'slept': ['fixture'], 'stopped': [], 'error': 'transport_error'}, True),
+    (TimeoutError('no response'), False),
+])
+def test_action_probe_failure_evidence_preserves_response_or_unknown(response, expected_response):
+    api, profile = _action_evidence_fixture(response)
+    with pytest.raises(smoke.EvidenceError) as exc:
+        smoke.action_probe(api, profile, 'free', 'local-request',
+                           deadline=time.monotonic() + 2,
+                           identity_reader=lambda *args, **kwargs: {
+                               'unit': 'vllm-fixture.service', 'pid': 1,
+                               'start_ticks': '2', 'invocation_id': 'a' * 32})
+    evidence = exc.value.evidence
+    assert evidence['local_request_id'] == 'local-request'
+    assert evidence['model'] == 'fixture'
+    assert evidence['identity_checks']['before_account'] is True
+    assert evidence['identity_checks']['before_unit']['invocation_id'] == 'a' * 32
+    assert (evidence['response'] is not None) is expected_response
+    assert evidence['client_returned_monotonic'] >= evidence['client_started_monotonic']
+
+
+@pytest.mark.parametrize('evidence', [
+    {'response': {'status': 'partial', 'measurement_complete': True,
+                  'freed_gb': 27.6, 'slept': ['fixture'], 'stopped': [],
+                  'error': 'transport_error'}, 'deadline': 10.0},
+    {'response': None, 'deadline': 10.0, 'transport_error_type': 'TimeoutError'},
+])
+def test_helper_receipt_serializes_structured_action_failure(tmp_path, monkeypatch, evidence):
+    root = tmp_path / 'run'; root.mkdir(); (root / 'owner').write_text('token')
+    deadline = time.monotonic() + 2
+    request = root / 'request.json'; request.write_text(json.dumps({
+        'id': 'local-request', 'operation': 'free', 'output': 'result.json',
+        'deadline': deadline}))
+    cli = tmp_path / 'cli.py'; cli.write_text('')
+    profile = root / 'profile.json'; profile.write_text(json.dumps({
+        'root': str(root), 'token': 'token', 'control_instances': {},
+        'cli': str(cli), 'model': 'fixture', 'work_deadline': deadline + 1}))
+    monkeypatch.setattr(smoke, 'action_probe', lambda *args, **kwargs:
+                        (_ for _ in ()).throw(smoke.EvidenceError(
+                            'free refused, partial or unmeasured',
+                            evidence={'operation': 'free', 'local_request_id': 'local-request',
+                                      'model': 'fixture', **evidence})))
+    assert smoke.helper_main(['request', str(profile), 'request.json']) == 1
+    receipt = json.loads((root / 'result.json').read_text())
+    assert receipt['status'] == 'failed'
+    assert receipt['evidence']['local_request_id'] == 'local-request'
+    assert receipt['evidence']['response'] == evidence['response']
+    if evidence['response'] is None:
+        assert receipt['evidence']['transport_error_type'] == 'TimeoutError'
+
+
 def test_scoped_systemctl_preserves_positive_absence_and_rejects_mutations(tmp_path):
     tool=tmp_path/'systemctl';calls=tmp_path/'calls.json'
     tool.write_text('#!'+sys.executable+'\nimport json,sys\nfrom pathlib import Path\n'
