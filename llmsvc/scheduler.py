@@ -686,12 +686,15 @@ class Scheduler:
         """Wait for the running sampler's first publication without doing I/O."""
         with self.changed:
             thread = self._thread
-            if self._sample_published:
-                return self.snapshot()
+            stopping = self.stopping.is_set()
         if thread is None or not thread.is_alive():
+            if stopping or deadline <= self.monotonic():
+                return self.snapshot()
             self.sample_once()
             return self.snapshot()
         with self.changed:
+            if self._sample_published:
+                return self.snapshot()
             while not self._sample_published and not self.stopping.is_set():
                 remaining = deadline - self.monotonic()
                 if remaining <= 0:

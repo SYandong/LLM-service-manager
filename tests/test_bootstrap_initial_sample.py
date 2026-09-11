@@ -127,9 +127,18 @@ def test_bootstrap_waits_for_running_first_sample_before_admission(tmp_path):
     scheduler, store, collector, probes, controller, calls = bootstrap_fixture(tmp_path)
     worker = threading.Thread(target=lambda: scheduler.start(sampling_only=True))
     worker.start()
+    attempt = None
     try:
         assert probes.entered.wait(2)
         result = {}
+        waiter_entered = threading.Event()
+        original_wait = scheduler.await_initial_sample
+
+        def wait_with_receipt(deadline):
+            waiter_entered.set()
+            return original_wait(deadline)
+
+        scheduler.await_initial_sample = wait_with_receipt
 
         def run_bootstrap():
             try:
@@ -139,7 +148,7 @@ def test_bootstrap_waits_for_running_first_sample_before_admission(tmp_path):
 
         attempt = threading.Thread(target=run_bootstrap)
         attempt.start()
-        time.sleep(.05)
+        assert waiter_entered.wait(2)
         assert attempt.is_alive()
         assert store.bootstrap_checkpoint() is None and calls == []
         probes.release.set()
@@ -151,6 +160,9 @@ def test_bootstrap_waits_for_running_first_sample_before_admission(tmp_path):
         assert store.bootstrap_checkpoint() is None and calls == ["bootstrap_preflight"]
     finally:
         probes.release.set()
+        if attempt is not None:
+            attempt.join(3)
+            assert not attempt.is_alive()
         scheduler.stop()
         worker.join(3)
         assert not worker.is_alive()
@@ -177,4 +189,52 @@ def test_bootstrap_initial_probe_failure_stays_unknown_before_claim(tmp_path):
         scheduler.stop()
         worker.join(3)
         assert not worker.is_alive()
+        store.close()
+
+
+def test_direct_initial_wait_resamples_after_transient_published_failure(tmp_path):
+    scheduler, store, collector, probes, controller, calls = bootstrap_fixture(tmp_path)
+    probes.release.set()
+    calls_count = {"value": 0}
+
+    def transient_then_clean():
+        calls_count["value"] += 1
+        if calls_count["value"] == 1:
+            raise OSError("transient fixture probe failure")
+        return collector.collect()
+
+    scheduler.collect = transient_then_clean
+    try:
+        first = scheduler.sample_once()
+        assert first.sampled_at is None and "collection_failed" in first.errors
+        clean = scheduler.await_initial_sample(time.monotonic() + 1)
+        assert calls_count["value"] == 2
+        assert clean.errors == () and clean.models
+    finally:
+        scheduler.stop()
+        store.close()
+
+
+@pytest.mark.parametrize("reason", ["expired", "stopping"])
+def test_initial_wait_does_not_start_new_io_after_expiry_or_shutdown(tmp_path, reason):
+    scheduler, store, collector, probes, controller, calls = bootstrap_fixture(tmp_path)
+    calls_count = {"value": 0}
+    original = scheduler.collect
+
+    def counted_collect():
+        calls_count["value"] += 1
+        return original()
+
+    scheduler.collect = counted_collect
+    try:
+        if reason == "stopping":
+            scheduler.stopping.set()
+            deadline = time.monotonic() + 1
+        else:
+            deadline = time.monotonic() - 1
+        scheduler.await_initial_sample(deadline)
+        assert calls_count["value"] == 0
+    finally:
+        probes.release.set()
+        scheduler.stop()
         store.close()
