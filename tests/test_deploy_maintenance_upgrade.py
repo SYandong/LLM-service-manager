@@ -3,8 +3,14 @@
 """Explicit maintenance replacement gates over real temporary SQLite."""
 
 import base64
+import fcntl
 import json
+import os
+import subprocess
+import sqlite3
+from pathlib import Path
 import threading
+import time
 
 import pytest
 
@@ -26,6 +32,7 @@ def _maintenance(root, config_path, shared):
     obj = MaintenanceUpgrade.__new__(MaintenanceUpgrade)
     obj.root = root
     obj.config = config_path
+    obj.maintenance_config_path = config_path
     obj.shared = shared
     obj.state_path = root / "upgrade-state.json"
     obj.command_timeout = 30
@@ -101,3 +108,47 @@ def test_unattended_readonly_unit_gate_still_rejects_writable_execstart(tmp_path
     obj.cfg = {"prefix": "/opt/llmsvc-scheduler"}
     with pytest.raises(Error, match="expected one explicitly read-only scheduler ExecStart"):
         obj.unit_candidate()
+
+
+def test_maintenance_apply_uses_nonblocking_shared_upgrade_lock(tmp_path):
+    obj = MaintenanceUpgrade.__new__(MaintenanceUpgrade)
+    obj.prefix = tmp_path / "prefix"; obj.prefix.mkdir()
+    obj._apply_locked = lambda *args, **kwargs: pytest.fail("lock conflict must stop before apply")
+    lock_path = obj.prefix / "maintenance.lock"
+    with lock_path.open("a+") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        with pytest.raises(Error, match="already in progress"):
+            obj.apply(tmp_path, dry_run=True)
+
+
+def test_process_identity_capture_uses_proc_start_and_stability_checks(tmp_path):
+    obj = MaintenanceUpgrade.__new__(MaintenanceUpgrade)
+    obj.root = tmp_path; obj.proc_root = Path("/proc")
+    obj.site = {"unit_path": "/etc/systemd/system/llmsvc-scheduler.service"}
+    pid = os.getpid()
+    cgroup = (Path("/proc") / str(pid) / "cgroup").read_text()
+    props = {"ActiveState": "active", "MainPID": str(pid), "InvocationID": "a" * 32,
+             "ControlGroup": cgroup.split("::", 1)[-1].strip(),
+             "FragmentPath": obj.site["unit_path"], "DropInPaths": ""}
+    obj._properties = lambda unit: dict(props)
+    identity = obj.capture_old_identity()
+    assert identity["pid"] == pid and identity["start_ticks"].isdigit()
+    changed = dict(props); changed["MainPID"] = str(pid + 1)
+    sequence = iter((props, changed))
+    obj._properties = lambda unit: next(sequence)
+    with pytest.raises(Error, match="identity changed"):
+        obj.capture_old_identity()
+
+
+def test_pending_ledger_fence_is_unsupported_before_candidate_admission(tmp_path):
+    db = tmp_path / "ledger.sqlite"
+    connection = sqlite3.connect(db)
+    connection.execute("CREATE TABLE llmsvc_maintenance (transaction_id TEXT, record TEXT)")
+    connection.execute("INSERT INTO llmsvc_maintenance VALUES (?, ?)", ("tx", json.dumps({"stage": "submitted"})))
+    connection.execute("PRAGMA user_version=6"); connection.commit(); connection.close()
+    config = tmp_path / "scheduler.yaml"; config.write_text("read_only: false\nstate_db_path: %s\n" % db)
+    obj = _maintenance(tmp_path, config, tmp_path / "shared")
+    obj.run = lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0,
+        '{"read_only": true}' if "--once" in argv else '{"read_only": false,"state_db_path":"%s"}' % db)
+    with pytest.raises(Error, match="UNSUPPORTED: pending external-effect fences"):
+        obj.preflight_candidate(tmp_path / "generation", {"path": str(db)})

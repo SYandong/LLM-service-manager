@@ -78,6 +78,9 @@ class MaintenanceUpgrade(Upgrade):
                  "invocation_id": props["InvocationID"], "control_group": props["ControlGroup"],
                  "fragment_path": props["FragmentPath"]}
         process = self._proc_identity(first["pid"])
+        if (first["control_group"] not in process["cgroup"]
+                and process["cgroup"].strip() not in ("", "0::" + first["control_group"])):
+            raise Error("scheduler process cgroup does not match unit")
         second = self._properties(unit)
         if (second.get("ActiveState") != "active" or second.get("MainPID") != str(first["pid"])
                 or second.get("InvocationID") != first["invocation_id"]
@@ -177,12 +180,15 @@ class MaintenanceUpgrade(Upgrade):
         end = time.monotonic() + self.health_timeout
         while time.monotonic() < end:
             try:
-                code = ("import json,sys,urllib.request; "
-                        "class NoRedirect(urllib.request.HTTPRedirectHandler):\n "
-                        " def redirect_request(self,*a,**k): return None\n"
-                        "o=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect()); "
-                        "r=o.open(sys.argv[1],timeout=2); raw=r.read(4194305); "
-                        "assert len(raw)<=4194304; print(raw.decode())")
+                code = """import json,sys,urllib.request
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+ def redirect_request(self,*a,**k): return None
+o=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
+r=o.open(sys.argv[1],timeout=2)
+raw=r.read(4194305)
+assert len(raw)<=4194304
+print(raw.decode())
+"""
                 state = json.loads(self.run([self.cfg["python"], "-c", code,
                                              self.cfg["scheduler_url"].rstrip("/") + "/v1/state"], timeout=3).stdout)
                 if state.get("read_only") is not False or state.get("sampled_at") is None or state.get("errors"):
