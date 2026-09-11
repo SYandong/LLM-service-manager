@@ -37,6 +37,6 @@ def test_cli_progress_labels_never_include_raw_log_values():
     module = api()
     parsed = module["parse_wake_progress"](event(detail("process_started")), "model")
     assert module["format_wake_progress"](parsed) == "daemon process started"
+    assert parsed["log_epoch"] == "abc"
     assert "PID" not in module["format_wake_progress"](parsed)
     assert module["format_wake_progress"]({"stage": "unavailable"}) == "progress unavailable"
-
