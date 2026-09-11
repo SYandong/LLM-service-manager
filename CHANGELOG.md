@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.1.0-alpha.13 — 2026-09-11
+
+Incremental scheduler and maintenance safety release; Python distribution
+`0.1.0a13`. The normal five-PR batch was triggered by #202, #206, #207, #209
+and #210; the candidate also includes the necessary terminal-cleanup repair
+#211.
+
+### Corrected and added
+
+- The first managed-default bootstrap remains explicit and default-off. It
+  persists schema7 claims and real place/launch/health/confirm progress without
+  adopting an unleased preload, restoring stale ledgers or replaying unknown
+  effects (#202).
+- Isolated scheduler-action validation and bounded ownership/cleanup checks use
+  the actual lease, process identity, cgroup and environment evidence (#206,
+  #210). A failed or unknown observation remains fenced; no live GPU acceptance
+  is implied by offline or bounded fixtures.
+- Maintenance phases bind immutable native provenance and phase image pins.
+  Records containing `native_provenance` are rejected by alpha12 and older
+  binaries; an old binary plus the current ledger is not a general rollback
+  path. Existing schema7 bootstrap records retain the same forward-compatibility
+  boundary (#207).
+- Collector contention no longer publishes a fake fresh measurement or runs
+  action reconciliation. Mixed probe errors remain visible, real failures stay
+  unknown, and action confirmation requires a genuinely newer observation
+  (#209).
+- Terminal cleanup rejects replacement identities and retains the ledger when
+  the owned daemon exit/identity proof is not the original instance (#210,
+  #211).
+
+### Compatibility and validation limits
+
+Bootstrap, native-witness and maintenance modes remain disabled by default.
+This release does not claim managed-site adoption, source installation,
+continuous quiet, settlement, producer upgrade, TTL/reaper replacement or
+production routing. Existing inference endpoints, model IDs/aliases, default,
+pin and inflight protections, and the single `llm` command remain unchanged.
+
+The maintenance schema-v6 number remains unchanged, but records containing
+`native_provenance` require the newer reader; alpha12 and older binaries reject
+them. Schema7 bootstrap records retain the same older-reader refusal boundary.
+Neither old binaries plus the current ledger nor stale-ledger restoration is a
+general rollback path. The candidate's functional tree passed the complete
+Python 3.10 suite (2848 tests, 172.56 seconds), matched 45 wheel entries when rebuilt
+from the sdist, and passed independent offline minimal/TUI installs, dependency
+checks, isolated CLI/TUI imports and release-manifest/checksum validation.
+Bounded CPU/loopback fixtures do not establish GPU or production behavior, and
+long-term stability/calibration remain **NOT MEASURED**. Current-head CI and
+exact Fable approval remain required before this draft can be made ready.
+
 ## 0.1.0-alpha.12 — 2026-09-11
 
 Urgent activity-query repair; Python distribution `0.1.0a12`.
@@ -626,3 +676,4 @@ M0–M6 roadmap or authorize production activation.
 Release process and cadence: [docs/RELEASING.md](docs/RELEASING.md).
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+<!-- Generated-By: Codex / gpt-5.6-luna -->
