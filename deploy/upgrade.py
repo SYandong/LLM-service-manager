@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-5.6-luna
 """Versioned, offline read-only upgrades preserving site configuration and clients."""
 import argparse
 import base64
@@ -156,10 +157,10 @@ def bundle(path):
     return value
 
 
-def launcher(python, default_url, *, scheduler=False, shared=None, config=None):
+def launcher(python, default_url, *, scheduler=False, shared=None, config=None, read_only=True):
     # Resolve the pointer once. A running client stays on its original environment.
     root = repr(shared) if scheduler else "str(Path(__file__).absolute().parent.parent if Path(__file__).name == 'llm-run' else Path(__file__).absolute().parent)"
-    arguments = "['-m','llmsvc','--config',"+repr(config)+",'--dry-run']" if scheduler else "[str(generation/'llm'),*sys.argv[1:]]"
+    arguments = ("['-m','llmsvc','--config',"+repr(config)+(",'--dry-run']" if read_only else "]")) if scheduler else "[str(generation/'llm'),*sys.argv[1:]]"
     return (f'''#!{python}
 # Generated-By: Codex / gpt-6-astra
 import os,re,sys

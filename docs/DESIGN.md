@@ -709,6 +709,28 @@ Save text 仅由显式按钮把完整冻结详情写入用户选定的新 UTF-8 
 
 ## 7. 部署与验证
 
+### 显式可写 scheduler 替换（#228）
+
+`deploy/upgrade.py` 与 `pull_release.py` 的无人值守路径始终只接受
+`scope: read_only` bundle 和只读 unit。可写 scheduler 的替换只能通过额外的
+`deploy/maintenance-upgrade.sh` 显式维护入口，默认不调用，也不改变发布 bundle
+范围。
+
+维护入口复用现有 generation、transaction、pointer、字节保护和 rollback 原语：
+先用候选 reader 以 dry-run/check-config/once 只读打开**同一** SQLite ledger，
+再停止明确绑定的 scheduler unit，核对旧 PID、start/InvocationID、cgroup 和
+整个旧进程/unit 已不存在，随后重新读取当前 ledger。旧进程退出前已提交的 pin、
+reserve、lease、fault/recovery/catalog/bootstrap fence 和未知记录全部保留；
+进程退出不等于外部 native/model effect 已结清。
+
+只有当前 ledger 兼容且旧资源身份证明完成，才允许切换 generation、以显式可写
+配置启动一个候选 scheduler，并检查实际 config/ledger identity、首轮 observation、
+health 和单 writer。候选启动或 health 失败时，rollback 先让候选进程消失，再让
+旧 reader 对**当前** ledger 做只读兼容检查；检查不支持时返回 `UNSUPPORTED`，
+保留 transaction/ledger/claims，不恢复陈旧数据库快照。该入口不提供 drain endpoint、
+writer epoch、强制清理、source/model/GPU 操作、TTL/reaper 替换或 zero-downtime
+保证；控制面短暂停机是预期边界。
+
 - 快速验证（#108，用户明确要求）：先在独立配置的验证端口以 `--dry-run` 做分钟级只读短测，记录真实起止、样本、缺口、错误与清理结果；典型窗口约 120 秒，GPU 测试仍须空闲且单次目标不超过 5 分钟。不再要求等满一天或一周才继续交付。相应功能用确定性回放、临时环境集成和必要短测验收；长期稳定性和长期占用分布明确标为未测。
 - 短测通过不自动启用生产动作：保护、内存准入、可信连续 quiet、配置采用/退出确认、已验证回滚及相应操作授权仍须满足。连续 5 秒 quiet 是正确性条件，不能用日历等待的取消替代它。
 - 回放测试：把 2026-09-06 / 09-07 的 `vllm-launch` 日志场景做成夹具，断言新算法不再出现无效驱逐与踢默认模型。
@@ -741,3 +763,4 @@ Save text 仅由显式按钮把完整冻结详情写入用户选定的新 UTF-8 
 
 <!-- Generated-By: Claude Code / claude-fable-5-1 -->
 <!-- Generated-By: Codex / gpt-6-astra -->
+<!-- Generated-By: Codex / gpt-5.6-luna -->

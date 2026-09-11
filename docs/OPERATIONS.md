@@ -146,6 +146,31 @@ change** acceptance. Record actual staging/live success, failure, rollback and
 unchanged trampoline/profile/config/backup evidence with the operation; no
 calendar wait or unmeasured stability claim is required.
 
+## Explicit writable scheduler replacement (#228)
+
+The unattended puller/upgrader remains read-only. A writable replacement is a
+separate, default-disabled maintenance operation and must be invoked explicitly
+with `deploy/maintenance-upgrade.sh apply --confirm-maintenance`; this issue
+does not authorize invoking it on a live site.
+
+The operation stages and verifies the release using the existing bundle,
+generation, transaction, pointer and byte guards. It opens the candidate against
+the same ledger in dry-run/check-config/once mode, stops only the bound scheduler
+unit, proves the old PID/start/InvocationID/cgroup and whole unit/process are
+gone, then rereads the current ledger before switching. A write committed by the
+old process before absence is legitimate and is retained. Process absence does
+not settle an external model/native effect; pending or unknown records remain
+blocked.
+
+Candidate startup uses the intended writable config and same ledger, then checks
+config/ledger identity, first observation, health and one scheduler writer.
+Rollback first proves candidate process absence and runs the old reader's
+read-only compatibility check against the current ledger. If that check is
+unsupported, the transaction remains pending/`UNSUPPORTED`; no stale database
+snapshot is restored and no claims are deleted. This path provides bounded
+control-plane downtime and no source/model/GPU, TTL/reaper or zero-downtime
+guarantee.
+
 ## Observation and evidence
 
 `deploy/capture.py` takes configurable, bounded, read-only probes and writes
@@ -472,5 +497,7 @@ new/base instances have separate recovery paths. A configuration rollback keeps
 current account releases; it does not recreate a removed model's old lease.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+
+<!-- Generated-By: Codex / gpt-5.6-luna -->
 
 <!-- Generated-By: Codex / gpt-5.6-luna -->
