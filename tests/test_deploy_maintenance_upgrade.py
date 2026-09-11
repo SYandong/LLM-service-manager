@@ -74,7 +74,7 @@ def test_incompatible_old_reader_blocks_rollback_without_discarding_candidate_wr
     shared = tmp_path / "shared"; (shared / "releases" / "old").mkdir(parents=True)
     transaction = tmp_path / "transaction"; transaction.mkdir()
     obj = _maintenance(tmp_path, config, shared)
-    obj.stop_candidate_before_rollback = lambda: {"unit_absent": True}
+    obj.stop_candidate_before_rollback = lambda record: {"unit_absent": True}
     obj.restore = lambda *args: pytest.fail("rollback must stay unsupported")
     def incompatible(argv, **kwargs):
         if "--once" in argv:

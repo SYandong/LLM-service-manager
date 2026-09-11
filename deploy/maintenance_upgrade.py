@@ -9,7 +9,9 @@ boundary required before a writable candidate is started.
 """
 import argparse
 import base64
+import fcntl
 import json
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -34,6 +36,8 @@ class MaintenanceUpgrade(Upgrade):
             raise Error("maintenance_config_path is required")
         self.maintenance_config_path = manage.inside(root, path)
         self.proc_root = Path(settings.get("proc_root", "/proc"))
+        if self.root == Path("/") and self.proc_root != Path("/proc"):
+            raise Error("live maintenance must use /proc identity source")
         self.expected_read_only = False
         self.old_identity = None
 
@@ -41,6 +45,26 @@ class MaintenanceUpgrade(Upgrade):
         raw = self.run(["systemctl", "show", unit,
                         "-p", "ActiveState,MainPID,InvocationID,ControlGroup,FragmentPath,DropInPaths"], timeout=5).stdout
         return dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+
+    def _proc_identity(self, pid):
+        root = self.proc_root / str(pid)
+        try:
+            stat = (root / "stat").read_text()
+            fields = stat.rsplit(") ", 1)[1].split()
+            if len(fields) <= 19 or fields[0] in ("Z", "X", "x"):
+                raise Error("scheduler process identity is unavailable")
+            start_ticks = fields[19]
+            if not re.fullmatch(r"[0-9]+", start_ticks):
+                raise Error("scheduler process start identity is invalid")
+            exe = os.readlink(root / "exe")
+            cmdline = (root / "cmdline").read_bytes()
+            cgroup = (root / "cgroup").read_text()
+            if not exe or not cmdline or not cgroup:
+                raise Error("scheduler process identity is incomplete")
+            return {"pid": pid, "start_ticks": start_ticks, "exe": exe,
+                    "cmdline_sha256": sha(cmdline), "cgroup": cgroup}
+        except (OSError, UnicodeError, IndexError) as exc:
+            raise Error("scheduler process identity is unavailable") from exc
 
     def capture_old_identity(self):
         unit = Path(self.site["unit_path"]).name
@@ -50,9 +74,18 @@ class MaintenanceUpgrade(Upgrade):
                 or not re.fullmatch(r"[0-9a-f-]{8,}", props.get("InvocationID", ""))
                 or not props.get("ControlGroup")):
             raise Error("old scheduler identity is unknown or not active")
-        return {"unit": unit, "pid": int(props["MainPID"]),
-                "invocation_id": props["InvocationID"], "control_group": props["ControlGroup"],
-                "fragment_path": props["FragmentPath"]}
+        first = {"unit": unit, "pid": int(props["MainPID"]),
+                 "invocation_id": props["InvocationID"], "control_group": props["ControlGroup"],
+                 "fragment_path": props["FragmentPath"]}
+        process = self._proc_identity(first["pid"])
+        second = self._properties(unit)
+        if (second.get("ActiveState") != "active" or second.get("MainPID") != str(first["pid"])
+                or second.get("InvocationID") != first["invocation_id"]
+                or second.get("ControlGroup") != first["control_group"]
+                or second.get("FragmentPath") != first["fragment_path"]):
+            raise Error("scheduler identity changed during capture")
+        return {**first, "start_ticks": process["start_ticks"], "exe": process["exe"],
+                "cmdline_sha256": process["cmdline_sha256"], "proc_cgroup": process["cgroup"]}
 
     def prove_old_absent(self, identity):
         props = self._properties(identity["unit"])
@@ -66,6 +99,9 @@ class MaintenanceUpgrade(Upgrade):
                 "old_invocation_id": identity["invocation_id"]}
 
     def stop_old(self, identity):
+        current = self.capture_old_identity()
+        if current != identity:
+            raise Error("scheduler identity changed before stop")
         self.run(["systemctl", "stop", identity["unit"]], timeout=45)
         return self.prove_old_absent(identity)
 
@@ -80,9 +116,27 @@ class MaintenanceUpgrade(Upgrade):
                 version = db.execute("PRAGMA user_version").fetchone()[0]
                 tables = [row[0] for row in db.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
-                counts = {name: db.execute("SELECT count(*) FROM \"" + name.replace('"', '""') + "\"").fetchone()[0]
-                          for name in tables}
-                return {"path": str(path), "user_version": version, "tables": tables, "counts": counts}
+                rows = {}
+                counts = {}
+                pending = []
+                terminal = {"complete", "committed", "rolled_back", "aborted", "default_confirmed"}
+                for name in tables:
+                    quoted = "\"" + name.replace('"', '""') + "\""
+                    values = db.execute("SELECT * FROM " + quoted + " ORDER BY rowid").fetchall()
+                    counts[name] = len(values)
+                    rows[name] = sha(json.dumps(values, sort_keys=True, default=str).encode())
+                    columns = [row[1] for row in db.execute("PRAGMA table_info(" + quoted + ")")]
+                    if "record" in columns:
+                        record_index = columns.index("record")
+                        for value in values:
+                            try:
+                                stage = json.loads(value[record_index]).get("stage")
+                            except (TypeError, ValueError, IndexError):
+                                stage = None
+                            if stage not in terminal:
+                                pending.append(name)
+                return {"path": str(path), "user_version": version, "tables": tables,
+                        "counts": counts, "rows_sha256": rows, "pending_tables": sorted(set(pending))}
             finally:
                 db.close()
         except (OSError, sqlite3.Error) as exc:
@@ -109,21 +163,32 @@ class MaintenanceUpgrade(Upgrade):
         once = json.loads(self.run([python, "-m", "llmsvc", "--config",
                                     str(self.maintenance_config_path), "--dry-run", "--once"],
                                    timeout=min(30, self.command_timeout)).stdout)
-        if once.get("read_only") is not True:
+        if once.get("read_only") is not True or once.get("errors"):
             raise Error("candidate compatibility read was not read-only")
-        return {"config": config, "once": once, "ledger": self.ledger_snapshot(ledger["path"])}
+        current = self.ledger_snapshot(ledger["path"])
+        unsupported = current.get("pending_tables", [])
+        if unsupported:
+            raise Error("UNSUPPORTED: pending external-effect fences in " + ",".join(unsupported))
+        return {"config": config, "once": once, "ledger": current}
 
-    def health(self, version=None):
+    def health(self, version=None, expected_identity=None):
         if self.root != Path("/"):
             return version or self.run([self.cfg["python"], str(self.cli), "--version"], timeout=5).stdout.strip()
         end = time.monotonic() + self.health_timeout
         while time.monotonic() < end:
             try:
-                code = "import json,sys,urllib.request; r=urllib.request.urlopen(sys.argv[1],timeout=2); print(r.read().decode())"
+                code = ("import json,sys,urllib.request; "
+                        "class NoRedirect(urllib.request.HTTPRedirectHandler):\n "
+                        " def redirect_request(self,*a,**k): return None\n"
+                        "o=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect()); "
+                        "r=o.open(sys.argv[1],timeout=2); raw=r.read(4194305); "
+                        "assert len(raw)<=4194304; print(raw.decode())")
                 state = json.loads(self.run([self.cfg["python"], "-c", code,
                                              self.cfg["scheduler_url"].rstrip("/") + "/v1/state"], timeout=3).stdout)
-                if state.get("read_only") is not False or state.get("sampled_at") is None:
+                if state.get("read_only") is not False or state.get("sampled_at") is None or state.get("errors"):
                     raise Error("writable candidate is not ready")
+                if expected_identity is not None and self.capture_old_identity() != expected_identity:
+                    raise Error("candidate identity changed during health")
                 break
             except (OSError, ValueError, Error, subprocess.SubprocessError):
                 time.sleep(.2)
@@ -153,14 +218,16 @@ class MaintenanceUpgrade(Upgrade):
             raise Error("unsupported rollback: old reader compatibility is not read-only")
         return {"generation": previous, "version": old.get("version"), "once": once}
 
-    def stop_candidate_before_rollback(self):
-        identity = self.capture_old_identity()
+    def stop_candidate_before_rollback(self, record):
+        identity = record.get("candidate_identity")
+        if not isinstance(identity, dict):
+            raise Error("unsupported rollback: candidate identity is unavailable")
         return self.stop_old(identity)
 
     def rollback_after_failure(self, record, transaction):
         """Require candidate absence and old-reader compatibility before restore."""
         try:
-            record["candidate_absent"] = self.stop_candidate_before_rollback()
+            record["candidate_absent"] = self.stop_candidate_before_rollback(record)
             record["old_reader"] = self.old_reader_compatible(record, transaction)
         except Error as rollback_error:
             record["status"] = "unsupported_rollback"
@@ -171,6 +238,15 @@ class MaintenanceUpgrade(Upgrade):
         return self.restore(record, transaction)
 
     def apply(self, directory, *, confirm=False, dry_run=False):
+        descriptor = os.open(self.prefix / "maintenance.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "a+") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise Error("maintenance operation already in progress") from exc
+            return self._apply_locked(directory, confirm=confirm, dry_run=dry_run)
+
+    def _apply_locked(self, directory, *, confirm=False, dry_run=False):
         if not confirm and not dry_run:
             raise Error("explicit maintenance confirmation required")
         payload = bundle(directory)
@@ -178,18 +254,24 @@ class MaintenanceUpgrade(Upgrade):
         current_config = json.loads(self.run([self.cfg["python"], "-c", CONFIG,
                                               str(self.config)]).stdout)
         ledger = self.ledger_snapshot(current_config["state_db_path"])
+        if dry_run:
+            self.guard()
+            self.maintenance_unit_candidate()
+            return {"dry_run": True, "ledger": ledger, "unit": str(self.unit),
+                    "read_only_updater_unchanged": True}
+        maintenance_bytes = self.maintenance_config_path.read_bytes()
+        maintenance_hash = sha(maintenance_bytes)
         generation = self.prepare(directory, payload)
         candidate = self.preflight_candidate(generation, ledger)
+        if sha(self.maintenance_config_path.read_bytes()) != maintenance_hash:
+            raise Error("maintenance config changed during candidate preflight")
         self.guard()
         old_identity = self.capture_old_identity()
-        if dry_run:
-            return {"dry_run": True, "generation": payload["generation"], "ledger": ledger,
-                    "old_identity": old_identity, "candidate": candidate}
         token = __import__("uuid").uuid4().hex
         transaction = manage.inside(self.root, self.cfg["prefix"] + "/transactions/" + token)
         transaction.mkdir(mode=0o700, parents=True)
         planned = {str(self.unit): self.maintenance_unit_candidate(),
-                   str(self.config): self.maintenance_config_path.read_bytes(),
+                   str(self.config): maintenance_bytes,
                    str(self.cli): launcher(self.cfg["python"], self.cfg["scheduler_url"]),
                    str(self.cli_run): launcher(self.cfg["python"], self.cfg["scheduler_url"]),
                    str(self.scheduler_run): launcher(self.cfg["python"], self.cfg["scheduler_url"],
@@ -203,12 +285,22 @@ class MaintenanceUpgrade(Upgrade):
                   "old_identity": old_identity, "ledger_before": ledger, "candidate": candidate}
         json_write(transaction / "transaction.json", record); json_write(self.state_path, {"transaction": token, "status": "preparing"})
         try:
+            record["status"] = "stopping_old"; json_write(transaction / "transaction.json", record); json_write(self.state_path, {"transaction": token, "status": "stopping_old"})
             self.stop_old(old_identity); record["status"] = "old_absent"; self.guard(); record["ledger_after_old_absent"] = self.ledger_snapshot(ledger["path"])
+            if sha(self.maintenance_config_path.read_bytes()) != maintenance_hash:
+                raise Error("maintenance config changed after old process exit")
             self.preflight_candidate(generation, ledger)
             record["status"] = "switching"; json_write(transaction / "transaction.json", record); json_write(self.state_path, {"transaction": token, "status": "switching"})
             point(self.pointer, record["new_pointer"])
-            for path, data in planned.items(): atomic(Path(path), data, 0o644 if Path(path) == self.unit else 0o755)
-            self.restart(); self.protection_guard(); self.health(payload["version"])
+            for path, data in planned.items():
+                mode = 0o644 if Path(path) in (self.unit, self.config) else 0o755
+                if Path(path) == self.config:
+                    mode = 0o600
+                atomic(Path(path), data, mode)
+            self.restart(); self.protection_guard()
+            record["candidate_identity"] = self.capture_old_identity()
+            json_write(transaction / "transaction.json", record)
+            self.health(payload["version"], expected_identity=record["candidate_identity"])
             new = json.loads(json.dumps(self.manifest)); new["schema_version"] = 2
             new["files"] = [{"path": self.site[key], "sha256": sha(manage.inside(self.root, self.site[key]).read_bytes())} for key in ("unit_path", "config_path", "cli_path")]
             new["managed_extra_files"] = {str(path): sha(path.read_bytes()) for path in (self.cli_run, self.scheduler_run)}
@@ -218,8 +310,8 @@ class MaintenanceUpgrade(Upgrade):
             record["status"] = "committed"; json_write(transaction / "transaction.json", record); json_write(self.state_path, {"transaction": token, "status": "committed"})
             return {"status": "committed", "transaction": token, "generation": payload["generation"]}
         except BaseException:
-            if record["status"] == "preparing":
-                record["status"] = "failed_before_switch"; json_write(transaction / "transaction.json", record); json_write(self.state_path, record.get("previous_upgrade_state") or {"transaction": token, "status": "failed_before_switch"})
+            if record["status"] in ("preparing", "stopping_old", "old_absent"):
+                record["status"] = "unsupported_maintenance_phase"; json_write(transaction / "transaction.json", record); json_write(self.state_path, {"transaction": token, "status": "unsupported_maintenance_phase"})
             else:
                 self.rollback_after_failure(record, transaction)
             raise
@@ -230,7 +322,7 @@ class MaintenanceUpgrade(Upgrade):
         original_restore = self.restore
         def guarded_restore(record, transaction):
             try:
-                candidate_absent = self.stop_candidate_before_rollback()
+                candidate_absent = self.stop_candidate_before_rollback(record)
                 old_reader = self.old_reader_compatible(record, transaction)
             except Error as exc:
                 record["status"] = "unsupported_rollback"
