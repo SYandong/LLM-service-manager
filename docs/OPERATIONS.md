@@ -157,13 +157,14 @@ deploy/maintenance-upgrade.sh preflight --root /path/to/staging-root \
   --bundle /path/to/verified/read-only-bundle
 ```
 
-The preflight verifies the staged `release.json` against the bundle, reads the
-configured scheduler YAML and same SQLite ledger without opening a writer, and
-starts the staged interpreter with `-B` to open that ledger through the existing
+The preflight verifies an existing `shared/releases/<generation>` runtime
+fingerprint and its `release.json` against the bundle, reads the configured
+scheduler YAML and same SQLite ledger without opening a writer, and starts the
+staged interpreter with isolated `-I -B` to open that ledger through the existing
 read-only `IntentStore`. It reports schema/record readability and stable config
 bytes; it does not call `prepare()`, create a venv, probe a model, contact a
-service, or write lock/state/transaction files. A missing or incompatible staged
-candidate returns an explicit error.
+service, or write lock/state/transaction files. A missing, drifted, or incompatible
+staged candidate returns an explicit error.
 
 `apply` and `rollback` names remain for command compatibility, but every
 non-dry-run invocation currently fails closed with `UNSUPPORTED` before any

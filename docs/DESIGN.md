@@ -716,12 +716,13 @@ Save text 仅由显式按钮把完整冻结详情写入用户选定的新 UTF-8 
 `deploy/maintenance-upgrade.sh` 显式维护入口，默认不调用，也不改变发布 bundle
 范围。
 
-本 issue 当前只交付**只读 preflight**。它要求候选 generation 已经在配置的
-staging root 中存在，并校验 release.json 与已验证 read-only bundle 的版本和
-commit 一致、解释器是已存在的普通文件、配置字节在检查期间不变。候选解释器以
-`-B` 子进程读取同一 SQLite ledger，强制使用只读 `IntentStore`，检查 schema 与
+本 issue 当前只交付**只读 preflight**。它要求候选 generation 已经在现有的
+`shared/releases/<generation>` 中存在，并用既有 runtime fingerprint 校验
+release.json 与已验证 read-only bundle 的 tag、版本、commit、generation 和
+bundle digest 一致。候选解释器（包括标准 venv 解释器链接）以隔离的 `-I -B`
+子进程读取同一 SQLite ledger，强制使用只读 `IntentStore`，检查 schema 与
 现有 pin/lease 等记录可读；不会调用 `prepare()`、创建 venv、启动服务、采样、
-访问网络或写 ledger。
+访问网络或写 ledger，也不会让导入路径回退到当前 checkout。
 
 `maintenance-upgrade.sh preflight` 返回 `apply_supported: false`，并明确把外部
 effect settlement 标为 `UNKNOWN`。`apply` 和 `rollback` 的非 dry-run 调用在
