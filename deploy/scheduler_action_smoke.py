@@ -472,6 +472,9 @@ print(r.stdout,end="")
 class ActionRun(lifecycle.Run):
     scope='actual isolated scheduler free/wake/SSE chain; live timings only after GPU guards'
 
+    def observation_quiet(self, preflight):
+        return lifecycle.scheduler_actions_quiet(preflight, self.model)
+
     def __init__(self,config):
         super().__init__(config)
         self.scheduler_unit='llmsvc-ops-action-scheduler-'+self.token+'.service'

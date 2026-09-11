@@ -134,6 +134,41 @@ def quiet(preflight):
             all(m.get('state') == 'stopped' for m in states))
 
 
+def scheduler_actions_quiet(preflight, selected_model):
+    """Require an explicit primary catalog and no selected-model collision.
+
+    The caller has already proven selected-card isolation with fresh GPU,
+    process, RAM and ownership checks. The generated isolated model must be
+    absent from the primary catalog; a collision cannot be treated as isolated.
+    Other model states do not impose direct-mode's all-model stopped
+    requirement, while malformed/unknown state or inflight remains fail-closed.
+    """
+    states = None
+    inflight = None
+    for event in preflight.get('events', []):
+        data = event['data']
+        if isinstance(data, str):
+            data = json.loads(data)
+        if event['type'] == 'modelStatus':
+            states = data
+        elif event['type'] == 'inflight' and data.get('operation') == 'snapshot':
+            inflight = data.get('requests', [])
+    if not isinstance(states, list) or inflight != []:
+        return False
+    known_states = {'stopped', 'ready', 'sleeping'}
+    names = []
+    for row in states:
+        if not isinstance(row, dict):
+            return False
+        name = row.get('id') or row.get('model') or row.get('name')
+        if not isinstance(name, str) or not name or row.get('state') not in known_states:
+            return False
+        if name in names:
+            return False
+        names.append(name)
+    return selected_model not in names
+
+
 def check_host_capacity(available_gb, weight_bytes):
     # Test-only conservative headroom; never exported as production admission.
     if not math.isfinite(available_gb) or weight_bytes <= 0 or weight_bytes > 20*1024**3:
@@ -209,7 +244,7 @@ class Run:
             if float(gpu[4]) < need or float(gpu[3]) > 256 or float(gpu[5]) > 0:
                 raise SmokeError('candidate GPU is not idle with sufficient memory')
         state = self.python(PREFLIGHT, {**self.config, 'choose_port': self.port is None})
-        if not quiet(state) or not state['cached_weights_complete']:
+        if not self.observation_quiet(state) or not state['cached_weights_complete']:
             raise SmokeError('unknown/busy serving or incomplete cached weights')
         mem = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines() if ':' in line)
         host_available_gb = int(mem['MemAvailable'].split()[0]) / 1024**2
@@ -218,6 +253,9 @@ class Run:
             self.port = state['port']
         self.log('preflight' if not allow_own else 'monitor', gpu=gpu, processes=processes, in_flight=0, host_available_gb=host_available_gb)
         return gpu
+
+    def observation_quiet(self, preflight):
+        return quiet(preflight)
 
     def verify_owner(self, *, cleanup=False):
         r = self.container(['systemctl', 'show', self.unit, '-p', 'Environment', '--value'],

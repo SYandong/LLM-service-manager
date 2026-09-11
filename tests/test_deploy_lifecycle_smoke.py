@@ -58,6 +58,27 @@ def test_quiet_requires_complete_zero_inflight_and_stopped_models():
     assert not smoke.quiet(state)
 
 
+def test_scheduler_actions_allows_other_gpu_bystander_after_selected_isolation():
+    state = {'events': [
+        {'type': 'modelStatus', 'data': '[{"id":"default","state":"ready"}]'},
+        {'type': 'inflight', 'data': '{"operation":"snapshot","requests":[]}'}]}
+    assert smoke.scheduler_actions_quiet(state, 'selected')
+    assert not smoke.quiet(state)
+
+
+@pytest.mark.parametrize('states,requests', [
+    ('[{"id":"selected","state":"ready"}]', []),
+    ('[{"id":"other"}]', []),
+    ('[{"id":"other","state":"unknown"}]', []),
+    ('[{"id":"selected","state":"stopped"}]', [{'id': 'inflight'}]),
+])
+def test_scheduler_actions_rejects_selected_unknown_or_inflight(states, requests):
+    state = {'events': [
+        {'type': 'modelStatus', 'data': states},
+        {'type': 'inflight', 'data': json.dumps({'operation': 'snapshot', 'requests': requests})}]}
+    assert not smoke.scheduler_actions_quiet(state, 'selected')
+
+
 def test_cleanup_never_stops_foreign_unit_or_removes_its_files():
     run=smoke.Run.__new__(smoke.Run);run.attempted=True;run.temp_created=True;run.unit='vllm-ops-life-test.service'
     run.verify_owner=lambda **_: False
