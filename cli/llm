@@ -390,7 +390,8 @@ def parse_wake_progress(item, target, *, after_id=0, since=None):
     if stage not in WAKE_PROGRESS_STAGES:
         return None
     return {"stage": stage, "label": WAKE_PROGRESS_STAGES[stage],
-            "sequence": detail["sequence"], "source": "llama-swap"}
+            "sequence": detail["sequence"], "log_epoch": detail["log_epoch"],
+            "source": "llama-swap"}
 
 
 def wake_progress_detail_valid(detail, target=None):
@@ -1261,6 +1262,8 @@ def execute_wake_with_progress(args, client):
     request = threading.Thread(target=invoke, name="llm-wake-request", daemon=True)
     request.start()
     generation = None
+    progress_epoch = None
+    progress_sequence = 0
     last = None
     while request.is_alive():
         update = reader.drain()
@@ -1268,6 +1271,8 @@ def execute_wake_with_progress(args, client):
             generation = update["generation"]
         elif update["generation"] != generation:
             generation = update["generation"]
+            progress_epoch = None
+            progress_sequence = 0
             if not args.json and last != "progress unavailable":
                 print("Wake progress unavailable; final server result remains authoritative", file=sys.stderr)
                 last = "progress unavailable"
@@ -1275,6 +1280,17 @@ def execute_wake_with_progress(args, client):
             progress = parse_wake_progress(item, args.model, since=started)
             if progress is None:
                 continue
+            if progress_epoch is not None and progress["log_epoch"] != progress_epoch:
+                if progress["sequence"] != 1:
+                    if not args.json and last != "progress unavailable":
+                        print("Wake progress unavailable; source epoch changed", file=sys.stderr)
+                        last = "progress unavailable"
+                    continue
+                progress_sequence = 0
+            if progress["log_epoch"] == progress_epoch and progress["sequence"] <= progress_sequence:
+                continue
+            progress_epoch = progress["log_epoch"]
+            progress_sequence = progress["sequence"]
             label = progress["label"]
             if not args.json and label != last:
                 print("Wake observed: %s (source: llama-swap; readiness is the server result)" % label,

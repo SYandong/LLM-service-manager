@@ -331,7 +331,7 @@ class SchedulerApp(App):
         self._progress = {"command": args.command, "target": target, "started": time.monotonic(),
                           "stage": "waiting for observed release" if args.command == "free" else "awaiting scheduler response",
                           "estimate": estimate, "after_id": max((e["id"] for e in self.event_history), default=0),
-                          "since": time.time()}
+                          "since": time.time(), "log_epoch": None, "progress_sequence": 0}
         self.render_progress()
         self._progress_timer.resume()
         try:
@@ -678,6 +678,9 @@ class SchedulerApp(App):
             self.event_generation = update["generation"]
             self.event_history.clear()
             self.event_presentation.reset()
+            if self._progress is not None:
+                self._progress["log_epoch"] = None
+                self._progress["progress_sequence"] = 0
         status = update["status"]
         if update.get("missed"):
             status += " · %s events unavailable in server history" % update["missed"]
@@ -759,6 +762,17 @@ class SchedulerApp(App):
                 item, progress["target"], after_id=progress.get("after_id", 0),
                 since=progress.get("since"))
             if observed is not None:
+                epoch = progress.get("log_epoch")
+                if epoch is not None and observed["log_epoch"] != epoch:
+                    if observed["sequence"] != 1:
+                        progress["stage"] = "observed: progress unavailable (source epoch changed)"
+                        return
+                    progress["progress_sequence"] = 0
+                if (observed["log_epoch"] == progress.get("log_epoch")
+                        and observed["sequence"] <= progress.get("progress_sequence", 0)):
+                    return
+                progress["log_epoch"] = observed["log_epoch"]
+                progress["progress_sequence"] = observed["sequence"]
                 stage = "%s (source: llama-swap; advisory)" % observed["label"]
             elif "state" in detail or "swap_state" in detail:
                 # Preserve the existing scheduler-state progress envelope.

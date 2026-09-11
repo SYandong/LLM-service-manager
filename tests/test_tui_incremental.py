@@ -150,7 +150,10 @@ def test_cold_wake_progress_uses_sanitized_model_log_stage_only(snapshot):
                                 "trusted_for_quiet": False}}
             app.observe_progress(valid)
             assert app._progress["stage"] == "observed: waiting for health (source: llama-swap; advisory)"
+            stale_epoch = {**valid, "detail": {**valid["detail"], "log_epoch": "old", "sequence": 9}}
+            app.observe_progress(stale_epoch)
+            assert "source epoch changed" in app._progress["stage"]
             app.observe_progress({**valid, "detail": {**valid["detail"], "source_model": "other"}})
-            assert app._progress["stage"].endswith("advisory)")
+            assert "source epoch changed" in app._progress["stage"]
             app._progress = None
     asyncio.run(scenario())
