@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.1.0-alpha.13 — 2026-09-11
+
+Incremental scheduler and maintenance safety release; Python distribution
+`0.1.0a13`. Includes #202, #206, #207, #209 and #210 since immutable
+alpha.12, the normal five-PR batch.
+
+### Corrected and added
+
+- The first managed-default bootstrap remains explicit and default-off. It
+  persists schema7 claims and real place/launch/health/confirm progress without
+  adopting an unleased preload, restoring stale ledgers or replaying unknown
+  effects (#202).
+- Isolated scheduler-action validation and bounded ownership/cleanup checks use
+  the actual lease, process identity, cgroup and environment evidence (#206,
+  #210). A failed or unknown observation remains fenced; no live GPU acceptance
+  is implied by offline or bounded fixtures.
+- Maintenance phases bind immutable native provenance and phase image pins.
+  Records containing `native_provenance` are rejected by alpha12 and older
+  binaries; an old binary plus the current ledger is not a general rollback
+  path. Existing schema7 bootstrap records retain the same forward-compatibility
+  boundary (#207).
+- Collector contention no longer publishes a fake fresh measurement or runs
+  action reconciliation. Mixed probe errors remain visible, real failures stay
+  unknown, and action confirmation requires a genuinely newer observation
+  (#209).
+
+### Compatibility and validation limits
+
+Bootstrap, native-witness and maintenance modes remain disabled by default.
+This release does not claim managed-site adoption, source installation,
+continuous quiet, settlement, producer upgrade, TTL/reaper replacement or
+production routing. Existing inference endpoints, model IDs/aliases, default,
+pin and inflight protections, and the single `llm` command remain unchanged.
+
+Final candidate build and complete release verification remain gated on the
+reviewed post-#210 ops state, exact current-head Fable approval and CI success.
+The bounded CPU/loopback fixtures do not establish GPU or production behavior;
+long-term stability and calibration remain **NOT MEASURED**.
+
 ## 0.1.0-alpha.12 — 2026-09-11
 
 Urgent activity-query repair; Python distribution `0.1.0a12`.
@@ -626,3 +665,4 @@ M0–M6 roadmap or authorize production activation.
 Release process and cadence: [docs/RELEASING.md](docs/RELEASING.md).
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+<!-- Generated-By: Codex / gpt-5.6-luna -->
