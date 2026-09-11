@@ -225,7 +225,8 @@ class ManagedModelTransport:
         self.units = {}
         self.paths = set()
         for name, model in self.models.items():
-            if not isinstance(name, str) or not name or name in (".", ".."):
+            if (not isinstance(name, str) or not name
+                    or name in (".", "..", "proxy", "upstream")):
                 raise ValueError("invalid configured model name")
             unit = model.get("unit", "vllm-" + name + ".service")
             if not isinstance(unit, str) or not re.fullmatch(r"vllm-[A-Za-z0-9_.@-]+\.service", unit):
@@ -460,6 +461,37 @@ class ModelActionController:
         return (_known(snapshot.sampled_at) and _known(now)
                 and 0 <= now - snapshot.sampled_at <= self.scheduler.config.max_snapshot_age_seconds
                 and not snapshot.errors)
+
+    def _start_progress_reader(self, name, deadline):
+        """Best-effort advisory reader; never gates or changes the wake."""
+        opener = getattr(getattr(self.transport, "opener", None), "open", None)
+        base_url = getattr(self.transport, "swap_url", None)
+        configured = getattr(self.transport, "active_models", None)
+        if (not callable(opener) or not isinstance(base_url, str)
+                or not isinstance(configured, (set, frozenset, tuple, list))):
+            return None
+        try:
+            reader = self.progress_reader_factory(
+                opener=opener,
+                base_url=base_url,
+                model=name,
+                configured_models=configured,
+                deadline=deadline,
+                emit=lambda detail: self.scheduler.emit(
+                    "wake_progress", model=name, detail=detail),
+                monotonic=self.monotonic,
+                wall_clock=time.time,
+            )
+            reader.start()
+            return reader
+        except Exception:
+            # A missing/failed observer must not suppress the actual wake.
+            try:
+                if "reader" in locals():
+                    reader.close(timeout=0.2)
+            except Exception:
+                pass
+            return None
 
     def _model(self, snapshot, name):
         if name not in getattr(self.transport, "active_models", self.transport.models):
@@ -788,20 +820,10 @@ class ModelActionController:
                 if faults is not None and model.state == "sleeping":
                     faults.note_wake(name)
                 self.scheduler.emit("wake_requested", model=name, detail={"by": by, "cold_start": result["cold_start"]})
-                if result["cold_start"]:
-                    # This reader is advisory and starts after the action lock is
-                    # released.  A delayed header never delays the wake request.
-                    progress_reader = self.progress_reader_factory(
-                        opener=self.transport.opener.open,
-                        base_url=self.transport.swap_url,
-                        model=name,
-                        deadline=deadline,
-                        emit=lambda detail: self.scheduler.emit(
-                            "wake_progress", model=name, detail=detail),
-                        monotonic=self.monotonic,
-                        wall_clock=time.time,
-                    )
-                    progress_reader.start()
+            if result["cold_start"]:
+                # This reader is advisory and starts after the action lock is
+                # released.  A delayed header never delays the wake request.
+                progress_reader = self._start_progress_reader(name, deadline)
             # No action lock during this request: it may synchronously reenter
             # /v1/place through the data-plane launcher before returning.
             prepared = _recovery.before_wake_request(name, deadline) if _recovery is not None else None
@@ -851,7 +873,10 @@ class ModelActionController:
             result.update(status="timeout" if exc.reason == "deadline_exceeded" else "blocked", error=exc.reason)
         finally:
             if progress_reader is not None:
-                progress_reader.close(timeout=2.0)
+                try:
+                    progress_reader.close(timeout=2.0)
+                except Exception:
+                    pass
             result["elapsed_seconds"] = max(0.0, self.monotonic() - started)
             with self.scheduler.changed:
                 if owned:

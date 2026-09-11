@@ -137,7 +137,8 @@ LLM_URL=http://scheduler:8011 python3 llm wake --wait 1200 -- '-model'
 llama-swap `ProcessLogger` 中少量固定启动阶段转成 `wake_progress`。这些阶段是带
 `source=llama-swap` 的不可信观察（可能丢失、断线或因 `no-history` 竞态而不可用），不会显示原始日志、
 URL、PID、错误文本、百分比或 ETA，也不代表 ready、daemon 已停止或资源已释放。重连/过期事件会显示
-`progress unavailable`；最终 ready/partial/failed/timeout 仍只取原始 wake 回执。`--json` 保持只在 stdout
+`progress unavailable`；本地 epoch/sequence/cursor 只用于抑制重放和过期阶段，不证明源连续或请求因果。最终
+ready/partial/failed/timeout 仍只取原始 wake 回执。`--json` 保持只在 stdout
 输出机器可读回执，进度提示不写入 stdout。真实 sleeping-wake <3 秒与显存释放实测仍需 ops/integration
 验收；命令发布不代表生产动作获准。
 

@@ -14,7 +14,7 @@ import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 
 MAX_LINE_BYTES = 16 * 1024
@@ -24,15 +24,15 @@ _GO_TIMESTAMP = re.compile(rb"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{6,9})?
 
 # These are byte prefixes from the pinned vllm-wrapper source.  Values after a
 # prefix (URL, PID and error text) are intentionally discarded.
-_PREFIXES = (
-    (b"Starting vllm-wrapper serve on ", "wrapper_started"),
-    (b"vLLM daemon not reachable (", "wake_attempted"),
-    (b"Wake up failed: ", "start_attempted"),
-    (b"Started daemon with PID ", "process_started"),
-    (b"Wake up sent, waiting for healthy state", "health_wait"),
-    (b"Waiting for vLLM to be healthy after wake up", "health_wait"),
-    (b"Failed to start daemon: ", "start_failed"),
-    (b"vLLM health check failed after wake up: ", "health_failed"),
+_PATTERNS = (
+    (re.compile(rb"^Starting vllm-wrapper serve on .+$"), "wrapper_started"),
+    (re.compile(rb"^vLLM daemon not reachable \(.+\), attempting to wake up$"), "wake_attempted"),
+    (re.compile(rb"^Wake up failed: .+, attempting to start daemon$"), "start_attempted"),
+    (re.compile(rb"^Started daemon with PID [0-9]+, waiting for healthy state$"), "process_started"),
+    (re.compile(rb"^Wake up sent, waiting for healthy state$"), "health_wait"),
+    (re.compile(rb"^Waiting for vLLM to be healthy after wake up$"), "health_wait"),
+    (re.compile(rb"^Failed to start daemon: .+$"), "start_failed"),
+    (re.compile(rb"^vLLM health check failed after wake up: .+$"), "health_failed"),
 )
 
 
@@ -50,8 +50,8 @@ def parse_log_line(raw):
         value.decode("utf-8")
     except UnicodeDecodeError:
         return None
-    for prefix, stage in _PREFIXES:
-        if value.startswith(prefix):
+    for pattern, stage in _PATTERNS:
+        if pattern.fullmatch(value):
             return stage
     return None
 
@@ -59,17 +59,25 @@ def parse_log_line(raw):
 class WakeProgressReader:
     """Read one bounded model log stream until wake completion or deadline."""
 
-    def __init__(self, *, opener, base_url, model, deadline, emit,
+    def __init__(self, *, opener, base_url, model, configured_models, deadline, emit,
                  monotonic=time.monotonic, wall_clock=time.time):
         if not callable(opener) or not isinstance(base_url, str) or not base_url:
             raise ValueError("wake progress reader requires an HTTP opener and origin")
-        if not isinstance(model, str) or not model or model in (".", ".."):
+        if (not isinstance(model, str) or not model or model in (".", "..", "proxy", "upstream")
+                or not isinstance(configured_models, (set, frozenset, tuple, list))
+                or list(configured_models).count(model) != 1):
             raise ValueError("wake progress reader requires a canonical model")
+        parts = urlsplit(base_url)
+        if (parts.scheme not in ("http", "https") or not parts.hostname
+                or parts.username or parts.password or parts.query or parts.fragment
+                or parts.path not in ("", "/")):
+            raise ValueError("wake progress reader requires an origin")
         if not callable(emit) or not callable(monotonic) or not callable(wall_clock):
             raise ValueError("wake progress reader callbacks are required")
         self.opener = opener
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.configured_models = frozenset(configured_models)
         self.deadline = deadline
         self.emit = emit
         self.monotonic = monotonic
@@ -81,7 +89,7 @@ class WakeProgressReader:
         self._response = None
         self.thread = None
         self._unavailable_sent = False
-        self._saw_stage = False
+        self._last_stage = None
 
     @property
     def url(self):
@@ -110,8 +118,14 @@ class WakeProgressReader:
     def _emit(self, stage):
         if self._stop.is_set():
             return
+        if stage != "unavailable" and stage == self._last_stage:
+            return
         if stage != "unavailable":
-            self._saw_stage = True
+            self._last_stage = stage
+        elif self._unavailable_sent:
+            return
+        if stage == "unavailable":
+            self._unavailable_sent = True
         try:
             self.emit(self._detail(stage))
         except Exception:
@@ -119,8 +133,7 @@ class WakeProgressReader:
             self._stop.set()
 
     def _unavailable(self):
-        if not self._saw_stage and not self._unavailable_sent and not self._stop.is_set():
-            self._unavailable_sent = True
+        if not self._stop.is_set():
             self._emit("unavailable")
 
     def _interrupt(self):
@@ -165,13 +178,11 @@ class WakeProgressReader:
             response = self.opener(request, timeout=min(1.0, remaining))
             with self._lock:
                 self._response = response
-            raw = getattr(getattr(response, "fp", None), "raw", None)
-            sock = getattr(raw, "_sock", None)
-            if sock is not None:
-                sock.settimeout(min(0.5, max(0.05, remaining)))
             while not self._stop.is_set() and self.monotonic() < self.deadline:
                 try:
-                    chunk = response.read(4096)
+                    read_available = getattr(response, "read1", None)
+                    chunk = (read_available(4096) if callable(read_available)
+                             else response.read(4096))
                 except socket.timeout:
                     # An idle stream is still within this wake window; do not
                     # turn an ordinary read timeout into a terminal failure.
@@ -194,7 +205,7 @@ class WakeProgressReader:
                         self._emit(stage)
             if not self._stop.is_set():
                 self._unavailable()
-        except (HTTPError, URLError, OSError, ValueError, UnicodeError, TimeoutError, TypeError):
+        except (HTTPError, URLError, OSError, ValueError, UnicodeError, TimeoutError, TypeError, AttributeError):
             self._unavailable()
         finally:
             with self._lock:

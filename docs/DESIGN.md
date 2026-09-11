@@ -684,7 +684,8 @@ gemma-4-31b-it-bf16        stopped   -    -     9h         0      -        冷�
   丢失、断开或在订阅竞态中不可用。事件只保留 source/model/epoch/sequence/时间和
   固定 stage，不携带 URL、PID、错误文本、prompt、IP 或 header；不建立第二个客户端
   上游连接，也不把 `health_wait` 或 `process_started` 当作 ready。唤醒 POST 不等待
-  日志首字节，最终状态仍以 controller 回执为准。
+  日志首字节；本地 epoch/sequence/cursor 仅抑制重放/过期阶段，不证明源连续或请求因果。
+  已知流中断会追加 bounded `unavailable`，静默丢失仍保持 unknown；最终状态仍以 controller 回执为准。
 - 验证采用实际 PTY 的 60 秒只读合成 HTTP 场景：CPU 以单核 100% 定义、目标
   idle <2%；按键写入至含该输入的 PTY 重绘输出 <50ms。记录逐帧耗时、清表次数、
   光标和日志上限。保存实际 SVG 截图/PTY 录制供用户确认；终端模拟器和远程网络

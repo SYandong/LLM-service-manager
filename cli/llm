@@ -1265,42 +1265,48 @@ def execute_wake_with_progress(args, client):
     progress_epoch = None
     progress_sequence = 0
     last = None
-    while request.is_alive():
-        update = reader.drain()
-        if generation is None:
-            generation = update["generation"]
-        elif update["generation"] != generation:
-            generation = update["generation"]
-            progress_epoch = None
-            progress_sequence = 0
-            if not args.json and last != "progress unavailable":
-                print("Wake progress unavailable; final server result remains authoritative", file=sys.stderr)
-                last = "progress unavailable"
-        for item in update["events"]:
-            progress = parse_wake_progress(item, args.model, since=started)
-            if progress is None:
-                continue
-            if progress_epoch is not None and progress["log_epoch"] != progress_epoch:
-                if progress["sequence"] != 1:
-                    if not args.json and last != "progress unavailable":
-                        print("Wake progress unavailable; source epoch changed", file=sys.stderr)
-                        last = "progress unavailable"
-                    continue
+    try:
+        while request.is_alive():
+            update = reader.drain()
+            if generation is None:
+                generation = update["generation"]
+            elif update["generation"] != generation:
+                generation = update["generation"]
+                progress_epoch = None
                 progress_sequence = 0
-            if progress["log_epoch"] == progress_epoch and progress["sequence"] <= progress_sequence:
-                continue
-            progress_epoch = progress["log_epoch"]
-            progress_sequence = progress["sequence"]
-            label = progress["label"]
-            if not args.json and label != last:
-                print("Wake observed: %s (source: llama-swap; readiness is the server result)" % label,
-                      file=sys.stderr)
-                last = label
-        time.sleep(0.01)
-    request.join()
-    reader.close(timeout=2)
+                if not args.json and last != "progress unavailable":
+                    print("Wake progress unavailable; final server result remains authoritative", file=sys.stderr)
+                    last = "progress unavailable"
+            for item in update["events"]:
+                progress = parse_wake_progress(item, args.model, since=started)
+                if progress is None:
+                    continue
+                if progress_epoch is not None and progress["log_epoch"] != progress_epoch:
+                    if progress["sequence"] != 1:
+                        if not args.json and last != "progress unavailable":
+                            print("Wake progress unavailable; source epoch changed", file=sys.stderr)
+                            last = "progress unavailable"
+                        continue
+                    progress_sequence = 0
+                if progress["log_epoch"] == progress_epoch and progress["sequence"] <= progress_sequence:
+                    continue
+                progress_epoch = progress["log_epoch"]
+                progress_sequence = progress["sequence"]
+                label = progress["label"]
+                if not args.json and label != last:
+                    print("Wake observed: %s (source: llama-swap; readiness is the server result)" % label,
+                          file=sys.stderr)
+                    last = label
+            time.sleep(0.01)
+    finally:
+        # Closing the observer never retries or cancels the already-submitted
+        # POST; it only bounds local reader/worker cleanup on errors or Ctrl-C.
+        reader.close(timeout=2)
+        request.join(timeout=2)
     if "error" in outcome:
         raise outcome["error"]
+    if request.is_alive():
+        raise ClientError("Wake request still running; outcome unknown. Check status/events before retrying")
     return outcome["result"]
 
 

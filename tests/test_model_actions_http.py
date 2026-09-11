@@ -136,6 +136,7 @@ def test_stopped_wake_progress_reader_is_advisory_and_closed_before_result(syste
             self.closed = False
 
         def start(self):
+            seen.append(("lock_owned", scheduler.action_lock._is_owned()))
             self.emit({"stage": "process_started", "source": "llama-swap",
                        "source_model": "model", "progress_source": "per_model_log",
                        "log_epoch": "fixture", "sequence": 1, "received_at": 1.0,
@@ -150,12 +151,23 @@ def test_stopped_wake_progress_reader_is_advisory_and_closed_before_result(syste
     scheduler.model_actions.progress_reader_factory = FixtureReader
     status, result = request(address, "POST", "/v1/wake/model")
     assert status == 200 and result["ready"] is True
-    assert seen[0][0] == "init" and "started" in seen and seen[-1][0] == "closed"
+    assert seen[0][0] == "init" and ("lock_owned", False) in seen and "started" in seen and seen[-1][0] == "closed"
     progress = [item for item in scheduler.events_since(0) if item.kind == "wake_progress"]
     assert len(progress) == 1
     assert progress[0].detail["source_model"] == "model"
     assert state["http_calls"] == [("GET", "/upstream/model/")]
     assert transport.swap_url.startswith("http://127.0.0.1:")
+
+
+def test_model_transport_rejects_reserved_global_log_monitor_names():
+    with pytest.raises(ValueError, match="invalid configured model name"):
+        ManagedModelTransport(swap_url="http://127.0.0.1:8000",
+                              models={"proxy": {"unit": "vllm-proxy.service"}},
+                              systemctl="configured-systemctl")
+    with pytest.raises(ValueError, match="invalid configured model name"):
+        ManagedModelTransport(swap_url="http://127.0.0.1:8000",
+                              models={"upstream": {"unit": "vllm-upstream.service"}},
+                              systemctl="configured-systemctl")
 
 
 def test_wake_wait_releases_lock_and_observes_later_readiness(system):
