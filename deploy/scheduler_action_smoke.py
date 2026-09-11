@@ -417,34 +417,49 @@ def stop_wrapper(profile, pid):
 
 def scheduler_wake_request(api, profile, deadline, *, identity_reader=unit_identity):
     """Own one scheduler wake POST while a separate reader observes SSE only."""
-    request_client=api['SchedulerClient'](profile['scheduler_url'],timeout=lifecycle.remaining(deadline,25))
+    request_timeout=deadline-time.monotonic()
+    if request_timeout<=0:raise EvidenceError('scheduler wake deadline')
+    request_client=api['SchedulerClient'](profile['scheduler_url'],timeout=request_timeout)
     event_client=api['SchedulerClient'](profile['scheduler_url'],timeout=1)
     reader=api['EventReader'](event_client,stream_timeout=.5,retry_delay=.1,max_retry_delay=1,queue_size=64)
     evidence={'operation':'cold','local_request_id':profile.get('request_id'),'model':profile['model'],
               'response':None,'progress':[],'progress_before_response':False,'identity_checks':{}}
-    outcome={};started=time.monotonic();after_id=0;progress_state={'log_epoch':None,'sequence':0,'retired_epochs':set()}
+    outcome={};started=time.monotonic();started_wall=time.time();after_id=0;generation=None
+    progress_state={'log_epoch':None,'sequence':0,'retired_epochs':set()};progress_observed=[]
     def invoke():
         try:outcome['response']=request_client.request('POST','/v1/wake/'+quote(profile['model'],safe=''),{})
         except Exception as exc:outcome['error']=exc
+        finally:outcome['returned_monotonic']=time.monotonic()
     request=threading.Thread(target=invoke,name='ops-cold-scheduler-wake',daemon=True)
     reader.start();request.start()
+    def collect(update,observed_at):
+        nonlocal generation,after_id,progress_state
+        if generation is None:generation=update.get('generation')
+        elif update.get('generation')!=generation:
+            generation=update.get('generation');after_id=0
+            progress_state={'log_epoch':None,'sequence':0,'retired_epochs':set()}
+        for item in update.get('events',[]):
+            progress=api['parse_wake_progress'](item,profile['model'],after_id=after_id,since=started_wall)
+            if progress is not None and api['accept_wake_progress'](progress,progress_state):
+                evidence['progress'].append(progress);progress_observed.append(observed_at);after_id=max(after_id,item['id'])
     try:
         while request.is_alive():
-            update=reader.drain()
-            for item in update.get('events',[]):
-                progress=api['parse_wake_progress'](item,profile['model'],after_id=after_id,since=started)
-                if progress is not None and api['accept_wake_progress'](progress,progress_state):
-                    evidence['progress'].append(progress);after_id=max(after_id,item['id'])
-            if evidence['progress']:evidence['progress_before_response']=True
+            collect(reader.drain(),time.monotonic())
             if time.monotonic()>=deadline:break
             time.sleep(.01)
         request.join(timeout=max(0,deadline-time.monotonic()))
+        collect(reader.drain(),time.monotonic())
         if request.is_alive():raise EvidenceError('scheduler wake deadline',evidence=evidence)
+        returned=outcome.get('returned_monotonic')
+        evidence['progress_before_response']=bool(returned is not None and any(value<=returned for value in progress_observed))
         if 'error' in outcome:
             raise EvidenceError('scheduler wake request failed',evidence={**evidence,'error':type(outcome['error']).__name__+': '+str(outcome['error'])})
         response=outcome.get('response');evidence['response']=response
         if (not isinstance(response,dict) or response.get('status')!='ready'
-                or response.get('ready') is not True or response.get('model')!=profile['model']):
+                or response.get('ready') is not True or response.get('model')!=profile['model']
+                or response.get('cold_start') is not True
+                or type(response.get('elapsed_seconds')) not in (int,float)
+                or not math.isfinite(response['elapsed_seconds']) or response['elapsed_seconds']<0):
             raise EvidenceError('scheduler wake did not reach ready',evidence=evidence)
         lifecycle.remaining(deadline,2)
         state=request_client.request('GET','/v1/state',timeout=lifecycle.remaining(deadline,2))
@@ -485,7 +500,7 @@ def helper_main(argv):
         if request['operation']=='cold' and profile.get('cold_route','native_chat')=='scheduler_wake':
             profile['request_id']=request['id']
             value=scheduler_wake_request(api,profile,deadline,identity_reader=unit_identity)
-            result.update(status='passed',evidence=value)
+            result.update(status='passed',evidence=value,lease=value['lease'],seconds=value['seconds'],cold_start=True)
         elif request['operation']=='cold':
             from urllib.request import Request,build_opener,ProxyHandler
             from urllib.error import HTTPError
@@ -852,6 +867,17 @@ print('{}')
                 self._record_phase_result(name,value)
                 self.log('scheduler_action_phase',phase=name,receipt=value)
                 if value.get('status')!='passed':raise lifecycle.SmokeError('action phase failed: '+str(value.get('error')))
+                if name=='wake' and self.config.get('cold_route','native_chat')=='scheduler_wake':
+                    warm_seconds=(value.get('evidence') or {}).get('http_seconds')
+                    if (type(warm_seconds) not in (int,float) or not math.isfinite(warm_seconds)
+                            or warm_seconds<0):
+                        self.phase_measurements[name]={'quality':'unmeasured','measured':False}
+                        self.measured_phases.discard(name)
+                        raise lifecycle.SmokeError('warm wake latency unavailable')
+                    if warm_seconds>3:
+                        self.phase_measurements[name]={'quality':'measured_over_target','measured':True}
+                        self.measured_phases.add(name)
+                        raise lifecycle.SmokeError('warm wake exceeded three-second target')
                 if name=='cold':self.lease=value['lease']
                 return value
             state=self.container(['systemctl','is-active',unit],check=False).stdout.strip()

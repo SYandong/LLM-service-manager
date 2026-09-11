@@ -155,12 +155,12 @@ def test_actual_scheduler_free_wake_events_preserve_real_launcher_account(chain)
 
 
 @pytest.mark.parametrize('response,expect_success', [
-    ({'model':'model','status':'ready','ready':True}, True),
+    ({'model':'model','status':'ready','ready':True,'cold_start':True,'elapsed_seconds':1.2}, True),
     ({'model':'other','status':'ready','ready':True}, False),
     ({'model':'model','status':'failed','ready':False,'error':'wake_failed'}, False),
     (['not','an','object'], False),
 ])
-def test_scheduler_wake_cold_route_owns_one_post_and_validates_final_response(response,expect_success):
+def test_scheduler_wake_cold_route_owns_one_post_and_validates_final_response(response,expect_success,tmp_path,monkeypatch):
     post_seen=threading.Event();progress_sent=threading.Event();done=threading.Event();calls=[]
     state={'read_only':False,'sampled_at':time.time(),'errors':[],
            'models':[{'name':'model','state':'awake','gpu':0,'unit':'vllm-model.service','resident_gb':20}],
@@ -188,11 +188,57 @@ def test_scheduler_wake_cold_route_owns_one_post_and_validates_final_response(re
             result=smoke.scheduler_wake_request(API,profile,time.monotonic()+3,identity_reader=identity)
             assert result['response']==response and result['progress_before_response'] is True
             assert result['lease']['lease_id']=='lease-1'
+            root=tmp_path/'run';root.mkdir();(root/'owner').write_text('token')
+            request_id='a'*32;deadline=time.monotonic()+3
+            (root/'request.json').write_text(json.dumps({'id':request_id,'operation':'cold','output':'result-'+request_id+'.json','deadline':deadline}))
+            helper_profile={**profile,'root':str(root),'cli':str(ROOT/'cli/llm'),'control_instances':{},'cold_route':'scheduler_wake','work_deadline':deadline+2}
+            profile_path=root/'profile.json';profile_path.write_text(json.dumps(helper_profile));monkeypatch.setattr(smoke,'unit_identity',identity)
+            assert smoke.helper_main(['request',str(profile_path),'request.json'])==0
+            receipt=json.loads((root/('result-'+request_id+'.json')).read_text())
+            assert receipt['status']=='passed' and receipt['cold_start'] is True and receipt['lease']['lease_id']=='lease-1'
+            run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='model';run.unit='vllm-model.service';run.temp=str(root);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run.config={'scheduler_python':sys.executable};run.log=lambda *a,**k:None;run.inventory=lambda **_:None;run.control=lambda *a,**k:None
+            monkeypatch.setattr(smoke.uuid,'uuid4',lambda:SimpleNamespace(hex=request_id))
+            run.python=lambda code,data,**kwargs: (Path(data['root'],data['name']).write_text(json.dumps(data['data'])) or {}) if 'write_text' in code else json.loads(Path(data['root'],data['name']).read_text())
+            consumed=run.phase('cold',1)
+            assert consumed['lease']['lease_id']=='lease-1' and run.measured_phases=={'cold'}
         else:
             with pytest.raises(smoke.EvidenceError):smoke.scheduler_wake_request(API,profile,time.monotonic()+3,identity_reader=identity)
-        assert calls==['/v1/wake/model']
+        assert calls==(['/v1/wake/model','/v1/wake/model'] if expect_success else ['/v1/wake/model'])
     finally:
         done.set();server.shutdown();server.server_close();thread.join(2)
+
+
+def test_scheduler_wake_post_uses_full_isolated_cold_budget_without_waiting_25_seconds():
+    timeouts=[];posts=[]
+    class Client:
+        def __init__(self,url,timeout=10):timeouts.append(timeout)
+        def request(self,method,path,payload=None,timeout=None):
+            if method=='POST':posts.append(path);return {'model':'model','status':'ready','ready':True,'cold_start':True,'elapsed_seconds':40}
+            return {'read_only':False,'sampled_at':time.time(),'errors':[],
+                    'models':[{'name':'model','state':'awake','gpu':0,'unit':'vllm-model.service','resident_gb':20}],
+                    'leases':[{'model':'model','gpu':0,'unit':'vllm-model.service','lease_id':'lease-1','status':'confirmed','budget_gb':20}]}
+    class Reader:
+        def __init__(self,*a,**k):pass
+        def start(self):pass
+        def drain(self):return {'generation':0,'events':[]}
+        def close(self,timeout=None):return True
+    api={'SchedulerClient':Client,'EventReader':Reader,'parse_wake_progress':lambda *a,**k:None,'accept_wake_progress':lambda *a,**k:False}
+    profile={'scheduler_url':'http://fixture','model':'model','unit':'vllm-model.service','token':'token','gpu':0,'request_id':'cold'}
+    result=smoke.scheduler_wake_request(api,profile,time.monotonic()+90,identity_reader=lambda *a,**k:{'unit':'vllm-model.service'})
+    assert result['response']['cold_start'] is True and posts==['/v1/wake/model'] and timeouts[0]>25
+
+
+def test_scheduler_wake_route_checks_warm_latency_independently(tmp_path):
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='model';run.unit='vllm-model.service';run.temp=str(tmp_path);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run.config={'scheduler_python':sys.executable,'cold_route':'scheduler_wake'};run.log=lambda *a,**k:None;run.inventory=lambda **_:None;run.control=lambda *a,**k:None
+    def python(code,data,**kwargs):
+        if 'write_text' in code:
+            receipt={'local_request_id':data['data']['id'],'operation':'wake','status':'passed','evidence':{'http_seconds':4.0}}
+            (tmp_path/data['data']['output']).write_text(json.dumps(receipt));return {}
+        return json.loads((tmp_path/data['name']).read_text())
+    run.python=python
+    with pytest.raises(life.SmokeError,match='warm wake exceeded'):
+        run.phase('wake',1)
+    assert run.phase_measurements['wake']=={'quality':'measured_over_target','measured':True}
 
 
 def test_pin_refusal_does_not_dispatch_or_forge_measurement(chain):
