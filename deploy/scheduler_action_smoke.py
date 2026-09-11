@@ -203,6 +203,9 @@ def account(snapshot, profile, *, state=None):
 def action_probe(api, profile, operation, request_id, *, deadline, identity_reader=unit_identity):
     """Actual API/SSE exercise; local correlation is explicitly not a server ID."""
     if operation not in ('free','wake'):raise EvidenceError('unsupported action')
+    evidence={'operation':operation,'local_request_id':request_id,'model':profile['model'],
+              'response':None,'client_started_monotonic':None,'client_returned_monotonic':None,
+              'deadline':deadline,'identity_checks':{}}
     client=api['SchedulerClient'](profile['scheduler_url'],timeout=lifecycle.remaining(deadline,25))
     event_client=api['SchedulerClient'](profile['scheduler_url'],timeout=1)
     reader=api['EventReader'](event_client,stream_timeout=lifecycle.remaining(deadline,30),retry_delay=.1,queue_size=512)
@@ -221,38 +224,49 @@ def action_probe(api, profile, operation, request_id, *, deadline, identity_read
             connected=[i for i,m in enumerate(metadata) if m['status']=='SSE connected']
             if connected and any(m['status']!='SSE connected' for m in metadata[connected[0]:]):
                 raise EvidenceError('SSE disconnected during measurement')
+            if connected:evidence['identity_checks']['sse_connected']=True
             return bool(connected)
-    reader.start()
     try:
+        reader.start()
         while not healthy_stream():
             notified.wait(lifecycle.remaining(deadline,.1));notified.clear()
         before=client.request('GET','/v1/state')
         old_model,old_lease=account(before,profile,state='awake' if operation=='free' else 'sleeping')
+        evidence['identity_checks']['before_account']=True
         unit_before=identity_reader(profile['unit'],profile['token'],lease=old_lease['lease_id'],deadline=deadline,origin=profile.get('backend_url'))
+        evidence['identity_checks']['before_unit']=unit_before
         with lock:cursor=max((item['id'] for item,_ in events),default=0)
+        evidence['identity_checks']['cursor_before']=cursor
         path='/v1/free' if operation=='free' else '/v1/wake/'+quote(profile['model'],safe='')
         payload={'gpu':profile['gpu'],'ram':False,'need_gb':1} if operation=='free' else {}
         started=time.monotonic()
+        evidence['client_started_monotonic']=started
         try:
             response=client.request('POST',path,payload)
             http_done=time.monotonic()
         except Exception as exc:
-            raise EvidenceError('action request transport error', evidence={
-                'operation':operation,'local_request_id':request_id,'model':profile['model'],
-                'response':None,'client_started_monotonic':started,
-                'client_returned_monotonic':time.monotonic(),'deadline':deadline,
-                'identity_checks':{'sse_connected':True,'before_account':True,
-                                   'before_unit':unit_before,'cursor_before':cursor,
-                                   'result_event':None,'after_account':None,'after_unit':None},
-                'transport_error_type':type(exc).__name__}) from exc
-        evidence={
-            'operation':operation,'local_request_id':request_id,'model':profile['model'],
-            'response':response,'client_started_monotonic':started,
-            'client_returned_monotonic':http_done,'deadline':deadline,
-            'identity_checks':{'sse_connected':True,'before_account':True,
-                               'before_unit':unit_before,'cursor_before':cursor,
-                               'result_event':None,'after_account':None,'after_unit':None},
-        }
+            returned=time.monotonic()
+            evidence['client_returned_monotonic']=returned
+            payload=getattr(exc,'payload',None)
+            status=getattr(exc,'status',None)
+            if isinstance(payload,dict):
+                evidence['response']=payload
+                evidence['response_parsed']=True
+            elif payload is not None:
+                evidence['response_parsed']=False
+            if status is not None:
+                evidence['http_status']=status
+                evidence['response_received']=True
+            elif payload is not None:
+                evidence['response_received']=True
+            else:
+                evidence['response_received']=None
+            evidence['transport_error_type']=type(exc).__name__
+            raise EvidenceError('action request transport error', evidence=evidence) from exc
+        evidence['client_returned_monotonic']=http_done
+        evidence['response']=response
+        evidence['response_received']=True
+        evidence['response_parsed']=True
         if operation=='free':
             if (response.get('status')!='complete' or response.get('measurement_complete') is not True
                     or response.get('slept')!=[profile['model']] or response.get('stopped')):
@@ -261,7 +275,7 @@ def action_probe(api, profile, operation, request_id, *, deadline, identity_read
             if type(value) not in (int,float) or not math.isfinite(value) or value<=0:
                 raise EvidenceError('free has no positive measured release', evidence=evidence)
         elif response.get('status')!='ready' or response.get('ready') is not True or response.get('model')!=profile['model']:
-            raise EvidenceError('wake did not reach ready')
+            raise EvidenceError('wake did not reach ready', evidence=evidence)
         kind=operation+'_result'
         while True:
             healthy_stream()
@@ -270,18 +284,25 @@ def action_probe(api, profile, operation, request_id, *, deadline, identity_read
                           and (operation=='free' or item.get('model')==profile['model'])
                           and all(item.get('detail',{}).get(k)==v for k,v in response.items())]
             if len(matching)>1:raise EvidenceError('ambiguous result-event correlation')
-            if matching:break
+            if matching:
+                evidence['identity_checks']['result_event']=matching[0][0]['id']
+                break
             notified.wait(lifecycle.remaining(deadline,.1));notified.clear()
         after=client.request('GET','/v1/state')
         new_model,new_lease=account(after,profile,state='sleeping' if operation=='free' else 'awake')
+        evidence['identity_checks']['after_account']=True
         if new_lease!=old_lease:raise EvidenceError('lease/account changed across action')
+        evidence['identity_checks']['lease_unchanged']=True
         unit_after=identity_reader(profile['unit'],profile['token'],lease=new_lease['lease_id'],deadline=deadline,origin=profile.get('backend_url'))
+        evidence['identity_checks']['after_unit']=unit_after
         if unit_after!=unit_before:raise EvidenceError('daemon instance changed across action')
+        evidence['identity_checks']['unit_unchanged']=True
         healthy_stream()
         with lock:
             final_matches=[(item,at) for item,at in events if item['id']>cursor and item['kind']==kind
                            and all(item.get('detail',{}).get(k)==v for k,v in response.items())]
         if len(final_matches)!=1:raise EvidenceError('ambiguous result-event correlation')
+        evidence['identity_checks']['final_result_event']=final_matches[0][0]['id']
         event,arrived=final_matches[0]
         return {'operation':operation,'local_request_id':request_id,'server_request_id':None,
                 'correlation':'isolated model/account + cursor + exact response fields; no server request ID',
@@ -292,8 +313,26 @@ def action_probe(api, profile, operation, request_id, *, deadline, identity_read
                 'before_resident_gb':old_model['resident_gb'],'after_resident_gb':new_model['resident_gb'],
                 'response':response,'source_event_timestamp':event.get('timestamp'),
                 'long_term_stability_calibration':'NOT MEASURED'}
+    except EvidenceError as exc:
+        if exc.evidence is None:exc.evidence=evidence
+        raise
+    except Exception as exc:
+        if evidence['client_started_monotonic'] is not None:
+            evidence['validation_error_type']=type(exc).__name__
+            raise EvidenceError('action validation failed: '+str(exc),evidence=evidence) from exc
+        raise
     finally:
-        if not reader.close():raise EvidenceError('SSE reader did not stop')
+        active=sys.exc_info()[1]
+        try:
+            closed=reader.close()
+        except Exception as exc:
+            if active is None:raise EvidenceError('SSE reader did not stop',evidence=evidence) from exc
+            evidence['reader_close_error_type']=type(exc).__name__
+        else:
+            if not closed:
+                if active is None:raise EvidenceError('SSE reader did not stop',evidence=evidence)
+                evidence['reader_close_error']='reader did not stop'
+            else:evidence['identity_checks']['reader_closed']=True
 
 
 def load_launcher(path):

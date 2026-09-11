@@ -604,6 +604,7 @@ def test_http200_unknown_release_preserves_ledger():
 class _EvidenceReader:
     def __init__(self, *args, **kwargs):
         self.callback = None
+        self.pending = None
 
     def set_notify(self, callback):
         self.callback = callback
@@ -613,19 +614,33 @@ class _EvidenceReader:
             self.callback()
 
     def drain(self):
+        if self.pending is not None:
+            value, self.pending = self.pending, None
+            return value
         return {'status': 'SSE connected', 'generation': 0, 'dropped': 0,
                 'missed': 0, 'cursor': 0, 'events': []}
+
+    def push(self, value):
+        self.pending = value
+        self.callback()
 
     def close(self):
         return True
 
 
-def _action_evidence_fixture(response):
+def _action_evidence_fixture(response, *, operation='free', post_hook=None,
+                             reader_type=_EvidenceReader):
     state = {'read_only': False, 'sampled_at': time.time(), 'errors': [],
              'models': [{'name': 'fixture', 'gpu': 0, 'unit': 'vllm-fixture.service',
-                         'state': 'awake', 'resident_gb': 80}],
+                         'state': 'awake' if operation == 'free' else 'sleeping',
+                         'resident_gb': 80}],
              'leases': [{'model': 'fixture', 'gpu': 0, 'unit': 'vllm-fixture.service',
                          'lease_id': 'lease-1', 'status': 'confirmed', 'budget_gb': 80}]}
+    reader_box = {}
+    class Reader(reader_type):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            reader_box['reader'] = self
     class Client:
         def __init__(self, *args, **kwargs):
             pass
@@ -635,8 +650,11 @@ def _action_evidence_fixture(response):
                 return state
             if isinstance(response, BaseException):
                 raise response
+            state['models'][0]['state'] = 'sleeping' if operation == 'free' else 'awake'
+            if method == 'POST' and post_hook is not None:
+                post_hook(reader_box['reader'], response)
             return response
-    api = {'SchedulerClient': Client, 'EventReader': _EvidenceReader}
+    api = {'SchedulerClient': Client, 'EventReader': Reader}
     profile = {'scheduler_url': 'http://fixture', 'model': 'fixture', 'gpu': 0,
                'unit': 'vllm-fixture.service', 'token': 'token',
                'backend_url': 'http://127.0.0.1:8101'}
@@ -663,6 +681,106 @@ def test_action_probe_failure_evidence_preserves_response_or_unknown(response, e
     assert evidence['identity_checks']['before_unit']['invocation_id'] == 'a' * 32
     assert (evidence['response'] is not None) is expected_response
     assert evidence['client_returned_monotonic'] >= evidence['client_started_monotonic']
+
+
+def test_wake_partial_response_preserves_failure_evidence():
+    response = {'status': 'partial', 'ready': False, 'model': 'fixture',
+                'error': 'transport_error'}
+    api, profile = _action_evidence_fixture(response, operation='wake')
+    with pytest.raises(smoke.EvidenceError, match='wake did not reach ready') as exc:
+        smoke.action_probe(api, profile, 'wake', 'wake-partial',
+                           deadline=time.monotonic() + 2,
+                           identity_reader=lambda *args, **kwargs: {
+                               'unit': 'vllm-fixture.service', 'pid': 1,
+                               'start_ticks': '2', 'invocation_id': 'a' * 32})
+    assert exc.value.evidence['response'] == response
+    assert exc.value.evidence['identity_checks']['before_account'] is True
+    assert exc.value.evidence['response_received'] is True
+
+
+def test_http_error_payload_is_distinguished_from_no_response():
+    class HTTPErrorFixture(RuntimeError):
+        status = 503
+        payload = {'error': 'placement_busy', 'status': 'blocked'}
+
+    api, profile = _action_evidence_fixture(HTTPErrorFixture('scheduler rejected'))
+    with pytest.raises(smoke.EvidenceError) as exc:
+        smoke.action_probe(api, profile, 'free', 'http-error',
+                           deadline=time.monotonic() + 2,
+                           identity_reader=lambda *args, **kwargs: {
+                               'unit': 'vllm-fixture.service', 'pid': 1,
+                               'start_ticks': '2', 'invocation_id': 'a' * 32})
+    evidence = exc.value.evidence
+    assert evidence['response'] == HTTPErrorFixture.payload
+    assert evidence['http_status'] == 503
+    assert evidence['response_received'] is True
+    assert evidence['response_parsed'] is True
+
+
+def test_post_response_stream_failure_preserves_response_and_passed_checks():
+    response = {'status': 'complete', 'measurement_complete': True,
+                'freed_gb': 27.6, 'slept': ['fixture'], 'stopped': []}
+    api, profile = _action_evidence_fixture(
+        response,
+        post_hook=lambda reader, _response: reader.push({
+            'status': 'SSE disconnected', 'generation': 0, 'dropped': 0,
+            'missed': 0, 'cursor': 1, 'events': []}),
+    )
+    with pytest.raises(smoke.EvidenceError, match='SSE disconnected') as exc:
+        smoke.action_probe(api, profile, 'free', 'stream-failure',
+                           deadline=time.monotonic() + 2,
+                           identity_reader=lambda *args, **kwargs: {
+                               'unit': 'vllm-fixture.service', 'pid': 1,
+                               'start_ticks': '2', 'invocation_id': 'a' * 32})
+    evidence = exc.value.evidence
+    assert evidence['response'] == response
+    assert evidence['identity_checks']['sse_connected'] is True
+    assert evidence['identity_checks'].get('result_event') is None
+    assert evidence['identity_checks']['reader_closed'] is True
+
+
+def test_post_response_identity_failure_preserves_response_and_checks():
+    response = {'status': 'complete', 'measurement_complete': True,
+                'freed_gb': 27.6, 'slept': ['fixture'], 'stopped': []}
+    event = {'id': 1, 'kind': 'free_result', 'model': 'fixture',
+             'detail': response}
+    calls = []
+    def identity(*args, **kwargs):
+        calls.append(True)
+        return {'unit': 'vllm-fixture.service', 'pid': 1,
+                'start_ticks': 'changed' if len(calls) > 1 else '2',
+                'invocation_id': 'a' * 32}
+    api, profile = _action_evidence_fixture(
+        response, post_hook=lambda reader, _response: reader.push({
+            'status': 'SSE connected', 'generation': 0, 'dropped': 0,
+            'missed': 0, 'cursor': 1, 'events': [event]}),
+    )
+    with pytest.raises(smoke.EvidenceError, match='daemon instance changed') as exc:
+        smoke.action_probe(api, profile, 'free', 'identity-failure',
+                           deadline=time.monotonic() + 2, identity_reader=identity)
+    evidence = exc.value.evidence
+    assert evidence['response'] == response
+    assert evidence['identity_checks']['result_event'] == 1
+    assert evidence['identity_checks']['after_account'] is True
+    assert evidence['identity_checks'].get('unit_unchanged') is None
+
+
+def test_reader_close_failure_does_not_mask_response_failure():
+    class CloseFailureReader(_EvidenceReader):
+        def close(self):
+            raise RuntimeError('close failed')
+
+    response = {'status': 'partial', 'measurement_complete': True,
+                'freed_gb': 27.6, 'slept': ['fixture'], 'stopped': []}
+    api, profile = _action_evidence_fixture(response, reader_type=CloseFailureReader)
+    with pytest.raises(smoke.EvidenceError, match='free refused') as exc:
+        smoke.action_probe(api, profile, 'free', 'close-failure',
+                           deadline=time.monotonic() + 2,
+                           identity_reader=lambda *args, **kwargs: {
+                               'unit': 'vllm-fixture.service', 'pid': 1,
+                               'start_ticks': '2', 'invocation_id': 'a' * 32})
+    assert exc.value.evidence['response'] == response
+    assert exc.value.evidence['reader_close_error_type'] == 'RuntimeError'
 
 
 @pytest.mark.parametrize('evidence', [
