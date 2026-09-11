@@ -378,8 +378,9 @@ def parse_wake_progress(item, target, *, after_id=0, since=None):
         return None
     if type(item.get("id")) is not int or item["id"] <= after_id:
         return None
-    if since is not None and (type(item.get("timestamp")) not in (int, float)
-                              or item["timestamp"] < since):
+    if (type(item.get("timestamp")) not in (int, float)
+            or not math.isfinite(item["timestamp"])
+            or (since is not None and item["timestamp"] < since)):
         return None
     detail = item.get("detail")
     if not isinstance(detail, dict):
