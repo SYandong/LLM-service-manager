@@ -244,7 +244,11 @@ print(raw.decode())
         return self.restore(record, transaction)
 
     def apply(self, directory, *, confirm=False, dry_run=False):
-        descriptor = os.open(self.prefix / "maintenance.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        if dry_run:
+            return self._apply_locked(directory, confirm=confirm, dry_run=True)
+        if not confirm:
+            raise Error("explicit maintenance confirmation required")
+        descriptor = os.open(self.prefix / "upgrade.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         with os.fdopen(descriptor, "a+") as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -265,6 +269,7 @@ print(raw.decode())
             self.maintenance_unit_candidate()
             return {"dry_run": True, "ledger": ledger, "unit": str(self.unit),
                     "read_only_updater_unchanged": True}
+        raise Error("UNSUPPORTED: no supported external-effect settlement proof")
         maintenance_bytes = self.maintenance_config_path.read_bytes()
         maintenance_hash = sha(maintenance_bytes)
         generation = self.prepare(directory, payload)

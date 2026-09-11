@@ -729,7 +729,9 @@ health 和单 writer。候选启动或 health 失败时，rollback 先让候选�
 旧 reader 对**当前** ledger 做只读兼容检查；检查不支持时返回 `UNSUPPORTED`，
 保留 transaction/ledger/claims，不恢复陈旧数据库快照。该入口不提供 drain endpoint、
 writer epoch、强制清理、source/model/GPU 操作、TTL/reaper 替换或 zero-downtime
-保证；控制面短暂停机是预期边界。
+保证；控制面短暂停机是预期边界。当前实现会在 writable effectful apply
+之前返回 `UNSUPPORTED`，因为仓库尚未提供可证明的外部 effect settlement
+来源；只读 preflight/dry-run 可执行，不能据此声称已完成现场替换。
 
 - 快速验证（#108，用户明确要求）：先在独立配置的验证端口以 `--dry-run` 做分钟级只读短测，记录真实起止、样本、缺口、错误与清理结果；典型窗口约 120 秒，GPU 测试仍须空闲且单次目标不超过 5 分钟。不再要求等满一天或一周才继续交付。相应功能用确定性回放、临时环境集成和必要短测验收；长期稳定性和长期占用分布明确标为未测。
 - 短测通过不自动启用生产动作：保护、内存准入、可信连续 quiet、配置采用/退出确认、已验证回滚及相应操作授权仍须满足。连续 5 秒 quiet 是正确性条件，不能用日历等待的取消替代它。

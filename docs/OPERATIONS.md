@@ -172,7 +172,9 @@ read-only compatibility check against the current ledger. If that check is
 unsupported, the transaction remains pending/`UNSUPPORTED`; no stale database
 snapshot is restored and no claims are deleted. This path provides bounded
 control-plane downtime and no source/model/GPU, TTL/reaper or zero-downtime
-guarantee.
+guarantee. The current implementation returns `UNSUPPORTED` before any
+writable stop/switch because no supported external-effect settlement proof is
+available; its dry-run and compatibility gates are executable only.
 
 ## Observation and evidence
 

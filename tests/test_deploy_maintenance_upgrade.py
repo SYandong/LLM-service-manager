@@ -114,11 +114,22 @@ def test_maintenance_apply_uses_nonblocking_shared_upgrade_lock(tmp_path):
     obj = MaintenanceUpgrade.__new__(MaintenanceUpgrade)
     obj.prefix = tmp_path / "prefix"; obj.prefix.mkdir()
     obj._apply_locked = lambda *args, **kwargs: pytest.fail("lock conflict must stop before apply")
-    lock_path = obj.prefix / "maintenance.lock"
+    lock_path = obj.prefix / "upgrade.lock"
     with lock_path.open("a+") as held:
         fcntl.flock(held, fcntl.LOCK_EX)
         with pytest.raises(Error, match="already in progress"):
-            obj.apply(tmp_path, dry_run=True)
+            obj.apply(tmp_path, confirm=True)
+
+
+def test_maintenance_dry_run_and_missing_confirmation_do_not_create_lock(tmp_path):
+    obj = MaintenanceUpgrade.__new__(MaintenanceUpgrade)
+    obj.prefix = tmp_path / "prefix"; obj.prefix.mkdir()
+    obj._apply_locked = lambda *args, **kwargs: {"dry_run": True}
+    before = sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*"))
+    with pytest.raises(Error, match="explicit maintenance confirmation"):
+        obj.apply(tmp_path, confirm=False)
+    assert not (obj.prefix / "upgrade.lock").exists()
+    assert sorted(path.relative_to(tmp_path).as_posix() for path in tmp_path.rglob("*")) == before
 
 
 def test_process_identity_capture_uses_proc_start_and_stability_checks(tmp_path):
