@@ -42,10 +42,13 @@ The maintenance schema-v6 number remains unchanged, but records containing
 `native_provenance` require the newer reader; alpha12 and older binaries reject
 them. Schema7 bootstrap records retain the same older-reader refusal boundary.
 Neither old binaries plus the current ledger nor stale-ledger restoration is a
-general rollback path. The final candidate validation receipt records the
-complete Python 3.10 suite, wheel/sdist parity, independent CLI/TUI installs
-and dependency checks; bounded CPU/loopback fixtures do not establish GPU or
-production behavior, and long-term stability/calibration remain **NOT MEASURED**.
+general rollback path. Candidate head `afaa94e` passed the complete Python
+3.10 suite (2848 tests, 172.56 seconds), matched 45 wheel entries when rebuilt
+from the sdist, and passed independent offline minimal/TUI installs, dependency
+checks, isolated CLI/TUI imports and release-manifest/checksum validation.
+Bounded CPU/loopback fixtures do not establish GPU or production behavior, and
+long-term stability/calibration remain **NOT MEASURED**. Current-head CI and
+exact Fable approval remain required before this draft can be made ready.
 
 ## 0.1.0-alpha.12 — 2026-09-11
 
