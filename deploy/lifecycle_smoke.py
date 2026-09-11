@@ -155,13 +155,15 @@ def scheduler_actions_quiet(preflight, selected_model):
             inflight = data.get('requests', [])
     if not isinstance(states, list) or inflight != []:
         return False
-    known_states = {'stopped', 'ready', 'sleeping', 'starting', 'loading'}
+    known_states = {'stopped', 'ready', 'sleeping'}
     names = []
     for row in states:
         if not isinstance(row, dict):
             return False
         name = row.get('id') or row.get('model') or row.get('name')
         if not isinstance(name, str) or not name or row.get('state') not in known_states:
+            return False
+        if name in names:
             return False
         names.append(name)
     return selected_model not in names

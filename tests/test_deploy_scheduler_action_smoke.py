@@ -259,10 +259,13 @@ def test_daemon_identity_uses_proc_environment_and_exact_instance_contract():
         smoke.validate_unit_observation(unit,token,values,{'CUDA_VISIBLE_DEVICES':'0','LLMSVC_LEASE_ID':'lease-1'},'123',cgroup,lease='lease-1',model='fixture')
 
 
-def test_action_run_inventory_uses_primary_catalog_without_generated_model_collision(tmp_path):
+def test_action_run_inventory_uses_primary_catalog_without_generated_model_collision(tmp_path, monkeypatch):
     run=smoke.ActionRun.__new__(smoke.ActionRun)
     run.config={'gpu':1,'util':.2,'model_path':'/cache','host_meminfo_path':'/verified-host'}
     run.model='ops-life-generated';run.unit='vllm-ops-life-generated.service';run.gpu_uuid='GPU-1';run.port=None;run.records=[]
+    meminfo=tmp_path/'meminfo';meminfo.write_text('MemAvailable:       1048576000 kB\n')
+    real_path=smoke.Path
+    monkeypatch.setattr(smoke, 'Path', lambda value: meminfo if str(value)=='/proc/meminfo' else real_path(value))
     run.command=lambda argv,**kwargs: subprocess.CompletedProcess(
         argv,0,
         '1, GPU-1, 100000, 5, 99995, 0\n' if '--query-gpu=' in argv[1]
@@ -280,6 +283,8 @@ def test_action_run_inventory_uses_primary_catalog_without_generated_model_colli
     '[{"id":"ops-life-generated","state":"stopped"},{"id":"production-default","state":"ready"}]',
     '[{"id":"production-default"}]',
     '[{"id":"production-default","state":"unknown"}]',
+    '[{"id":"production-default","state":"starting"}]',
+    '[{"id":"production-default","state":"ready"},{"id":"production-default","state":"stopped"}]',
 ])
 def test_action_run_inventory_rejects_collision_or_malformed_primary_catalog(tmp_path, events):
     run=smoke.ActionRun.__new__(smoke.ActionRun)
