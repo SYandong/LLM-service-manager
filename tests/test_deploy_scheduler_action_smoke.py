@@ -11,6 +11,7 @@ import runpy
 import shlex
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -516,13 +517,41 @@ def test_cleanup_replacement_after_exit_preserves_without_release():
 def test_cleanup_already_released_reconciles_without_second_release():
     run=smoke.ActionRun.__new__(smoke.ActionRun)
     run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+3
-    run.profile={'scheduler_url':'http://fixture'};run.log=lambda *a,**k:None
+    run.profile={'scheduler_url':'http://fixture'};run.log=lambda *a,**k:None;run.token='token';run.temp='/tmp/unused'
     readings=iter(({'absent':False,'lease_id':'lease-1'},{'absent':True,'lease_id':'lease-1'}));run.daemon_binding=lambda **_:next(readings)
     calls=[];run.container=lambda argv,**kwargs:(calls.append(argv) or subprocess.CompletedProcess(argv,0,'LoadState=not-found\nActiveState=inactive\nMainPID=0\n',''))
     released=[]
-    run.json_at=lambda url,path,body=None,**kwargs: ({'schema_version':1,'sampled_at':time.time(),'errors':[],'leases':[{'model':'fixture','status':'released','lease_id':'lease-1','unit':run.unit}]} if path=='/v1/state' else (released.append(path) or {'status':'released','lease_id':'lease-1'}))
+    run._ledger_release_witness=lambda binding:True
+    run.json_at=lambda url,path,body=None,**kwargs: ({'schema_version':1,'sampled_at':time.time(),'errors':[],'leases':[]} if path=='/v1/state' else (released.append(path) or {'status':'released','lease_id':'lease-1'}))
     run.cleanup_actions()
     assert len([x for x in calls if x[1]=='stop'])==1 and released==[]
+
+
+@pytest.mark.parametrize('tombstone', [
+    None,
+    ('fixture','confirmed','vllm-fixture.service'),
+    ('fixture','released','other-unit.service'),
+    ('fixture','released','vllm-fixture.service'),
+])
+def test_cleanup_empty_public_leases_requires_private_released_witness(tmp_path,tombstone):
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.token='token';run.temp=str(tmp_path);run.deadline=time.monotonic()+.2
+    run.profile={'scheduler_url':'http://fixture'};run.log=lambda *a,**k:None
+    (tmp_path/'owner').write_text('token');(tmp_path/'launch-lease.json').write_text(json.dumps({'lease_id':'lease-1'}))
+    db=sqlite3.connect(tmp_path/'ledger.sqlite');db.execute('CREATE TABLE llmsvc_leases (lease_id TEXT PRIMARY KEY, model TEXT, gpu INTEGER, util REAL, expires_at REAL, budget_gb REAL, status TEXT, unit TEXT)')
+    if tombstone is not None:db.execute('INSERT INTO llmsvc_leases VALUES (?,?,?,?,?,?,?,?)',('lease-1',tombstone[0],0,0,0,1,tombstone[1],tombstone[2]))
+    db.commit();db.close()
+    run.daemon_binding=lambda **_: {'absent':True,'lease_id':'lease-1'};run.container=lambda *a,**k:subprocess.CompletedProcess([],0,'not-found\n','')
+    released=[];run.json_at=lambda url,path,body=None,**kwargs: ({'schema_version':1,'sampled_at':time.time(),'errors':[],'leases':[]} if path=='/v1/state' else (released.append(path) or {'status':'released','lease_id':'lease-1'}))
+    def remote_python(code,data,**kwargs):
+        result=subprocess.run([sys.executable,'-B','-c',code],input=json.dumps(data),text=True,capture_output=True,check=True)
+        return json.loads(result.stdout)
+    run.python=remote_python
+    if tombstone==('fixture','released','vllm-fixture.service'):
+        run.cleanup_actions();assert released==[] and not run.preserve
+    else:
+        with pytest.raises(life.SmokeError,match='cleanup incomplete'):run.cleanup_actions()
+        assert run.preserve and released==[]
 
 
 def test_completion_keeps_measured_phases_when_cleanup_fails():

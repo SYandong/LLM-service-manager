@@ -164,7 +164,10 @@ stale or non-advancing snapshots, replacement identity, persistent unknown
 state, or deadline expiry preserves the ledger/files. An already-released
 matching lease is reconciled without another release. A cleanup failure keeps
 the overall result non-passing while retaining truthful per-phase cold/free/wake
-measurements, including a separately marked partial measured response.
+measurements, including a separately marked partial measured response. When the
+public state omits released leases, cleanup requires a matching read-only
+private-ledger release tombstone bound to the owned run token/model/unit; an
+absent or conflicting tombstone preserves the files and ledger.
 
 CPU contract tests run the actual scheduler HTTP server, empty SQLite ledger,
 existing launcher, a real loopback health child and scheduler SSE. Hardware,

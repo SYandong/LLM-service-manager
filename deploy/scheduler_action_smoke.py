@@ -566,6 +566,30 @@ class ActionRun(lifecycle.Run):
         self.source_unit='llmsvc-ops-action-source-'+self.token+'.service'
         self.units=[];self.lease=None;self.preserve=False;self.measured_phases=set();self.phase_measurements={}
 
+    def _ledger_release_witness(self, binding):
+        code='''import json,sqlite3,sys
+from pathlib import Path
+x=json.load(sys.stdin);root=Path(x['root'])
+if root.is_symlink() or not (root/'owner').is_file() or (root/'owner').read_text()!=x['token']:
+ raise RuntimeError('run root ownership mismatch')
+marker=root/'launch-lease.json'
+if not marker.is_file() or json.loads(marker.read_text()).get('lease_id')!=x['lease_id']:
+ raise RuntimeError('launch lease marker mismatch')
+path=root/'ledger.sqlite'
+if path.is_symlink() or not path.is_file(): print(json.dumps({'released':False}));raise SystemExit(0)
+db=sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True,timeout=2)
+try:
+ row=db.execute('SELECT model,status,unit FROM llmsvc_leases WHERE lease_id=?',(x['lease_id'],)).fetchone()
+ print(json.dumps({'released':bool(row and row[0]==x['model'] and row[1]=='released' and row[2]==x['unit'])}))
+finally: db.close()
+'''
+        try:
+            value=self.python(code,{'root':self.temp,'token':self.token,'lease_id':binding.get('lease_id'),
+                                    'model':self.model,'unit':self.unit},cleanup=True,limit=3)
+        except Exception:
+            return False
+        return value.get('released') is True
+
     def _cleanup_state(self, binding, *, newer_than=None, require_publication=False, allow_baseline=False):
         try:
             observed=self.daemon_binding(cleanup=True)
@@ -863,6 +887,8 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity,'control_g
                         leases,sampled_at=self._cleanup_state(binding,newer_than=last_unknown_sampled_at,
                                                               require_publication=unknown_without_timestamp,
                                                               allow_baseline=baseline_pending)
+                        if not leases and binding.get('lease_id') and not self._ledger_release_witness(binding):
+                            raise _CleanupObservationUnknown('private ledger release witness unavailable',sampled_at=sampled_at)
                         if baseline_pending:
                             last_unknown_sampled_at=sampled_at;unknown_without_timestamp=False;baseline_pending=False
                             continue
