@@ -555,13 +555,24 @@ def test_phase_records_measured_receipt_for_completion_reporting(tmp_path):
 
 def test_partial_measured_phase_is_reported_without_claiming_full_success():
     run=smoke.ActionRun.__new__(smoke.ActionRun);run.model='fixture';run.measured_phases=set();run.phase_measurements={}
-    run._record_phase_result('free',{'status':'failed','evidence':{'response':{
-        'status':'partial','model':'fixture','measurement_complete':True,'freed_gb':3.5}}})
+    run._record_phase_result('free',{'status':'failed','evidence':{'model':'fixture','response':{
+        'status':'partial','measurement_complete':True,'freed_gb':3.5,'slept':['fixture'],'stopped':[]}}})
     value=run._completion_fields('failed',False)
     assert value['live_chain_measured'] is True and value['measured_phases']==['free']
     assert value['phase_measurements']['free']['quality']=='partial_measured'
     run._record_phase_result('wake',{'status':'failed','evidence':{'response':None}})
     assert value['phase_measurements']['free']['measured'] is True and run.phase_measurements['wake']['measured'] is False
+
+
+@pytest.mark.parametrize('evidence', [
+    {'model':'different','response':{'status':'partial','measurement_complete':True,'freed_gb':3.5,'slept':['fixture'],'stopped':[]}},
+    {'response':{'status':'partial','measurement_complete':True,'freed_gb':3.5,'slept':['fixture'],'stopped':[]}},
+    {'model':'fixture','response':{'status':'partial','measurement_complete':True,'freed_gb':3.5,'slept':['different'],'stopped':[]}},
+])
+def test_partial_free_wrong_or_missing_association_is_not_measured(evidence):
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.model='fixture';run.measured_phases=set();run.phase_measurements={}
+    run._record_phase_result('free',{'status':'failed','evidence':evidence})
+    assert run.phase_measurements['free']['measured'] is False and run.measured_phases==set()
 
 
 def test_cleanup_stop_timeout_without_exit_preserves_ledger_and_does_not_release():

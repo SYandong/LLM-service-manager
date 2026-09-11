@@ -657,13 +657,19 @@ class ActionRun(lifecycle.Run):
     def _record_phase_result(self, name, value):
         status=value.get('status') if isinstance(value,dict) else None
         measured=status=='passed';quality='validated' if measured else 'unmeasured'
-        response=(value.get('evidence') or {}).get('response') if isinstance(value,dict) else None
+        evidence=value.get('evidence') if isinstance(value,dict) else None
+        evidence_model=evidence.get('model') if isinstance(evidence,dict) else None
+        response=evidence.get('response') if isinstance(evidence,dict) else None
         if not measured and isinstance(response,dict):
             if (name=='free' and response.get('measurement_complete') is True
+                    and evidence_model==self.model
+                    and response.get('slept')==[self.model]
+                    and response.get('stopped')==[]
                     and type(response.get('freed_gb')) in (int,float)
                     and math.isfinite(response['freed_gb']) and response['freed_gb']>0):
                 measured=True;quality='partial_measured'
             elif (name=='wake' and response.get('ready') is True
+                  and evidence_model==self.model
                   and response.get('model')==self.model):
                 measured=True;quality='partial_measured'
         self.phase_measurements[name]={'quality':quality,'measured':measured}
