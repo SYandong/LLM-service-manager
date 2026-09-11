@@ -394,12 +394,13 @@ class Scheduler:
         return reserve
 
     @contextmanager
-    def _reserve_lock(self, deadline):
+    def _reserve_lock(self, deadline, *, reject_stopping=True):
         remaining = deadline-time.monotonic()
         if remaining <= 0 or not self.action_lock.acquire(timeout=remaining):
             raise IntentWriteError(503, "reserve_timeout")
         try:
-            self._check_stopping()
+            if reject_stopping:
+                self._check_stopping()
             yield
         finally:
             self.action_lock.release()
@@ -407,7 +408,7 @@ class Scheduler:
     def _save_reserve(self, payload, *, source_ip, dry_run=False, deadline=None):
         """Commit the intent before starting any bounded evacuation."""
         deadline = deadline if deadline is not None else time.monotonic()+self.config.reserve_timeout_seconds
-        with self._reserve_lock(deadline):
+        with self._reserve_lock(deadline, reject_stopping=not dry_run):
             if not dry_run:
                 if self.config.read_only:
                     raise IntentWriteError(405, "read_only")
@@ -428,7 +429,7 @@ class Scheduler:
 
     def _delete_reserve(self, reserve_id, *, source_ip, dry_run=False, deadline=None):
         deadline = deadline if deadline is not None else time.monotonic()+self.config.request_timeout_seconds
-        with self._reserve_lock(deadline):
+        with self._reserve_lock(deadline, reject_stopping=not dry_run):
             nonempty(reserve_id, "id")
             owner = self.config.owner_for_ip(source_ip)
             if not dry_run:
