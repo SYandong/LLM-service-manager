@@ -318,15 +318,24 @@ def test_daemon_binding_runs_through_remote_runtime_entrypoint(tmp_path):
     systemctl.write_text('#!/usr/bin/env python3\nprint("Id=vllm-fixture.service\\nLoadState=loaded\\nActiveState=inactive\\nMainPID=0\\nInvocationID=\\nEnvironment=\\nControlGroup=/system.slice/vllm-fixture.service")\n')
     systemctl.chmod(0o700)
     run=smoke.ActionRun.__new__(smoke.ActionRun);run.temp=str(root);run.unit='vllm-fixture.service';run.model='fixture';run.token='token'
+    isolated_cwd=root/'cwd';isolated_cwd.mkdir()
+    captured={}
     def remote_python(code,data,**kwargs):
-        env={**os.environ,'PATH':str(fakebin)+':'+os.environ.get('PATH',''),
-             'PYTHONPATH':str(root/'runtime')+':'+str(ROOT)}
-        value=subprocess.run([sys.executable,'-B','-c',code],input=json.dumps(data),text=True,
-                             capture_output=True,env=env,check=True,timeout=5)
+        captured['code']=code
+        env={**os.environ,'PATH':str(fakebin)+':'+os.environ.get('PATH','')}
+        env.pop('PYTHONPATH',None)
+        value=subprocess.run([sys.executable,'-I','-B','-c',code],input=json.dumps(data),text=True,
+                             capture_output=True,env=env,cwd=isolated_cwd,check=True,timeout=5)
         return json.loads(value.stdout)
     run.python=remote_python
     result=run.daemon_binding(cleanup=True)
     assert result=={'absent':True,'exit_proven':True,'lease_id':'lease-1'}
+    broken=captured['code'].replace("sys.path.insert(0,str(root/'runtime'))\n",'',1)
+    env={**os.environ,'PATH':str(fakebin)+':'+os.environ.get('PATH','')}
+    env.pop('PYTHONPATH',None)
+    failed=subprocess.run([sys.executable,'-I','-B','-c',broken],input=json.dumps({'root':str(root),'unit':run.unit,'model':run.model,'token':run.token}),text=True,
+                          capture_output=True,env=env,cwd=isolated_cwd,check=False,timeout=5)
+    assert failed.returncode != 0
 
 
 def test_cleanup_preserves_files_when_exit_observation_deadline_expires():

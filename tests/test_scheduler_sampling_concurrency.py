@@ -90,16 +90,19 @@ def test_concurrent_collector_round_does_not_publish_busy_snapshot(real_collecto
     probes.hold_next = True
     first = threading.Thread(target=scheduler.sample_once)
     first.start()
-    assert probes.entered.wait(3)
+    try:
+        assert probes.entered.wait(3)
 
-    second = scheduler.sample_once()
-    assert second == initial
-    assert "collector: concurrent round" not in second.errors
-    assert scheduler._sample_published == 1
-    assert scheduler._sample_bounds[0] == 1
-    assert len(reconcile_calls) == 0
-    probes.release.set()
-    first.join(3)
+        second = scheduler.sample_once()
+        assert second == initial
+        assert "collector: concurrent round" not in second.errors
+        assert scheduler._sample_published == 1
+        assert scheduler._sample_bounds[0] == 1
+        assert len(reconcile_calls) == 0
+    finally:
+        probes.release.set()
+        first.join(3)
+        assert not first.is_alive()
 
     published = scheduler.snapshot()
     assert published.models and "collector: concurrent round" not in published.errors
@@ -140,15 +143,19 @@ def test_stop_does_not_deadlock_on_a_bounded_collector_round(real_collector_sche
     probes.hold_next = True
     sampling = threading.Thread(target=scheduler.sample_once)
     sampling.start()
-    assert probes.entered.wait(3)
-
     stopping = threading.Thread(target=scheduler.stop)
-    stopping.start()
-    stopping.join(3)
-    assert not stopping.is_alive()
-    probes.release.set()
-    sampling.join(3)
-    assert not sampling.is_alive()
+    try:
+        assert probes.entered.wait(3)
+        stopping.start()
+        stopping.join(3)
+        assert not stopping.is_alive()
+    finally:
+        probes.release.set()
+        sampling.join(3)
+        if stopping.is_alive():
+            stopping.join(3)
+        assert not sampling.is_alive()
+        assert not stopping.is_alive()
 
 
 def test_action_refresh_needs_a_new_sample_after_reused_post_effect_observation(real_collector_scheduler, tmp_path):
