@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.1.0-alpha.15 — 2026-09-12
+
+Incremental scheduler safety and isolated cold-wake harness release; Python distribution
+`0.1.0a15`. The five qualifying PRs since alpha14 are #227, #229, #231, #233
+and #235.
+
+### Corrected and added
+
+- Mutating scheduler HTTP admission now rejects new writes after stopping under the
+  existing action lock while preserving already accepted operation settlement rules
+  (#227).
+- Maintenance replacement exposes only a verified read-only staged-generation and
+  ledger preflight; effectful writable upgrade/rollback remains unsupported (#229).
+- Post-exit cleanup uses bounded read-only observation and exact private release
+  witnesses without repeating stop/release; malformed or unknown state remains
+  preserved and partial phase evidence stays truthful (#231).
+- Stopped-model cold wake can expose bounded advisory per-model progress from the
+  pinned log stream. Progress does not prove source continuity, quiet or settlement;
+  the final controller response determines readiness (#233).
+- The isolated harness has an explicit opt-in `scheduler_wake` cold route with one
+  wake request, full original cold deadline, fresh state baseline and final
+  account/unit proof; `native_chat` remains the default and warm latency is checked
+  independently (#235).
+
+### Compatibility and validation limits
+
+Bootstrap, native-witness, maintenance and scheduler-action modes remain
+default-off unless explicitly selected. The read-only maintenance preflight is
+not an effectful upgrade, and this release does not claim live cold-wake/GPU
+acceptance, managed writable upgrade/rollback, external-effect settlement,
+continuous quiet, production routing or automatic deployment. Existing inference
+endpoints, model IDs/aliases, default, pin and inflight protections, and the
+single `llm` command remain unchanged.
+
+Maintenance schema-v6 records containing `native_provenance` are rejected by
+alpha12 and older readers; schema7 bootstrap records retain the same older-reader
+refusal. An old binary plus the current ledger is not a general rollback path.
+The candidate uses bounded CPU/loopback checks only; long-term
+stability/calibration and live deployment acceptance remain **NOT MEASURED**.
+
 ## 0.1.0-alpha.14 — 2026-09-11
 
 Incremental startup and isolated scheduler-action safety release; Python distribution
