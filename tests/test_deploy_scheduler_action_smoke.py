@@ -264,8 +264,8 @@ def test_action_run_inventory_uses_primary_catalog_without_generated_model_colli
     run.config={'gpu':1,'util':.2,'model_path':'/cache','host_meminfo_path':'/verified-host'}
     run.model='ops-life-generated';run.unit='vllm-ops-life-generated.service';run.gpu_uuid='GPU-1';run.port=None;run.records=[]
     meminfo=tmp_path/'meminfo';meminfo.write_text('MemAvailable:       1048576000 kB\n')
-    real_path=smoke.Path
-    monkeypatch.setattr(smoke, 'Path', lambda value: meminfo if str(value)=='/proc/meminfo' else real_path(value))
+    real_path=life.Path
+    monkeypatch.setattr(life, 'Path', lambda value: meminfo if str(value)=='/proc/meminfo' else real_path(value))
     run.command=lambda argv,**kwargs: subprocess.CompletedProcess(
         argv,0,
         '1, GPU-1, 100000, 5, 99995, 0\n' if '--query-gpu=' in argv[1]
