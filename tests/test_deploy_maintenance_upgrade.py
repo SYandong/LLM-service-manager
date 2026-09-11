@@ -15,6 +15,7 @@ import pytest
 
 from deploy.maintenance_upgrade import Error, MaintenanceUpgrade
 from deploy.upgrade import Upgrade
+from llmsvc import __version__ as PACKAGE_VERSION
 from llmsvc.state import Pin
 from llmsvc.store import IntentStore
 
@@ -38,7 +39,7 @@ def tree_snapshot(root):
     return result
 
 
-def make_bundle(path, version="0.1.0a14"):
+def make_bundle(path, version=PACKAGE_VERSION):
     (path/"wheelhouse").mkdir(parents=True)
     cli=b"#!/usr/bin/env python3\nprint("+repr(version).encode()+b")\n"
     (path/"llm").write_bytes(cli)
@@ -47,7 +48,7 @@ def make_bundle(path, version="0.1.0a14"):
         z.writestr("llmsvc-"+version+".dist-info/METADATA","Metadata-Version: 2.1\nName: llmsvc\nVersion: "+version+"\n")
         z.writestr("llmsvc-"+version+".data/scripts/llm",b"#!python\n"+cli.split(b"\n",1)[1])
     pip=path/"wheelhouse/pip-26.2.1-py3-none-any.whl"; pip.write_bytes(b"pip")
-    info={"schema_version":1,"tag":"v0.1.0-alpha.14","version":version,"commit":"a"*40,
+    info={"schema_version":1,"tag":"v"+version.replace("a", "-alpha."),"version":version,"commit":"a"*40,
           "scope":"read_only","app_wheel":"wheelhouse/"+wheel.name,"cli":"llm",
           "bootstrap_pip":"wheelhouse/"+pip.name,"install_wheels":["wheelhouse/"+wheel.name],
           "files":{n:sha(path/n) for n in ("llm","wheelhouse/"+wheel.name,"wheelhouse/"+pip.name)}}
@@ -93,7 +94,7 @@ def test_preflight_uses_actual_candidate_reader_and_no_writes(tmp_path):
     result=MaintenanceUpgrade(settings,tmp_path).preflight(bundle)
     assert result["status"]=="preflight" and result["apply_supported"] is False and result["writes"] is False
     assert result["candidate_reader"]["read_only"] is True
-    assert result["candidate_reader"]["version"]=="0.1.0a14"
+    assert result["candidate_reader"]["version"]==PACKAGE_VERSION
     assert str(staged/"llmsvc") in result["candidate_reader"]["origin"]
     assert db.read_bytes()==before_db and config.read_bytes()==before_config
     assert tree_snapshot(tmp_path)==before_tree
@@ -101,10 +102,21 @@ def test_preflight_uses_actual_candidate_reader_and_no_writes(tmp_path):
     assert [pin.model for pin in reopened.active(4102444700)[0]]==["kept"]; reopened.close()
 
 
+def test_preflight_rejects_actual_candidate_version_mismatch(tmp_path):
+    db=tmp_path/"ledger.sqlite"; store=IntentStore(db,action_lock=threading.RLock()); store.close()
+    base, alpha = PACKAGE_VERSION.rsplit("a", 1)
+    bundle=make_bundle(tmp_path/"bundle", version=base+"a"+str(int(alpha)+1))
+    staged,config,settings=make_candidate(tmp_path,db,bundle)
+    before_tree=tree_snapshot(tmp_path)
+    with pytest.raises(Error,match="candidate read-only ledger preflight failed"):
+        MaintenanceUpgrade(settings,tmp_path).preflight(bundle)
+    assert tree_snapshot(tmp_path)==before_tree
+
+
 def test_preflight_rejects_staged_runtime_drift_before_reader(tmp_path):
     db=tmp_path/"ledger.sqlite"; store=IntentStore(db,action_lock=threading.RLock()); store.close()
     bundle=make_bundle(tmp_path/"bundle"); staged,config,settings=make_candidate(tmp_path,db,bundle)
-    before_db=db.read_bytes(); (staged/"llmsvc/__init__.py").write_text("__version__ = '0.1.0a14'\n")
+    before_db=db.read_bytes(); (staged/"llmsvc/__init__.py").write_text("__version__ = "+repr(PACKAGE_VERSION)+"\n")
     with pytest.raises(Error,match="staged candidate runtime manifest is invalid"):
         MaintenanceUpgrade(settings,tmp_path).preflight(bundle)
     assert db.read_bytes()==before_db
