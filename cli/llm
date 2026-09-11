@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-5.6-luna
 """A standalone, standard-library scheduler client; reusable by the optional TUI."""
 
 import argparse
@@ -286,12 +287,13 @@ class EventReader:
         self._interrupt()
         self._notify()
 
-    def close(self):
+    def close(self, timeout=None):
         self._stop.set()
         self._wake.set()
         self._interrupt()
         if self.thread is not None:
-            self.thread.join(timeout=self.client.timeout + self.stream_timeout + 1)
+            wait = self.client.timeout + self.stream_timeout + 1 if timeout is None else positive_timeout(timeout)
+            self.thread.join(timeout=wait)
             return not self.thread.is_alive()
         return True
 
@@ -349,6 +351,76 @@ class EventReader:
             self._wake.wait(delay)
             self._wake.clear()
             delay = min(self.max_retry_delay, delay * 2)
+
+
+WAKE_PROGRESS_STAGES = {
+    "wrapper_started": "wrapper started",
+    "wake_attempted": "wake attempt observed",
+    "start_attempted": "daemon start attempted",
+    "process_started": "daemon process started",
+    "health_wait": "waiting for health",
+    "start_failed": "daemon start failed",
+    "health_failed": "health check failed",
+    "unavailable": "progress unavailable",
+}
+
+
+def parse_wake_progress(item, target, *, after_id=0, since=None):
+    """Validate only the fixed scheduler wake-progress envelope.
+
+    Raw model log text is never accepted here.  The scheduler's local epoch and
+    sequence are useful for stale-event filtering, but do not prove continuity
+    or readiness.
+    """
+    if not isinstance(item, dict) or item.get("kind") != "wake_progress":
+        return None
+    if not isinstance(target, str) or item.get("model") != target:
+        return None
+    if type(item.get("id")) is not int or item["id"] <= after_id:
+        return None
+    if since is not None and (type(item.get("timestamp")) not in (int, float)
+                              or item["timestamp"] < since):
+        return None
+    detail = item.get("detail")
+    if not isinstance(detail, dict):
+        return None
+    if not wake_progress_detail_valid(detail, target):
+        return None
+    stage = detail["stage"]
+    if stage not in WAKE_PROGRESS_STAGES:
+        return None
+    return {"stage": stage, "label": WAKE_PROGRESS_STAGES[stage],
+            "sequence": detail["sequence"], "source": "llama-swap"}
+
+
+def wake_progress_detail_valid(detail, target=None):
+    if not isinstance(detail, dict) or detail.get("stage") not in WAKE_PROGRESS_STAGES:
+        return False
+    if (detail.get("source") != "llama-swap"
+            or detail.get("progress_source") != "per_model_log"
+            or detail.get("trusted_for_quiet") is not False):
+        return False
+    if target is not None and detail.get("source_model") != target:
+        return False
+    if not isinstance(detail.get("source_model"), str) or not detail["source_model"]:
+        return False
+    if not isinstance(detail.get("log_epoch"), str) or not detail["log_epoch"]:
+        return False
+    if type(detail.get("sequence")) is not int or detail["sequence"] < 1:
+        return False
+    received = detail.get("received_at")
+    return type(received) in (int, float) and math.isfinite(received)
+
+
+def format_wake_progress(progress):
+    if (isinstance(progress, dict) and progress.get("stage") in WAKE_PROGRESS_STAGES
+            and isinstance(progress.get("label"), str)):
+        return progress["label"]
+    if not wake_progress_detail_valid(progress) and not (
+            isinstance(progress, dict) and progress.get("source") is None
+            and progress.get("stage") in WAKE_PROGRESS_STAGES):
+        return "progress unavailable"
+    return WAKE_PROGRESS_STAGES[progress["stage"]]
 
 
 def cell_width(text):
@@ -1172,6 +1244,50 @@ def tui_app():
         return None
 
 
+def execute_wake_with_progress(args, client):
+    """Run one wake request while a single scheduler SSE reader observes stages."""
+    reader = EventReader(client, stream_timeout=0.5, retry_delay=0.1,
+                         max_retry_delay=1, queue_size=64)
+    reader.start()
+    started = time.time()
+    outcome = {}
+
+    def invoke():
+        try:
+            outcome["result"] = execute_command(args, client)
+        except BaseException as exc:  # Re-raise on the caller thread below.
+            outcome["error"] = exc
+
+    request = threading.Thread(target=invoke, name="llm-wake-request", daemon=True)
+    request.start()
+    generation = None
+    last = None
+    while request.is_alive():
+        update = reader.drain()
+        if generation is None:
+            generation = update["generation"]
+        elif update["generation"] != generation:
+            generation = update["generation"]
+            if not args.json and last != "progress unavailable":
+                print("Wake progress unavailable; final server result remains authoritative", file=sys.stderr)
+                last = "progress unavailable"
+        for item in update["events"]:
+            progress = parse_wake_progress(item, args.model, since=started)
+            if progress is None:
+                continue
+            label = progress["label"]
+            if not args.json and label != last:
+                print("Wake observed: %s (source: llama-swap; readiness is the server result)" % label,
+                      file=sys.stderr)
+                last = label
+        time.sleep(0.01)
+    request.join()
+    reader.close(timeout=2)
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["result"]
+
+
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1183,7 +1299,10 @@ def main(argv=None):
             if app is not None:
                 app(client=client, api=SimpleNamespace(**globals())).run()
                 return 0
-        result = execute_command(args, client)
+        if args.command == "wake" and not args.dry_run:
+            result = execute_wake_with_progress(args, client)
+        else:
+            result = execute_command(args, client)
         print(format_result(args, result, width=shutil.get_terminal_size((100, 30)).columns))
         if args.command is None:
             print("TUI: install with pip install 'llmsvc[tui]' and run llm in a terminal.")

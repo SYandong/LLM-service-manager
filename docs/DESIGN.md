@@ -677,6 +677,14 @@ gemma-4-31b-it-bf16        stopped   -    -     9h         0      -        冷�
   lease 不是启动/加载完成；state/swap 未知不补齐；free 无中间事件时显示等待
   观测释放。进度不编造权重加载、百分比或 ETA。cold_start_seconds 如存在，
   只标配置的总时长估计，并明确剩余 ETA 未知；无值就显示 ETA unknown。
+- stopped 模型 cold wake 可在同一 scheduler SSE 中接收固定的 `wake_progress` 阶段：
+  `wrapper_started`、`wake_attempted`、`start_attempted`、`process_started`、
+  `health_wait`、`start_failed`、`health_failed`、`unavailable`。它们来自指定模型的
+  llama-swap `ProcessLogger`，是未经 quiet/ready 信任的 best-effort 观察；日志可能
+  丢失、断开或在订阅竞态中不可用。事件只保留 source/model/epoch/sequence/时间和
+  固定 stage，不携带 URL、PID、错误文本、prompt、IP 或 header；不建立第二个客户端
+  上游连接，也不把 `health_wait` 或 `process_started` 当作 ready。唤醒 POST 不等待
+  日志首字节，最终状态仍以 controller 回执为准。
 - 验证采用实际 PTY 的 60 秒只读合成 HTTP 场景：CPU 以单核 100% 定义、目标
   idle <2%；按键写入至含该输入的 PTY 重绘输出 <50ms。记录逐帧耗时、清表次数、
   光标和日志上限。保存实际 SVG 截图/PTY 录制供用户确认；终端模拟器和远程网络

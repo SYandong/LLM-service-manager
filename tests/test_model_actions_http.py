@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-5.6-luna
 """Actual loopback transport/reentry tests; placement and GPU effects are fixtures."""
 
 import http.client
@@ -60,6 +61,11 @@ def system(tmp_path):
             pass
         def do_GET(self):
             state["http_calls"].append(("GET", self.path))
+            if self.path.startswith("/logs/stream/"):
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             assert self.path == "/upstream/model/"
             if state["mode"] == "reenter":
                 status, response = request(core.server_address, "POST", "/v1/place", {"model": "model"})
@@ -113,10 +119,43 @@ def test_wake_reenters_real_loopback_place_without_holding_global_lock(system):
     assert status == 200 and result["status"] == "ready" and result["ready"] is True
     assert result["cold_start"] is True
     assert state["reentries"] == 1  # The fixture /v1/place handler acquired the SAME lock.
-    assert state["http_calls"] == [("GET", "/upstream/model/")]
+    assert state["http_calls"].count(("GET", "/upstream/model/")) == 1
     assert not scheduler.model_actions.pending
     assert not state["stop_calls"]
     # This proves reentry/unblocking, not a production lease/placement protocol.
+
+
+def test_stopped_wake_progress_reader_is_advisory_and_closed_before_result(system):
+    scheduler, address, transport, state = system
+    seen = []
+
+    class FixtureReader:
+        def __init__(self, **kwargs):
+            seen.append(("init", kwargs["model"], kwargs["base_url"], kwargs["deadline"]))
+            self.emit = kwargs["emit"]
+            self.closed = False
+
+        def start(self):
+            self.emit({"stage": "process_started", "source": "llama-swap",
+                       "source_model": "model", "progress_source": "per_model_log",
+                       "log_epoch": "fixture", "sequence": 1, "received_at": 1.0,
+                       "trusted_for_quiet": False})
+            seen.append("started")
+
+        def close(self, timeout=2.0):
+            self.closed = True
+            seen.append(("closed", timeout))
+            return True
+
+    scheduler.model_actions.progress_reader_factory = FixtureReader
+    status, result = request(address, "POST", "/v1/wake/model")
+    assert status == 200 and result["ready"] is True
+    assert seen[0][0] == "init" and "started" in seen and seen[-1][0] == "closed"
+    progress = [item for item in scheduler.events_since(0) if item.kind == "wake_progress"]
+    assert len(progress) == 1
+    assert progress[0].detail["source_model"] == "model"
+    assert state["http_calls"] == [("GET", "/upstream/model/")]
+    assert transport.swap_url.startswith("http://127.0.0.1:")
 
 
 def test_wake_wait_releases_lock_and_observes_later_readiness(system):

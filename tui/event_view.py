@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-5.6-luna
 """Compact event presentation and explicit, portable detail export."""
 import asyncio
 from collections import Counter, OrderedDict
@@ -16,8 +17,9 @@ from textual.widgets import Button, Input, Static, TextArea
 
 class EventPresentation:
     """Raw history lives in the app; this bounded projection never edits events."""
-    def __init__(self, clean):
+    def __init__(self, clean, wake_progress_label=None):
         self.clean = clean
+        self.wake_progress_label = wake_progress_label
         self.reset()
 
     def reset(self):
@@ -146,6 +148,17 @@ class EventPresentation:
                 return None
             body = 'observations incomplete (details)' if errors else 'observations available'
             color = 'yellow' if errors else 'white'
+        elif (kind == 'wake_progress' and self.wake_progress_label is not None
+              and detail.get('progress_source') == 'per_model_log'
+              and detail.get('source') == 'llama-swap'
+              and detail.get('source_model') == item.get('model')
+              and detail.get('trusted_for_quiet') is False):
+            label = self.wake_progress_label(detail)
+            key = (model, label)
+            if key == self._latest.get('wake_progress'):
+                return None
+            self._latest['wake_progress'] = key
+            body, color = model + ': observed ' + self.short(label), 'green'
         else:
             if model:
                 body += ' ' + model

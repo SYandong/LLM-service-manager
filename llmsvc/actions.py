@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-5.6-luna
 """Guarded single-action dispatch; no live transport or HTTP mount is defaulted.
 
 Submission is not a confirmed state transition or measured resource release.
@@ -15,6 +16,8 @@ import time
 from dataclasses import asdict
 from typing import Any, Callable, Optional, Protocol
 from urllib.parse import quote
+
+from llmsvc.wake_progress import WakeProgressReader
 
 from llmsvc.state import Action, StateSnapshot
 
@@ -373,12 +376,16 @@ class ModelActionController:
     policy estimate. Accounting is never released here.
     """
 
-    def __init__(self, scheduler, transport, *, monotonic=time.monotonic, settings=None):
+    def __init__(self, scheduler, transport, *, monotonic=time.monotonic, settings=None,
+                 progress_reader_factory=WakeProgressReader):
         from llmsvc.policy import PolicySettings
         self.scheduler = scheduler
         self.transport = transport
         self.monotonic = monotonic
         self.settings = settings or PolicySettings()
+        if not callable(progress_reader_factory):
+            raise ValueError("progress_reader_factory must be callable")
+        self.progress_reader_factory = progress_reader_factory
         self.pending = set()
         self.free_active = False
         self.dispatcher = ModelActionDispatcher(
@@ -759,6 +766,7 @@ class ModelActionController:
             deadline = min(deadline, _deadline)
         result = {"model": name, "status": "blocked", "ready": False, "elapsed_seconds": 0.0, "cold_start": False}
         owned = False
+        progress_reader = None
         try:
             self._enabled()
             if _recovery is not None and (_recovery is not getattr(self.scheduler, "sleeping_recovery", None)
@@ -780,6 +788,20 @@ class ModelActionController:
                 if faults is not None and model.state == "sleeping":
                     faults.note_wake(name)
                 self.scheduler.emit("wake_requested", model=name, detail={"by": by, "cold_start": result["cold_start"]})
+                if result["cold_start"]:
+                    # This reader is advisory and starts after the action lock is
+                    # released.  A delayed header never delays the wake request.
+                    progress_reader = self.progress_reader_factory(
+                        opener=self.transport.opener.open,
+                        base_url=self.transport.swap_url,
+                        model=name,
+                        deadline=deadline,
+                        emit=lambda detail: self.scheduler.emit(
+                            "wake_progress", model=name, detail=detail),
+                        monotonic=self.monotonic,
+                        wall_clock=time.time,
+                    )
+                    progress_reader.start()
             # No action lock during this request: it may synchronously reenter
             # /v1/place through the data-plane launcher before returning.
             prepared = _recovery.before_wake_request(name, deadline) if _recovery is not None else None
@@ -828,6 +850,8 @@ class ModelActionController:
         except ActionDispatchError as exc:
             result.update(status="timeout" if exc.reason == "deadline_exceeded" else "blocked", error=exc.reason)
         finally:
+            if progress_reader is not None:
+                progress_reader.close(timeout=2.0)
             result["elapsed_seconds"] = max(0.0, self.monotonic() - started)
             with self.scheduler.changed:
                 if owned:
