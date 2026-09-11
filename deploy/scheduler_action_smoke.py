@@ -598,7 +598,7 @@ if values.get('LoadState')=='not-found' or (values.get('MainPID')=='0' and value
  print(json.dumps({'absent':True,'exit_proven':True,'lease_id':lease}));raise SystemExit(0)
 if values.get('MainPID')=='0':raise RuntimeError('daemon identity unknown')
 identity=unit_identity(x['unit'],x['token'],lease=lease,model=x['model'])
-print(json.dumps({'absent':False,'lease_id':lease,'identity':identity}))
+print(json.dumps({'absent':False,'lease_id':lease,'identity':identity,'control_group':values.get('ControlGroup',''),'invocation_id':values.get('InvocationID','')}))
 '''
         return self.python(code,{'root':self.temp,'unit':self.unit,'model':self.model,
                                  'token':self.token},limit=5,cleanup=cleanup)
@@ -606,9 +606,18 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity}))
     def wait_daemon_exit(self, binding):
         end=min(self.deadline,time.monotonic()+18)
         while time.monotonic()<end:
-            value=self.container(['systemctl','show',self.unit,'-p','LoadState','-p','ActiveState','-p','MainPID'],cleanup=True,check=False).stdout
+            value=self.container(['systemctl','show',self.unit,'-p','Id','-p','LoadState','-p','ActiveState','-p','MainPID','-p','InvocationID','-p','ControlGroup'],cleanup=True,check=False).stdout
             fields=dict(line.split('=',1) for line in value.splitlines() if '=' in line)
-            if fields.get('LoadState')=='not-found' or (fields.get('ActiveState') in ('inactive','failed','dead') and fields.get('MainPID')=='0'):
+            if fields.get('LoadState')=='not-found':
+                return
+            if fields.get('ActiveState') in ('inactive','failed','dead') and fields.get('MainPID')=='0':
+                if fields.get('Id')!=self.unit:raise lifecycle.SmokeError('daemon identity changed during cleanup')
+                expected=binding.get('identity') or {}
+                for key,old in (('InvocationID',expected.get('invocation_id') or binding.get('invocation_id','')),
+                                ('ControlGroup',binding.get('control_group',''))):
+                    current=fields.get(key,'')
+                    if current and (not old or current!=old):
+                        raise lifecycle.SmokeError('daemon identity changed during cleanup')
                 return
             current=self.daemon_binding(cleanup=True)
             if current.get('absent'):
@@ -679,7 +688,14 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity}))
                     while time.monotonic()<end:
                         state=self.container(['systemctl','show',unit,'-p','Id','-p','LoadState','-p','ActiveState','-p','MainPID','-p','InvocationID','-p','ControlGroup'],cleanup=True,check=False).stdout
                         fields=dict(line.split('=',1) for line in state.splitlines() if '=' in line)
-                        if fields.get('LoadState')=='not-found' or (fields.get('ActiveState') in ('inactive','failed','dead') and fields.get('MainPID')=='0'):
+                        if fields.get('LoadState')=='not-found':
+                            break
+                        if fields.get('ActiveState') in ('inactive','failed','dead') and fields.get('MainPID')=='0':
+                            if fields.get('Id')!=initial.get('Id'):raise lifecycle.SmokeError('control unit identity changed during cleanup')
+                            for key in ('InvocationID','ControlGroup'):
+                                current=fields.get(key,'');old=initial.get(key,'')
+                                if current and (not old or current!=old):
+                                    raise lifecycle.SmokeError('control unit identity changed during cleanup')
                             break
                         for key in ('Id','InvocationID','ControlGroup'):
                             if fields.get(key)!=initial.get(key):
