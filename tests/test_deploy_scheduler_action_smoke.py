@@ -717,6 +717,27 @@ def test_http_error_payload_is_distinguished_from_no_response():
     assert evidence['http_status'] == 503
     assert evidence['response_received'] is True
     assert evidence['response_parsed'] is True
+    assert evidence['request_error_kind'] == 'http'
+
+
+def test_http_error_non_object_payload_is_preserved():
+    class HTTPErrorList(RuntimeError):
+        status = 409
+        payload = ['placement_busy', 'model']
+
+    api, profile = _action_evidence_fixture(HTTPErrorList('scheduler rejected'))
+    with pytest.raises(smoke.EvidenceError, match='HTTP error') as exc:
+        smoke.action_probe(api, profile, 'free', 'http-list-error',
+                           deadline=time.monotonic() + 2,
+                           identity_reader=lambda *args, **kwargs: {
+                               'unit': 'vllm-fixture.service', 'pid': 1,
+                               'start_ticks': '2', 'invocation_id': 'a' * 32})
+    evidence = exc.value.evidence
+    assert evidence['response'] == HTTPErrorList.payload
+    assert evidence['response_parsed'] is True
+    assert evidence['http_status'] == 409
+    assert evidence['response_received'] is True
+    assert evidence['request_error_kind'] == 'http'
 
 
 def test_post_response_stream_failure_preserves_response_and_passed_checks():

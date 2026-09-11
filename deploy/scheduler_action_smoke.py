@@ -249,20 +249,23 @@ def action_probe(api, profile, operation, request_id, *, deadline, identity_read
             evidence['client_returned_monotonic']=returned
             payload=getattr(exc,'payload',None)
             status=getattr(exc,'status',None)
-            if isinstance(payload,dict):
+            if payload is not None:
                 evidence['response']=payload
                 evidence['response_parsed']=True
-            elif payload is not None:
-                evidence['response_parsed']=False
+            elif status is not None:evidence['response_parsed']=False
             if status is not None:
                 evidence['http_status']=status
                 evidence['response_received']=True
+                evidence['request_error_kind']='http'
             elif payload is not None:
                 evidence['response_received']=True
+                evidence['request_error_kind']='client'
             else:
                 evidence['response_received']=None
+                evidence['request_error_kind']='transport'
             evidence['transport_error_type']=type(exc).__name__
-            raise EvidenceError('action request transport error', evidence=evidence) from exc
+            message='action request HTTP error' if status is not None else 'action request transport error'
+            raise EvidenceError(message, evidence=evidence) from exc
         evidence['client_returned_monotonic']=http_done
         evidence['response']=response
         evidence['response_received']=True
