@@ -139,6 +139,7 @@ def test_http_pin_commits_before_stop_and_new_pin_rejects_after_stop(tmp_path):
     store.put_pin = put_pin
     scheduler.start(); serving.start()
     responses = []
+    first = stopper = None
     try:
         body = json.dumps({"model": "first", "until": time.time() + 60, "by": "fixture"})
         first = threading.Thread(target=lambda: responses.append(request(server.server_address, "POST", "/v1/pin", body=body)))
@@ -156,11 +157,57 @@ def test_http_pin_commits_before_stop_and_new_pin_rejects_after_stop(tmp_path):
         assert responses[0][0] == 200
     finally:
         release.set()
+        for worker in (first, stopper):
+            if worker is not None: worker.join(3)
+        assert all(worker is None or not worker.is_alive() for worker in (first, stopper))
         if serving.is_alive(): server.shutdown()
         server.server_close()
         serving.join(3)
         if not scheduler.stopping.is_set(): scheduler.stop()
         store.close()
+
+
+def test_lock_queued_pin_and_unpin_reject_after_stop_without_side_effects(tmp_path):
+    db = tmp_path / "queued.sqlite"
+    config = SchedulerConfig("127.0.0.1", 18094, read_only=False, state_db_path=str(db))
+    store = IntentStore(str(db), action_lock=threading.RLock())
+    scheduler = Scheduler(config, lambda: StateSnapshot(
+        gpus=(GPUState(0, free_gb=42),), models=(ModelState("model", state="awake"),),
+        activity=(Activity("model", in_flight=0),)), store=store)
+    scheduler.sample_once()
+    queued = threading.Event()
+    original_pending = store.bootstrap_pending
+    pending_calls = [0]
+    def bootstrap_pending(*args, **kwargs):
+        pending_calls[0] += 1
+        if pending_calls[0] >= 2: queued.set()
+        return original_pending(*args, **kwargs)
+    store.bootstrap_pending = bootstrap_pending
+    server = SchedulerHTTPServer(("127.0.0.1", 0), scheduler)
+    serving = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .01}, daemon=True)
+    serving.start()
+    responses = []
+    pin_body = json.dumps({"model": "model", "until": time.time() + 60, "by": "fixture"})
+    workers = [
+        threading.Thread(target=lambda: responses.append(("pin", request(server.server_address, "POST", "/v1/pin", body=pin_body)))),
+        threading.Thread(target=lambda: responses.append(("unpin", request(server.server_address, "DELETE", "/v1/pin/model")))),
+    ]
+    before_events = scheduler.events_since(0)
+    try:
+        with scheduler.action_lock:
+            for worker in workers: worker.start()
+            assert queued.wait(2)
+            scheduler.stopping.set()
+        for worker in workers: worker.join(3)
+        assert all(not worker.is_alive() for worker in workers)
+        assert sorted(responses) == [("pin", (503, {"error": "scheduler_stopping"})),
+                                     ("unpin", (503, {"error": "scheduler_stopping"}))]
+        assert store.active(time.time()) == ((), ())
+        assert scheduler.events_since(0) == before_events
+    finally:
+        for worker in workers: worker.join(3)
+        if serving.is_alive(): server.shutdown()
+        server.server_close(); serving.join(3); store.close()
 
 
 def test_stopping_http_mutation_matrix_is_fail_closed(tmp_path):
