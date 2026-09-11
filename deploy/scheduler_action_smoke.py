@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-5.6-luna
 """Isolated scheduler-action mode for lifecycle_smoke, not a production driver."""
 import argparse
 import hashlib
@@ -51,34 +52,131 @@ def validate(config):
         if not (root/name).is_file():raise lifecycle.SmokeError('reviewed source missing '+name)
 
 
-def unit_identity(unit, token, *, lease=None, deadline=None, origin=None):
-    limit=lifecycle.remaining(deadline or time.monotonic()+3,3)
-    result=subprocess.run(['systemctl','show',unit,'--property=Id,MainPID,InvocationID,Environment,ControlGroup'],
-                          capture_output=True,text=True,timeout=limit,check=True)
-    values=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
-    pairs=[item.split('=',1) for item in shlex.split(values.get('Environment','')) if '=' in item]
-    env=dict(pairs)
-    if len(env)!=len(pairs):raise EvidenceError('ambiguous unit environment')
-    if values.get('Id')!=unit or env.get('LLMSVC_OPS_RUN_ID')!=token:
-        raise EvidenceError('unit ownership mismatch')
-    if lease is not None and env.get('LLMSVC_LEASE_ID')!=lease:raise EvidenceError('unit lease mismatch')
-    pid=int(values['MainPID'])
-    invocation=values.get('InvocationID','')
-    if pid<=0 or not re.fullmatch('[0-9a-f]{32}',invocation) or int(invocation,16)==0 or not values.get('ControlGroup'):
+def _parse_environment(raw):
+    pairs = [item.split('=', 1) for item in shlex.split(raw or '') if '=' in item]
+    if len(pairs) != len({name for name, _ in pairs}):
+        raise EvidenceError('ambiguous unit environment')
+    return dict(pairs)
+
+
+def _parse_process_environment(raw):
+    pairs=[]
+    for item in raw.split(b'\0'):
+        if not item:continue
+        try:name,value=item.split(b'=',1)
+        except ValueError:raise EvidenceError('process environment malformed')
+        pairs.append((name.decode(),value.decode()))
+    if len(pairs)!=len({name for name,_ in pairs}):raise EvidenceError('ambiguous process environment')
+    return dict(pairs)
+
+
+def _cgroup_matches(expected, proc_cgroup):
+    expected=expected.rstrip('/')
+    paths=[]
+    for line in proc_cgroup.splitlines():
+        parts=line.split(':',2)
+        if len(parts)==3:paths.append(parts[2].rstrip('/'))
+    return any(path==expected or path.startswith(expected+'/') for path in paths)
+
+
+def validate_unit_observation(unit, token, values, proc_env, proc_start_ticks,
+                              proc_cgroup, *, lease=None, model=None,
+                              expected=None, control=None):
+    """Validate a live unit instance; EnvironmentFile text is never authority."""
+    control = unit.startswith('llmsvc-ops-action-') if control is None else control
+    if values.get('Id') != unit:
+        raise EvidenceError('unit identity mismatch')
+    try:
+        pid = int(values.get('MainPID', '0'))
+    except (TypeError, ValueError) as exc:
+        raise EvidenceError('unit PID invalid') from exc
+    invocation = values.get('InvocationID', '')
+    cgroup = values.get('ControlGroup', '')
+    if pid <= 0:
+        raise EvidenceError('unit exited before identity proof')
+    if not re.fullmatch('[0-9a-f]{32}', invocation) or int(invocation, 16) == 0:
         raise EvidenceError('unit instance unknown')
-    ticks=(Path('/proc')/str(pid)/'stat').read_text().rsplit(') ',1)[1].split()[19]
+    if not cgroup or not _cgroup_matches(cgroup,proc_cgroup):
+        raise EvidenceError('unit cgroup mismatch')
+    if not isinstance(proc_start_ticks, str) or not re.fullmatch('[0-9]+', proc_start_ticks):
+        raise EvidenceError('unit start identity unknown')
+    if control:
+        if proc_env.get('LLMSVC_OPS_RUN_ID') != token:
+            raise EvidenceError('control unit owner mismatch')
+    else:
+        expected_model = model or (unit[:-8] if unit.endswith('.service') else unit)
+        if model is None and not expected_model.startswith('vllm-'):
+            raise EvidenceError('daemon model binding missing')
+        if model is None:
+            expected_model = expected_model[5:]
+        if proc_env.get('LLMSVC_MODEL') != expected_model:
+            raise EvidenceError('daemon model environment mismatch')
+        if lease is not None and proc_env.get('LLMSVC_LEASE_ID') != lease:
+            raise EvidenceError('unit lease mismatch')
+        if not proc_env.get('CUDA_VISIBLE_DEVICES'):
+            raise EvidenceError('daemon GPU environment missing')
+    declared = _parse_environment(values.get('Environment', ''))
+    for key in ('LLMSVC_OPS_RUN_ID', 'LLMSVC_LEASE_ID', 'LLMSVC_MODEL', 'CUDA_VISIBLE_DEVICES'):
+        if key in declared and declared.get(key) != proc_env.get(key):
+            raise EvidenceError('unit environment differs from process environment')
+    identity = {'unit': unit, 'pid': pid, 'start_ticks': proc_start_ticks,
+                'invocation_id': invocation}
+    if expected is not None and identity != expected:
+        raise EvidenceError('unit instance changed')
+    return identity
+
+
+def unit_identity(unit, token, *, lease=None, deadline=None, origin=None,
+                  model=None, expected=None, control=None, proc_root=Path('/proc')):
+    limit=lifecycle.remaining(deadline or time.monotonic()+3,3)
+    command=['systemctl','show',unit,'--property=Id,MainPID,InvocationID,Environment,ControlGroup']
+    result=subprocess.run(command,capture_output=True,text=True,timeout=limit,check=True)
+    values=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+    pid=int(values.get('MainPID','0'))
+    if pid <= 0:raise EvidenceError('unit exited before identity proof')
+    process=Path(proc_root)/str(pid)
+    try:
+        proc_env=_parse_process_environment(process.joinpath('environ').read_bytes())
+        ticks=process.joinpath('stat').read_text().rsplit(') ',1)[1].split()[19]
+        proc_cgroup=process.joinpath('cgroup').read_text()
+    except (OSError, UnicodeError, IndexError) as exc:
+        raise EvidenceError('process identity unavailable') from exc
+    identity=validate_unit_observation(unit,token,values,proc_env,ticks,proc_cgroup,
+                                       lease=lease,model=model,expected=expected,control=control)
+    remaining=lifecycle.remaining(deadline or time.monotonic()+3,3)
+    result=subprocess.run(command,capture_output=True,text=True,timeout=remaining,check=True)
+    current=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+    for key in ('Id','MainPID','InvocationID','ControlGroup'):
+        if current.get(key)!=values.get(key):raise EvidenceError('unit instance changed')
+    pid2=int(current.get('MainPID','0'))
+    if pid2!=pid:raise EvidenceError('unit instance changed')
+    process2=Path(proc_root)/str(pid2)
+    try:
+        proc_env2=_parse_process_environment(process2.joinpath('environ').read_bytes())
+        ticks2=process2.joinpath('stat').read_text().rsplit(') ',1)[1].split()[19]
+        proc_cgroup2=process2.joinpath('cgroup').read_text()
+    except (OSError, UnicodeError, IndexError) as exc:
+        raise EvidenceError('process identity unavailable') from exc
+    if (ticks2!=ticks or proc_cgroup2!=proc_cgroup
+            or any(proc_env2.get(key)!=proc_env.get(key) for key in ('LLMSVC_MODEL','LLMSVC_LEASE_ID','LLMSVC_OPS_RUN_ID','CUDA_VISIBLE_DEVICES'))):
+        raise EvidenceError('unit instance changed')
+    validate_unit_observation(unit,token,current,proc_env,ticks2,proc_cgroup2,
+                              lease=lease,model=model,expected=identity,control=control)
     if origin is not None:
         from deploy.maintenance_executor import ScopeInspector
         from deploy.maintenance_native import NativeAdapter
         inspector=ScopeInspector({'unit':unit})
         if not NativeAdapter.listener_owned(inspector,origin,values['ControlGroup'],deadline or time.monotonic()+3):
             raise EvidenceError('daemon listener is not owned by bound unit')
-    return {'unit':unit,'pid':pid,'start_ticks':ticks,'invocation_id':values['InvocationID']}
+    return identity
 
 
 def account(snapshot, profile, *, state=None):
-    if not isinstance(snapshot,dict) or snapshot.get('errors'):
-        raise EvidenceError('unknown scheduler observation')
+    if not isinstance(snapshot,dict):
+        raise EvidenceError('unknown scheduler observation: state is not an object')
+    if snapshot.get('errors'):
+        reasons=';'.join(str(item)[:160] for item in snapshot['errors'][:4])
+        raise EvidenceError('unknown scheduler observation: '+reasons)
     if snapshot.get('read_only') is not False:raise EvidenceError('action runtime is not enabled')
     at=snapshot.get('sampled_at')
     if type(at) not in (int,float) or not math.isfinite(at) or not 0<=time.time()-at<=5:
@@ -200,14 +298,14 @@ def guarded_launch(profile, argv):
     module.start_unit=start
     if module.unit_exists(profile['unit']):
         marker=json.loads((Path(profile['root'])/'launch-lease.json').read_text())
-        unit_identity(profile['unit'],profile['token'],lease=marker['lease_id'])
+        unit_identity(profile['unit'],profile['token'],lease=marker['lease_id'],model=profile['model'])
     return module.main(argv)
 
 
 def stop_wrapper(profile, pid):
     """Use the existing wrapper sleep command, then signal only a bound pidfd."""
     marker=json.loads((Path(profile['root'])/'launch-lease.json').read_text())
-    before=unit_identity(profile['unit'],profile['token'],lease=marker['lease_id'],origin=profile['backend_url'])
+    before=unit_identity(profile['unit'],profile['token'],lease=marker['lease_id'],model=profile.get('model'),origin=profile['backend_url'])
     process=Path('/proc')/str(pid)
     if not lifecycle.cgroup_owned((process/'cgroup').read_text(),profile['source_unit']):
         raise EvidenceError('wrapper is outside owned source unit')
@@ -219,7 +317,7 @@ def stop_wrapper(profile, pid):
     fd=os.pidfd_open(pid)
     try:
         if (process/'stat').read_text().rsplit(') ',1)[1].split()[19]!=ticks:raise EvidenceError('wrapper PID reused')
-        if unit_identity(profile['unit'],profile['token'],lease=marker['lease_id'],origin=profile['backend_url'])!=before:
+        if unit_identity(profile['unit'],profile['token'],lease=marker['lease_id'],model=profile.get('model'),origin=profile['backend_url'])!=before:
             raise EvidenceError('daemon changed before sleep')
         # Never let an external stop-pid argument target a reused process ID.
         result=subprocess.run([profile['wrapper_binary'],'stop','--vllm-url',profile['backend_url']],
@@ -228,7 +326,7 @@ def stop_wrapper(profile, pid):
         from deploy.maintenance_native import NativeHTTP
         sleeping=NativeHTTP(profile['backend_url']).json('GET','/is_sleeping',min(profile['work_deadline'],time.monotonic()+2))
         if sleeping.get('is_sleeping') is not True:raise EvidenceError('daemon sleep not confirmed')
-        if unit_identity(profile['unit'],profile['token'],lease=marker['lease_id'],origin=profile['backend_url'])!=before:
+        if unit_identity(profile['unit'],profile['token'],lease=marker['lease_id'],model=profile.get('model'),origin=profile['backend_url'])!=before:
             raise EvidenceError('daemon changed during sleep')
         signal.pidfd_send_signal(fd,signal.SIGTERM)
     finally:os.close(fd)
@@ -270,7 +368,7 @@ def helper_main(argv):
             except HTTPError as exc:status=exc.code;exc.close()
             if status!=200:raise EvidenceError('cold request failed')
             state=api['SchedulerClient'](profile['scheduler_url'],timeout=2).request('GET','/v1/state')
-            model,lease=account(state,profile,state='awake');unit_identity(profile['unit'],profile['token'],lease=lease['lease_id'])
+            model,lease=account(state,profile,state='awake');unit_identity(profile['unit'],profile['token'],lease=lease['lease_id'],model=profile['model'])
             result.update(status='passed',seconds=time.monotonic()-started,lease=lease)
         else:
             value=action_probe(api,profile,request['operation'],request['id'],deadline=deadline)
@@ -482,6 +580,39 @@ print('{}')
             time.sleep(.5)
         raise lifecycle.SmokeError('bounded action request did not complete')
 
+    def daemon_binding(self, *, cleanup=False):
+        code='''import json,sys,subprocess
+from pathlib import Path
+x=json.load(sys.stdin);root=Path(x['root'])
+if root.is_symlink() or not (root/'owner').is_file() or (root/'owner').read_text()!=x['token']:raise RuntimeError('run root ownership mismatch')
+sys.path.insert(0,str(root/'runtime'))
+from deploy.scheduler_action_smoke import unit_identity
+marker=root/'launch-lease.json'
+if not marker.is_file():raise RuntimeError('launch lease marker missing')
+lease=json.loads(marker.read_text()).get('lease_id')
+if not isinstance(lease,str) or not lease:raise RuntimeError('launch lease marker invalid')
+show=subprocess.run(['systemctl','show',x['unit'],'-p','Id','-p','LoadState','-p','ActiveState','-p','MainPID','-p','InvocationID','-p','Environment','-p','ControlGroup'],capture_output=True,text=True,check=False).stdout
+values=dict(line.split('=',1) for line in show.splitlines() if '=' in line)
+if values.get('Id')!=x['unit']:raise RuntimeError('daemon unit identity mismatch')
+if values.get('LoadState')=='not-found' or (values.get('MainPID')=='0' and values.get('ActiveState') in ('inactive','dead','failed')):
+ print(json.dumps({'absent':True,'exit_proven':True,'lease_id':lease}));raise SystemExit(0)
+if values.get('MainPID')=='0':raise RuntimeError('daemon identity unknown')
+identity=unit_identity(x['unit'],x['token'],lease=lease,model=x['model'])
+print(json.dumps({'absent':False,'lease_id':lease,'identity':identity}))
+'''
+        return self.python(code,{'root':self.temp,'unit':self.unit,'model':self.model,
+                                 'token':self.token},limit=5,cleanup=cleanup)
+
+    def wait_daemon_exit(self):
+        end=min(self.deadline,time.monotonic()+18)
+        while time.monotonic()<end:
+            value=self.container(['systemctl','show',self.unit,'-p','LoadState','-p','ActiveState','-p','MainPID'],cleanup=True,check=False).stdout
+            fields=dict(line.split('=',1) for line in value.splitlines() if '=' in line)
+            if fields.get('LoadState')=='not-found' or (fields.get('ActiveState') in ('inactive','failed','dead') and fields.get('MainPID')=='0'):
+                return
+            lifecycle.remaining(end,2);time.sleep(.2)
+        raise lifecycle.SmokeError('owned daemon did not exit before cleanup deadline')
+
     def wait_free_eligible(self):
         end=min(self.work_deadline-55,time.monotonic()+40)
         while time.monotonic()<end:
@@ -503,16 +634,18 @@ print('{}')
         # native unload callback touch a possibly replaced daemon during cleanup.
         if self.attempted or (self.temp_created and self.units):
             try:
-                loaded=self.container(['systemctl','show',self.unit,'-p','LoadState','--value'],cleanup=True).stdout.strip()
-                if loaded!='not-found':
-                    if not self.verify_owner(cleanup=True):raise lifecycle.SmokeError('daemon ownership unknown')
-                    self.container(['systemctl','stop',self.unit],limit=18,cleanup=True)
+                binding=self.daemon_binding(cleanup=True)
+                if not binding.get('absent'):
+                    self.container(['systemctl','stop',self.unit],limit=12,cleanup=True)
+                    self.wait_daemon_exit()
                 state=self.json_at(self.profile['scheduler_url'],'/v1/state',cleanup=True)
                 if (not isinstance(state.get('leases'),list) or state.get('schema_version')!=1
-                        or any('intent_store' in str(error) for error in state.get('errors',[]))):
-                    raise lifecycle.SmokeError('account cleanup snapshot unknown')
+                        or state.get('errors')):
+                    raise lifecycle.SmokeError('account cleanup snapshot unknown: '+str(state.get('errors',[]))[:300])
                 leases=[r for r in state.get('leases',[]) if r.get('model')==self.model and r.get('status')!='released']
                 for lease in leases:
+                    if lease.get('lease_id')!=binding.get('lease_id'):
+                        raise lifecycle.SmokeError('account cleanup lease identity mismatch')
                     released=self.json_at(self.profile['scheduler_url'],'/v1/place/'+quote(lease['lease_id'],safe='')+'/release',{},cleanup=True)
                     if released.get('status')!='released' or released.get('lease_id')!=lease['lease_id']:
                         raise lifecycle.SmokeError('lease release unconfirmed')
