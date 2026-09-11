@@ -566,7 +566,7 @@ class ActionRun(lifecycle.Run):
         self.source_unit='llmsvc-ops-action-source-'+self.token+'.service'
         self.units=[];self.lease=None;self.preserve=False;self.measured_phases=set();self.phase_measurements={}
 
-    def _cleanup_state(self, binding, *, newer_than=None, require_publication=False):
+    def _cleanup_state(self, binding, *, newer_than=None, require_publication=False, allow_baseline=False):
         try:
             observed=self.daemon_binding(cleanup=True)
         except lifecycle.SmokeError as exc:
@@ -584,17 +584,30 @@ class ActionRun(lifecycle.Run):
             raise _CleanupObservationUnknown('account cleanup snapshot unavailable') from exc
         sampled_at=state.get('sampled_at') if isinstance(state,dict) else None
         now=time.time()
-        max_age=getattr(self,'config',{}).get('max_snapshot_age_seconds',5)
-        if (not isinstance(state,dict) or type(sampled_at) not in (int,float)
-                or not math.isfinite(sampled_at) or sampled_at<0 or sampled_at>now
-                or now-sampled_at>max_age):
-            raise _CleanupObservationUnknown('account cleanup snapshot timestamp unknown',sampled_at=sampled_at,requires_publication=True)
-        if require_publication and newer_than is None:
-            raise _CleanupObservationUnknown('account cleanup requires a fresh publication',sampled_at=sampled_at,requires_publication=True)
+        configured_age=getattr(self,'config',{}).get('max_snapshot_age_seconds',5)
+        if (isinstance(configured_age,bool) or type(configured_age) not in (int,float)
+                or not math.isfinite(configured_age) or configured_age<=0):
+            raise _CleanupObservationUnknown('account cleanup freshness configuration unknown',requires_publication=True)
+        valid_timestamp=(isinstance(state,dict) and type(sampled_at) in (int,float)
+                         and math.isfinite(sampled_at) and 0<=sampled_at<=now
+                         and now-sampled_at<=configured_age)
+        if not valid_timestamp:
+            detail=(str(state.get('errors'))[:200] if isinstance(state,dict) and 'errors' in state else '')
+            suffix=': '+detail if detail else ''
+            raise _CleanupObservationUnknown('account cleanup snapshot timestamp unknown'+suffix,
+                                              requires_publication=True)
+        if require_publication and newer_than is None and not allow_baseline:
+            raise _CleanupObservationUnknown('account cleanup requires a fresh publication',
+                                              sampled_at=sampled_at,requires_publication=True)
         if newer_than is not None and sampled_at<=newer_than:
             raise _CleanupObservationUnknown('account cleanup publication did not advance',sampled_at=sampled_at)
-        if state.get('schema_version')!=1 or not isinstance(state.get('leases'),list) or state.get('errors'):
-            raise _CleanupObservationUnknown('account cleanup snapshot unknown',sampled_at=sampled_at)
+        schema=state.get('schema_version');errors=state.get('errors')
+        if type(schema) is not int or schema!=1:
+            raise _CleanupObservationUnknown('account cleanup schema unknown',sampled_at=sampled_at)
+        if not isinstance(errors,list) or any(not isinstance(item,str) for item in errors):
+            raise _CleanupObservationUnknown('account cleanup errors malformed: '+str(errors)[:200],sampled_at=sampled_at)
+        if errors:
+            raise _CleanupObservationUnknown('account cleanup reported errors: '+';'.join(errors[:4]),sampled_at=sampled_at)
         models=state.get('models')
         if models is not None:
             if not isinstance(models,list):
@@ -632,7 +645,7 @@ class ActionRun(lifecycle.Run):
         for lease in leases:
             if lease.get('lease_id')!=binding.get('lease_id') or lease.get('unit') not in (None,self.unit):
                 raise lifecycle.SmokeError('account cleanup lease identity mismatch')
-        return leases
+        return leases,sampled_at
 
     def _completion_fields(self, result, cleanup_succeeded):
         return {'result':result,'scope':self.scope,
@@ -838,17 +851,22 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity,'control_g
                         # The stop request was already submitted. Observe the
                         # same identity until the original deadline; never resend it.
                     self.wait_daemon_exit(binding)
-                last_unknown_sampled_at=None;unknown_without_timestamp=False
+                last_unknown_sampled_at=None;unknown_without_timestamp=False;baseline_pending=False
                 while True:
                     try:
-                        leases=self._cleanup_state(binding,newer_than=last_unknown_sampled_at,
-                                                  require_publication=unknown_without_timestamp)
+                        leases,sampled_at=self._cleanup_state(binding,newer_than=last_unknown_sampled_at,
+                                                              require_publication=unknown_without_timestamp,
+                                                              allow_baseline=baseline_pending)
+                        if baseline_pending:
+                            last_unknown_sampled_at=sampled_at;unknown_without_timestamp=False;baseline_pending=False
+                            continue
                         break
                     except _CleanupObservationUnknown as exc:
                         if exc.sampled_at is not None:
                             last_unknown_sampled_at=(exc.sampled_at if last_unknown_sampled_at is None
                                                      else max(last_unknown_sampled_at,exc.sampled_at))
-                        unknown_without_timestamp=unknown_without_timestamp or exc.requires_publication and exc.sampled_at is None
+                        if exc.requires_publication and exc.sampled_at is None:
+                            unknown_without_timestamp=True;baseline_pending=True
                         remaining=self.deadline-time.monotonic()
                         if remaining<=0:
                             raise lifecycle.SmokeError('account cleanup snapshot unknown: '+str(exc)) from exc

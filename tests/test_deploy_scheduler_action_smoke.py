@@ -445,6 +445,44 @@ def test_cleanup_invalid_timestamp_preserves_without_release():
     assert run.preserve and released==[]
 
 
+def test_cleanup_invalid_timestamp_builds_baseline_then_requires_new_clean_publication():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+2
+    run.profile={'scheduler_url':'http://fixture'};run.log=lambda *a,**k:None
+    run.daemon_binding=lambda **_: {'absent':True,'lease_id':'lease-1'}
+    base=time.time();released=[]
+    states=iter((
+        {'schema_version':1,'sampled_at':'bad','errors':[],'leases':[{'model':'fixture','status':'confirmed','lease_id':'lease-1'}]},
+        {'schema_version':1,'sampled_at':base,'errors':[],'leases':[{'model':'fixture','status':'confirmed','lease_id':'lease-1'}]},
+        {'schema_version':1,'sampled_at':base+.01,'errors':[],'leases':[{'model':'fixture','status':'confirmed','lease_id':'lease-1'}]},
+    ))
+    run.json_at=lambda url,path,body=None,**kwargs: next(states) if path=='/v1/state' else (released.append(path) or {'status':'released','lease_id':'lease-1'})
+    run.cleanup_actions()
+    assert released==['/v1/place/lease-1/release']
+
+
+def test_cleanup_malformed_errors_are_unknown_and_preserved():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+.2
+    run.profile={'scheduler_url':'http://fixture'};run.log=lambda *a,**k:None
+    run.daemon_binding=lambda **_: {'absent':True,'lease_id':'lease-1'};released=[]
+    run.json_at=lambda url,path,body=None,**kwargs: ({'schema_version':1,'sampled_at':time.time(),'errors':{},'leases':[{'model':'fixture','status':'confirmed','lease_id':'lease-1'}]} if path=='/v1/state' else (released.append(path) or {'status':'released','lease_id':'lease-1'}))
+    with pytest.raises(life.SmokeError,match='cleanup incomplete'):
+        run.cleanup_actions()
+    assert run.preserve and released==[]
+
+
+def test_cleanup_boolean_schema_version_is_unknown_and_preserved():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+.2
+    run.profile={'scheduler_url':'http://fixture'};run.log=lambda *a,**k:None
+    run.daemon_binding=lambda **_: {'absent':True,'lease_id':'lease-1'};released=[]
+    run.json_at=lambda url,path,body=None,**kwargs: ({'schema_version':True,'sampled_at':time.time(),'errors':[],'leases':[{'model':'fixture','status':'confirmed','lease_id':'lease-1'}]} if path=='/v1/state' else (released.append(path) or {'status':'released','lease_id':'lease-1'}))
+    with pytest.raises(life.SmokeError,match='cleanup incomplete'):
+        run.cleanup_actions()
+    assert run.preserve and released==[]
+
+
 @pytest.mark.parametrize('rows', [
     [{'lease_id':'lease-1','model':'fixture','status':'confirmed'},
      {'lease_id':'lease-1','model':'fixture','status':'stale'}],
@@ -518,10 +556,12 @@ def test_phase_records_measured_receipt_for_completion_reporting(tmp_path):
 def test_partial_measured_phase_is_reported_without_claiming_full_success():
     run=smoke.ActionRun.__new__(smoke.ActionRun);run.model='fixture';run.measured_phases=set();run.phase_measurements={}
     run._record_phase_result('free',{'status':'failed','evidence':{'response':{
-        'status':'partial','measurement_complete':True,'freed_gb':3.5}}})
+        'status':'partial','model':'fixture','measurement_complete':True,'freed_gb':3.5}}})
     value=run._completion_fields('failed',False)
     assert value['live_chain_measured'] is True and value['measured_phases']==['free']
     assert value['phase_measurements']['free']['quality']=='partial_measured'
+    run._record_phase_result('wake',{'status':'failed','evidence':{'response':None}})
+    assert value['phase_measurements']['free']['measured'] is True and run.phase_measurements['wake']['measured'] is False
 
 
 def test_cleanup_stop_timeout_without_exit_preserves_ledger_and_does_not_release():
@@ -760,7 +800,7 @@ def test_http200_unknown_release_preserves_ledger():
     run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.temp_created=True;run.preserve=False;run.units=[]
     run.unit='vllm-own.service';run.model='own';run.profile={'scheduler_url':'http://127.0.0.1:1'};run.log=lambda *a,**k:None
     run.container=lambda *a,**k:subprocess.CompletedProcess([],0,'not-found\n','')
-    run.json_at=lambda url,path,*a,**k:({'schema_version':1,'sampled_at':time.time(),'leases':[{'model':'own','lease_id':'lease','status':'pending'}]} if path=='/v1/state' else {'status':'unknown'})
+    run.json_at=lambda url,path,*a,**k:({'schema_version':1,'sampled_at':time.time(),'errors':[],'leases':[{'model':'own','lease_id':'lease','status':'pending'}]} if path=='/v1/state' else {'status':'unknown'})
     run.python=lambda *a,**k:pytest.fail('unknown lease must be retained')
     with pytest.raises(life.SmokeError):run.cleanup_actions()
     assert run.preserve
