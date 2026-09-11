@@ -367,7 +367,7 @@ class BootstrapController:
         module=None
         try:
             module=self._launcher()
-            s.sample_once()
+            s.await_initial_sample(self.deadline)
             with s.action_lock:
                 request=s.placement._request({'model':self.model,'util':self.spec['util']})
                 decision,blocked=s.placement._decision(s.snapshot(),request,waiting=False)
