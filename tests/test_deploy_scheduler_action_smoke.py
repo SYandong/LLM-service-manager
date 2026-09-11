@@ -154,6 +154,47 @@ def test_actual_scheduler_free_wake_events_preserve_real_launcher_account(chain)
     assert chain.world['calls']==[('POST','/api/models/unload/smoke'),('GET','/upstream/smoke/')]
 
 
+@pytest.mark.parametrize('response,expect_success', [
+    ({'model':'model','status':'ready','ready':True}, True),
+    ({'model':'other','status':'ready','ready':True}, False),
+    ({'model':'model','status':'failed','ready':False,'error':'wake_failed'}, False),
+    (['not','an','object'], False),
+])
+def test_scheduler_wake_cold_route_owns_one_post_and_validates_final_response(response,expect_success):
+    post_seen=threading.Event();progress_sent=threading.Event();done=threading.Event();calls=[]
+    state={'read_only':False,'sampled_at':time.time(),'errors':[],
+           'models':[{'name':'model','state':'awake','gpu':0,'unit':'vllm-model.service','resident_gb':20}],
+           'leases':[{'model':'model','gpu':0,'unit':'vllm-model.service','lease_id':'lease-1','status':'confirmed','budget_gb':20}]}
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*a):pass
+        def do_GET(self):
+            if self.path.startswith('/v1/events?since='):
+                self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+                self.wfile.write(b': connected\n\n');self.wfile.flush();post_seen.wait(1)
+                item={'id':1,'timestamp':time.time(),'kind':'wake_progress','model':'model','detail':{
+                    'stage':'health_wait','source':'llama-swap','source_model':'model','progress_source':'per_model_log',
+                    'log_epoch':'epoch','sequence':1,'received_at':time.time(),'trusted_for_quiet':False}}
+                raw=json.dumps(item).encode();self.wfile.write(b'id: 1\ndata: '+raw+b'\n\n');self.wfile.flush();progress_sent.set();done.wait(1);return
+            assert self.path=='/v1/state';payload=json.dumps(state).encode();self.send_response(200);self.send_header('Content-Length',str(len(payload)));self.end_headers();self.wfile.write(payload)
+        def do_POST(self):
+            assert self.path=='/v1/wake/model';calls.append(self.path);post_seen.set();assert progress_sent.wait(1);time.sleep(.05)
+            payload=json.dumps(response).encode() if isinstance(response,dict) else json.dumps(response).encode()
+            self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(payload)));self.end_headers();self.wfile.write(payload);done.set()
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    try:
+        profile={'scheduler_url':'http://127.0.0.1:'+str(server.server_port),'model':'model','unit':'vllm-model.service','token':'token','gpu':0,'request_id':'cold','work_deadline':time.monotonic()+5}
+        identity=lambda unit,token,**kwargs:{'unit':unit,'pid':1,'start_ticks':'1','invocation_id':'a'*32}
+        if expect_success:
+            result=smoke.scheduler_wake_request(API,profile,time.monotonic()+3,identity_reader=identity)
+            assert result['response']==response and result['progress_before_response'] is True
+            assert result['lease']['lease_id']=='lease-1'
+        else:
+            with pytest.raises(smoke.EvidenceError):smoke.scheduler_wake_request(API,profile,time.monotonic()+3,identity_reader=identity)
+        assert calls==['/v1/wake/model']
+    finally:
+        done.set();server.shutdown();server.server_close();thread.join(2)
+
+
 def test_pin_refusal_does_not_dispatch_or_forge_measurement(chain):
     client=API['SchedulerClient'](chain.profile['scheduler_url'])
     client.request('POST','/v1/pin',{'model':'smoke','until':time.time()+60,'by':'fixture'})
@@ -751,6 +792,11 @@ def test_generated_profile_has_empty_ledger_and_scoped_hardware(tmp_path):
         run.config['scheduler_python'], '-B', run.temp+'/runtime/deploy/scheduler_action_smoke.py',
         'stop', run.temp+'/profile.json', '${PID}',
     ]
+    run.config.update(cold_route='scheduler_wake',startup_seconds=90)
+    wake_files,wake_profile=smoke.artifacts(run,[9002,9003,9004],10*1024**3)
+    wake_scheduler=json.loads(wake_files[run.temp+'/scheduler.json'])
+    assert wake_scheduler['wake_timeout_seconds']==90
+    assert wake_profile['cold_route']=='scheduler_wake' and wake_profile['cold_budget_seconds']==90
 
 
 @pytest.mark.parametrize('chain',['unstarted'],indirect=True)
@@ -828,7 +874,8 @@ def test_stop_wrapper_uses_supported_sleep_and_proves_before_pidfd_signal(tmp_pa
 
 
 @pytest.mark.parametrize('key,value',[('startup_seconds',0),('startup_seconds',float('inf')),
-                                      ('cold_start_cost_seconds',True),('host_meminfo_path','/proc/meminfo')])
+                                      ('cold_start_cost_seconds',True),('cold_route','unsupported'),
+                                      ('host_meminfo_path','/proc/meminfo')])
 def test_invalid_action_mode_inputs_are_rejected_without_runner(tmp_path,key,value):
     config={'source':str(ROOT),'native_binary':'/native','wrapper_binary':'/wrapper','scheduler_python':'/python',
             'nvidia_smi':'/nvidia','host_meminfo_path':'/verified-host','native_binary_sha256':'a'*64,'wrapper_sha256':'b'*64}

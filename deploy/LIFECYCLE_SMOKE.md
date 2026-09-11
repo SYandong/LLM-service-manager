@@ -126,6 +126,15 @@ unverified numeric `stop-pid` is passed to another process. Scheduler-actions
 mode allows stable primary-model bystanders only after selected-GPU/process/RAM
 guards; direct lifecycle mode keeps its strict all-model quiet preflight.
 
+The default `cold_route: native_chat` remains unchanged. A separately selected
+`cold_route: scheduler_wake` uses the existing `startup_seconds` (validated
+1..150 seconds) as the isolated scheduler wake budget and sets only that generated
+test scheduler's `wake_timeout_seconds`; it sends exactly one `POST /v1/wake/<model>`.
+The final ready response plus account/lease/unit checks are authoritative, while
+SSE wake stages are advisory evidence only. This route does not change production
+timeouts or imply a warm-wake pass: warm observations remain independently checked
+against the original three-second target.
+
 The existing standalone CLI's `SchedulerClient` and `EventReader` collect the
 scheduler result event. Evidence includes a **local** request UUID, model, actual
 lease/unit identity, pre-request cursor, result event ID, HTTP duration, event

@@ -61,6 +61,9 @@ def validate(config):
     root=Path(config['source'])
     for name in ('cli/llm','deploy/vllm-launch','deploy/maintenance_native.py','deploy/maintenance_executor.py'):
         if not (root/name).is_file():raise lifecycle.SmokeError('reviewed source missing '+name)
+    route=config.get('cold_route','native_chat')
+    if route not in ('native_chat','scheduler_wake'):
+        raise lifecycle.SmokeError('cold_route must be native_chat or scheduler_wake')
 
 
 def _parse_environment(raw):
@@ -412,6 +415,55 @@ def stop_wrapper(profile, pid):
     return 0
 
 
+def scheduler_wake_request(api, profile, deadline, *, identity_reader=unit_identity):
+    """Own one scheduler wake POST while a separate reader observes SSE only."""
+    request_client=api['SchedulerClient'](profile['scheduler_url'],timeout=lifecycle.remaining(deadline,25))
+    event_client=api['SchedulerClient'](profile['scheduler_url'],timeout=1)
+    reader=api['EventReader'](event_client,stream_timeout=.5,retry_delay=.1,max_retry_delay=1,queue_size=64)
+    evidence={'operation':'cold','local_request_id':profile.get('request_id'),'model':profile['model'],
+              'response':None,'progress':[],'progress_before_response':False,'identity_checks':{}}
+    outcome={};started=time.monotonic();after_id=0;progress_state={'log_epoch':None,'sequence':0,'retired_epochs':set()}
+    def invoke():
+        try:outcome['response']=request_client.request('POST','/v1/wake/'+quote(profile['model'],safe=''),{})
+        except Exception as exc:outcome['error']=exc
+    request=threading.Thread(target=invoke,name='ops-cold-scheduler-wake',daemon=True)
+    reader.start();request.start()
+    try:
+        while request.is_alive():
+            update=reader.drain()
+            for item in update.get('events',[]):
+                progress=api['parse_wake_progress'](item,profile['model'],after_id=after_id,since=started)
+                if progress is not None and api['accept_wake_progress'](progress,progress_state):
+                    evidence['progress'].append(progress);after_id=max(after_id,item['id'])
+            if evidence['progress']:evidence['progress_before_response']=True
+            if time.monotonic()>=deadline:break
+            time.sleep(.01)
+        request.join(timeout=max(0,deadline-time.monotonic()))
+        if request.is_alive():raise EvidenceError('scheduler wake deadline',evidence=evidence)
+        if 'error' in outcome:
+            raise EvidenceError('scheduler wake request failed',evidence={**evidence,'error':type(outcome['error']).__name__+': '+str(outcome['error'])})
+        response=outcome.get('response');evidence['response']=response
+        if (not isinstance(response,dict) or response.get('status')!='ready'
+                or response.get('ready') is not True or response.get('model')!=profile['model']):
+            raise EvidenceError('scheduler wake did not reach ready',evidence=evidence)
+        lifecycle.remaining(deadline,2)
+        state=request_client.request('GET','/v1/state',timeout=lifecycle.remaining(deadline,2))
+        model,lease=account(state,profile,state='awake');evidence['identity_checks']['account']=True
+        identity=identity_reader(profile['unit'],profile['token'],lease=lease['lease_id'],model=profile['model'],deadline=deadline)
+        evidence['identity_checks']['unit']=identity
+        return {'response':response,'progress':evidence['progress'],
+                'progress_before_response':evidence['progress_before_response'],
+                'lease':lease,'unit_identity':identity,'seconds':time.monotonic()-started}
+    except EvidenceError:
+        raise
+    finally:
+        try:
+            reader.close(timeout=max(0,min(2,deadline-time.monotonic())))
+        except Exception:
+            # Observer cleanup is advisory and cannot replace the wake result.
+            pass
+
+
 def helper_main(argv):
     parser=argparse.ArgumentParser();parser.add_argument('mode',choices=('request','launch','stop'));parser.add_argument('profile')
     parser.add_argument('rest',nargs=argparse.REMAINDER);args=parser.parse_args(argv)
@@ -430,7 +482,11 @@ def helper_main(argv):
         for key,expected in profile['control_instances'].items():
             if unit_identity(key,profile['token'],deadline=deadline)!=expected:raise EvidenceError('control instance changed')
         api=runpy.run_path(profile['cli'])
-        if request['operation']=='cold':
+        if request['operation']=='cold' and profile.get('cold_route','native_chat')=='scheduler_wake':
+            profile['request_id']=request['id']
+            value=scheduler_wake_request(api,profile,deadline,identity_reader=unit_identity)
+            result.update(status='passed',evidence=value)
+        elif request['operation']=='cold':
             from urllib.request import Request,build_opener,ProxyHandler
             from urllib.error import HTTPError
             started=time.monotonic()
@@ -499,12 +555,13 @@ def artifacts(run, ports, weights_bytes):
               'systemd_run':{'environment_file':root+'/daemon.env','collect':True,'properties':{
                   'Restart':'no','RuntimeMaxSec':max(1,int(run.work_deadline-time.monotonic())),
                   'TimeoutStopSec':15}}}
+    cold_route=c.get('cold_route','native_chat');cold_budget=c.get('startup_seconds',150)
     scheduler={'listen_host':'127.0.0.1','listen_port':scheduler_port,'read_only':False,
                'state_db_path':root+'/ledger.sqlite','placement_enabled':True,'model_actions_enabled':True,
                'automation_enabled':False,'fault_recovery_enabled':False,'catalog_enabled':False,
                'sample_interval_seconds':.25,'event_history_size':4096,'event_heartbeat_seconds':.25,
                'max_snapshot_age_seconds':5,'placement_wait_seconds':20,'lease_timeout_seconds':240,
-               'free_timeout_seconds':20,'wake_timeout_seconds':20,'action_observe_seconds':8,'action_poll_seconds':.1,
+               'free_timeout_seconds':20,'wake_timeout_seconds':cold_budget if cold_route=='scheduler_wake' else 20,'action_observe_seconds':8,'action_poll_seconds':.1,
                'collectors':{'swap_url':native_url,'activity_path':root+'/activity.sqlite',
                    'host_meminfo_path':c['host_meminfo_path'],'nvidia_smi':root+'/nvidia-smi',
                    'systemctl':root+'/systemctl-read',
@@ -540,6 +597,7 @@ print(r.stdout,end="")
     profile={'root':root,'token':run.token,'model':run.model,'unit':run.unit,'gpu':c['gpu'],
              'scheduler_url':scheduler_url,'native_url':native_url,'cli':runtime+'/cli/llm',
              'launcher':runtime+'/deploy/vllm-launch','control_instances':{},'work_deadline':run.work_deadline,
+             'cold_route':cold_route,'cold_budget_seconds':cold_budget,
              'source_unit':run.source_unit,'wrapper_argv':wrapper,'wrapper_binary':c['wrapper_binary'],
              'wrapper_sha256':c['wrapper_sha256'],'backend_url':backend_url}
     files={root+'/native.json':json.dumps(native),root+'/scheduler.json':json.dumps(scheduler),
