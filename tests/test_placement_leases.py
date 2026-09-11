@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-5.6-luna
 """Offline lease durability, admission, deadlines and real HTTP reentry."""
 
 import http.client
@@ -323,6 +324,11 @@ def test_real_wake_reenters_mounted_place_and_confirm_endpoints(system):
         def log_message(self, *args):
             pass
         def do_GET(self):
+            if self.path.startswith("/logs/stream/"):
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             status, body = request(core.server_address, "/v1/place", {"model": "a", "util": 0.6})
             results.append((status, body))
             if status == 200:

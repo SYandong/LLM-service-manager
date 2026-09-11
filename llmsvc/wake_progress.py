@@ -178,15 +178,24 @@ class WakeProgressReader:
             response = self.opener(request, timeout=min(1.0, remaining))
             with self._lock:
                 self._response = response
+            raw = getattr(getattr(response, "fp", None), "raw", None)
+            sock = getattr(raw, "_sock", None)
+            if sock is not None:
+                # The short timeout above is only for connect/headers. Once a
+                # response exists, one read may wait until the original wake
+                # deadline; close() interrupts it without poisoning read1.
+                sock.settimeout(max(0.01, self.deadline - self.monotonic()))
             while not self._stop.is_set() and self.monotonic() < self.deadline:
                 try:
                     read_available = getattr(response, "read1", None)
                     chunk = (read_available(4096) if callable(read_available)
                              else response.read(4096))
                 except socket.timeout:
-                    # An idle stream is still within this wake window; do not
-                    # turn an ordinary read timeout into a terminal failure.
-                    continue
+                    # This is the original wake deadline, not an idle poll.
+                    # Retrying a timed-out buffered HTTPResponse can poison
+                    # its parser, so publish one bounded gap and stop.
+                    self._unavailable()
+                    return
                 if not chunk:
                     self._unavailable()
                     return

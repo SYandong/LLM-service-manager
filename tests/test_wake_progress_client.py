@@ -48,6 +48,19 @@ def test_cli_progress_labels_never_include_raw_log_values():
     assert module["format_wake_progress"]({"stage": "unavailable"}) == "progress unavailable"
 
 
+def test_epoch_tracker_retires_replayed_epochs_within_one_wake():
+    module = api()
+    state = {"log_epoch": None, "sequence": 0, "retired_epochs": set()}
+    first = module["parse_wake_progress"](event(detail(log_epoch="A", sequence=1)), "model")
+    second = module["parse_wake_progress"](event(detail(log_epoch="B", sequence=1), event_id=9), "model")
+    replay = module["parse_wake_progress"](event(detail(log_epoch="A", sequence=1), event_id=10), "model")
+    replay_later = module["parse_wake_progress"](event(detail(log_epoch="A", sequence=2), event_id=11), "model")
+    assert module["accept_wake_progress"](first, state)
+    assert module["accept_wake_progress"](second, state)
+    assert not module["accept_wake_progress"](replay, state)
+    assert not module["accept_wake_progress"](replay_later, state)
+
+
 def test_cli_wake_uses_one_sse_reader_while_delayed_post_runs(capsys):
     module = api()
     events_ready, post_seen, stop = threading.Event(), threading.Event(), threading.Event()

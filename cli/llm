@@ -425,6 +425,30 @@ def format_wake_progress(progress):
     return WAKE_PROGRESS_STAGES[progress["stage"]]
 
 
+def accept_wake_progress(progress, state):
+    """Accept one monotonic epoch/sequence, rejecting retired replay epochs."""
+    if not isinstance(progress, dict) or not isinstance(state, dict):
+        return False
+    epoch, sequence = progress.get("log_epoch"), progress.get("sequence")
+    if not isinstance(epoch, str) or type(sequence) is not int or sequence < 1:
+        return False
+    retired = state.setdefault("retired_epochs", set())
+    current = state.get("log_epoch")
+    if current == epoch:
+        if sequence <= state.get("sequence", 0):
+            return False
+    else:
+        if current is not None:
+            retired.add(current)
+        if epoch in retired or sequence != 1:
+            retired.add(epoch)
+            return False
+        state["log_epoch"] = epoch
+        state["sequence"] = 0
+    state["sequence"] = sequence
+    return True
+
+
 def cell_width(text):
     return sum(0 if unicodedata.combining(ch) else 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
 
@@ -1263,8 +1287,7 @@ def execute_wake_with_progress(args, client):
     request = threading.Thread(target=invoke, name="llm-wake-request", daemon=True)
     request.start()
     generation = None
-    progress_epoch = None
-    progress_sequence = 0
+    progress_state = {"log_epoch": None, "sequence": 0, "retired_epochs": set()}
     last = None
     try:
         while request.is_alive():
@@ -1273,8 +1296,7 @@ def execute_wake_with_progress(args, client):
                 generation = update["generation"]
             elif update["generation"] != generation:
                 generation = update["generation"]
-                progress_epoch = None
-                progress_sequence = 0
+                progress_state = {"log_epoch": None, "sequence": 0, "retired_epochs": set()}
                 if not args.json and last != "progress unavailable":
                     print("Wake progress unavailable; final server result remains authoritative", file=sys.stderr)
                     last = "progress unavailable"
@@ -1282,17 +1304,11 @@ def execute_wake_with_progress(args, client):
                 progress = parse_wake_progress(item, args.model, since=started)
                 if progress is None:
                     continue
-                if progress_epoch is not None and progress["log_epoch"] != progress_epoch:
-                    if progress["sequence"] != 1:
-                        if not args.json and last != "progress unavailable":
-                            print("Wake progress unavailable; source epoch changed", file=sys.stderr)
-                            last = "progress unavailable"
-                        continue
-                    progress_sequence = 0
-                if progress["log_epoch"] == progress_epoch and progress["sequence"] <= progress_sequence:
+                if not accept_wake_progress(progress, progress_state):
+                    if not args.json and last != "progress unavailable":
+                        print("Wake progress unavailable; source epoch replayed or changed", file=sys.stderr)
+                        last = "progress unavailable"
                     continue
-                progress_epoch = progress["log_epoch"]
-                progress_sequence = progress["sequence"]
                 label = progress["label"]
                 if not args.json and label != last:
                     print("Wake observed: %s (source: llama-swap; readiness is the server result)" % label,

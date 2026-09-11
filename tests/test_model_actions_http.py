@@ -159,15 +159,58 @@ def test_stopped_wake_progress_reader_is_advisory_and_closed_before_result(syste
     assert transport.swap_url.startswith("http://127.0.0.1:")
 
 
-def test_model_transport_rejects_reserved_global_log_monitor_names():
-    with pytest.raises(ValueError, match="invalid configured model name"):
-        ManagedModelTransport(swap_url="http://127.0.0.1:8000",
-                              models={"proxy": {"unit": "vllm-proxy.service"}},
-                              systemctl="configured-systemctl")
-    with pytest.raises(ValueError, match="invalid configured model name"):
-        ManagedModelTransport(swap_url="http://127.0.0.1:8000",
-                              models={"upstream": {"unit": "vllm-upstream.service"}},
-                              systemctl="configured-systemctl")
+def test_reserved_model_cold_wake_keeps_original_transport_without_log_stream(tmp_path):
+    state = {"model": ModelState("proxy", state="stopped", unit="vllm-proxy.service",
+                                  unit_active=False, health_ok=None, is_sleeping=None,
+                                  swap_state="stopped", weights_gb=40, budget_gb=80,
+                                  resident_gb=None), "calls": []}
+
+    def collect():
+        return StateSnapshot(sampled_at=time.time(),
+            gpus=(GPUState(0, total_gb=200, free_gb=150, external_gb=0),),
+            models=(state["model"],), memory=MemoryState(500, 40),
+            activity=(Activity("proxy", time.time() - 1000, 0, 0, 0),))
+
+    scheduler = Scheduler(SchedulerConfig("127.0.0.1", 8011, read_only=False,
+        model_actions_enabled=True, state_db_path=str(tmp_path / "state.sqlite"),
+        wake_timeout_seconds=1, action_poll_seconds=0.005), collect)
+    core = SchedulerHTTPServer(("127.0.0.1", 0), scheduler)
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            state["calls"].append(self.path)
+            assert self.path == "/upstream/proxy/"
+            state["model"] = replace(state["model"], state="awake", unit_active=True,
+                                      health_ok=True, is_sleeping=False, swap_state="ready",
+                                      gpu=0, resident_gb=80)
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    transport = ManagedModelTransport(
+        swap_url="http://127.0.0.1:" + str(upstream.server_port),
+        models={"proxy": {"unit": "vllm-proxy.service"}}, systemctl="configured-systemctl")
+    scheduler.model_actions = ModelActionController(scheduler, transport)
+    scheduler.sample_once()
+    threads = [threading.Thread(target=lambda: core.serve_forever(poll_interval=0.01)),
+               threading.Thread(target=lambda: upstream.serve_forever(poll_interval=0.01))]
+    for thread in threads:
+        thread.start()
+    try:
+        status, result = request(core.server_address, "POST", "/v1/wake/proxy")
+        assert status == 200 and result["ready"] is True
+        assert state["calls"] == ["/upstream/proxy/"]
+        assert not any(path.startswith("/logs/stream/") for path in state["calls"])
+    finally:
+        scheduler.stop()
+        core.shutdown(); upstream.shutdown()
+        core.server_close(); upstream.server_close()
+        for thread in threads:
+            thread.join(2)
 
 
 def test_wake_wait_releases_lock_and_observes_later_readiness(system):

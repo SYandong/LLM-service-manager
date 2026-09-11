@@ -225,8 +225,7 @@ class ManagedModelTransport:
         self.units = {}
         self.paths = set()
         for name, model in self.models.items():
-            if (not isinstance(name, str) or not name
-                    or name in (".", "..", "proxy", "upstream")):
+            if not isinstance(name, str) or not name or name in (".", ".."):
                 raise ValueError("invalid configured model name")
             unit = model.get("unit", "vllm-" + name + ".service")
             if not isinstance(unit, str) or not re.fullmatch(r"vllm-[A-Za-z0-9_.@-]+\.service", unit):

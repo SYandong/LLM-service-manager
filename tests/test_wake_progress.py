@@ -112,7 +112,7 @@ def test_reader_rejects_reserved_or_unconfigured_monitor_ids():
 
 
 def test_real_chunked_stream_delivers_short_line_before_eof_and_closes_promptly():
-    ready, release = threading.Event(), threading.Event()
+    ready, second, release = threading.Event(), threading.Event(), threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -129,6 +129,11 @@ def test_real_chunked_stream_delivers_short_line_before_eof_and_closes_promptly(
             self.wfile.write(("%x\r\n" % len(body)).encode() + body + b"\r\n")
             self.wfile.flush()
             ready.set()
+            time.sleep(1.3)
+            body = b"Waiting for vLLM to be healthy after wake up\n"
+            self.wfile.write(("%x\r\n" % len(body)).encode() + body + b"\r\n")
+            self.wfile.flush()
+            second.set()
             release.wait(5)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -143,11 +148,12 @@ def test_real_chunked_stream_delivers_short_line_before_eof_and_closes_promptly(
                                     deadline=time.monotonic() + 5, emit=details.append)
         reader.start()
         assert ready.wait(2)
-        deadline = time.monotonic() + 2
-        while not details:
+        deadline = time.monotonic() + 4
+        while len(details) < 2:
             assert time.monotonic() < deadline
             time.sleep(0.005)
-        assert details[0]["stage"] == "process_started"
+        assert second.is_set()
+        assert [item["stage"] for item in details[:2]] == ["process_started", "health_wait"]
         started = time.monotonic()
         release.set()
         assert reader.close(timeout=2)
