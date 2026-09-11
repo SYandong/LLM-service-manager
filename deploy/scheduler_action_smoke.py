@@ -417,23 +417,20 @@ def stop_wrapper(profile, pid):
 
 def scheduler_wake_request(api, profile, deadline, *, identity_reader=unit_identity):
     """Own one scheduler wake POST while a separate reader observes SSE only."""
-    request_timeout=deadline-time.monotonic()
-    if request_timeout<=0:raise EvidenceError('scheduler wake deadline')
-    request_client=api['SchedulerClient'](profile['scheduler_url'],timeout=request_timeout)
-    event_client=api['SchedulerClient'](profile['scheduler_url'],timeout=1)
-    reader=api['EventReader'](event_client,stream_timeout=.5,retry_delay=.1,max_retry_delay=1,queue_size=64)
+    reader=None;request=None;active_error=None
     evidence={'operation':'cold','local_request_id':profile.get('request_id'),'model':profile['model'],
-              'response':None,'progress':[],'progress_before_response':False,'identity_checks':{}}
-    outcome={};started=time.monotonic();started_wall=time.time();after_id=0;generation=None
+              'response':None,'progress':[],'progress_truncated':False,
+              'progress_before_response':False,'identity_checks':{},
+              'started_monotonic':None,'started_wall':None,'post_returned_monotonic':None}
+    outcome={};started=time.monotonic();started_wall=time.time();evidence['started_monotonic']=started;evidence['started_wall']=started_wall
+    after_id=0;generation=None;max_progress_entries=64;max_progress_bytes=32768;progress_bytes=0
     progress_state={'log_epoch':None,'sequence':0,'retired_epochs':set()};progress_observed=[]
     def invoke():
         try:outcome['response']=request_client.request('POST','/v1/wake/'+quote(profile['model'],safe=''),{})
         except Exception as exc:outcome['error']=exc
         finally:outcome['returned_monotonic']=time.monotonic()
-    request=threading.Thread(target=invoke,name='ops-cold-scheduler-wake',daemon=True)
-    reader.start();request.start()
     def collect(update,observed_at):
-        nonlocal generation,after_id,progress_state
+        nonlocal generation,after_id,progress_state,progress_bytes
         if generation is None:generation=update.get('generation')
         elif update.get('generation')!=generation:
             generation=update.get('generation');after_id=0
@@ -441,19 +438,39 @@ def scheduler_wake_request(api, profile, deadline, *, identity_reader=unit_ident
         for item in update.get('events',[]):
             progress=api['parse_wake_progress'](item,profile['model'],after_id=after_id,since=started_wall)
             if progress is not None and api['accept_wake_progress'](progress,progress_state):
-                evidence['progress'].append(progress);progress_observed.append(observed_at);after_id=max(after_id,item['id'])
+                safe={**progress,'event_id':item['id'],'source_event_timestamp':item['timestamp'],
+                      'model':item['model'],'local_observed_monotonic':observed_at}
+                size=len(json.dumps(safe,separators=(',',':')))
+                if len(evidence['progress'])<max_progress_entries and progress_bytes+size<=max_progress_bytes:
+                    evidence['progress'].append(safe);progress_observed.append(observed_at);progress_bytes+=size
+                else:evidence['progress_truncated']=True
+                after_id=max(after_id,item['id'])
     try:
+        request_timeout=deadline-time.monotonic()
+        if request_timeout<=0:raise EvidenceError('scheduler wake deadline',evidence=evidence)
+        request_client=api['SchedulerClient'](profile['scheduler_url'],timeout=request_timeout)
+        event_client=api['SchedulerClient'](profile['scheduler_url'],timeout=1)
+        reader=api['EventReader'](event_client,stream_timeout=.5,retry_delay=.1,max_retry_delay=1,queue_size=64)
+        reader.start()
+        if deadline-time.monotonic()<=0:raise EvidenceError('scheduler wake deadline',evidence=evidence)
+        request=threading.Thread(target=invoke,name='ops-cold-scheduler-wake',daemon=True)
+        request.start()
         while request.is_alive():
             collect(reader.drain(),time.monotonic())
             if time.monotonic()>=deadline:break
             time.sleep(.01)
         request.join(timeout=max(0,deadline-time.monotonic()))
-        collect(reader.drain(),time.monotonic())
+        if reader is not None:collect(reader.drain(),time.monotonic())
         if request.is_alive():raise EvidenceError('scheduler wake deadline',evidence=evidence)
         returned=outcome.get('returned_monotonic')
+        evidence['post_returned_monotonic']=returned
         evidence['progress_before_response']=bool(returned is not None and any(value<=returned for value in progress_observed))
         if 'error' in outcome:
-            raise EvidenceError('scheduler wake request failed',evidence={**evidence,'error':type(outcome['error']).__name__+': '+str(outcome['error'])})
+            error=outcome['error'];details={**evidence,'error':type(error).__name__+': '+str(error)}
+            status=getattr(error,'status',None);payload=getattr(error,'payload',None)
+            if status is not None:details.update(http_status=status,response_received=True,request_error_kind='http')
+            if payload is not None:details.update(response=payload,response_parsed=True,response_payload_available=True)
+            raise EvidenceError('scheduler wake request failed',evidence=details)
         response=outcome.get('response');evidence['response']=response
         if (not isinstance(response,dict) or response.get('status')!='ready'
                 or response.get('ready') is not True or response.get('model')!=profile['model']
@@ -469,14 +486,33 @@ def scheduler_wake_request(api, profile, deadline, *, identity_reader=unit_ident
         return {'response':response,'progress':evidence['progress'],
                 'progress_before_response':evidence['progress_before_response'],
                 'lease':lease,'unit_identity':identity,'seconds':time.monotonic()-started}
-    except EvidenceError:
+    except EvidenceError as exc:
+        active_error=exc
+        if exc.evidence is None:exc.evidence=evidence
+        raise
+    except Exception as exc:
+        active_error=exc
+        try:
+            if getattr(exc,'evidence',None) is None:exc.evidence=evidence
+        except Exception:pass
         raise
     finally:
-        try:
-            reader.close(timeout=max(0,min(2,deadline-time.monotonic())))
-        except Exception:
-            # Observer cleanup is advisory and cannot replace the wake result.
-            pass
+        cleanup_timeout=max(.1,min(2,max(.1,deadline-time.monotonic())))
+        cleanup_error=None
+        if reader is not None:
+            try:
+                if not reader.close(timeout=cleanup_timeout):cleanup_error='event reader did not stop'
+            except Exception as exc:cleanup_error=type(exc).__name__+': '+str(exc)
+        if request is not None and request.is_alive():
+            request.join(timeout=cleanup_timeout)
+            if request.is_alive():cleanup_error='wake request worker did not stop'
+        if cleanup_error:
+            if active_error is not None:
+                try:
+                    active_error.evidence=(getattr(active_error,'evidence',None) or evidence)
+                    active_error.evidence['observer_cleanup_error']=cleanup_error
+                except Exception:pass
+            else:raise EvidenceError('scheduler wake observer cleanup incomplete',evidence={**evidence,'observer_cleanup_error':cleanup_error})
 
 
 def helper_main(argv):

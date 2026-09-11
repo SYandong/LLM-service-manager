@@ -188,6 +188,9 @@ def test_scheduler_wake_cold_route_owns_one_post_and_validates_final_response(re
             result=smoke.scheduler_wake_request(API,profile,time.monotonic()+3,identity_reader=identity)
             assert result['response']==response and result['progress_before_response'] is True
             assert result['lease']['lease_id']=='lease-1'
+            assert result['progress'][0]['event_id']==1 and result['progress'][0]['model']=='model'
+            assert isinstance(result['progress'][0]['source_event_timestamp'],float)
+            assert isinstance(result['progress'][0]['local_observed_monotonic'],float)
             root=tmp_path/'run';root.mkdir();(root/'owner').write_text('token')
             request_id='a'*32;deadline=time.monotonic()+3
             (root/'request.json').write_text(json.dumps({'id':request_id,'operation':'cold','output':'result-'+request_id+'.json','deadline':deadline}))
@@ -226,6 +229,30 @@ def test_scheduler_wake_post_uses_full_isolated_cold_budget_without_waiting_25_s
     profile={'scheduler_url':'http://fixture','model':'model','unit':'vllm-model.service','token':'token','gpu':0,'request_id':'cold'}
     result=smoke.scheduler_wake_request(api,profile,time.monotonic()+90,identity_reader=lambda *a,**k:{'unit':'vllm-model.service'})
     assert result['response']['cold_start'] is True and posts==['/v1/wake/model'] and timeouts[0]>25
+
+
+def test_scheduler_wake_postresponse_identity_failure_preserves_response_and_progress():
+    class Client:
+        def __init__(self,url,timeout=10):pass
+        def request(self,method,path,payload=None,timeout=None):
+            if method=='POST':return {'model':'model','status':'ready','ready':True,'cold_start':True,'elapsed_seconds':1}
+            return {'read_only':False,'sampled_at':time.time(),'errors':[],
+                    'models':[{'name':'model','state':'awake','gpu':0,'unit':'vllm-model.service','resident_gb':20}],
+                    'leases':[{'model':'model','gpu':0,'unit':'vllm-model.service','lease_id':'lease-1','status':'confirmed','budget_gb':20}]}
+    class Reader:
+        def __init__(self,*a,**k):self.done=False
+        def start(self):pass
+        def drain(self):
+            if self.done:return {'generation':0,'events':[]}
+            self.done=True;return {'generation':0,'events':[{'id':1,'timestamp':time.time(),'kind':'wake_progress','model':'model','detail':{'stage':'health_wait','source':'llama-swap','source_model':'model','progress_source':'per_model_log','log_epoch':'e','sequence':1,'received_at':time.time(),'trusted_for_quiet':False}}]}
+        def close(self,timeout=None):return True
+    api={'SchedulerClient':Client,'EventReader':Reader,'parse_wake_progress':API['parse_wake_progress'],'accept_wake_progress':API['accept_wake_progress']}
+    profile={'scheduler_url':'http://fixture','model':'model','unit':'vllm-model.service','token':'token','gpu':0,'request_id':'cold'}
+    def fail_identity(*a,**k):raise RuntimeError('identity failed after response')
+    with pytest.raises(RuntimeError) as caught:
+        smoke.scheduler_wake_request(api,profile,time.monotonic()+5,identity_reader=fail_identity)
+    evidence=caught.value.evidence
+    assert evidence['response']['status']=='ready' and evidence['progress'] and evidence['identity_checks']['account'] is True
 
 
 def test_scheduler_wake_route_checks_warm_latency_independently(tmp_path):
