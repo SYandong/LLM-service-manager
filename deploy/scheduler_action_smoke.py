@@ -319,7 +319,8 @@ def action_probe(api, profile, operation, request_id, *, deadline, identity_read
     except Exception as exc:
         if evidence['client_started_monotonic'] is not None:
             evidence['validation_error_type']=type(exc).__name__
-            raise EvidenceError('action validation failed: '+str(exc),evidence=evidence) from exc
+            try:exc.evidence=evidence
+            except Exception:pass
         raise
     finally:
         active=sys.exc_info()[1]
@@ -440,7 +441,9 @@ def helper_main(argv):
         result.update(status='failed',error=type(exc).__name__+': '+str(exc))
         if exc.evidence is not None:
             result['evidence']=exc.evidence
-    except Exception as exc:result.update(status='failed',error=type(exc).__name__+': '+str(exc))
+    except Exception as exc:
+        result.update(status='failed',error=type(exc).__name__+': '+str(exc))
+        if getattr(exc,'evidence',None) is not None:result['evidence']=exc.evidence
     temporary=output.with_name('.result-'+uuid.uuid4().hex)
     with temporary.open('x') as stream:
         json.dump(result,stream);temporary.chmod(0o600);stream.flush();os.fsync(stream.fileno())

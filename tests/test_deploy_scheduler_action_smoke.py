@@ -202,8 +202,10 @@ def test_missing_result_event_never_proves_latency(chain,monkeypatch):
         if kind=='free_result':return None  # Explicit missing-event fault injection.
         return original(kind,*args,**kwargs)
     monkeypatch.setattr(chain.scheduler,'emit',emit)
-    with pytest.raises(life.SmokeError,match='deadline'):
+    with pytest.raises(life.SmokeError,match='deadline') as exc:
         smoke.action_probe(API,chain.profile,'free','missing-event',deadline=time.monotonic()+1,identity_reader=chain.identity_reader)
+    assert exc.value.evidence['response']['status'] in ('complete', 'partial', 'blocked')
+    assert exc.value.evidence['identity_checks']['before_account'] is True
     assert chain.world['calls']==[('POST','/api/models/unload/smoke')]
     assert chain.store.leases()[0][0].status=='confirmed'
 
