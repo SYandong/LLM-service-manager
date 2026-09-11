@@ -242,6 +242,63 @@ def test_scheduler_wake_post_uses_full_isolated_cold_budget_without_waiting_25_s
     assert result['response']['cold_start'] is True and posts==['/v1/wake/model'] and timeouts[0]>25
 
 
+def test_scheduler_wake_controlled_baseline_consumes_budget_and_posts_once(monkeypatch):
+    clock=[100.0];timeouts=[];posts=[]
+    monkeypatch.setattr(smoke.time,'monotonic',lambda:clock[0])
+    state={'read_only':False,'sampled_at':time.time(),'errors':[],
+           'models':[{'name':'model','state':'awake','gpu':0,'unit':'vllm-model.service','resident_gb':20}],
+           'leases':[{'model':'model','gpu':0,'unit':'vllm-model.service','lease_id':'lease-1','status':'confirmed','budget_gb':20}]}
+    class Client:
+        def __init__(self,url,timeout=10):timeouts.append(timeout)
+        def request(self,method,path,payload=None,timeout=None):
+            if method=='GET' and path=='/v1/state' and not posts:clock[0]+=10
+            if method=='POST':posts.append(path);return {'model':'model','status':'ready','ready':True,'cold_start':True,'elapsed_seconds':40}
+            return state
+    class Reader:
+        def __init__(self,*a,**k):self.closed=False;self.calls=0
+        def start(self):pass
+        def drain(self):
+            self.calls+=1
+            if self.calls==1:return {'generation':0,'events':[{'id':1,'timestamp':time.time(),'kind':'state','model':'model','detail':{'sampled_at':time.time()+1,'errors':[]}}]}
+            return {'generation':0,'events':[]}
+        def close(self,timeout=None):self.closed=True;return True
+    api={'SchedulerClient':Client,'EventReader':Reader,'parse_wake_progress':lambda *a,**k:None,'accept_wake_progress':lambda *a,**k:False}
+    profile={'scheduler_url':'http://fixture','model':'model','unit':'vllm-model.service','token':'token','gpu':0}
+    result=smoke.scheduler_wake_request(api,profile,190,identity_reader=lambda *a,**k:{'unit':'vllm-model.service'})
+    assert result['response']['cold_start'] is True and posts==['/v1/wake/model'] and timeouts[0]==90
+
+
+def test_scheduler_wake_expired_before_worker_invoke_does_not_post(monkeypatch):
+    clock=[100.0];posts=[];closed=[]
+    monkeypatch.setattr(smoke.time,'monotonic',lambda:clock[0])
+    state={'read_only':False,'sampled_at':time.time(),'errors':[],
+           'models':[{'name':'model','state':'awake','gpu':0,'unit':'vllm-model.service','resident_gb':20}],
+           'leases':[{'model':'model','gpu':0,'unit':'vllm-model.service','lease_id':'lease-1','status':'confirmed','budget_gb':20}]}
+    class Client:
+        def __init__(self,url,timeout=10):pass
+        def request(self,method,path,payload=None,timeout=None):
+            if method=='POST':posts.append(path)
+            return state if method=='GET' else {'model':'model','status':'ready','ready':True,'cold_start':True,'elapsed_seconds':40}
+    class Reader:
+        def __init__(self,*a,**k):self.calls=0
+        def start(self):pass
+        def drain(self):
+            self.calls+=1
+            return {'generation':0,'events':[{'id':1,'timestamp':time.time(),'kind':'state','model':'model','detail':{'sampled_at':time.time()+1,'errors':[]}}]} if self.calls==1 else {'generation':0,'events':[]}
+        def close(self,timeout=None):closed.append(timeout);return True
+    class DelayedThread:
+        def __init__(self,target,**kwargs):self.target=target
+        def start(self):clock[0]=190;self.target()
+        def is_alive(self):return False
+        def join(self,timeout=None):pass
+    monkeypatch.setattr(smoke.threading,'Thread',DelayedThread)
+    api={'SchedulerClient':Client,'EventReader':Reader,'parse_wake_progress':lambda *a,**k:None,'accept_wake_progress':lambda *a,**k:False}
+    profile={'scheduler_url':'http://fixture','model':'model','unit':'vllm-model.service','token':'token','gpu':0}
+    with pytest.raises((smoke.EvidenceError,life.SmokeError)):
+        smoke.scheduler_wake_request(api,profile,190,identity_reader=lambda *a,**k:{'unit':'vllm-model.service'})
+    assert posts==[] and closed and closed[0]>0
+
+
 def test_scheduler_wake_postresponse_identity_failure_preserves_response_and_progress():
     class Client:
         def __init__(self,url,timeout=10):pass

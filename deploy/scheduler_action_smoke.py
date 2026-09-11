@@ -429,7 +429,13 @@ def scheduler_wake_request(api, profile, deadline, *, identity_reader=unit_ident
     progress_state={'log_epoch':None,'sequence':0,'retired_epochs':set()}
     progress_observed=[];progress_bytes=0;max_progress_entries=64;max_progress_bytes=32768
     def invoke():
-        try:outcome['response']=request_client.request('POST','/v1/wake/'+quote(profile['model'],safe=''),{})
+        try:
+            remaining=deadline-time.monotonic()
+            if remaining<=0:
+                outcome['error']=lifecycle.SmokeError('test deadline expired')
+                return
+            evidence['post_started_monotonic']=time.monotonic();evidence['post_started_wall']=time.time()
+            outcome['response']=request_client.request('POST','/v1/wake/'+quote(profile['model'],safe=''),{},timeout=remaining)
         except Exception as exc:outcome['error']=exc
         finally:outcome['returned_monotonic']=time.monotonic()
     def collect(update,observed_at,*,allow_progress):
@@ -450,7 +456,7 @@ def scheduler_wake_request(api, profile, deadline, *, identity_reader=unit_ident
                     progress_state={'log_epoch':None,'sequence':0,'retired_epochs':set()};evidence['baseline_event_id']=item['id'];evidence['baseline_generation']=generation;allow_progress=False
                 else:allow_progress=False
                 continue
-            if not allow_progress or not isinstance(item,dict):
+            if not allow_progress or evidence['post_started_wall'] is None or not isinstance(item,dict):
                 continue
             progress=api['parse_wake_progress'](item,profile['model'],after_id=after_id,since=evidence['post_started_wall'])
             if progress is not None and api['accept_wake_progress'](progress,progress_state):
@@ -489,7 +495,6 @@ def scheduler_wake_request(api, profile, deadline, *, identity_reader=unit_ident
             baseline_ready=baseline_state_event(reader.drain(),time.monotonic())
             if not baseline_ready:time.sleep(.01)
         if not baseline_ready:raise EvidenceError('scheduler state baseline unavailable',evidence=evidence)
-        evidence['post_started_monotonic']=time.monotonic();evidence['post_started_wall']=time.time()
         if deadline-time.monotonic()<=0:raise EvidenceError('scheduler wake deadline',evidence=evidence)
         request=threading.Thread(target=invoke,name='ops-cold-scheduler-wake',daemon=True);request.start()
         while request.is_alive():
@@ -502,6 +507,9 @@ def scheduler_wake_request(api, profile, deadline, *, identity_reader=unit_ident
         returned=evidence['post_returned_monotonic'];evidence['progress_before_response']=bool(returned is not None and any(value<=returned for value in progress_observed))
         if 'error' in outcome:
             error=outcome['error'];details={**evidence,'error':type(error).__name__+': '+str(error)};status=getattr(error,'status',None);payload=getattr(error,'payload',None)
+            if isinstance(error,lifecycle.SmokeError):
+                error.evidence=evidence
+                raise error
             if status is not None:details.update(http_status=status,response_received=True,request_error_kind='http')
             if payload is not None:details.update(response=payload,response_parsed=True,response_payload_available=True)
             raise EvidenceError('scheduler wake request failed',evidence=details)
