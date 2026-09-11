@@ -3,6 +3,7 @@
 """CPU contract tests: real scheduler/lease HTTP and launcher, fixture hardware."""
 import importlib.util
 import hashlib
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
@@ -202,8 +204,10 @@ def test_missing_result_event_never_proves_latency(chain,monkeypatch):
         if kind=='free_result':return None  # Explicit missing-event fault injection.
         return original(kind,*args,**kwargs)
     monkeypatch.setattr(chain.scheduler,'emit',emit)
-    with pytest.raises(life.SmokeError,match='deadline'):
+    with pytest.raises(life.SmokeError,match='deadline') as exc:
         smoke.action_probe(API,chain.profile,'free','missing-event',deadline=time.monotonic()+1,identity_reader=chain.identity_reader)
+    assert exc.value.evidence['response']['status'] in ('complete', 'partial', 'blocked')
+    assert exc.value.evidence['identity_checks']['before_account'] is True
     assert chain.world['calls']==[('POST','/api/models/unload/smoke')]
     assert chain.store.leases()[0][0].status=='confirmed'
 
@@ -599,6 +603,288 @@ def test_http200_unknown_release_preserves_ledger():
     run.python=lambda *a,**k:pytest.fail('unknown lease must be retained')
     with pytest.raises(life.SmokeError):run.cleanup_actions()
     assert run.preserve
+
+
+class _EvidenceReader:
+    def __init__(self, *args, **kwargs):
+        self.callback = None
+        self.pending = None
+
+    def set_notify(self, callback):
+        self.callback = callback
+
+    def start(self):
+        if self.callback:
+            self.callback()
+
+    def drain(self):
+        if self.pending is not None:
+            value, self.pending = self.pending, None
+            return value
+        return {'status': 'SSE connected', 'generation': 0, 'dropped': 0,
+                'missed': 0, 'cursor': 0, 'events': []}
+
+    def push(self, value):
+        self.pending = value
+        self.callback()
+
+    def close(self):
+        return True
+
+
+def _action_evidence_fixture(response, *, operation='free', post_hook=None,
+                             reader_type=_EvidenceReader):
+    state = {'read_only': False, 'sampled_at': time.time(), 'errors': [],
+             'models': [{'name': 'fixture', 'gpu': 0, 'unit': 'vllm-fixture.service',
+                         'state': 'awake' if operation == 'free' else 'sleeping',
+                         'resident_gb': 80}],
+             'leases': [{'model': 'fixture', 'gpu': 0, 'unit': 'vllm-fixture.service',
+                         'lease_id': 'lease-1', 'status': 'confirmed', 'budget_gb': 80}]}
+    reader_box = {}
+    class Reader(reader_type):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            reader_box['reader'] = self
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def request(self, method, path, payload=None):
+            if method == 'GET':
+                return state
+            if isinstance(response, BaseException):
+                raise response
+            state['models'][0]['state'] = 'sleeping' if operation == 'free' else 'awake'
+            if method == 'POST' and post_hook is not None:
+                post_hook(reader_box['reader'], response)
+            return response
+    api = {'SchedulerClient': Client, 'EventReader': Reader}
+    profile = {'scheduler_url': 'http://fixture', 'model': 'fixture', 'gpu': 0,
+               'unit': 'vllm-fixture.service', 'token': 'token',
+               'backend_url': 'http://127.0.0.1:8101'}
+    return api, profile
+
+
+@pytest.mark.parametrize('response,expected_response', [
+    ({'status': 'partial', 'measurement_complete': True, 'freed_gb': 27.6,
+      'slept': ['fixture'], 'stopped': [], 'error': 'transport_error'}, True),
+    (TimeoutError('no response'), False),
+])
+def test_action_probe_failure_evidence_preserves_response_or_unknown(response, expected_response):
+    api, profile = _action_evidence_fixture(response)
+    with pytest.raises(smoke.EvidenceError) as exc:
+        smoke.action_probe(api, profile, 'free', 'local-request',
+                           deadline=time.monotonic() + 2,
+                           identity_reader=lambda *args, **kwargs: {
+                               'unit': 'vllm-fixture.service', 'pid': 1,
+                               'start_ticks': '2', 'invocation_id': 'a' * 32})
+    evidence = exc.value.evidence
+    assert evidence['local_request_id'] == 'local-request'
+    assert evidence['model'] == 'fixture'
+    assert evidence['identity_checks']['before_account'] is True
+    assert evidence['identity_checks']['before_unit']['invocation_id'] == 'a' * 32
+    assert (evidence['response'] is not None) is expected_response
+    assert evidence['client_returned_monotonic'] >= evidence['client_started_monotonic']
+
+
+def test_wake_partial_response_preserves_failure_evidence():
+    response = {'status': 'partial', 'ready': False, 'model': 'fixture',
+                'error': 'transport_error'}
+    api, profile = _action_evidence_fixture(response, operation='wake')
+    with pytest.raises(smoke.EvidenceError, match='wake did not reach ready') as exc:
+        smoke.action_probe(api, profile, 'wake', 'wake-partial',
+                           deadline=time.monotonic() + 2,
+                           identity_reader=lambda *args, **kwargs: {
+                               'unit': 'vllm-fixture.service', 'pid': 1,
+                               'start_ticks': '2', 'invocation_id': 'a' * 32})
+    assert exc.value.evidence['response'] == response
+    assert exc.value.evidence['identity_checks']['before_account'] is True
+    assert exc.value.evidence['response_received'] is True
+
+
+class _JSONResponse:
+    def __init__(self, body):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, limit=-1):
+        return self.body if limit < 0 else self.body[:limit]
+
+
+def _actual_client_http_error_fixture(body):
+    state = {'read_only': False, 'sampled_at': time.time(), 'errors': [],
+             'models': [{'name': 'fixture', 'gpu': 0, 'unit': 'vllm-fixture.service',
+                         'state': 'awake', 'resident_gb': 80}],
+             'leases': [{'model': 'fixture', 'gpu': 0, 'unit': 'vllm-fixture.service',
+                         'lease_id': 'lease-1', 'status': 'confirmed', 'budget_gb': 80}]}
+    def opener(request, timeout):
+        if request.get_method() == 'GET':
+            return _JSONResponse(json.dumps(state).encode())
+        raise HTTPError(request.full_url, 409, 'Conflict', {}, BytesIO(body))
+    class Client:
+        def __new__(cls, url, timeout=10):
+            return API['SchedulerClient'](url, timeout=timeout, opener=opener)
+    return {'SchedulerClient': Client, 'EventReader': _EvidenceReader}, {
+        'scheduler_url': 'http://fixture', 'model': 'fixture', 'gpu': 0,
+        'unit': 'vllm-fixture.service', 'token': 'token',
+        'backend_url': 'http://127.0.0.1:8101',
+    }
+
+
+@pytest.mark.parametrize('body,available,expected_response', [
+    (b'{"error":"placement_busy"}', True, {'error': 'placement_busy'}),
+    (b'["placement_busy"]', False, None),
+    (b'7', False, None),
+    (b'null', False, None),
+    (b'not-json', False, None),
+])
+def test_real_scheduler_client_http_error_boundary(body, available, expected_response):
+    api, profile = _actual_client_http_error_fixture(body)
+    with pytest.raises(smoke.EvidenceError, match='HTTP error') as exc:
+        smoke.action_probe(api, profile, 'free', 'real-http-error',
+                           deadline=time.monotonic() + 2,
+                           identity_reader=lambda *args, **kwargs: {
+                               'unit': 'vllm-fixture.service', 'pid': 1,
+                               'start_ticks': '2', 'invocation_id': 'a' * 32})
+    evidence = exc.value.evidence
+    assert evidence['http_status'] == 409
+    assert evidence['response_received'] is True
+    assert evidence['request_error_kind'] == 'http'
+    assert evidence['response_payload_available'] is available
+    assert evidence['response'] == expected_response
+    assert evidence['response_parsed'] is (True if available else None)
+    assert 'HTTP 409:' in evidence['transport_error_message']
+
+
+def test_helper_receipt_serializes_real_client_http_error_evidence(tmp_path, monkeypatch):
+    api, profile = _actual_client_http_error_fixture(b'["placement_busy"]')
+    with pytest.raises(smoke.EvidenceError) as exc:
+        smoke.action_probe(api, profile, 'free', 'real-http-receipt',
+                           deadline=time.monotonic() + 2,
+                           identity_reader=lambda *args, **kwargs: {
+                               'unit': 'vllm-fixture.service', 'pid': 1,
+                               'start_ticks': '2', 'invocation_id': 'a' * 32})
+    evidence = exc.value.evidence
+    root = tmp_path / 'run'; root.mkdir(); (root / 'owner').write_text('token')
+    deadline = time.monotonic() + 2
+    (root / 'request.json').write_text(json.dumps({
+        'id': 'real-http-receipt', 'operation': 'free', 'output': 'result.json',
+        'deadline': deadline}))
+    cli = tmp_path / 'cli.py'; cli.write_text('')
+    (root / 'profile.json').write_text(json.dumps({
+        'root': str(root), 'token': 'token', 'control_instances': {},
+        'cli': str(cli), 'model': 'fixture', 'work_deadline': deadline + 1}))
+    monkeypatch.setattr(smoke, 'action_probe', lambda *args, **kwargs:
+                        (_ for _ in ()).throw(smoke.EvidenceError(
+                            'action request HTTP error', evidence=evidence)))
+    assert smoke.helper_main(['request', str(root / 'profile.json'), 'request.json']) == 1
+    receipt = json.loads((root / 'result.json').read_text())
+    assert receipt['status'] == 'failed'
+    assert receipt['evidence']['http_status'] == 409
+    assert receipt['evidence']['response_payload_available'] is False
+    assert receipt['evidence']['response_parsed'] is None
+    assert receipt['evidence']['request_error_kind'] == 'http'
+
+
+def test_post_response_stream_failure_preserves_response_and_passed_checks():
+    response = {'status': 'complete', 'measurement_complete': True,
+                'freed_gb': 27.6, 'slept': ['fixture'], 'stopped': []}
+    api, profile = _action_evidence_fixture(
+        response,
+        post_hook=lambda reader, _response: reader.push({
+            'status': 'SSE disconnected', 'generation': 0, 'dropped': 0,
+            'missed': 0, 'cursor': 1, 'events': []}),
+    )
+    with pytest.raises(smoke.EvidenceError, match='SSE disconnected') as exc:
+        smoke.action_probe(api, profile, 'free', 'stream-failure',
+                           deadline=time.monotonic() + 2,
+                           identity_reader=lambda *args, **kwargs: {
+                               'unit': 'vllm-fixture.service', 'pid': 1,
+                               'start_ticks': '2', 'invocation_id': 'a' * 32})
+    evidence = exc.value.evidence
+    assert evidence['response'] == response
+    assert evidence['identity_checks']['sse_connected'] is True
+    assert evidence['identity_checks'].get('result_event') is None
+    assert evidence['identity_checks']['reader_closed'] is True
+
+
+def test_post_response_identity_failure_preserves_response_and_checks():
+    response = {'status': 'complete', 'measurement_complete': True,
+                'freed_gb': 27.6, 'slept': ['fixture'], 'stopped': []}
+    event = {'id': 1, 'kind': 'free_result', 'model': 'fixture',
+             'detail': response}
+    calls = []
+    def identity(*args, **kwargs):
+        calls.append(True)
+        return {'unit': 'vllm-fixture.service', 'pid': 1,
+                'start_ticks': 'changed' if len(calls) > 1 else '2',
+                'invocation_id': 'a' * 32}
+    api, profile = _action_evidence_fixture(
+        response, post_hook=lambda reader, _response: reader.push({
+            'status': 'SSE connected', 'generation': 0, 'dropped': 0,
+            'missed': 0, 'cursor': 1, 'events': [event]}),
+    )
+    with pytest.raises(smoke.EvidenceError, match='daemon instance changed') as exc:
+        smoke.action_probe(api, profile, 'free', 'identity-failure',
+                           deadline=time.monotonic() + 2, identity_reader=identity)
+    evidence = exc.value.evidence
+    assert evidence['response'] == response
+    assert evidence['identity_checks']['result_event'] == 1
+    assert evidence['identity_checks']['after_account'] is True
+    assert evidence['identity_checks'].get('unit_unchanged') is None
+
+
+def test_reader_close_failure_does_not_mask_response_failure():
+    class CloseFailureReader(_EvidenceReader):
+        def close(self):
+            raise RuntimeError('close failed')
+
+    response = {'status': 'partial', 'measurement_complete': True,
+                'freed_gb': 27.6, 'slept': ['fixture'], 'stopped': []}
+    api, profile = _action_evidence_fixture(response, reader_type=CloseFailureReader)
+    with pytest.raises(smoke.EvidenceError, match='free refused') as exc:
+        smoke.action_probe(api, profile, 'free', 'close-failure',
+                           deadline=time.monotonic() + 2,
+                           identity_reader=lambda *args, **kwargs: {
+                               'unit': 'vllm-fixture.service', 'pid': 1,
+                               'start_ticks': '2', 'invocation_id': 'a' * 32})
+    assert exc.value.evidence['response'] == response
+    assert exc.value.evidence['reader_close_error_type'] == 'RuntimeError'
+
+
+@pytest.mark.parametrize('evidence', [
+    {'response': {'status': 'partial', 'measurement_complete': True,
+                  'freed_gb': 27.6, 'slept': ['fixture'], 'stopped': [],
+                  'error': 'transport_error'}, 'deadline': 10.0},
+    {'response': None, 'deadline': 10.0, 'transport_error_type': 'TimeoutError'},
+])
+def test_helper_receipt_serializes_structured_action_failure(tmp_path, monkeypatch, evidence):
+    root = tmp_path / 'run'; root.mkdir(); (root / 'owner').write_text('token')
+    deadline = time.monotonic() + 2
+    request = root / 'request.json'; request.write_text(json.dumps({
+        'id': 'local-request', 'operation': 'free', 'output': 'result.json',
+        'deadline': deadline}))
+    cli = tmp_path / 'cli.py'; cli.write_text('')
+    profile = root / 'profile.json'; profile.write_text(json.dumps({
+        'root': str(root), 'token': 'token', 'control_instances': {},
+        'cli': str(cli), 'model': 'fixture', 'work_deadline': deadline + 1}))
+    monkeypatch.setattr(smoke, 'action_probe', lambda *args, **kwargs:
+                        (_ for _ in ()).throw(smoke.EvidenceError(
+                            'free refused, partial or unmeasured',
+                            evidence={'operation': 'free', 'local_request_id': 'local-request',
+                                      'model': 'fixture', **evidence})))
+    assert smoke.helper_main(['request', str(profile), 'request.json']) == 1
+    receipt = json.loads((root / 'result.json').read_text())
+    assert receipt['status'] == 'failed'
+    assert receipt['evidence']['local_request_id'] == 'local-request'
+    assert receipt['evidence']['response'] == evidence['response']
+    if evidence['response'] is None:
+        assert receipt['evidence']['transport_error_type'] == 'TimeoutError'
 
 
 def test_scoped_systemctl_preserves_positive_absence_and_rejects_mutations(tmp_path):
