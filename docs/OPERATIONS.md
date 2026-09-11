@@ -173,7 +173,9 @@ compatibility evidence only: `external_effect_settlement` is `UNKNOWN`, and the
 result does not authorize writable startup, old-process stopping, health,
 single-writer admission, rollback, or production use. The read-only `upgrade.sh`
 path and its package/read-only gates are unchanged; #228 still needs a reviewed
-cutover contract for those effectful phases.
+cutover contract for those effectful phases. A ledger with a SQLite WAL header or
+existing `-wal`/`-shm` sidecars is rejected before opening, since this preflight
+does not provide a no-side-effect WAL observation protocol.
 
 ## Observation and evidence
 

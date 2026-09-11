@@ -39,16 +39,25 @@ class MaintenanceUpgrade(Upgrade):
         if self.candidate_root == root:
             raise Error("candidate_root must be a staged generation")
 
-    def _staged(self):
+    def _staged(self, payload):
         if self.candidate_root.is_symlink() or not self.candidate_root.is_dir():
             raise Error("staged candidate is unavailable")
         release = self.candidate_root / "release.json"
         if release.is_symlink() or not release.is_file():
             raise Error("staged candidate release record is unavailable")
-        record = json.loads(release.read_text())
-        if (not re.fullmatch(r"[0-9a-f]{40}", str(record.get("commit", "")))
-                or not re.fullmatch(r"0\.1\.0a[1-9][0-9]*", str(record.get("version", "")))):
-            raise Error("staged candidate release identity is invalid")
+        try:
+            record = self.verify_generation(self.candidate_root)
+        except (Error, OSError, TypeError, ValueError, KeyError) as exc:
+            raise Error("staged candidate runtime manifest is invalid") from exc
+        expected = {
+            "version": payload["version"],
+            "commit": payload["commit"],
+            "tag": payload["tag"],
+            "bundle_sha256": payload["bundle_sha256"],
+            "generation": payload["generation"],
+        }
+        if any(record.get(key) != value for key, value in expected.items()):
+            raise Error("staged candidate does not match verified bundle")
         expected = self.cfg.get("candidate_commit")
         if expected is not None and record["commit"] != expected:
             raise Error("staged candidate commit differs")
@@ -61,9 +70,25 @@ class MaintenanceUpgrade(Upgrade):
         path = Path(path)
         if path.is_symlink() or not path.is_file():
             raise Error("same ledger is unavailable")
+        sidecars = tuple(path.with_name(path.name + suffix) for suffix in ("-wal", "-shm"))
+        if any(sidecar.exists() for sidecar in sidecars):
+            raise Error("same ledger WAL journal state is unsupported for no-write preflight")
+        try:
+            header = path.open("rb").read(20)
+        except OSError as exc:
+            raise Error("same ledger compatibility read failed") from exc
+        if len(header) < 20 or header[:16] != b"SQLite format 3\x00":
+            raise Error("same ledger header is unsupported")
+        # SQLite records rollback (1) or WAL (2) in the file header.  Reject
+        # WAL before opening so a read-only connection cannot create -shm.
+        if header[18] != 1 or header[19] != 1:
+            raise Error("same ledger journal mode is unsupported for no-write preflight")
         try:
             db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
             try:
+                journal_mode = str(db.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+                if journal_mode == "wal" or any(sidecar.exists() for sidecar in sidecars):
+                    raise Error("same ledger WAL journal state is unsupported for no-write preflight")
                 version = db.execute("PRAGMA user_version").fetchone()[0]
                 tables = [row[0] for row in db.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
@@ -80,47 +105,57 @@ class MaintenanceUpgrade(Upgrade):
         except (OSError, sqlite3.Error) as exc:
             raise Error("same ledger compatibility read failed") from exc
 
-    def _candidate_read(self, python, config, ledger):
+    def _candidate_read(self, python, config, ledger, expected_version):
         code = """import json,sys,threading
+from pathlib import Path
+sys.path.insert(0, sys.argv[4])
 from dataclasses import replace
 from llmsvc.config import load_config
 from llmsvc.store import IntentStore
 c=load_config(sys.argv[1])
 if c.state_db_path != sys.argv[2]: raise ValueError('ledger path differs')
 if c.read_only is not False: raise ValueError('intended config is not writable')
+import llmsvc
+origin=Path(llmsvc.__file__).resolve()
+candidate=Path(sys.argv[4]).resolve()
+if candidate not in origin.parents: raise ValueError('candidate import escaped staged runtime')
+if llmsvc.__version__ != sys.argv[3]: raise ValueError('candidate package version differs')
 ro=replace(c, read_only=True)
 s=IntentStore(ro.state_db_path, action_lock=threading.RLock(), read_only=True)
 try:
- print(json.dumps({'version':c.__class__.__name__,'read_only':ro.read_only,'ledger':{'user_version':s._db.execute('PRAGMA user_version').fetchone()[0]}}))
+ print(json.dumps({'version':llmsvc.__version__,'origin':str(origin),'read_only':ro.read_only,'ledger':{'user_version':s._db.execute('PRAGMA user_version').fetchone()[0]}}))
 finally: s.close()
 """
-        env = {"PYTHONPATH": str(self.candidate_root)}
-        result = subprocess.run([str(python), "-B", "-c", code, str(config), ledger["path"]],
+        result = subprocess.run([str(python), "-I", "-B", "-c", code, str(config), ledger["path"],
+                                 expected_version, str(self.candidate_root)],
                                 capture_output=True, text=True, timeout=min(30, self.command_timeout),
-                                cwd=str(self.candidate_root), env={**os.environ, **env})
+                                cwd=str(self.candidate_root), env={"PATH": os.environ.get("PATH", "")})
         if result.returncode:
             raise Error("candidate read-only ledger preflight failed")
         try:
             value = json.loads(result.stdout)
         except (TypeError, ValueError) as exc:
             raise Error("candidate preflight output is invalid") from exc
-        if value.get("read_only") is not True or value.get("ledger", {}).get("user_version") != ledger["user_version"]:
+        if (value.get("read_only") is not True
+                or value.get("version") != expected_version
+                or not str(value.get("origin", "")).startswith(str(self.candidate_root) + "/")
+                or value.get("ledger", {}).get("user_version") != ledger["user_version"]):
             raise Error("candidate ledger compatibility is unsupported")
         return value
 
     def preflight(self, directory):
         payload = bundle(directory)
-        record, python = self._staged()
-        if record["version"] != payload["version"] or record["commit"] != payload["commit"]:
-            raise Error("staged candidate does not match verified bundle")
+        record, python = self._staged(payload)
         config_bytes = self.maintenance_config_path.read_bytes()
         config_sha = sha(config_bytes)
-        current = json.loads(self.run([self.cfg["python"], "-c", CONFIG, str(self.config)]).stdout)
+        source_root = Path(__file__).resolve().parents[1]
+        current = json.loads(self.run([self.cfg["python"], "-I", "-B", "-c", CONFIG,
+                                       str(self.config), str(source_root)]).stdout)
         state_db_path = current.get("state_db_path")
         if not isinstance(state_db_path, str) or not state_db_path.startswith("/"):
             raise Error("configured scheduler ledger path is unavailable")
         ledger = self.ledger_snapshot(state_db_path)
-        candidate = self._candidate_read(python, self.maintenance_config_path, ledger)
+        candidate = self._candidate_read(python, self.maintenance_config_path, ledger, record["version"])
         if sha(self.maintenance_config_path.read_bytes()) != config_sha:
             raise Error("maintenance config changed during preflight")
         return {"status": "preflight", "read_only": True, "apply_supported": False,
@@ -144,6 +179,7 @@ finally: s.close()
 
 
 CONFIG = '''import json,sys
+sys.path.insert(0, sys.argv[2])
 from llmsvc.config import load_config
 c=load_config(sys.argv[1])
 print(json.dumps({'read_only':c.read_only,'state_db_path':c.state_db_path}))

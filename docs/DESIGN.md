@@ -709,7 +709,7 @@ Save text 仅由显式按钮把完整冻结详情写入用户选定的新 UTF-8 
 
 ## 7. 部署与验证
 
-### 显式可写 scheduler 替换（#228）
+### 维护替换 preflight（#228）
 
 `deploy/upgrade.py` 与 `pull_release.py` 的无人值守路径始终只接受
 `scope: read_only` bundle 和只读 unit。可写 scheduler 的替换只能通过额外的
@@ -727,7 +727,9 @@ commit 一致、解释器是已存在的普通文件、配置字节在检查期�
 effect settlement 标为 `UNKNOWN`。`apply` 和 `rollback` 的非 dry-run 调用在
 任何 lock、staging、transaction、state、process 或 service 写入前返回
 `UNSUPPORTED`；dry-run 只复用上述无写入检查。只读无人值守 upgrader 的行为和
-`deploy/upgrade.py` 的 read-only gate 不变。
+`deploy/upgrade.py` 的 read-only gate 不变。带有 SQLite WAL header 或 `-wal`/
+`-shm` sidecar 的 ledger 也会在打开前返回 `UNSUPPORTED`，因为本轮 preflight
+不承担无副作用的 WAL 观察协议。
 
 这项 preflight 证明的是候选与当前 ledger 的结构兼容性，不证明旧进程身份、外部
 native/model effect 已结算、候选可写启动、健康检查、单 writer 或安全回滚。真正
