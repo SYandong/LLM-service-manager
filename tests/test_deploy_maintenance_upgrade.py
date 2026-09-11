@@ -110,6 +110,17 @@ def test_preflight_rejects_staged_runtime_drift_before_reader(tmp_path):
     assert db.read_bytes()==before_db
 
 
+def test_preflight_rejects_verified_generation_in_wrong_sibling(tmp_path):
+    db=tmp_path/"ledger.sqlite"; store=IntentStore(db,action_lock=threading.RLock()); store.close()
+    bundle=make_bundle(tmp_path/"bundle"); staged,config,settings=make_candidate(tmp_path,db,bundle)
+    wrong=staged.parent/"other-generation"; shutil.move(str(staged),wrong)
+    settings["candidate_root"]="/shared/releases/other-generation"
+    before_db=db.read_bytes(); before_tree=tree_snapshot(tmp_path)
+    with pytest.raises(Error,match="candidate path does not match verified generation"):
+        MaintenanceUpgrade(settings,tmp_path).preflight(bundle)
+    assert db.read_bytes()==before_db and tree_snapshot(tmp_path)==before_tree
+
+
 def test_preflight_rejects_wal_state_without_touching_sidecars(tmp_path):
     db=tmp_path/"ledger.sqlite"; connection=sqlite3.connect(db); connection.execute("PRAGMA journal_mode=WAL"); connection.execute("CREATE TABLE retained (value TEXT)"); connection.commit()
     bundle=make_bundle(tmp_path/"bundle"); staged,config,settings=make_candidate(tmp_path,db,bundle)

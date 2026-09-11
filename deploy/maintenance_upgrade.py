@@ -40,6 +40,9 @@ class MaintenanceUpgrade(Upgrade):
             raise Error("candidate_root must be a staged generation")
 
     def _staged(self, payload):
+        expected_root = self.shared / "releases" / payload["generation"]
+        if self.candidate_root != expected_root:
+            raise Error("staged candidate path does not match verified generation")
         if self.candidate_root.is_symlink() or not self.candidate_root.is_dir():
             raise Error("staged candidate is unavailable")
         release = self.candidate_root / "release.json"
