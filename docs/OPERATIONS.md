@@ -146,35 +146,34 @@ change** acceptance. Record actual staging/live success, failure, rollback and
 unchanged trampoline/profile/config/backup evidence with the operation; no
 calendar wait or unmeasured stability claim is required.
 
-## Explicit writable scheduler replacement (#228)
+## Maintenance replacement preflight (#228)
 
-The unattended puller/upgrader remains read-only. A writable replacement is a
-separate, default-disabled maintenance operation and must be invoked explicitly
-with `deploy/maintenance-upgrade.sh apply --confirm-maintenance`; this issue
-does not authorize invoking it on a live site.
-The matching rollback command is
-`deploy/maintenance-upgrade.sh rollback --transaction TRANSACTION_ID`; it
-performs the old-reader/current-ledger gate before any pointer or unit restore.
+The unattended puller/upgrader remains read-only. The current maintenance entry
+point is a read-only compatibility preflight for an already staged candidate:
 
-The operation stages and verifies the release using the existing bundle,
-generation, transaction, pointer and byte guards. It opens the candidate against
-the same ledger in dry-run/check-config/once mode, stops only the bound scheduler
-unit, proves the old PID/start/InvocationID/cgroup and whole unit/process are
-gone, then rereads the current ledger before switching. A write committed by the
-old process before absence is legitimate and is retained. Process absence does
-not settle an external model/native effect; pending or unknown records remain
-blocked.
+```sh
+deploy/maintenance-upgrade.sh preflight --root /path/to/staging-root \
+  --settings /path/to/maintenance.json \
+  --bundle /path/to/verified/read-only-bundle
+```
 
-Candidate startup uses the intended writable config and same ledger, then checks
-config/ledger identity, first observation, health and one scheduler writer.
-Rollback first proves candidate process absence and runs the old reader's
-read-only compatibility check against the current ledger. If that check is
-unsupported, the transaction remains pending/`UNSUPPORTED`; no stale database
-snapshot is restored and no claims are deleted. This path provides bounded
-control-plane downtime and no source/model/GPU, TTL/reaper or zero-downtime
-guarantee. The current implementation returns `UNSUPPORTED` before any
-writable stop/switch because no supported external-effect settlement proof is
-available; its dry-run and compatibility gates are executable only.
+The preflight verifies the staged `release.json` against the bundle, reads the
+configured scheduler YAML and same SQLite ledger without opening a writer, and
+starts the staged interpreter with `-B` to open that ledger through the existing
+read-only `IntentStore`. It reports schema/record readability and stable config
+bytes; it does not call `prepare()`, create a venv, probe a model, contact a
+service, or write lock/state/transaction files. A missing or incompatible staged
+candidate returns an explicit error.
+
+`apply` and `rollback` names remain for command compatibility, but every
+non-dry-run invocation currently fails closed with `UNSUPPORTED` before any
+lockfile, staging, state, process, or service mutation. Their dry-run forms are
+preflight-only and return `apply_supported: false`. This is structural
+compatibility evidence only: `external_effect_settlement` is `UNKNOWN`, and the
+result does not authorize writable startup, old-process stopping, health,
+single-writer admission, rollback, or production use. The read-only `upgrade.sh`
+path and its package/read-only gates are unchanged; #228 still needs a reviewed
+cutover contract for those effectful phases.
 
 ## Observation and evidence
 

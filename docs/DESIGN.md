@@ -716,22 +716,23 @@ Save text 仅由显式按钮把完整冻结详情写入用户选定的新 UTF-8 
 `deploy/maintenance-upgrade.sh` 显式维护入口，默认不调用，也不改变发布 bundle
 范围。
 
-维护入口复用现有 generation、transaction、pointer、字节保护和 rollback 原语：
-先用候选 reader 以 dry-run/check-config/once 只读打开**同一** SQLite ledger，
-再停止明确绑定的 scheduler unit，核对旧 PID、start/InvocationID、cgroup 和
-整个旧进程/unit 已不存在，随后重新读取当前 ledger。旧进程退出前已提交的 pin、
-reserve、lease、fault/recovery/catalog/bootstrap fence 和未知记录全部保留；
-进程退出不等于外部 native/model effect 已结清。
+本 issue 当前只交付**只读 preflight**。它要求候选 generation 已经在配置的
+staging root 中存在，并校验 release.json 与已验证 read-only bundle 的版本和
+commit 一致、解释器是已存在的普通文件、配置字节在检查期间不变。候选解释器以
+`-B` 子进程读取同一 SQLite ledger，强制使用只读 `IntentStore`，检查 schema 与
+现有 pin/lease 等记录可读；不会调用 `prepare()`、创建 venv、启动服务、采样、
+访问网络或写 ledger。
 
-只有当前 ledger 兼容且旧资源身份证明完成，才允许切换 generation、以显式可写
-配置启动一个候选 scheduler，并检查实际 config/ledger identity、首轮 observation、
-health 和单 writer。候选启动或 health 失败时，rollback 先让候选进程消失，再让
-旧 reader 对**当前** ledger 做只读兼容检查；检查不支持时返回 `UNSUPPORTED`，
-保留 transaction/ledger/claims，不恢复陈旧数据库快照。该入口不提供 drain endpoint、
-writer epoch、强制清理、source/model/GPU 操作、TTL/reaper 替换或 zero-downtime
-保证；控制面短暂停机是预期边界。当前实现会在 writable effectful apply
-之前返回 `UNSUPPORTED`，因为仓库尚未提供可证明的外部 effect settlement
-来源；只读 preflight/dry-run 可执行，不能据此声称已完成现场替换。
+`maintenance-upgrade.sh preflight` 返回 `apply_supported: false`，并明确把外部
+effect settlement 标为 `UNKNOWN`。`apply` 和 `rollback` 的非 dry-run 调用在
+任何 lock、staging、transaction、state、process 或 service 写入前返回
+`UNSUPPORTED`；dry-run 只复用上述无写入检查。只读无人值守 upgrader 的行为和
+`deploy/upgrade.py` 的 read-only gate 不变。
+
+这项 preflight 证明的是候选与当前 ledger 的结构兼容性，不证明旧进程身份、外部
+native/model effect 已结算、候选可写启动、健康检查、单 writer 或安全回滚。真正
+的替换仍需 #228 后续设计提供可复核的旧进程退出、当前 ledger 重读、候选就绪及
+旧 reader 兼容性边界；不得把空快照或调用者确认当作 settlement proof。
 
 - 快速验证（#108，用户明确要求）：先在独立配置的验证端口以 `--dry-run` 做分钟级只读短测，记录真实起止、样本、缺口、错误与清理结果；典型窗口约 120 秒，GPU 测试仍须空闲且单次目标不超过 5 分钟。不再要求等满一天或一周才继续交付。相应功能用确定性回放、临时环境集成和必要短测验收；长期稳定性和长期占用分布明确标为未测。
 - 短测通过不自动启用生产动作：保护、内存准入、可信连续 quiet、配置采用/退出确认、已验证回滚及相应操作授权仍须满足。连续 5 秒 quiet 是正确性条件，不能用日历等待的取消替代它。
