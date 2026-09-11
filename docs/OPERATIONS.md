@@ -134,6 +134,12 @@ Read-only bundles/site configuration may use the authorized automatic path.
 Non-read-only configuration or model-action/placement/automation/fault/recovery
 opt-ins are rejected with an approval-required error: future unattended M2
 changes retain a manual review/approval gate, not a config flag that bypasses it.
+During an explicit scheduler shutdown, a new mutating HTTP request may receive
+HTTP 503 `scheduler_stopping`; this means no new pin/action/place/reserve,
+registry or bootstrap write was admitted. Already accepted work keeps its
+existing bounded deadline and reconciliation rules. Read-only state and dry-run
+previews retain their existing behavior; retry mutations only after the
+replacement scheduler is ready.
 Release publication is integration-owned; see [RELEASING](RELEASING.md). A same-
 version bootstrap rehearsal does not satisfy the separate real-tag **version
 change** acceptance. Record actual staging/live success, failure, rollback and
@@ -421,6 +427,7 @@ calendar wait. Verified consumers, owner consent and rollback still control
 any retirement action.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+<!-- Generated-By: Codex / gpt-5.6-luna -->
 
 ## Watcher-only native generation evidence (#60)
 
@@ -465,3 +472,5 @@ new/base instances have separate recovery paths. A configuration rollback keeps
 current account releases; it does not recreate a removed model's old lease.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+
+<!-- Generated-By: Codex / gpt-5.6-luna -->

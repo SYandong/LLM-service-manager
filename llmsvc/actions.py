@@ -433,6 +433,8 @@ class ModelActionController:
 
     def _enabled(self):
         getattr(self.transport, "check_catalog", lambda: None)()
+        if self.scheduler.stopping.is_set():
+            raise ActionDispatchError("scheduler_stopping")
         if self.scheduler.store is not None and self.scheduler.store.bootstrap_pending():
             raise ActionDispatchError("bootstrap_reconciliation_required")
         if self.scheduler.config.read_only:
@@ -582,6 +584,17 @@ class ModelActionController:
             record(last)
             while self.monotonic() < deadline:
                 with self._locked(deadline):
+                    if self.scheduler.stopping.is_set():
+                        measured = result.get("measurement_complete") is True
+                        if measured and need is not None and result["freed_gb"] is not None and result["freed_gb"] >= need:
+                            result["status"] = "complete"
+                            result["skipped"] = [item for item in result["skipped"]
+                                                 if item["reason"] != "insufficient_reclaimable_memory"]
+                        else:
+                            result["status"] = "partial" if confirmed else "failed"
+                            result["error"] = "scheduler_stopping"
+                            result["error_model"] = None
+                        break
                     self._enabled()
                     snapshot = self._snapshot()
                     if not self._fresh(snapshot):

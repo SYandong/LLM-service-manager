@@ -4,12 +4,17 @@
 import http.client
 import json
 import threading
+import time
+from types import SimpleNamespace
 
 import pytest
 
 from llmsvc.config import SchedulerConfig
-from llmsvc.scheduler import Scheduler
+from llmsvc.actions import ActionDispatchError, ModelActionController
+from llmsvc.leases import LeaseError, PlacementController
+from llmsvc.scheduler import IntentWriteError, Scheduler
 from llmsvc.server import SchedulerHTTPServer
+from llmsvc.store import IntentStore
 from llmsvc.state import Activity, GPUState, ModelState, StateSnapshot
 
 
@@ -105,3 +110,199 @@ def test_sse_cursor_and_state_reads_progress_during_event_wait(service):
 def test_unknown_route(service):
     _, address = service
     assert request(address, "GET", "/missing")[0] == 404
+
+
+def test_http_pin_commits_before_stop_and_new_pin_rejects_after_stop(tmp_path):
+    db = tmp_path / "ledger.sqlite"
+    config = SchedulerConfig("127.0.0.1", 18091, read_only=False, state_db_path=str(db),
+                             sample_interval_seconds=.02)
+    lock = threading.RLock()
+    store = IntentStore(str(db), action_lock=lock)
+    snapshot = StateSnapshot(gpus=(GPUState(0, free_gb=42),),
+                             models=(ModelState("first", state="awake"), ModelState("second", state="awake")),
+                             activity=(Activity("first", in_flight=0), Activity("second", in_flight=0)))
+    scheduler = Scheduler(config, lambda: snapshot, store=store)
+    scheduler.sample_once()
+    server = SchedulerHTTPServer(("127.0.0.1", 0), scheduler)
+    serving = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .01}, daemon=True)
+    entered, release, stop_started, stop_done = (threading.Event() for _ in range(4))
+    original_put = store.put_pin
+    calls = []
+    def put_pin(pin, *args, **kwargs):
+        calls.append(("enter", pin.model, scheduler.stopping.is_set()))
+        if pin.model == "first":
+            entered.set()
+            assert release.wait(3)
+        result = original_put(pin, *args, **kwargs)
+        calls.append(("commit", pin.model, scheduler.stopping.is_set()))
+        return result
+    store.put_pin = put_pin
+    scheduler.start(); serving.start()
+    responses = []
+    first = stopper = None
+    try:
+        body = json.dumps({"model": "first", "until": time.time() + 60, "by": "fixture"})
+        first = threading.Thread(target=lambda: responses.append(request(server.server_address, "POST", "/v1/pin", body=body)))
+        first.start(); assert entered.wait(2)
+        stopper = threading.Thread(target=lambda: (stop_started.set(), scheduler.stop(), stop_done.set()))
+        stopper.start(); assert stop_started.wait(1)
+        release.set(); assert stop_done.wait(3)
+        first.join(3); stopper.join(3)
+        second_body = json.dumps({"model": "second", "until": time.time() + 60, "by": "fixture"})
+        status, payload = request(server.server_address, "POST", "/v1/pin", body=second_body)
+        assert status == 503 and payload["error"] == "scheduler_stopping"
+        pins = [pin.model for pin in store.active(time.time())[0]]
+        assert pins == ["first"]
+        assert calls == [("enter", "first", False), ("commit", "first", False)]
+        assert responses[0][0] == 200
+    finally:
+        release.set()
+        for worker in (first, stopper):
+            if worker is not None: worker.join(3)
+        assert all(worker is None or not worker.is_alive() for worker in (first, stopper))
+        if serving.is_alive(): server.shutdown()
+        server.server_close()
+        serving.join(3)
+        if not scheduler.stopping.is_set(): scheduler.stop()
+        store.close()
+
+
+def test_lock_queued_pin_and_unpin_reject_after_stop_without_side_effects(tmp_path):
+    db = tmp_path / "queued.sqlite"
+    config = SchedulerConfig("127.0.0.1", 18094, read_only=False, state_db_path=str(db))
+    store = IntentStore(str(db), action_lock=threading.RLock())
+    scheduler = Scheduler(config, lambda: StateSnapshot(
+        gpus=(GPUState(0, free_gb=42),), models=(ModelState("model", state="awake"),),
+        activity=(Activity("model", in_flight=0),)), store=store)
+    scheduler.sample_once()
+    queued = threading.Event()
+    original_pending = store.bootstrap_pending
+    pending_calls = [0]
+    def bootstrap_pending(*args, **kwargs):
+        pending_calls[0] += 1
+        if pending_calls[0] >= 2: queued.set()
+        return original_pending(*args, **kwargs)
+    store.bootstrap_pending = bootstrap_pending
+    server = SchedulerHTTPServer(("127.0.0.1", 0), scheduler)
+    serving = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .01}, daemon=True)
+    serving.start()
+    responses = []
+    pin_body = json.dumps({"model": "model", "until": time.time() + 60, "by": "fixture"})
+    workers = [
+        threading.Thread(target=lambda: responses.append(("pin", request(server.server_address, "POST", "/v1/pin", body=pin_body)))),
+        threading.Thread(target=lambda: responses.append(("unpin", request(server.server_address, "DELETE", "/v1/pin/model")))),
+    ]
+    before_events = scheduler.events_since(0)
+    try:
+        with scheduler.action_lock:
+            for worker in workers: worker.start()
+            assert queued.wait(2)
+            scheduler.stopping.set()
+        for worker in workers: worker.join(3)
+        assert all(not worker.is_alive() for worker in workers)
+        assert sorted(responses) == [("pin", (503, {"error": "scheduler_stopping"})),
+                                     ("unpin", (503, {"error": "scheduler_stopping"}))]
+        assert store.active(time.time()) == ((), ())
+        assert scheduler.events_since(0) == before_events
+    finally:
+        for worker in workers: worker.join(3)
+        if serving.is_alive(): server.shutdown()
+        server.server_close(); serving.join(3); store.close()
+
+
+def test_stopping_http_mutation_matrix_is_fail_closed(tmp_path):
+    db = tmp_path / "matrix.sqlite"
+    config = SchedulerConfig("127.0.0.1", 18093, read_only=False, state_db_path=str(db),
+                             model_actions_enabled=True, placement_enabled=True,
+                             collectors={"models": {"model": {"unit": "vllm-model.service", "util": .2}}},
+                             registry={"config_path": str(tmp_path / "models.yaml"),
+                                       "shared_roots": [str(tmp_path)], "daemon_port_range": [8101, 8110]})
+    store = IntentStore(str(db), action_lock=threading.RLock())
+    scheduler = Scheduler(config, lambda: StateSnapshot(
+        gpus=(GPUState(0, free_gb=42),), models=(ModelState("model", state="awake"),),
+        activity=(Activity("model", in_flight=0),)), store=store)
+    transport_calls = []
+    transport = SimpleNamespace(
+        models={"model": {"unit": "vllm-model.service", "util": .2}},
+        units={"model": "vllm-model.service"},
+        check_catalog=lambda: None,
+        http_request=lambda *args, **kwargs: transport_calls.append(("http", args)) or 200,
+        stop_unit=lambda *args, **kwargs: transport_calls.append(("stop", args)) or 0,
+        unit_for_model=lambda name: "vllm-" + name + ".service",
+        systemctl="systemctl",
+    )
+    scheduler.model_actions = ModelActionController(scheduler, transport)
+    scheduler.placement = PlacementController(scheduler, transport)
+    scheduler.registry = SimpleNamespace()
+    scheduler.catalog = SimpleNamespace(can_submit=lambda: True, submit_change=lambda *args, **kwargs: None)
+    scheduler.sample_once()
+    server = SchedulerHTTPServer(("127.0.0.1", 0), scheduler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .01}, daemon=True)
+    thread.start()
+    scheduler.stopping.set()
+    until = time.time() + 60
+    mutations = [
+        ("POST", "/v1/pin", {"model": "model", "until": until, "by": "fixture"}),
+        ("DELETE", "/v1/pin/model", None),
+        ("POST", "/v1/free", {}),
+        ("POST", "/v1/wake/model", {}),
+        ("POST", "/v1/place", {"model": "model", "util": .2}),
+        ("POST", "/v1/place/lease-1/confirm", None),
+        ("POST", "/v1/place/lease-1/release", None),
+        ("POST", "/v1/reserve", {"gpu": 0, "size_gb": 1, "until": until, "by": "fixture"}),
+        ("DELETE", "/v1/reserve/reserve-1", None),
+        ("POST", "/v1/models", {}),
+    ]
+    before_events = scheduler.events_since(0)
+    try:
+        results = [request(server.server_address, method, path,
+                           body=json.dumps(body) if isinstance(body, dict) else body)
+                   for method, path, body in mutations]
+        for index, (status, payload) in enumerate(results):
+            assert status == 503 and payload["error"] == "scheduler_stopping", (index, status, payload, results)
+        assert store.active(time.time()) == ((), ())
+        assert scheduler.events_since(0) == before_events
+        assert transport_calls == []
+    finally:
+        server.shutdown(); server.server_close(); thread.join(3); store.close()
+
+
+def test_direct_controller_admission_guards_reject_stopping_without_mutation(tmp_path):
+    db = tmp_path / "ledger.sqlite"
+    config = SchedulerConfig("127.0.0.1", 18092, read_only=False, state_db_path=str(db),
+                             model_actions_enabled=True, placement_enabled=True,
+                             collectors={"models": {"model": {"unit": "vllm-model.service", "util": .2}}})
+    store = IntentStore(str(db), action_lock=threading.RLock())
+    scheduler = Scheduler(config, lambda: StateSnapshot(), store=store)
+    transport = SimpleNamespace(
+        models={"model": {"unit": "vllm-model.service", "util": .2}},
+        units={"model": "vllm-model.service"},
+        check_catalog=lambda: None,
+        http_request=lambda *args, **kwargs: 200,
+        stop_unit=lambda *args, **kwargs: 0,
+        unit_for_model=lambda name: "vllm-" + name + ".service",
+        systemctl="systemctl",
+    )
+    action = ModelActionController(scheduler, transport)
+    placement = PlacementController(scheduler, transport)
+    scheduler.registry = SimpleNamespace()
+    scheduler.catalog = SimpleNamespace(can_submit=lambda: True, submit_change=lambda *args, **kwargs: None)
+    scheduler.stopping.set()
+    try:
+        with pytest.raises(ActionDispatchError, match="scheduler_stopping"): action._enabled()
+        with pytest.raises(LeaseError, match="scheduler_stopping"): placement._enabled()
+        with pytest.raises(IntentWriteError, match="scheduler_stopping"):
+            with scheduler._reserve_lock(time.monotonic() + 1):
+                pass
+        with pytest.raises(IntentWriteError, match="scheduler_stopping"):
+            scheduler.registry_request("POST", "/v1/models", {}, dry_run=False)
+        from llmsvc.bootstrap import BootstrapController
+        bootstrap = BootstrapController.__new__(BootstrapController)
+        bootstrap.scheduler = scheduler
+        bootstrap._enabled = lambda: None
+        with pytest.raises(IntentWriteError, match="scheduler_stopping"):
+            with bootstrap.http_scope("place", {}, "token", "127.0.0.1"):
+                pass
+        assert store.active(time.time()) == ((), ())
+    finally:
+        store.close()

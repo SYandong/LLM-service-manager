@@ -222,6 +222,8 @@ class BootstrapController:
     def http_scope(self,operation,payload,token,source_ip):
         s=self.scheduler;self._enabled()
         with s.action_lock:
+            if s.stopping.is_set():
+                raise IntentWriteError(503,'scheduler_stopping')
             if not self.busy or self.clock()>=self.deadline:
                 raise IntentWriteError(503,'bootstrap_reconciliation_required')
             record=self._record()

@@ -135,6 +135,41 @@ def test_failed_second_action_preserves_measured_partial_and_stops(tmp_path):
     assert backend.samples >= 4
 
 
+@pytest.mark.parametrize("need,expected_status", [(10, "complete"), (80, "partial")])
+def test_stopping_after_confirmed_effect_preserves_measurement_without_next_action(tmp_path, need, expected_status):
+    service, controller, backend = setup(tmp_path)
+    original_wait = controller._wait_effect
+    def stop_after_effect(action, deadline):
+        observed, applied = original_wait(action, deadline)
+        if applied:
+            effect_done[0] = True
+        return observed, applied
+    original_locked = controller._locked
+    effect_done = [False]
+    stop_set = [False]
+    def stop_after_outer_check(deadline):
+        context = original_locked(deadline)
+        class Boundary:
+            def __enter__(self):
+                value = context.__enter__()
+                if effect_done[0] and not stop_set[0]:
+                    service.stopping.set()
+                    stop_set[0] = True
+                return value
+            def __exit__(self, *args):
+                return context.__exit__(*args)
+        return Boundary()
+    controller._wait_effect = stop_after_effect
+    controller._locked = stop_after_outer_check
+    result = controller.free({"need_gb": need}, by="caller")
+    assert backend.calls == [("sleep", "a")]
+    assert result["status"] == expected_status
+    if expected_status == "partial":
+        assert result["error"] == "scheduler_stopping"
+    assert result["slept"] == ["a"] and result["freed_gb"] == 30
+    assert result["measurement_complete"] is True
+
+
 def test_failed_request_with_observed_effect_preserves_it_without_more_actions(tmp_path):
     _, controller, backend = setup(tmp_path)
     backend.fail_model = "a"
