@@ -161,7 +161,7 @@ def test_actual_scheduler_free_wake_events_preserve_real_launcher_account(chain)
     (['not','an','object'], False),
 ])
 def test_scheduler_wake_cold_route_owns_one_post_and_validates_final_response(response,expect_success,tmp_path,monkeypatch):
-    post_seen=threading.Event();progress_sent=threading.Event();done=threading.Event();calls=[]
+    post_seen=threading.Event();baseline_get_seen=threading.Event();progress_sent=threading.Event();done=threading.Event();calls=[]
     state={'read_only':False,'sampled_at':time.time(),'errors':[],
            'models':[{'name':'model','state':'awake','gpu':0,'unit':'vllm-model.service','resident_gb':20}],
            'leases':[{'model':'model','gpu':0,'unit':'vllm-model.service','lease_id':'lease-1','status':'confirmed','budget_gb':20}]}
@@ -170,12 +170,16 @@ def test_scheduler_wake_cold_route_owns_one_post_and_validates_final_response(re
         def do_GET(self):
             if self.path.startswith('/v1/events?since='):
                 self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
-                self.wfile.write(b': connected\n\n');self.wfile.flush();post_seen.wait(1)
-                item={'id':1,'timestamp':time.time(),'kind':'wake_progress','model':'model','detail':{
-                    'stage':'health_wait','source':'llama-swap','source_model':'model','progress_source':'per_model_log',
-                    'log_epoch':'epoch','sequence':1,'received_at':time.time(),'trusted_for_quiet':False}}
-                raw=json.dumps(item).encode();self.wfile.write(b'id: 1\ndata: '+raw+b'\n\n');self.wfile.flush();progress_sent.set();done.wait(1);return
-            assert self.path=='/v1/state';payload=json.dumps(state).encode();self.send_response(200);self.send_header('Content-Length',str(len(payload)));self.end_headers();self.wfile.write(payload)
+                self.wfile.write(b': connected\n\n');self.wfile.flush();assert baseline_get_seen.wait(1)
+                old={'id':1,'timestamp':time.time(),'kind':'wake_progress','model':'model','detail':{'stage':'health_wait','source':'llama-swap','source_model':'model','progress_source':'per_model_log','log_epoch':'old','sequence':1,'received_at':time.time(),'trusted_for_quiet':False}}
+                raw=json.dumps(old).encode();self.wfile.write(b'id: 1\ndata: '+raw+b'\n\n');self.wfile.flush()
+                baseline={'id':2,'timestamp':time.time(),'kind':'state','model':'model','detail':{'sampled_at':time.time(),'errors':[]}}
+                raw=json.dumps(baseline).encode();self.wfile.write(b'id: 2\ndata: '+raw+b'\n\n');self.wfile.flush();post_seen.wait(1)
+                item={'id':3,'timestamp':time.time(),'kind':'wake_progress','model':'model','detail':{
+                'stage':'health_wait','source':'llama-swap','source_model':'model','progress_source':'per_model_log',
+                'log_epoch':'epoch','sequence':1,'received_at':time.time(),'trusted_for_quiet':False}}
+                raw=json.dumps(item).encode();self.wfile.write(b'id: 3\ndata: '+raw+b'\n\n');self.wfile.flush();progress_sent.set();done.wait(1);return
+            assert self.path=='/v1/state';state['sampled_at']=time.time();baseline_get_seen.set();payload=json.dumps(state).encode();self.send_response(200);self.send_header('Content-Length',str(len(payload)));self.end_headers();self.wfile.write(payload)
         def do_POST(self):
             assert self.path=='/v1/wake/model';calls.append(self.path);post_seen.set();assert progress_sent.wait(1);time.sleep(.05)
             payload=json.dumps(response).encode() if isinstance(response,dict) else json.dumps(response).encode()
@@ -188,10 +192,11 @@ def test_scheduler_wake_cold_route_owns_one_post_and_validates_final_response(re
             result=smoke.scheduler_wake_request(API,profile,time.monotonic()+3,identity_reader=identity)
             assert result['response']==response and result['progress_before_response'] is True
             assert result['lease']['lease_id']=='lease-1'
-            assert result['progress'][0]['event_id']==1 and result['progress'][0]['model']=='model'
+            assert result['progress'][0]['event_id']==3 and result['progress'][0]['model']=='model'
             assert isinstance(result['progress'][0]['source_event_timestamp'],float)
             assert isinstance(result['progress'][0]['local_observed_monotonic'],float)
             root=tmp_path/'run';root.mkdir();(root/'owner').write_text('token')
+            baseline_get_seen.clear();post_seen.clear();progress_sent.clear();done.clear()
             request_id='a'*32;deadline=time.monotonic()+3
             (root/'request.json').write_text(json.dumps({'id':request_id,'operation':'cold','output':'result-'+request_id+'.json','deadline':deadline}))
             helper_profile={**profile,'root':str(root),'cli':str(ROOT/'cli/llm'),'control_instances':{},'cold_route':'scheduler_wake','work_deadline':deadline+2}
@@ -224,9 +229,12 @@ def test_scheduler_wake_post_uses_full_isolated_cold_budget_without_waiting_25_s
                     'models':[{'name':'model','state':'awake','gpu':0,'unit':'vllm-model.service','resident_gb':20}],
                     'leases':[{'model':'model','gpu':0,'unit':'vllm-model.service','lease_id':'lease-1','status':'confirmed','budget_gb':20}]}
     class Reader:
-        def __init__(self,*a,**k):pass
+        def __init__(self,*a,**k):self.calls=0
         def start(self):pass
-        def drain(self):return {'generation':0,'events':[]}
+        def drain(self):
+            self.calls+=1
+            if self.calls==1:return {'generation':0,'events':[{'id':1,'timestamp':time.time(),'kind':'state','model':'model','detail':{'sampled_at':time.time()+1,'errors':[]}}]}
+            return {'generation':0,'events':[]}
         def close(self,timeout=None):return True
     api={'SchedulerClient':Client,'EventReader':Reader,'parse_wake_progress':lambda *a,**k:None,'accept_wake_progress':lambda *a,**k:False}
     profile={'scheduler_url':'http://fixture','model':'model','unit':'vllm-model.service','token':'token','gpu':0,'request_id':'cold'}
@@ -243,11 +251,13 @@ def test_scheduler_wake_postresponse_identity_failure_preserves_response_and_pro
                     'models':[{'name':'model','state':'awake','gpu':0,'unit':'vllm-model.service','resident_gb':20}],
                     'leases':[{'model':'model','gpu':0,'unit':'vllm-model.service','lease_id':'lease-1','status':'confirmed','budget_gb':20}]}
     class Reader:
-        def __init__(self,*a,**k):self.done=False
+        def __init__(self,*a,**k):self.done=False;self.calls=0
         def start(self):pass
         def drain(self):
-            if self.done:return {'generation':0,'events':[]}
-            self.done=True;return {'generation':0,'events':[{'id':1,'timestamp':time.time(),'kind':'wake_progress','model':'model','detail':{'stage':'health_wait','source':'llama-swap','source_model':'model','progress_source':'per_model_log','log_epoch':'e','sequence':1,'received_at':time.time(),'trusted_for_quiet':False}}]}
+            self.calls+=1
+            if self.calls==1:return {'generation':0,'events':[{'id':1,'timestamp':time.time(),'kind':'state','model':'model','detail':{'sampled_at':time.time()+1,'errors':[]}}]}
+            if self.calls==2:return {'generation':0,'events':[{'id':2,'timestamp':time.time(),'kind':'wake_progress','model':'model','detail':{'stage':'health_wait','source':'llama-swap','source_model':'model','progress_source':'per_model_log','log_epoch':'e','sequence':1,'received_at':time.time(),'trusted_for_quiet':False}}]}
+            return {'generation':0,'events':[]}
         def close(self,timeout=None):return True
     api={'SchedulerClient':Client,'EventReader':Reader,'parse_wake_progress':API['parse_wake_progress'],'accept_wake_progress':API['accept_wake_progress']}
     profile={'scheduler_url':'http://fixture','model':'model','unit':'vllm-model.service','token':'token','gpu':0,'request_id':'cold'}
