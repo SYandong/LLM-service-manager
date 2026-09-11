@@ -709,6 +709,34 @@ Save text 仅由显式按钮把完整冻结详情写入用户选定的新 UTF-8 
 
 ## 7. 部署与验证
 
+### 维护替换 preflight（#228）
+
+`deploy/upgrade.py` 与 `pull_release.py` 的无人值守路径始终只接受
+`scope: read_only` bundle 和只读 unit。可写 scheduler 的替换只能通过额外的
+`deploy/maintenance-upgrade.sh` 显式维护入口，默认不调用，也不改变发布 bundle
+范围。
+
+本 issue 当前只交付**只读 preflight**。它要求候选 generation 已经在现有的
+`shared/releases/<generation>` 中存在，并用既有 runtime fingerprint 校验
+release.json 与已验证 read-only bundle 的 tag、版本、commit、generation 和
+bundle digest 一致。候选解释器（包括标准 venv 解释器链接）以隔离的 `-I -B`
+子进程读取同一 SQLite ledger，强制使用只读 `IntentStore`，检查 schema 与
+现有 pin/lease 等记录可读；不会调用 `prepare()`、创建 venv、启动服务、采样、
+访问网络或写 ledger，也不会让导入路径回退到当前 checkout。
+
+`maintenance-upgrade.sh preflight` 返回 `apply_supported: false`，并明确把外部
+effect settlement 标为 `UNKNOWN`。`apply` 和 `rollback` 的非 dry-run 调用在
+任何 lock、staging、transaction、state、process 或 service 写入前返回
+`UNSUPPORTED`；dry-run 只复用上述无写入检查。只读无人值守 upgrader 的行为和
+`deploy/upgrade.py` 的 read-only gate 不变。带有 SQLite WAL header 或 `-wal`/
+`-shm` sidecar 的 ledger 也会在打开前返回 `UNSUPPORTED`，因为本轮 preflight
+不承担无副作用的 WAL 观察协议。
+
+这项 preflight 证明的是候选与当前 ledger 的结构兼容性，不证明旧进程身份、外部
+native/model effect 已结算、候选可写启动、健康检查、单 writer 或安全回滚。真正
+的替换仍需 #228 后续设计提供可复核的旧进程退出、当前 ledger 重读、候选就绪及
+旧 reader 兼容性边界；不得把空快照或调用者确认当作 settlement proof。
+
 - 快速验证（#108，用户明确要求）：先在独立配置的验证端口以 `--dry-run` 做分钟级只读短测，记录真实起止、样本、缺口、错误与清理结果；典型窗口约 120 秒，GPU 测试仍须空闲且单次目标不超过 5 分钟。不再要求等满一天或一周才继续交付。相应功能用确定性回放、临时环境集成和必要短测验收；长期稳定性和长期占用分布明确标为未测。
 - 短测通过不自动启用生产动作：保护、内存准入、可信连续 quiet、配置采用/退出确认、已验证回滚及相应操作授权仍须满足。连续 5 秒 quiet 是正确性条件，不能用日历等待的取消替代它。
 - 回放测试：把 2026-09-06 / 09-07 的 `vllm-launch` 日志场景做成夹具，断言新算法不再出现无效驱逐与踢默认模型。
@@ -741,3 +769,4 @@ Save text 仅由显式按钮把完整冻结详情写入用户选定的新 UTF-8 
 
 <!-- Generated-By: Claude Code / claude-fable-5-1 -->
 <!-- Generated-By: Codex / gpt-6-astra -->
+<!-- Generated-By: Codex / gpt-5.6-luna -->

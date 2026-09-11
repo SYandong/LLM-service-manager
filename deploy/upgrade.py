@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-5.6-luna
 """Versioned, offline read-only upgrades preserving site configuration and clients."""
 import argparse
 import base64

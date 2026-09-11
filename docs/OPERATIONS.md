@@ -146,6 +146,38 @@ change** acceptance. Record actual staging/live success, failure, rollback and
 unchanged trampoline/profile/config/backup evidence with the operation; no
 calendar wait or unmeasured stability claim is required.
 
+## Maintenance replacement preflight (#228)
+
+The unattended puller/upgrader remains read-only. The current maintenance entry
+point is a read-only compatibility preflight for an already staged candidate:
+
+```sh
+deploy/maintenance-upgrade.sh preflight --root /path/to/staging-root \
+  --settings /path/to/maintenance.json \
+  --bundle /path/to/verified/read-only-bundle
+```
+
+The preflight verifies an existing `shared/releases/<generation>` runtime
+fingerprint and its `release.json` against the bundle, reads the configured
+scheduler YAML and same SQLite ledger without opening a writer, and starts the
+staged interpreter with isolated `-I -B` to open that ledger through the existing
+read-only `IntentStore`. It reports schema/record readability and stable config
+bytes; it does not call `prepare()`, create a venv, probe a model, contact a
+service, or write lock/state/transaction files. A missing, drifted, or incompatible
+staged candidate returns an explicit error.
+
+`apply` and `rollback` names remain for command compatibility, but every
+non-dry-run invocation currently fails closed with `UNSUPPORTED` before any
+lockfile, staging, state, process, or service mutation. Their dry-run forms are
+preflight-only and return `apply_supported: false`. This is structural
+compatibility evidence only: `external_effect_settlement` is `UNKNOWN`, and the
+result does not authorize writable startup, old-process stopping, health,
+single-writer admission, rollback, or production use. The read-only `upgrade.sh`
+path and its package/read-only gates are unchanged; #228 still needs a reviewed
+cutover contract for those effectful phases. A ledger with a SQLite WAL header or
+existing `-wal`/`-shm` sidecars is rejected before opening, since this preflight
+does not provide a no-side-effect WAL observation protocol.
+
 ## Observation and evidence
 
 `deploy/capture.py` takes configurable, bounded, read-only probes and writes
@@ -472,5 +504,7 @@ new/base instances have separate recovery paths. A configuration rollback keeps
 current account releases; it does not recreate a removed model's old lease.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+
+<!-- Generated-By: Codex / gpt-5.6-luna -->
 
 <!-- Generated-By: Codex / gpt-5.6-luna -->
