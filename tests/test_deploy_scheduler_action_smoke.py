@@ -199,6 +199,9 @@ def test_scheduler_wake_cold_route_owns_one_post_and_validates_final_response(re
             assert smoke.helper_main(['request',str(profile_path),'request.json'])==0
             receipt=json.loads((root/('result-'+request_id+'.json')).read_text())
             assert receipt['status']=='passed' and receipt['cold_start'] is True and receipt['lease']['lease_id']=='lease-1'
+            evidence=receipt['evidence']
+            assert all(field in evidence for field in ('started_wall','started_monotonic','post_returned_monotonic','progress_truncated','identity_checks'))
+            assert evidence['progress_truncated'] is False and evidence['identity_checks']['account'] is True
             run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='model';run.unit='vllm-model.service';run.temp=str(root);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run.config={'scheduler_python':sys.executable};run.log=lambda *a,**k:None;run.inventory=lambda **_:None;run.control=lambda *a,**k:None
             monkeypatch.setattr(smoke.uuid,'uuid4',lambda:SimpleNamespace(hex=request_id))
             run.python=lambda code,data,**kwargs: (Path(data['root'],data['name']).write_text(json.dumps(data['data'])) or {}) if 'write_text' in code else json.loads(Path(data['root'],data['name']).read_text())

@@ -483,9 +483,7 @@ def scheduler_wake_request(api, profile, deadline, *, identity_reader=unit_ident
         model,lease=account(state,profile,state='awake');evidence['identity_checks']['account']=True
         identity=identity_reader(profile['unit'],profile['token'],lease=lease['lease_id'],model=profile['model'],deadline=deadline)
         evidence['identity_checks']['unit']=identity
-        return {'response':response,'progress':evidence['progress'],
-                'progress_before_response':evidence['progress_before_response'],
-                'lease':lease,'unit_identity':identity,'seconds':time.monotonic()-started}
+        return {**evidence,'lease':lease,'unit_identity':identity,'seconds':time.monotonic()-started}
     except EvidenceError as exc:
         active_error=exc
         if exc.evidence is None:exc.evidence=evidence
