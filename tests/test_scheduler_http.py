@@ -163,6 +163,63 @@ def test_http_pin_commits_before_stop_and_new_pin_rejects_after_stop(tmp_path):
         store.close()
 
 
+def test_stopping_http_mutation_matrix_is_fail_closed(tmp_path):
+    db = tmp_path / "matrix.sqlite"
+    config = SchedulerConfig("127.0.0.1", 18093, read_only=False, state_db_path=str(db),
+                             model_actions_enabled=True, placement_enabled=True,
+                             collectors={"models": {"model": {"unit": "vllm-model.service", "util": .2}}},
+                             registry={"config_path": str(tmp_path / "models.yaml"),
+                                       "shared_roots": [str(tmp_path)], "daemon_port_range": [8101, 8110]})
+    store = IntentStore(str(db), action_lock=threading.RLock())
+    scheduler = Scheduler(config, lambda: StateSnapshot(
+        gpus=(GPUState(0, free_gb=42),), models=(ModelState("model", state="awake"),),
+        activity=(Activity("model", in_flight=0),)), store=store)
+    transport_calls = []
+    transport = SimpleNamespace(
+        models={"model": {"unit": "vllm-model.service", "util": .2}},
+        units={"model": "vllm-model.service"},
+        check_catalog=lambda: None,
+        http_request=lambda *args, **kwargs: transport_calls.append(("http", args)) or 200,
+        stop_unit=lambda *args, **kwargs: transport_calls.append(("stop", args)) or 0,
+        unit_for_model=lambda name: "vllm-" + name + ".service",
+        systemctl="systemctl",
+    )
+    scheduler.model_actions = ModelActionController(scheduler, transport)
+    scheduler.placement = PlacementController(scheduler, transport)
+    scheduler.registry = SimpleNamespace()
+    scheduler.catalog = SimpleNamespace(can_submit=lambda: True, submit_change=lambda *args, **kwargs: None)
+    scheduler.sample_once()
+    server = SchedulerHTTPServer(("127.0.0.1", 0), scheduler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .01}, daemon=True)
+    thread.start()
+    scheduler.stopping.set()
+    until = time.time() + 60
+    mutations = [
+        ("POST", "/v1/pin", {"model": "model", "until": until, "by": "fixture"}),
+        ("DELETE", "/v1/pin/model", None),
+        ("POST", "/v1/free", {}),
+        ("POST", "/v1/wake/model", {}),
+        ("POST", "/v1/place", {"model": "model", "util": .2}),
+        ("POST", "/v1/place/lease-1/confirm", None),
+        ("POST", "/v1/place/lease-1/release", None),
+        ("POST", "/v1/reserve", {"gpu": 0, "size_gb": 1, "until": until, "by": "fixture"}),
+        ("DELETE", "/v1/reserve/reserve-1", None),
+        ("POST", "/v1/models", {}),
+    ]
+    before_events = scheduler.events_since(0)
+    try:
+        results = [request(server.server_address, method, path,
+                           body=json.dumps(body) if isinstance(body, dict) else body)
+                   for method, path, body in mutations]
+        for index, (status, payload) in enumerate(results):
+            assert status == 503 and payload["error"] == "scheduler_stopping", (index, status, payload, results)
+        assert store.active(time.time()) == ((), ())
+        assert scheduler.events_since(0) == before_events
+        assert transport_calls == []
+    finally:
+        server.shutdown(); server.server_close(); thread.join(3); store.close()
+
+
 def test_direct_controller_admission_guards_reject_stopping_without_mutation(tmp_path):
     db = tmp_path / "ledger.sqlite"
     config = SchedulerConfig("127.0.0.1", 18092, read_only=False, state_db_path=str(db),
@@ -192,6 +249,13 @@ def test_direct_controller_admission_guards_reject_stopping_without_mutation(tmp
                 pass
         with pytest.raises(IntentWriteError, match="scheduler_stopping"):
             scheduler.registry_request("POST", "/v1/models", {}, dry_run=False)
+        from llmsvc.bootstrap import BootstrapController
+        bootstrap = BootstrapController.__new__(BootstrapController)
+        bootstrap.scheduler = scheduler
+        bootstrap._enabled = lambda: None
+        with pytest.raises(IntentWriteError, match="scheduler_stopping"):
+            with bootstrap.http_scope("place", {}, "token", "127.0.0.1"):
+                pass
         assert store.active(time.time()) == ((), ())
     finally:
         store.close()

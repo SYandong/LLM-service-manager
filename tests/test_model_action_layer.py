@@ -135,6 +135,22 @@ def test_failed_second_action_preserves_measured_partial_and_stops(tmp_path):
     assert backend.samples >= 4
 
 
+def test_stopping_after_confirmed_effect_preserves_measurement_without_next_action(tmp_path):
+    service, controller, backend = setup(tmp_path)
+    original_wait = controller._wait_effect
+    def stop_after_effect(action, deadline):
+        observed, applied = original_wait(action, deadline)
+        if applied:
+            service.stopping.set()
+        return observed, applied
+    controller._wait_effect = stop_after_effect
+    result = controller.free({}, by="caller")
+    assert backend.calls == [("sleep", "a")]
+    assert result["status"] == "partial" and result["error"] == "scheduler_stopping"
+    assert result["slept"] == ["a"] and result["freed_gb"] == 30
+    assert result["measurement_complete"] is True
+
+
 def test_failed_request_with_observed_effect_preserves_it_without_more_actions(tmp_path):
     _, controller, backend = setup(tmp_path)
     backend.fail_model = "a"

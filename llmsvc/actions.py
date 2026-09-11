@@ -659,6 +659,17 @@ class ModelActionController:
                     result["error"] = "no_measured_release"
                     result["error_model"] = action.model
                     break
+                if self.scheduler.stopping.is_set():
+                    if need is not None and result["freed_gb"] is not None and result["freed_gb"] >= need:
+                        result["status"] = "complete"
+                        result["skipped"] = [item for item in result["skipped"]
+                                             if item["reason"] != "insufficient_reclaimable_memory"]
+                    else:
+                        result["status"] = "partial"
+                        result["error"] = "scheduler_stopping"
+                        result["error_model"] = None
+                    result["measurement_complete"] = True
+                    break
                 with self._locked(deadline):
                     self.pending.discard(pending)
                     pending = None

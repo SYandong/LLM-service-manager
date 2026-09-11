@@ -301,6 +301,10 @@ class Scheduler:
             raise IntentWriteError(405, "read_only")
         if not self.config.model_actions_enabled or self.model_actions is None:
             raise IntentWriteError(405, "operation_not_enabled")
+        # Admission is a short lock section; free/wake release it before any
+        # collector or upstream wait, and their controllers recheck under lock.
+        with self.action_lock:
+            self._check_stopping()
         owner = self.config.owner_for_ip(source_ip)
         try:
             if operation == "free":
