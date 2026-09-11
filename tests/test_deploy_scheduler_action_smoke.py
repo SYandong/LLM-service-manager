@@ -360,6 +360,56 @@ def test_cleanup_stop_timeout_replacement_identity_preserves_ledger_and_no_repea
     assert run.preserve and len([x for x in calls if x[1]=='stop'])==1
 
 
+def test_cleanup_stop_timeout_cleared_terminal_identity_releases_once():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+5
+    run.profile={'scheduler_url':'http://fixture'};run.log=lambda *a,**k:None
+    binding={'absent':False,'lease_id':'lease-1','identity':{'unit':run.unit,'pid':42,'start_ticks':'100','invocation_id':'a'*32},'control_group':'/system.slice/'+run.unit}
+    run.daemon_binding=lambda **_:binding
+    calls=[]
+    def container(argv,**kwargs):
+        calls.append(argv)
+        if argv[1]=='stop':raise subprocess.TimeoutExpired(argv,1)
+        return subprocess.CompletedProcess(argv,0,'Id='+run.unit+'\nLoadState=loaded\nActiveState=inactive\nMainPID=0\nInvocationID=\nControlGroup=\n','')
+    run.container=container;released=[]
+    run.json_at=lambda url,path,body=None,**kwargs: ({'schema_version':1,'errors':[],'leases':[{'model':'fixture','status':'confirmed','lease_id':'lease-1'}]} if path=='/v1/state' else (released.append(path) or {'status':'released','lease_id':'lease-1'}))
+    run.cleanup_actions()
+    assert len([x for x in calls if x[1]=='stop'])==1 and released==['/v1/place/lease-1/release']
+
+
+def test_cleanup_stop_timeout_terminal_replacement_invocation_preserves_files():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=True;run.temp_created=False;run.units=[];run.preserve=False;run.model='fixture';run.unit='vllm-fixture.service';run.deadline=time.monotonic()+5
+    run.profile={'scheduler_url':'http://fixture'};run.log=lambda *a,**k:None
+    first={'unit':run.unit,'pid':42,'start_ticks':'100','invocation_id':'a'*32}
+    run.daemon_binding=lambda **_: {'absent':False,'lease_id':'lease-1','identity':first,'control_group':'/system.slice/'+run.unit}
+    calls=[]
+    def container(argv,**kwargs):
+        calls.append(argv)
+        if argv[1]=='stop':raise subprocess.TimeoutExpired(argv,1)
+        return subprocess.CompletedProcess(argv,0,'Id='+run.unit+'\nLoadState=loaded\nActiveState=failed\nMainPID=0\nInvocationID='+'b'*32+'\nControlGroup=/system.slice/'+run.unit+'\n','')
+    run.container=container;run.json_at=lambda *a,**k:pytest.fail('replacement must not release')
+    with pytest.raises(life.SmokeError,match='cleanup incomplete'):run.cleanup_actions()
+    assert run.preserve and len([x for x in calls if x[1]=='stop'])==1
+
+
+def test_control_stop_timeout_terminal_replacement_preserves_files():
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    run.attempted=False;run.temp_created=False;run.units=['llmsvc-control.service'];run.preserve=False;run.token='token';run.model='fixture';run.unit='vllm-fixture.service';run.profile={'scheduler_url':'http://fixture'};run.deadline=time.monotonic()+5;run.log=lambda *a,**k:None
+    run.daemon_binding=lambda **_: {'absent':True,'lease_id':'lease'}
+    initial='Id=llmsvc-control.service\nLoadState=loaded\nActiveState=active\nMainPID=7\nInvocationID='+'a'*32+'\nControlGroup=/system.slice/llmsvc-control.service\nEnvironment=LLMSVC_OPS_RUN_ID=token\n'
+    terminal='Id=llmsvc-control.service\nLoadState=loaded\nActiveState=failed\nMainPID=0\nInvocationID='+'b'*32+'\nControlGroup=/system.slice/llmsvc-control.service\n'
+    calls=[]
+    def container(argv,**kwargs):
+        calls.append(argv)
+        if argv[1]=='kill':return subprocess.CompletedProcess(argv,0,'','')
+        if argv[1]=='stop':raise subprocess.TimeoutExpired(argv,1)
+        return subprocess.CompletedProcess(argv,0,initial if len([x for x in calls if x[1]=='show'])==1 else terminal,'')
+    run.container=container;run.python=lambda *a,**k:pytest.fail('replacement must preserve files')
+    with pytest.raises(life.SmokeError,match='cleanup incomplete'):run.cleanup_actions()
+    assert run.preserve and len([x for x in calls if x[1]=='stop'])==1
+
+
 def test_daemon_binding_runs_through_remote_runtime_entrypoint(tmp_path):
     root=tmp_path/'run';(root/'runtime').mkdir(parents=True);(root/'owner').write_text('token')
     (root/'launch-lease.json').write_text(json.dumps({'lease_id':'lease-1'}))
