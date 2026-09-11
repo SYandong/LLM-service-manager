@@ -135,12 +135,13 @@ def quiet(preflight):
 
 
 def scheduler_actions_quiet(preflight, selected_model):
-    """Require the selected model stopped and no inflight requests.
+    """Require an explicit primary catalog and no selected-model collision.
 
     The caller has already proven selected-card isolation with fresh GPU,
-    process, RAM and ownership checks. Other model states therefore do not
-    impose direct-mode's all-model stopped requirement, while unknown selected
-    state or unknown inflight remains fail-closed.
+    process, RAM and ownership checks. The generated isolated model must be
+    absent from the primary catalog; a collision cannot be treated as isolated.
+    Other model states do not impose direct-mode's all-model stopped
+    requirement, while malformed/unknown state or inflight remains fail-closed.
     """
     states = None
     inflight = None
@@ -152,12 +153,18 @@ def scheduler_actions_quiet(preflight, selected_model):
             states = data
         elif event['type'] == 'inflight' and data.get('operation') == 'snapshot':
             inflight = data.get('requests', [])
-    if states is None or inflight != []:
+    if not isinstance(states, list) or inflight != []:
         return False
-    selected = [row for row in states
-                if isinstance(row, dict)
-                and (row.get('id') or row.get('model') or row.get('name')) == selected_model]
-    return len(selected) == 1 and selected[0].get('state') == 'stopped'
+    known_states = {'stopped', 'ready', 'sleeping', 'starting', 'loading'}
+    names = []
+    for row in states:
+        if not isinstance(row, dict):
+            return False
+        name = row.get('id') or row.get('model') or row.get('name')
+        if not isinstance(name, str) or not name or row.get('state') not in known_states:
+            return False
+        names.append(name)
+    return selected_model not in names
 
 
 def check_host_capacity(available_gb, weight_bytes):

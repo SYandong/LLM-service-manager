@@ -60,7 +60,7 @@ def test_quiet_requires_complete_zero_inflight_and_stopped_models():
 
 def test_scheduler_actions_allows_other_gpu_bystander_after_selected_isolation():
     state = {'events': [
-        {'type': 'modelStatus', 'data': '[{"id":"selected","state":"stopped"},{"id":"default","state":"ready"}]'},
+        {'type': 'modelStatus', 'data': '[{"id":"default","state":"ready"}]'},
         {'type': 'inflight', 'data': '{"operation":"snapshot","requests":[]}'}]}
     assert smoke.scheduler_actions_quiet(state, 'selected')
     assert not smoke.quiet(state)
@@ -68,7 +68,8 @@ def test_scheduler_actions_allows_other_gpu_bystander_after_selected_isolation()
 
 @pytest.mark.parametrize('states,requests', [
     ('[{"id":"selected","state":"ready"}]', []),
-    ('[{"id":"other","state":"stopped"}]', []),
+    ('[{"id":"other"}]', []),
+    ('[{"id":"other","state":"unknown"}]', []),
     ('[{"id":"selected","state":"stopped"}]', [{'id': 'inflight'}]),
 ])
 def test_scheduler_actions_rejects_selected_unknown_or_inflight(states, requests):
