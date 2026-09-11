@@ -3,8 +3,9 @@
 ## 0.1.0-alpha.13 — 2026-09-11
 
 Incremental scheduler and maintenance safety release; Python distribution
-`0.1.0a13`. Includes #202, #206, #207, #209 and #210 since immutable
-alpha.12, the normal five-PR batch.
+`0.1.0a13`. The normal five-PR batch was triggered by #202, #206, #207, #209
+and #210; the candidate also includes the necessary terminal-cleanup repair
+#211.
 
 ### Corrected and added
 
@@ -25,6 +26,9 @@ alpha.12, the normal five-PR batch.
   action reconciliation. Mixed probe errors remain visible, real failures stay
   unknown, and action confirmation requires a genuinely newer observation
   (#209).
+- Terminal cleanup rejects replacement identities and retains the ledger when
+  the owned daemon exit/identity proof is not the original instance (#210,
+  #211).
 
 ### Compatibility and validation limits
 
@@ -34,10 +38,14 @@ continuous quiet, settlement, producer upgrade, TTL/reaper replacement or
 production routing. Existing inference endpoints, model IDs/aliases, default,
 pin and inflight protections, and the single `llm` command remain unchanged.
 
-Final candidate build and complete release verification remain gated on the
-reviewed post-#210 ops state, exact current-head Fable approval and CI success.
-The bounded CPU/loopback fixtures do not establish GPU or production behavior;
-long-term stability and calibration remain **NOT MEASURED**.
+The maintenance schema-v6 number remains unchanged, but records containing
+`native_provenance` require the newer reader; alpha12 and older binaries reject
+them. Schema7 bootstrap records retain the same older-reader refusal boundary.
+Neither old binaries plus the current ledger nor stale-ledger restoration is a
+general rollback path. The final candidate validation receipt records the
+complete Python 3.10 suite, wheel/sdist parity, independent CLI/TUI installs
+and dependency checks; bounded CPU/loopback fixtures do not establish GPU or
+production behavior, and long-term stability/calibration remain **NOT MEASURED**.
 
 ## 0.1.0-alpha.12 — 2026-09-11
 
