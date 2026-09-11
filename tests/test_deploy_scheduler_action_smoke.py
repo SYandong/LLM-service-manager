@@ -243,7 +243,7 @@ def test_scheduler_wake_post_uses_full_isolated_cold_budget_without_waiting_25_s
 
 
 def test_scheduler_wake_controlled_baseline_consumes_budget_and_posts_once(monkeypatch):
-    clock=[100.0];timeouts=[];posts=[]
+    clock=[100.0];timeouts=[];posts=[];post_timeouts=[]
     monkeypatch.setattr(smoke.time,'monotonic',lambda:clock[0])
     state={'read_only':False,'sampled_at':time.time(),'errors':[],
            'models':[{'name':'model','state':'awake','gpu':0,'unit':'vllm-model.service','resident_gb':20}],
@@ -252,7 +252,9 @@ def test_scheduler_wake_controlled_baseline_consumes_budget_and_posts_once(monke
         def __init__(self,url,timeout=10):timeouts.append(timeout)
         def request(self,method,path,payload=None,timeout=None):
             if method=='GET' and path=='/v1/state' and not posts:clock[0]+=10
-            if method=='POST':posts.append(path);return {'model':'model','status':'ready','ready':True,'cold_start':True,'elapsed_seconds':40}
+            if method=='POST':
+                posts.append(path);post_timeouts.append(timeout)
+                return {'model':'model','status':'ready','ready':True,'cold_start':True,'elapsed_seconds':40}
             return state
     class Reader:
         def __init__(self,*a,**k):self.closed=False;self.calls=0
@@ -266,6 +268,7 @@ def test_scheduler_wake_controlled_baseline_consumes_budget_and_posts_once(monke
     profile={'scheduler_url':'http://fixture','model':'model','unit':'vllm-model.service','token':'token','gpu':0}
     result=smoke.scheduler_wake_request(api,profile,190,identity_reader=lambda *a,**k:{'unit':'vllm-model.service'})
     assert result['response']['cold_start'] is True and posts==['/v1/wake/model'] and timeouts[0]==90
+    assert post_timeouts==[80.0]
 
 
 def test_scheduler_wake_expired_before_worker_invoke_does_not_post(monkeypatch):
