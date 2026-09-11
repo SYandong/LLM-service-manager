@@ -180,6 +180,7 @@ class MaintenanceUpgrade(Upgrade):
         ledger = self.ledger_snapshot(current_config["state_db_path"])
         generation = self.prepare(directory, payload)
         candidate = self.preflight_candidate(generation, ledger)
+        self.guard()
         old_identity = self.capture_old_identity()
         if dry_run:
             return {"dry_run": True, "generation": payload["generation"], "ledger": ledger,
@@ -202,7 +203,7 @@ class MaintenanceUpgrade(Upgrade):
                   "old_identity": old_identity, "ledger_before": ledger, "candidate": candidate}
         json_write(transaction / "transaction.json", record); json_write(self.state_path, {"transaction": token, "status": "preparing"})
         try:
-            self.stop_old(old_identity); record["status"] = "old_absent"; record["ledger_after_old_absent"] = self.ledger_snapshot(ledger["path"])
+            self.stop_old(old_identity); record["status"] = "old_absent"; self.guard(); record["ledger_after_old_absent"] = self.ledger_snapshot(ledger["path"])
             self.preflight_candidate(generation, ledger)
             record["status"] = "switching"; json_write(transaction / "transaction.json", record); json_write(self.state_path, {"transaction": token, "status": "switching"})
             point(self.pointer, record["new_pointer"])
@@ -223,6 +224,26 @@ class MaintenanceUpgrade(Upgrade):
                 self.rollback_after_failure(record, transaction)
             raise
 
+    def rollback(self, token, *, dry_run=False):
+        if dry_run:
+            return super().rollback(token, dry_run=True)
+        original_restore = self.restore
+        def guarded_restore(record, transaction):
+            try:
+                candidate_absent = self.stop_candidate_before_rollback()
+                old_reader = self.old_reader_compatible(record, transaction)
+            except Error as exc:
+                record["status"] = "unsupported_rollback"
+                record["rollback_error"] = str(exc)
+                json_write(transaction / "transaction.json", record)
+                json_write(self.state_path, {"transaction": record["transaction"], "status": "unsupported_rollback"})
+                raise Error("unsupported rollback: " + str(exc)) from exc
+            record["candidate_absent"] = candidate_absent
+            record["old_reader"] = old_reader
+            return original_restore(record, transaction)
+        self.restore = guarded_restore
+        return super().rollback(token, dry_run=False)
+
 
 CONFIG = '''import json,sys
 from llmsvc.config import load_config
@@ -233,17 +254,24 @@ print(json.dumps({'read_only':c.read_only,'state_db_path':c.state_db_path}))
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("apply",))
+    parser.add_argument("action", choices=("apply", "rollback"))
     parser.add_argument("--settings", type=Path, required=True)
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--bundle", type=Path, required=True)
+    parser.add_argument("--bundle", type=Path)
+    parser.add_argument("--transaction")
     parser.add_argument("--confirm-maintenance", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     try:
         settings = json.loads(args.settings.read_text())
         upgrade = MaintenanceUpgrade(settings, args.root)
-        print(json.dumps(upgrade.apply(args.bundle, confirm=args.confirm_maintenance, dry_run=args.dry_run), allow_nan=False))
+        if args.action == "apply":
+            if args.bundle is None:
+                raise Error("apply requires --bundle")
+            result = upgrade.apply(args.bundle, confirm=args.confirm_maintenance, dry_run=args.dry_run)
+        else:
+            result = upgrade.rollback(args.transaction or "", dry_run=args.dry_run)
+        print(json.dumps(result, allow_nan=False))
         return 0
     except (Error, OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
         print(json.dumps({"error": str(exc)})); return 1

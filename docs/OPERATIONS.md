@@ -152,6 +152,9 @@ The unattended puller/upgrader remains read-only. A writable replacement is a
 separate, default-disabled maintenance operation and must be invoked explicitly
 with `deploy/maintenance-upgrade.sh apply --confirm-maintenance`; this issue
 does not authorize invoking it on a live site.
+The matching rollback command is
+`deploy/maintenance-upgrade.sh rollback --transaction TRANSACTION_ID`; it
+performs the old-reader/current-ledger gate before any pointer or unit restore.
 
 The operation stages and verifies the release using the existing bundle,
 generation, transaction, pointer and byte guards. It opens the candidate against
