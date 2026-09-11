@@ -156,6 +156,19 @@ cgroups before removal, preventing late native unload callbacks from reaching an
 uncertain daemon. Unknown ownership or release leaves the private ledger/files
 for inspection. Existing workloads are never stopped or slept to make room.
 
+After the owned daemon's positive exit proof, scheduler state cleanup may make
+bounded read-only observations until the original wall deadline. A transient
+collector/HTTP error can be followed by a fresh valid matching publication; the
+timestamp must be current and advance after an observed error. Malformed rows,
+stale or non-advancing snapshots, replacement identity, persistent unknown
+state, or deadline expiry preserves the ledger/files. An already-released
+matching lease is reconciled without another release. A cleanup failure keeps
+the overall result non-passing while retaining truthful per-phase cold/free/wake
+measurements, including a separately marked partial measured response. When the
+public state omits released leases, cleanup requires a matching read-only
+private-ledger release tombstone bound to the owned run token/model/unit; an
+absent or conflicting tombstone preserves the files and ledger.
+
 CPU contract tests run the actual scheduler HTTP server, empty SQLite ledger,
 existing launcher, a real loopback health child and scheduler SSE. Hardware,
 systemd and source sleep/wake observations are explicitly fixtures. They verify
