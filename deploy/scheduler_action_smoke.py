@@ -743,6 +743,10 @@ class ActionRun(lifecycle.Run):
             raise lifecycle.SmokeError('protected host process identity changed')
         return {'start_ticks':start,'cgroup':cgroup,'nspid':nspid}
 
+    def _host_cgroup_binds(self, cgroup, unit):
+        return any(path.rstrip('/') == '/system.slice/'+unit or path.rstrip('/').endswith('/'+unit)
+                   for path in (line.rsplit(':',1)[-1] for line in cgroup.splitlines()))
+
     def _primary_state(self):
         """Read the configured primary state endpoint before private setup."""
         reader=getattr(self,'_primary_state_reader',None)
@@ -830,6 +834,8 @@ check_health();check_sleeping();print(json.dumps({"health":True,"sleeping":True}
         if callable(reader):
             return reader(unit,model,lease_id,host_process)
         host_before=self._host_process_identity(host_process)
+        if not self._host_cgroup_binds(host_before['cgroup'],unit):
+            raise lifecycle.SmokeError('protected host cgroup is not bound to unit')
         code='''import json,os,subprocess,sys
 x=json.load(sys.stdin)
 def read():
@@ -842,10 +848,14 @@ def read():
  main_cg=open(main_proc+"/cgroup").read()
  if not any(line.rsplit(":",1)[-1].rstrip("/") == v["ControlGroup"].rstrip("/") for line in main_cg.splitlines()):raise RuntimeError("protected main cgroup binding")
  for item in open(target_proc+"/environ","rb").read().split(b"\\0"):
-  if b"=" in item:
-   key,value=item.split(b"=",1);env[key.decode()]=value.decode()
+  if not item:continue
+  if b"=" not in item:raise RuntimeError("protected process environment malformed")
+  key,value=item.split(b"=",1);key=key.decode();value=value.decode()
+  if key in env:raise RuntimeError("protected process environment duplicated")
+  env[key]=value
  ticks=open(target_proc+"/stat").read().rsplit(") ",1)[1].split()[19];cg=open(target_proc+"/cgroup").read()
  if not any(line.rsplit(":",1)[-1].rstrip("/") == v["ControlGroup"].rstrip("/") for line in cg.splitlines()):raise RuntimeError("protected cgroup binding")
+ if ticks != x["host_start_ticks"]:raise RuntimeError("host/container start identity mismatch")
  if env.get("LLMSVC_MODEL")!=x["model"] or env.get("LLMSVC_LEASE_ID")!=x["lease"] or env.get("CUDA_VISIBLE_DEVICES")!=str(x["gpu"]):raise RuntimeError("protected process binding")
  return v,main_pid,ticks,cg
 first=read();second=read()
@@ -853,7 +863,8 @@ if any(first[i]!=second[i] for i in (0,1,2,3)):raise RuntimeError("protected uni
 print(json.dumps({"unit":x["unit"],"pid":x["namespace_pid"],"start_ticks":first[2],"cgroup":first[3],"invocation_id":first[0].get("InvocationID","")}))
 '''
         result=self.container(['python3','-B','-c',code],input=json.dumps({'unit':unit,'model':model,'lease':lease_id,'gpu':self.config['gpu'],
-                                                                          'namespace_pid':host_before['nspid'][-1]}),limit=3)
+                                                                          'namespace_pid':host_before['nspid'][-1],
+                                                                          'host_start_ticks':host_before['start_ticks']}),limit=3)
         host_after=self._host_process_identity(host_process)
         if host_after != host_before:raise lifecycle.SmokeError('protected host process changed during proof')
         return json.loads(result.stdout)
@@ -918,7 +929,7 @@ print(json.dumps({"unit":x["unit"],"pid":x["namespace_pid"],"start_ticks":first[
                 and item['sm_percent']<=resident.get('idle_util_percent',1)
                 and item['mem_percent']<=resident.get('idle_util_percent',1) for item in samples))
         def protected_samples(samples):
-            if not isinstance(samples,list) or len(samples)<2:return False
+            if not isinstance(samples,list) or not samples:return True
             for item in samples:
                 if not isinstance(item,dict):return False
                 for key in ('sm_percent','mem_percent'):

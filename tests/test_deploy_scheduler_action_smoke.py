@@ -447,11 +447,12 @@ def test_primary_probe_executes_real_loopback_code_and_rejects_bad_sleeping(slee
 
 @pytest.mark.parametrize('lease_env,expect_success',[('lease-protected',True),('wrong-lease',False)])
 def test_primary_unit_identity_executes_remote_namespace_and_rechecks_byte_env(tmp_path,lease_env,expect_success):
-    unit='vllm-protected.service';model='protected';lease='lease-protected';
+    model='protected';lease='lease-protected';
     child=subprocess.Popen([sys.executable,'-B','-c','import time;time.sleep(4)'],env={**os.environ,
         'LLMSVC_MODEL':model,'LLMSVC_LEASE_ID':lease_env,'CUDA_VISIBLE_DEVICES':'0'})
     host_cgroup=Path('/proc/'+str(child.pid)+'/cgroup').read_text()
     control_group=host_cgroup.split(':',2)[-1].strip().rstrip('/')
+    unit=control_group.rsplit('/',1)[-1] or 'fixture.service'
     systemctl=tmp_path/'systemctl';systemctl.write_text(
         '#!/bin/sh\necho Id='+unit+'\necho MainPID='+str(child.pid)+'\necho InvocationID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
         'echo ControlGroup='+control_group+'\necho Environment=LLMSVC_MODEL=protected LLMSVC_LEASE_ID=lease-protected\n')
