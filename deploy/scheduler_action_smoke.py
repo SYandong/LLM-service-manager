@@ -860,10 +860,10 @@ def read():
  if ticks != x["host_start_ticks"]:raise RuntimeError("host/container start identity mismatch")
  if pid_namespace != x["host_pid_namespace"]:raise RuntimeError("host/container PID namespace mismatch")
  if env.get("LLMSVC_MODEL")!=x["model"] or env.get("LLMSVC_LEASE_ID")!=x["lease"] or env.get("CUDA_VISIBLE_DEVICES")!=str(x["gpu"]):raise RuntimeError("protected process binding")
- return v,main_pid,ticks,cg
+ return v,main_pid,ticks,cg,pid_namespace
 first=read();second=read()
-if any(first[i]!=second[i] for i in (0,1,2,3)):raise RuntimeError("protected unit changed")
-print(json.dumps({"unit":x["unit"],"pid":x["namespace_pid"],"start_ticks":first[2],"cgroup":first[3],"pid_namespace":x["host_pid_namespace"],"invocation_id":first[0].get("InvocationID","")}))
+if any(first[i]!=second[i] for i in (0,1,2,3,4)):raise RuntimeError("protected unit changed")
+print(json.dumps({"unit":x["unit"],"pid":x["namespace_pid"],"start_ticks":first[2],"cgroup":first[3],"pid_namespace":first[4],"invocation_id":first[0].get("InvocationID","")}))
 '''
         result=self.container(['python3','-B','-c',code],input=json.dumps({'unit':unit,'model':model,'lease':lease_id,'gpu':self.config['gpu'],
                                                                           'namespace_pid':host_before['nspid'][-1],
