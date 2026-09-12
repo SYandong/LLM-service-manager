@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-5.6-luna
 """Bounded, ops-owned cached-base lifecycle smoke; never LoRA acceptance."""
 import argparse
 import csv
@@ -51,13 +52,15 @@ def validate(config):
         raise SmokeError('util must be between zero and one')
     if config.get('mode','direct') not in ('direct','scheduler-actions','idle_resident'):
         raise SmokeError('unknown lifecycle mode')
-    if config.get('mode')=='scheduler-actions':
+    if config.get('mode') in ('scheduler-actions','idle_resident'):
         from deploy.scheduler_action_smoke import validate as validate_actions
         validate_actions(config)
-    if config.get('mode')=='idle_resident':
+    if config.get('mode')=='idle_resident' or 'idle_resident' in config:
         value=config.get('idle_resident')
         if not isinstance(value,dict):
             raise SmokeError('idle_resident settings are required')
+        if value.get('enabled') is not True:
+            raise SmokeError('idle_resident requires explicit enabled=true')
         for key in ('candidate_full_budget_gb','external_baseline_gb','margin_gb','idle_util_percent'):
             number=value.get(key)
             if isinstance(number,bool) or type(number) not in (int,float) or not math.isfinite(number) or number<0:
@@ -66,8 +69,10 @@ def validate(config):
             raise SmokeError('idle_resident inflight must be a nonnegative integer')
         if value['idle_util_percent']>100:
             raise SmokeError('idle_resident idle_util_percent must be <=100')
+        if value['margin_gb'] < 4:
+            raise SmokeError('idle_resident margin must be at least 4 GiB')
         if type(value.get('candidate_full_budget_gb')) not in (int,float):
-            raise SmokeError('idle_resident candidate full budget is required')
+            raise SmokeError('idle_resident candidate budget is an expected value only')
         for key in ('protected_processes','baseline_processes'):
             if not isinstance(value.get(key),list):raise SmokeError('idle_resident '+key+' is required')
 
@@ -194,45 +199,105 @@ def check_host_capacity(available_gb, weight_bytes):
 
 
 def idle_resident_admission(*, gpu, protected_processes, baseline_processes,
-                            current_processes, candidate_full_budget_gb,
-                            external_baseline_gb, inflight, margin_gb=4.0,
-                            idle_util_percent=1.0, owned_processes=()):
-    """Pure opt-in test admission for a card with classified idle residents."""
+                            current_processes, candidate_full_budget_gb=None,
+                            external_baseline_gb=None, inflight=None, margin_gb=4.0,
+                            idle_util_percent=1.0, owned_processes=(),
+                            observation=None, now=None, max_age_seconds=5.0):
+    """Pure opt-in admission over one fresh, collector-bound observation.
+
+    The process/config rows are expected identities and thresholds.  Sleeping
+    proof, budgets, inflight and external memory must come from ``observation``
+    at this call; static affirmative config cannot satisfy this predicate.
+    """
     reasons=[]
     def finite(value):return type(value) in (int,float) and math.isfinite(value) and value>=0
+    now=time.time() if now is None else now
+    if not finite(now): reasons.append('clock_unknown')
+    if not isinstance(observation,dict):
+        reasons.append('fresh_observation_unknown')
+        observation={}
+    sampled_at=observation.get('sampled_at')
+    if (not finite(sampled_at) or not finite(now) or sampled_at>now
+            or now-sampled_at>max_age_seconds):
+        reasons.append('fresh_observation_stale_or_invalid')
+    if observation.get('source') != 'collector':
+        reasons.append('collector_source_unverified')
+    if observation.get('ledger_source') != 'state+ledger':
+        reasons.append('ledger_source_unverified')
+    if observation.get('capacity_source') != 'nvidia-smi':
+        reasons.append('capacity_source_unverified')
+    if observation.get('unit_source') != 'systemd+proc':
+        reasons.append('unit_source_unverified')
     if not isinstance(gpu,dict) or not isinstance(gpu.get('uuid'),str) or not gpu['uuid']:
         reasons.append('gpu_identity_unknown')
     for key in ('total_gb','free_gb','utilization_percent'):
         if not finite(gpu.get(key) if isinstance(gpu,dict) else None):reasons.append('gpu_'+key+'_unknown')
-    if inflight!=0:reasons.append('inflight_unknown_or_nonzero')
-    if not finite(candidate_full_budget_gb) or not finite(external_baseline_gb) or not finite(margin_gb):
-        reasons.append('budget_unknown')
-    if not finite(idle_util_percent) or (isinstance(gpu,dict) and gpu.get('utilization_percent',99)>idle_util_percent):
-        reasons.append('gpu_not_idle')
+    observed_inflight=observation.get('inflight', inflight)
+    if type(observed_inflight) is not int or observed_inflight != 0:reasons.append('inflight_unknown_or_nonzero')
+    if not finite(margin_gb) or margin_gb < 4:reasons.append('margin_below_required_floor')
+    if not finite(observation.get('external_baseline_gb')):
+        reasons.append('external_capacity_unknown')
+    candidate_util=observation.get('candidate_util')
+    if not finite(candidate_util) or candidate_util<=0 or candidate_util>=1:
+        reasons.append('candidate_budget_unknown')
+    if not finite(idle_util_percent): reasons.append('idle_threshold_unknown')
+    observed_external=observation.get('external_baseline_gb')
+    if finite(observed_external) and isinstance(gpu,dict) and finite(gpu.get('total_gb')) and finite(candidate_util):
+        candidate_full_budget_gb=float(gpu['total_gb'])*float(candidate_util)
+        if not finite(candidate_full_budget_gb) or candidate_full_budget_gb<=0:
+            reasons.append('candidate_budget_unknown')
+    else:
+        candidate_full_budget_gb=0.0
+    external_baseline_gb=observed_external
     def identity(row):
         return (row.get('gpu_uuid'),row.get('pid'),row.get('start_ticks'),row.get('cgroup')) if isinstance(row,dict) else None
     def valid_identity(row):
         value=identity(row)
-        return (value is not None and value[0]==gpu.get('uuid') and type(value[1]) is int and value[1]>0
+        gpu_uuid=gpu.get('uuid') if isinstance(gpu,dict) else None
+        return (value is not None and value[0]==gpu_uuid and type(value[1]) is int and value[1]>0
                 and isinstance(value[2],str) and value[2].isdigit() and isinstance(value[3],str) and bool(value[3]))
     protected_ids=[]
     protected_total=0.0
-    for row in protected_processes if isinstance(protected_processes,list) else ():
-        if (not valid_identity(row) or row.get('sleeping_proof') is not True
-                or row.get('health_proof') is not True or not finite(row.get('full_budget_gb'))):
+    if not isinstance(protected_processes,list) or not isinstance(baseline_processes,list):
+        reasons.append('expected_identity_lists_malformed')
+        protected_processes=baseline_processes=()
+    observed_protected=observation.get('protected_processes')
+    if not isinstance(observed_protected,list):
+        reasons.append('protected_ledger_unknown')
+        observed_protected=[]
+    for expected in protected_processes:
+        row=next((item for item in observed_protected
+                  if isinstance(item,dict) and item.get('model')==expected.get('model')),None)
+        if (not isinstance(expected,dict) or not isinstance(row,dict)
+                or not valid_identity(row) or identity(row)!=identity(expected)
+                or row.get('ledger_status')!='confirmed'
+                or row.get('model_state')!='sleeping'
+                or row.get('health_status')!='sleeping'
+                or not finite(row.get('full_budget_gb'))):
             reasons.append('protected_identity_or_sleeping_unknown');continue
+        if identity(row) in protected_ids: reasons.append('duplicate_protected_identity');continue
         protected_ids.append(identity(row));protected_total+=float(row['full_budget_gb'])
+    if any(isinstance(row,dict) and row.get('model') not in {x.get('model') for x in protected_processes if isinstance(x,dict)}
+           for row in observed_protected):
+        reasons.append('unclassified_protected_model')
     baseline_ids=[]
-    for row in baseline_processes if isinstance(baseline_processes,list) else ():
+    observed_baseline=observation.get('baseline_processes')
+    if not isinstance(observed_baseline,list):
+        reasons.append('baseline_observation_unknown');observed_baseline=[]
+    for expected in baseline_processes:
+        row=next((item for item in observed_baseline
+                  if isinstance(item,dict) and identity(item)==identity(expected)),None)
         samples=row.get('utilization_samples') if isinstance(row,dict) else None
-        if (not valid_identity(row) or identity(row) in protected_ids or not isinstance(samples,list)
+        if (not isinstance(expected,dict) or not isinstance(row,dict) or identity(row) in protected_ids
+                or not valid_identity(row) or identity(row)!=identity(expected) or not isinstance(samples,list)
                 or len(samples)<2 or any(not finite(x) or x>idle_util_percent for x in samples)):
             reasons.append('baseline_identity_or_idle_unknown');continue
         baseline_ids.append(identity(row))
     owned_ids=[identity(row) for row in owned_processes if valid_identity(row)]
     allowed=set(protected_ids+baseline_ids+owned_ids)
     seen=[]
-    for row in current_processes if isinstance(current_processes,list) else ():
+    if not isinstance(current_processes,list): reasons.append('current_processes_unknown');current_processes=[]
+    for row in current_processes:
         current_id=identity(row)
         if not valid_identity(row) or current_id in seen or current_id not in allowed:
             reasons.append('new_changed_or_unknown_occupant');continue
@@ -241,8 +306,8 @@ def idle_resident_admission(*, gpu, protected_processes, baseline_processes,
     required=protected_total+float(candidate_full_budget_gb if finite(candidate_full_budget_gb) else 0)+float(external_baseline_gb if finite(external_baseline_gb) else 0)+float(margin_gb if finite(margin_gb) else 0)
     if isinstance(gpu,dict) and finite(gpu.get('total_gb')) and required>gpu['total_gb']:
         reasons.append('full_budget_capacity_shortfall')
-    if finite(candidate_full_budget_gb) and finite(margin_gb) and isinstance(gpu,dict) and finite(gpu.get('free_gb')) \
-            and gpu['free_gb'] < candidate_full_budget_gb+margin_gb:
+    if finite(candidate_full_budget_gb) and isinstance(gpu,dict) and finite(gpu.get('free_gb')) \
+            and gpu['free_gb'] < candidate_full_budget_gb:
         reasons.append('current_free_capacity_shortfall')
     return {'eligible':not reasons,'reasons':sorted(set(reasons)),'required_gb':required,
             'protected_full_budget_gb':protected_total}
@@ -274,6 +339,10 @@ class Run:
     def extra_args(self):
         return []
 
+    def resident_observation(self, gpu, current_processes):
+        """Return one fresh collector-bound resident proof, or fail closed."""
+        raise SmokeError('idle_resident requires a live collector-bound observation')
+
     def log(self, kind, **detail):
         record = {'at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'kind': kind, **detail}
         self.records.append(record)
@@ -296,8 +365,9 @@ class Run:
         return json.loads(result.stdout)
 
     def inventory(self, *, allow_own=False, allow_resident=False):
-        g = self.command(['nvidia-smi', '--query-gpu=index,uuid,memory.total,memory.used,memory.free,utilization.gpu', '--format=csv,noheader,nounits']).stdout
-        p = self.command(['nvidia-smi', '--query-compute-apps=gpu_uuid,pid,process_name,used_memory', '--format=csv,noheader,nounits']).stdout
+        nvidia_smi=self.config.get('nvidia_smi','nvidia-smi')
+        g = self.command([nvidia_smi, '--query-gpu=index,uuid,memory.total,memory.used,memory.free,utilization.gpu', '--format=csv,noheader,nounits']).stdout
+        p = self.command([nvidia_smi, '--query-compute-apps=gpu_uuid,pid,process_name,used_memory', '--format=csv,noheader,nounits']).stdout
         rows = [list(map(str.strip, r)) for r in csv.reader(io.StringIO(g))]
         gpu = next(r for r in rows if int(r[0]) == self.config['gpu'])
         if not all(math.isfinite(float(value)) for value in gpu[2:]):
@@ -334,6 +404,10 @@ class Run:
                     owned_processes=current_owned;self._idle_owned_processes=list(current_owned)
                 if getattr(self,'attempted',False) and not owned_processes:
                     raise SmokeError('idle_resident owned daemon identity unknown')
+            observation=self.resident_observation(
+                {'uuid':gpu[1],'total_gb':float(gpu[2])/1024,
+                 'free_gb':float(gpu[4])/1024,'utilization_percent':float(gpu[5])},
+                current_processes)
             result=idle_resident_admission(
                 gpu={'uuid':gpu[1],'total_gb':float(gpu[2])/1024,
                      'free_gb':float(gpu[4])/1024,'utilization_percent':float(gpu[5])},
@@ -341,10 +415,11 @@ class Run:
                 baseline_processes=resident.get('baseline_processes',[]),
                 current_processes=current_processes,
                 owned_processes=owned_processes,
-                candidate_full_budget_gb=resident.get('candidate_full_budget_gb'),
-                external_baseline_gb=resident.get('external_baseline_gb'),
-                inflight=resident.get('inflight'),margin_gb=resident.get('margin_gb',4),
-                idle_util_percent=resident.get('idle_util_percent',1))
+                candidate_full_budget_gb=observation.get('candidate_full_budget_gb'),
+                external_baseline_gb=observation.get('external_baseline_gb'),
+                inflight=observation.get('inflight'),margin_gb=resident.get('margin_gb',4),
+                idle_util_percent=resident.get('idle_util_percent',1),
+                observation=observation)
             if not result['eligible']:raise SmokeError('idle_resident blocked: '+','.join(result['reasons']))
         state = self.python(PREFLIGHT, {**self.config, 'choose_port': self.port is None})
         if not self.observation_quiet(state) or not state['cached_weights_complete']:
@@ -489,17 +564,6 @@ shutil.rmtree(p);print('{}')
         return result
 
 
-class IdleResidentRun(Run):
-    """Opt-in test-only lifecycle with explicitly classified idle residents."""
-    scope = 'cached-base lifecycle with classified idle residents; not production policy'
-
-    def observation_quiet(self, preflight):
-        return scheduler_actions_quiet(preflight, self.model)
-
-    def inventory(self, *, allow_own=False):
-        return super().inventory(allow_own=allow_own, allow_resident=True)
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
@@ -513,11 +577,9 @@ def main(argv=None):
     output.mkdir(mode=0o700, parents=True, exist_ok=True)
     with Path(config['lock_path']).open('a+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if config.get('mode')=='scheduler-actions':
+        if config.get('mode') in ('scheduler-actions','idle_resident'):
             from deploy.scheduler_action_smoke import ActionRun
             run = ActionRun(config)
-        elif config.get('mode')=='idle_resident':
-            run = IdleResidentRun(config)
         else:
             run = Run(config)
         result = run.execute()

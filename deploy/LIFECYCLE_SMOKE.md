@@ -72,15 +72,20 @@ not a day/week completion gate. Actual LoRA still requires its compatible cached
 adapter and semantic fixture. Test cleanup may never stop/sleep existing
 workloads to make space.
 
-The optional `mode: idle_resident` is a test-harness-only admission variant. It
-keeps the default exclusive-card guard unchanged and admits a selected card only
-when protected sleeping full budgets, the candidate full budget, classified
-external baseline and the existing safety margin fit physical capacity. Baseline
-processes are bound by GPU UUID, PID/start identity and cgroup with fresh finite
-idle samples; new, changed, active or unknown occupants fail closed. Protected
-sleeping models require exact lease/unit/process plus positive sleeping/health
-proof. Any invalidation aborts and cleanup may stop only the test-owned daemon;
-short idle evidence is not future quiet or production authority.
+The optional `idle_resident.enabled: true` is a test-harness-only admission
+variant of `mode: scheduler-actions` (the legacy `mode: idle_resident` spelling
+is routed through the same ActionRun). It keeps the default exclusive-card guard
+unchanged and admits a selected card only from one fresh collector-bound
+observation. Protected sleeping full budgets come from the current scheduler
+state/ledger and require exact lease/unit/process plus a positive sleeping/health
+check; configured rows are expected identities, never proof. External baseline
+memory and pmon samples are read at admission, with the candidate budget bound
+to the configured utilization times the observed physical card size. Baseline
+processes are bound by GPU UUID, PID/start identity and cgroup; new, changed,
+active or unknown occupants, stale data, missing inflight proof, or capacity
+shortfall fail closed. Any invalidation aborts and cleanup may stop only the
+test-owned daemon; short idle evidence is not future quiet or production
+authority.
 
 ## Scheduler action mode (#9 / #10 / #23)
 

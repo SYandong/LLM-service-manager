@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import time
 
 import pytest
 
@@ -88,11 +89,18 @@ def test_idle_resident_predicate_accepts_classified_baseline_and_full_budget_mar
     protected=_resident_process(10,model='protected',full_budget_gb=42.12041015625,
                                 sleeping_proof=True,health_proof=True,cgroup='/system.slice/vllm-protected.service')
     baseline=_resident_process(20,model='external',cgroup='/user.slice/external.service')
+    protected_observed={**protected,'ledger_status':'confirmed','model_state':'sleeping',
+                        'health_status':'sleeping'}
+    baseline_observed={**baseline}
+    observation={'sampled_at':time.time(),'source':'collector','ledger_source':'state+ledger',
+                 'unit_source':'systemd+proc','capacity_source':'nvidia-smi','inflight':0,
+                 'protected_processes':[protected_observed],'baseline_processes':[baseline_observed],
+                 'external_baseline_gb':1.831,'candidate_util':9.828/140.4013671875}
     result=smoke.idle_resident_admission(
         gpu={'uuid':'GPU0','total_gb':140.4013671875,'free_gb':135.0,'utilization_percent':0.0},
         protected_processes=[protected],baseline_processes=[baseline],
         current_processes=[protected,baseline],candidate_full_budget_gb=9.828,
-        external_baseline_gb=1.831,inflight=0,margin_gb=4)
+        external_baseline_gb=1.831,inflight=0,margin_gb=4,observation=observation)
     assert result['eligible'] is True and result['required_gb']==pytest.approx(57.77941015625)
 
 
@@ -107,14 +115,31 @@ def test_idle_resident_predicate_fails_closed_on_capacity_or_identity(change):
     if change=='active':baseline['utilization_samples']=[0.0,2.0]
     if change=='changed':current=[protected,{**baseline,'start_ticks':'99'}]
     if change=='unknown':current=[protected,{**baseline,'gpu_uuid':'GPU1'}]
-    result=smoke.idle_resident_admission(gpu=gpu,protected_processes=[protected],baseline_processes=[baseline],current_processes=current,**kwargs)
+    observed_protected={**protected,'ledger_status':'confirmed','model_state':'sleeping',
+                        'health_status':'sleeping'}
+    observed_baseline={**baseline}
+    if change=='active':observed_baseline['utilization_samples']=[0.0,2.0]
+    observation={'sampled_at':time.time(),'source':'collector','ledger_source':'state+ledger',
+                     'unit_source':'systemd+proc','capacity_source':'nvidia-smi',
+                     'inflight':1 if change=='inflight' else 0,
+                 'protected_processes':[observed_protected],'baseline_processes':[observed_baseline],
+                 'external_baseline_gb':1.8,'candidate_util':9.8/140.0}
+    result=smoke.idle_resident_admission(gpu=gpu,protected_processes=[protected],baseline_processes=[baseline],current_processes=current,**kwargs,observation=observation)
     assert result['eligible'] is False and result['reasons']
 
 
 def test_idle_resident_mode_validation_is_opt_in_and_strict(tmp_path):
-    value=config(tmp_path);value['mode']='idle_resident';value['idle_resident']={
+    value=config(tmp_path);value['mode']='scheduler-actions';value.update({
+        'native_binary':'/native','wrapper_binary':'/wrapper','scheduler_python':'/python',
+        'host_meminfo_path':'/approved/meminfo','nvidia_smi':'/usr/bin/nvidia-smi',
+        'native_binary_sha256':'a'*64,'wrapper_sha256':'b'*64})
+    for name in ('cli/llm','deploy/vllm-launch','deploy/maintenance_native.py','deploy/maintenance_executor.py'):
+        path=tmp_path/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('')
+    value['idle_resident']={
         'candidate_full_budget_gb':9.828,'external_baseline_gb':1.831,'margin_gb':4,
-        'idle_util_percent':1,'inflight':0,'protected_processes':[],'baseline_processes':[]}
+        'idle_util_percent':1,'inflight':0,'protected_processes':[],'baseline_processes':[],
+        'enabled':True}
+    value['mode']='idle_resident'
     smoke.validate(value)
     value['idle_resident']['candidate_full_budget_gb']=float('nan')
     with pytest.raises(smoke.SmokeError):smoke.validate(value)

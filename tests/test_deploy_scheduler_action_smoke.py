@@ -302,6 +302,64 @@ def test_scheduler_wake_expired_before_worker_invoke_does_not_post(monkeypatch):
     assert posts==[] and closed and closed[0]>0
 
 
+def _resident_boundary_run(monkeypatch, *, stale=False, active_baseline=False, own=False):
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    pid=os.getpid();proc=Path('/proc')/str(pid)
+    ticks=proc.joinpath('stat').read_text().rsplit(') ',1)[1].split()[19]
+    cgroup=proc.joinpath('cgroup').read_text().split(':',2)[-1].strip().rstrip('/')
+    unit=cgroup.rsplit('/',1)[-1] or 'fixture.service'
+    run.config={'mode':'scheduler-actions','gpu':0,'util':.07,'nvidia_smi':'nvidia-smi',
+                'idle_resident':{'enabled':True,'margin_gb':4,'idle_util_percent':1,
+                    'candidate_full_budget_gb':99,'external_baseline_gb':99,
+                    'inflight':99,'protected_processes':[],
+                    'baseline_processes':[] if own else [{'gpu_uuid':'GPU0','pid':pid,
+                        'start_ticks':ticks,'cgroup':cgroup}]}}
+    run.token='token';run.model='candidate';run.unit=unit;run.deadline=time.monotonic()+10
+    run.work_deadline=run.deadline-1;run.profile={'scheduler_url':'http://scheduler'};run.records=[]
+    run._idle_owned_processes=[];run.port=None
+    current=[] if own else [{'gpu_uuid':'GPU0','pid':pid,'start_ticks':ticks,'cgroup':cgroup,
+                             'used_memory_mib':'128'}]
+    state={'sampled_at':time.time()-(10 if stale else 0),'read_only':False,'errors':[],
+           'inflight':0,'models':[],'leases':[]}
+    def command(argv, **kwargs):
+        if any(item.startswith('--query-gpu=') for item in argv):
+            return subprocess.CompletedProcess(argv,0,'0, GPU0, 143360.0, 1024.0, 142336.0, 0.0\n','')
+        if any(item.startswith('--query-compute-apps=') for item in argv):
+            text=f'GPU0, {pid}, owned, 128\n'
+            return subprocess.CompletedProcess(argv,0,text,'')
+        if argv[1:2]==['pmon']:
+            util='2.0' if active_baseline else '0.0'
+            return subprocess.CompletedProcess(argv,0,f'# gpu pid type sm mem enc dec command\n0 {pid} C {util} 0 0 0 python\n','')
+        raise AssertionError(argv)
+    run.command=command
+    run.json_at=lambda url,path,*args,**kwargs: state
+    run.python=lambda code,data,**kwargs: {'events':[{'type':'modelStatus','data':'[]'},
+        {'type':'inflight','data':'{"operation":"snapshot","requests":[]}'}],
+        'cached_weights_complete':True,'weight_bytes':1000000,'port':12345}
+    monkeypatch.setattr(smoke.lifecycle,'check_host_capacity',lambda *a,**k:None)
+    return run
+
+
+@pytest.mark.parametrize('case', ['stale_static','active_baseline','own_activity'])
+def test_action_run_idle_resident_uses_fresh_boundary_observation(monkeypatch, case):
+    run=_resident_boundary_run(monkeypatch, stale=case=='stale_static',
+                               active_baseline=case=='active_baseline', own=case=='own_activity')
+    if case=='own_activity':
+        assert run.inventory(allow_own=True,allow_resident=True)[1]=='GPU0'
+    else:
+        with pytest.raises(life.SmokeError):run.inventory(allow_resident=True)
+
+
+def test_action_run_idle_resident_does_not_accept_static_sleeping_booleans(monkeypatch):
+    run=_resident_boundary_run(monkeypatch)
+    run.config['idle_resident']['protected_processes']=[{
+        'model':'protected','gpu_uuid':'GPU0','pid':os.getpid(),'start_ticks':'1',
+        'cgroup':'/system.slice/protected.service','sleeping_proof':True,
+        'health_proof':True,'full_budget_gb':10}]
+    with pytest.raises(life.SmokeError,match='protected'):
+        run.inventory(allow_resident=True)
+
+
 def test_scheduler_wake_postresponse_identity_failure_preserves_response_and_progress():
     class Client:
         def __init__(self,url,timeout=10):pass

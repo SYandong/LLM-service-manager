@@ -701,6 +701,134 @@ class ActionRun(lifecycle.Run):
     def observation_quiet(self, preflight):
         return lifecycle.scheduler_actions_quiet(preflight, self.model)
 
+    def _resident_enabled(self):
+        return (self.config.get('mode') in ('scheduler-actions','idle_resident')
+                and isinstance(self.config.get('idle_resident'), dict)
+                and self.config['idle_resident'].get('enabled') is True)
+
+    def _resident_pmon(self, gpu_index):
+        """Read two bounded pmon samples; failures remain unknown."""
+        binary=self.config.get('nvidia_smi','nvidia-smi')
+        result=self.command([binary,'pmon','-i',str(gpu_index),'-c','2','-s','um'],limit=3)
+        samples={}
+        for line in result.stdout.splitlines():
+            fields=line.split()
+            if not fields or fields[0].startswith('#') or len(fields)<5:
+                continue
+            try:
+                pid=int(fields[1]); util=float(fields[3])
+            except (TypeError,ValueError):
+                continue
+            if pid>0 and math.isfinite(util):
+                samples.setdefault(pid,[]).append(util)
+        return samples
+
+    def resident_observation(self, gpu, current_processes):
+        """Build fresh proof from scheduler state, systemd/proc and pmon."""
+        profile=getattr(self,'profile',None)
+        if not isinstance(profile,dict):
+            raise lifecycle.SmokeError('idle_resident scheduler proof unavailable before scheduler start')
+        state=self.json_at(profile['scheduler_url'],'/v1/state')
+        now=time.time();
+        if (not isinstance(state,dict) or type(state.get('sampled_at')) not in (int,float)
+                or not math.isfinite(state['sampled_at']) or state['sampled_at']>now
+                or now-state['sampled_at']>5 or state.get('errors') not in ([], ())):
+            raise lifecycle.SmokeError('idle_resident scheduler observation is stale or unknown')
+        if type(state.get('inflight')) is not int:
+            raise lifecycle.SmokeError('idle_resident inflight observation unavailable')
+        models=state.get('models'); leases=state.get('leases')
+        if not isinstance(models,list) or not isinstance(leases,list):
+            raise lifecycle.SmokeError('idle_resident ledger observation malformed')
+        model_names=[row.get('name') if isinstance(row,dict) else None for row in models]
+        if (any(not isinstance(name,str) or not name for name in model_names)
+                or len(model_names)!=len(set(model_names))):
+            raise lifecycle.SmokeError('idle_resident model observation malformed or duplicated')
+        lease_ids=[row.get('lease_id') if isinstance(row,dict) else None for row in leases]
+        if (any(not isinstance(row,dict) or not isinstance(row.get('lease_id'),str)
+                or not row.get('lease_id') or not isinstance(row.get('model'),str)
+                or type(row.get('gpu')) is not int or not isinstance(row.get('unit'),str)
+                or not isinstance(row.get('status'),str) for row in leases)
+                or len(lease_ids)!=len(set(lease_ids))):
+            raise lifecycle.SmokeError('idle_resident lease observation malformed or duplicated')
+        resident=self.config.get('idle_resident',{})
+        expected_protected=resident.get('protected_processes',[])
+        expected_baseline=resident.get('baseline_processes',[])
+        if not isinstance(expected_protected,list) or not isinstance(expected_baseline,list):
+            raise lifecycle.SmokeError('idle_resident expected identities malformed')
+        protected_names=[row.get('model') if isinstance(row,dict) else None for row in expected_protected]
+        if len(protected_names)!=len(set(protected_names)):
+            raise lifecycle.SmokeError('idle_resident protected identities duplicated')
+        current_by_id={(row.get('gpu_uuid'),row.get('pid'),row.get('start_ticks'),row.get('cgroup')):row
+                       for row in current_processes if isinstance(row,dict)}
+        protected=[];protected_names=set()
+        for expected in expected_protected:
+            if not isinstance(expected,dict) or not isinstance(expected.get('model'),str):
+                raise lifecycle.SmokeError('idle_resident protected identity expectation malformed')
+            name=expected['model'];protected_names.add(name)
+            rows=[row for row in models if isinstance(row,dict) and row.get('name')==name]
+            if len(rows)!=1:raise lifecycle.SmokeError('idle_resident protected model observation ambiguous')
+            model=rows[0]
+            if model.get('gpu')!=self.config['gpu'] or model.get('state')!='sleeping':
+                raise lifecycle.SmokeError('idle_resident protected model is not sleeping on selected GPU')
+            lease_rows=[row for row in leases if isinstance(row,dict) and row.get('model')==name
+                        and row.get('gpu')==self.config['gpu'] and row.get('status')=='confirmed'
+                        and row.get('unit')==model.get('unit')]
+            if len(lease_rows)!=1:raise lifecycle.SmokeError('idle_resident protected ledger proof unavailable')
+            lease=lease_rows[0]
+            identity={k:expected.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup')}
+            if tuple(identity.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup')) not in current_by_id:
+                raise lifecycle.SmokeError('idle_resident protected process identity unavailable')
+            health_url=model.get('health_url') or model.get('daemon_url') or model.get('url')
+            if not isinstance(health_url,str) or not health_url:
+                raise lifecycle.SmokeError('idle_resident protected health binding unavailable')
+            health=self.json_at(health_url,'/health')
+            if not isinstance(health,dict) or health.get('status') not in ('ok','healthy'):
+                raise lifecycle.SmokeError('idle_resident protected health proof unavailable')
+            checked=self._resident_unit_identity(model['unit'],name,lease['lease_id'])
+            protected.append({**identity,'model':name,'ledger_status':'confirmed',
+                              'model_state':'sleeping','health_status':'sleeping',
+                              'full_budget_gb':lease.get('budget_gb'),'unit_identity':checked})
+        for model in models:
+            if (isinstance(model,dict) and model.get('name')!=self.model
+                    and model.get('gpu')==self.config['gpu'] and model.get('state')=='sleeping'
+                    and model.get('name') not in protected_names):
+                raise lifecycle.SmokeError('idle_resident unclassified protected model')
+        pmon=self._resident_pmon(self.config['gpu'])
+        baseline=[]
+        for expected in expected_baseline:
+            if not isinstance(expected,dict):raise lifecycle.SmokeError('idle_resident baseline identity malformed')
+            key=tuple(expected.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup'))
+            row=current_by_id.get(key)
+            if row is None:raise lifecycle.SmokeError('idle_resident baseline process identity unavailable')
+            samples=pmon.get(expected.get('pid'),[])
+            if len(samples)<2:raise lifecycle.SmokeError('idle_resident baseline pmon unavailable')
+            baseline.append({**expected,'utilization_samples':samples})
+        external_ids={tuple(row.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup'))
+                      for row in current_processes if isinstance(row,dict)
+                      and not self._process_owned(row)}
+        expected_ids={tuple(row.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup'))
+                      for row in expected_baseline+expected_protected if isinstance(row,dict)}
+        if external_ids-set(expected_ids):
+            raise lifecycle.SmokeError('idle_resident new or unknown external process')
+        external_baseline=sum(float(row.get('used_memory_mib',0))/1024 for row in current_processes
+                              if isinstance(row,dict) and tuple(row.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup')) in external_ids)
+        return {'source':'collector','ledger_source':'state+ledger','unit_source':'systemd+proc',
+                'capacity_source':'nvidia-smi','sampled_at':state['sampled_at'],
+                'inflight':state['inflight'],'protected_processes':protected,
+                'baseline_processes':baseline,'external_baseline_gb':external_baseline,
+                'candidate_util':self.config.get('util')}
+
+    def _process_owned(self, row):
+        return lifecycle.cgroup_owned(row.get('cgroup',''),self.unit)
+
+    def _resident_unit_identity(self, unit, model, lease):
+        return unit_identity(unit,self.token,lease=lease,model=model,deadline=self.deadline)
+
+    def inventory(self, *, allow_own=False, allow_resident=False):
+        if allow_resident is False and self._resident_enabled() and getattr(self,'profile',None) is not None:
+            allow_resident=True
+        return super().inventory(allow_own=allow_own,allow_resident=allow_resident)
+
     def __init__(self,config):
         super().__init__(config)
         self.scheduler_unit='llmsvc-ops-action-scheduler-'+self.token+'.service'
@@ -915,7 +1043,7 @@ print('{}')
 
     def phase(self,name,seconds):
         if self.deadline-time.monotonic()<=60:raise lifecycle.SmokeError('insufficient remaining action/cleanup budget')
-        self.inventory(allow_own=self.attempted and name!='cold')
+        self.inventory(allow_own=self.attempted and name!='cold', allow_resident=self._resident_enabled())
         if name=='cold':self.attempted=True
         request_id=uuid.uuid4().hex;input_name='request-'+request_id+'.json';output_name='result-'+request_id+'.json'
         request={'id':request_id,'operation':name,'output':output_name,
@@ -1123,6 +1251,8 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity,'control_g
                 lifecycle.remaining(self.work_deadline,1);time.sleep(.2)
             self.profile['control_instances']=self.identities()
             self.python("import json,sys;from pathlib import Path;x=json.load(sys.stdin);(Path(x['root'])/'profile.json').write_text(json.dumps(x));print('{}')",self.profile)
+            if self._resident_enabled():
+                self.inventory(allow_resident=True)
             self.phase('cold',self.config.get('startup_seconds',150))
             self.wait_free_eligible()
             self.phase('free',25);self.phase('wake',25)
