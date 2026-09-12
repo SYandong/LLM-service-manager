@@ -360,6 +360,22 @@ def test_action_run_idle_resident_does_not_accept_static_sleeping_booleans(monke
         run.inventory(allow_resident=True)
 
 
+def test_action_run_idle_resident_rejects_missing_protected_process_identity(monkeypatch):
+    run=_resident_boundary_run(monkeypatch)
+    run.config['idle_resident']['protected_processes']=[{
+        'model':'protected','gpu_uuid':'GPU0','pid':os.getpid(),
+        'cgroup':'/system.slice/protected.service'}]
+    run.json_at=lambda url,path,*args,**kwargs: {
+        'sampled_at':time.time(),'read_only':False,'errors':[],'inflight':0,
+        'models':[{'name':'protected','state':'sleeping','gpu':0,
+                   'unit':'vllm-protected.service','health_url':'http://health'}],
+        'leases':[{'model':'protected','gpu':0,'unit':'vllm-protected.service',
+                   'lease_id':'lease-protected','status':'confirmed','budget_gb':10}],
+    }
+    with pytest.raises(life.SmokeError,match='protected process identity'):
+        run.inventory(allow_resident=True)
+
+
 def test_scheduler_wake_postresponse_identity_failure_preserves_response_and_progress():
     class Client:
         def __init__(self,url,timeout=10):pass
