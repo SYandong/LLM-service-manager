@@ -413,6 +413,15 @@ def test_action_run_idle_resident_rejects_missing_primary_activity_coverage(monk
         run.inventory(allow_resident=True)
 
 
+def test_action_run_idle_resident_allows_unknown_protected_counters_with_sleep_proof(monkeypatch,tmp_path):
+    run=_resident_boundary_run(monkeypatch,tmp_path)
+    protected_pid=run.config['idle_resident']['protected_processes'][0]['pid']
+    baseline_pid=run.config['idle_resident']['baseline_processes'][0]['pid']
+    run._resident_pmon=lambda _gpu:{protected_pid:[{'sm_percent':None,'mem_percent':None}]*2,
+                                     baseline_pid:[{'sm_percent':0.0,'mem_percent':0.0}]*2}
+    assert run.inventory(allow_resident=True)[1]=='GPU0'
+
+
 @pytest.mark.parametrize('sleeping_body', [b'{"is_sleeping": false}', b'not-json'])
 def test_primary_probe_executes_real_loopback_code_and_rejects_bad_sleeping(sleeping_body):
     class Handler(BaseHTTPRequestHandler):
@@ -437,25 +446,26 @@ def test_primary_probe_executes_real_loopback_code_and_rejects_bad_sleeping(slee
 
 
 @pytest.mark.parametrize('lease_env,expect_success',[('lease-protected',True),('wrong-lease',False)])
-def test_primary_unit_identity_executes_remote_namespace_and_rechecks_byte_env(tmp_path,monkeypatch,lease_env,expect_success):
+def test_primary_unit_identity_executes_remote_namespace_and_rechecks_byte_env(tmp_path,lease_env,expect_success):
     unit='vllm-protected.service';model='protected';lease='lease-protected';
     child=subprocess.Popen([sys.executable,'-B','-c','import time;time.sleep(4)'],env={**os.environ,
         'LLMSVC_MODEL':model,'LLMSVC_LEASE_ID':lease_env,'CUDA_VISIBLE_DEVICES':'0'})
-    control_group=Path('/proc/'+str(child.pid)+'/cgroup').read_text().split(':',2)[-1].strip().rstrip('/')
+    host_cgroup=Path('/proc/'+str(child.pid)+'/cgroup').read_text()
+    control_group=host_cgroup.split(':',2)[-1].strip().rstrip('/')
     systemctl=tmp_path/'systemctl';systemctl.write_text(
         '#!/bin/sh\necho Id='+unit+'\necho MainPID='+str(child.pid)+'\necho InvocationID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
         'echo ControlGroup='+control_group+'\necho Environment=LLMSVC_MODEL=protected LLMSVC_LEASE_ID=lease-protected\n')
     systemctl.chmod(0o700)
     run=smoke.ActionRun.__new__(smoke.ActionRun);run.config={'gpu':0}
-    monkeypatch.setattr(smoke.lifecycle,'cgroup_owned',lambda *args:True)
     def container(argv,**kwargs):
         result=subprocess.run(argv,input=kwargs.get('input'),capture_output=True,text=True,timeout=3,
                               env={**os.environ,'PATH':str(tmp_path)+':'+os.environ.get('PATH','')})
         if result.returncode:raise life.SmokeError(result.stderr or 'identity failed')
         return result
     run.container=container
-    host={'gpu_uuid':'GPU0','pid':child.pid,'start_ticks':'1',
-          'cgroup':control_group}
+    start_ticks=Path('/proc/'+str(child.pid)+'/stat').read_text().rsplit(') ',1)[1].split()[19]
+    host={'gpu_uuid':'GPU0','pid':child.pid,'start_ticks':start_ticks,
+          'cgroup':host_cgroup}
     try:
         if expect_success:
             identity=run._primary_unit_identity(unit,model,lease,host)

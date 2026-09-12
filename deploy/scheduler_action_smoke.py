@@ -716,12 +716,32 @@ class ActionRun(lifecycle.Run):
             if not fields or fields[0].startswith('#') or len(fields)<7:
                 continue
             try:
-                pid=int(fields[1]); sm=float(fields[3]); mem=float(fields[4])
+                pid=int(fields[1])
+                sm=None if fields[3] in ('-','N/A') else float(fields[3])
+                mem=None if fields[4] in ('-','N/A') else float(fields[4])
             except (TypeError,ValueError):
                 continue
-            if pid>0 and math.isfinite(sm) and math.isfinite(mem):
+            if pid>0 and (sm is None or math.isfinite(sm)) and (mem is None or math.isfinite(mem)):
                 samples.setdefault(pid,[]).append({'sm_percent':sm,'mem_percent':mem})
         return samples
+
+    def _host_process_identity(self, host_process):
+        if not isinstance(host_process,dict) or type(host_process.get('pid')) is not int or host_process['pid']<=0:
+            raise lifecycle.SmokeError('protected host PID unavailable')
+        proc=Path('/proc')/str(host_process['pid'])
+        try:
+            start=proc.joinpath('stat').read_text().rsplit(') ',1)[1].split()[19]
+            cgroup=proc.joinpath('cgroup').read_text()
+            nspid=[]
+            for line in proc.joinpath('status').read_text().splitlines():
+                if line.startswith('NSpid:'):
+                    nspid=[int(value) for value in line.split()[1:]]
+                    break
+        except (OSError,ValueError,IndexError) as exc:
+            raise lifecycle.SmokeError('protected host process identity unavailable') from exc
+        if start != host_process.get('start_ticks') or cgroup != host_process.get('cgroup') or not nspid:
+            raise lifecycle.SmokeError('protected host process identity changed')
+        return {'start_ticks':start,'cgroup':cgroup,'nspid':nspid}
 
     def _primary_state(self):
         """Read the configured primary state endpoint before private setup."""
@@ -809,29 +829,33 @@ check_health();check_sleeping();print(json.dumps({"health":True,"sleeping":True}
         reader=getattr(self,'_primary_unit_reader',None)
         if callable(reader):
             return reader(unit,model,lease_id,host_process)
-        if not isinstance(host_process,dict) or not lifecycle.cgroup_owned(host_process.get('cgroup',''),unit):
-            raise lifecycle.SmokeError('protected host GPU process is not bound to its unit')
+        host_before=self._host_process_identity(host_process)
         code='''import json,os,subprocess,sys
 x=json.load(sys.stdin)
 def read():
  show=subprocess.run(["systemctl","show",x["unit"],"-p","Id","-p","MainPID","-p","InvocationID","-p","ControlGroup","-p","Environment"],capture_output=True,text=True,check=True)
  v=dict(line.split("=",1) for line in show.stdout.splitlines() if "=" in line)
- pid=int(v.get("MainPID","0"));
- if (v.get("Id")!=x["unit"] or pid<=0 or not v.get("InvocationID")
+ main_pid=int(v.get("MainPID","0"));
+ if (v.get("Id")!=x["unit"] or main_pid<=0 or not v.get("InvocationID")
      or not v.get("ControlGroup")):raise RuntimeError("protected unit binding")
- proc="/proc/"+str(pid);env={}
- for item in open(proc+"/environ","rb").read().split(b"\\0"):
+ main_proc="/proc/"+str(main_pid);target_proc="/proc/"+str(x["namespace_pid"]);env={}
+ main_cg=open(main_proc+"/cgroup").read()
+ if not any(line.rsplit(":",1)[-1].rstrip("/") == v["ControlGroup"].rstrip("/") for line in main_cg.splitlines()):raise RuntimeError("protected main cgroup binding")
+ for item in open(target_proc+"/environ","rb").read().split(b"\\0"):
   if b"=" in item:
    key,value=item.split(b"=",1);env[key.decode()]=value.decode()
- ticks=open(proc+"/stat").read().rsplit(") ",1)[1].split()[19];cg=open(proc+"/cgroup").read()
+ ticks=open(target_proc+"/stat").read().rsplit(") ",1)[1].split()[19];cg=open(target_proc+"/cgroup").read()
  if not any(line.rsplit(":",1)[-1].rstrip("/") == v["ControlGroup"].rstrip("/") for line in cg.splitlines()):raise RuntimeError("protected cgroup binding")
  if env.get("LLMSVC_MODEL")!=x["model"] or env.get("LLMSVC_LEASE_ID")!=x["lease"] or env.get("CUDA_VISIBLE_DEVICES")!=str(x["gpu"]):raise RuntimeError("protected process binding")
- return v,pid,ticks,cg
+ return v,main_pid,ticks,cg
 first=read();second=read()
 if any(first[i]!=second[i] for i in (0,1,2,3)):raise RuntimeError("protected unit changed")
-print(json.dumps({"unit":x["unit"],"pid":first[1],"start_ticks":first[2],"cgroup":first[3],"invocation_id":first[0].get("InvocationID","")}))
+print(json.dumps({"unit":x["unit"],"pid":x["namespace_pid"],"start_ticks":first[2],"cgroup":first[3],"invocation_id":first[0].get("InvocationID","")}))
 '''
-        result=self.container(['python3','-B','-c',code],input=json.dumps({'unit':unit,'model':model,'lease':lease_id,'gpu':self.config['gpu']}),limit=3)
+        result=self.container(['python3','-B','-c',code],input=json.dumps({'unit':unit,'model':model,'lease':lease_id,'gpu':self.config['gpu'],
+                                                                          'namespace_pid':host_before['nspid'][-1]}),limit=3)
+        host_after=self._host_process_identity(host_process)
+        if host_after != host_before:raise lifecycle.SmokeError('protected host process changed during proof')
         return json.loads(result.stdout)
 
     def resident_observation(self, gpu, current_processes):
@@ -893,6 +917,16 @@ print(json.dumps({"unit":x["unit"],"pid":first[1],"start_ticks":first[2],"cgroup
                 and math.isfinite(item['sm_percent']) and math.isfinite(item['mem_percent'])
                 and item['sm_percent']<=resident.get('idle_util_percent',1)
                 and item['mem_percent']<=resident.get('idle_util_percent',1) for item in samples))
+        def protected_samples(samples):
+            if not isinstance(samples,list) or len(samples)<2:return False
+            for item in samples:
+                if not isinstance(item,dict):return False
+                for key in ('sm_percent','mem_percent'):
+                    value=item.get(key)
+                    if value is not None and (type(value) not in (int,float) or not math.isfinite(value)
+                                               or value>resident.get('idle_util_percent',1)):
+                        return False
+            return True
         protected=[];protected_names=set()
         for expected in expected_protected:
             if not isinstance(expected,dict) or not isinstance(expected.get('model'),str):
@@ -915,14 +949,17 @@ print(json.dumps({"unit":x["unit"],"pid":first[1],"start_ticks":first[2],"cgroup
             key=tuple(identity.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup'))
             if any(identity.get(k) in (None,'') for k in ('gpu_uuid','pid','start_ticks','cgroup')) or key not in current_by_id:
                 raise lifecycle.SmokeError('idle_resident protected process identity unavailable')
-            if not idle_samples(pmon.get(identity['pid'])):
+            if not protected_samples(pmon.get(identity['pid'])):
                 raise lifecycle.SmokeError('idle_resident protected process is not idle')
             probe=self._primary_probe(model['port'])
             if not isinstance(probe,dict) or probe.get('health') is not True or probe.get('sleeping') is not True:
                 raise lifecycle.SmokeError('idle_resident protected HTTP proof unavailable')
             checked=self._primary_unit_identity(model.get('unit'),name,lease['lease_id'],current_by_id[key])
+            counter_status=('unknown' if any(item.get('sm_percent') is None or item.get('mem_percent') is None
+                                            for item in pmon.get(identity['pid'],[])) else 'finite_idle')
             protected.append({**identity,'model':name,'ledger_status':'confirmed','model_state':'sleeping',
-                              'health_status':'sleeping','full_budget_gb':lease['budget_gb'],'unit_identity':checked})
+                              'health_status':'sleeping','full_budget_gb':lease['budget_gb'],
+                              'counter_status':counter_status,'unit_identity':checked})
         for model in models:
             if (isinstance(model,dict) and model.get('name')!=self.model
                     and model.get('gpu')==self.config['gpu']
