@@ -477,6 +477,27 @@ def test_primary_unit_identity_executes_remote_namespace_and_rechecks_byte_env(t
         child.terminate();child.wait(timeout=3)
 
 
+def test_primary_unit_identity_rejects_wrong_host_start_before_remote(tmp_path):
+    child=subprocess.Popen([sys.executable,'-B','-c','import time;time.sleep(3)'],env=os.environ.copy())
+    host_cgroup=Path('/proc/'+str(child.pid)+'/cgroup').read_text()
+    control_group=host_cgroup.split(':',2)[-1].strip().rstrip('/')
+    unit=control_group.rsplit('/',1)[-1] or 'fixture.service';calls=[]
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.config={'gpu':0}
+    run.container=lambda *args,**kwargs:calls.append(args)
+    try:
+        with pytest.raises(life.SmokeError,match='identity changed'):
+            run._primary_unit_identity(unit,'model','lease',{
+                'gpu_uuid':'GPU0','pid':child.pid,'start_ticks':'0','cgroup':host_cgroup})
+        assert calls==[]
+    finally:
+        child.terminate();child.wait(timeout=3)
+
+
+@pytest.mark.parametrize('raw',[b'LLMSVC_MODEL=x\0BROKEN\0',b'LLMSVC_MODEL=x\0LLMSVC_MODEL=y\0'])
+def test_process_environment_parser_rejects_malformed_or_duplicate_bytes(raw):
+    with pytest.raises(smoke.EvidenceError):smoke._parse_process_environment(raw)
+
+
 def test_scheduler_wake_postresponse_identity_failure_preserves_response_and_progress():
     class Client:
         def __init__(self,url,timeout=10):pass

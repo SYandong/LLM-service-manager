@@ -732,6 +732,7 @@ class ActionRun(lifecycle.Run):
         try:
             start=proc.joinpath('stat').read_text().rsplit(') ',1)[1].split()[19]
             cgroup=proc.joinpath('cgroup').read_text()
+            pid_namespace=os.readlink(proc.joinpath('ns/pid'))
             nspid=[]
             for line in proc.joinpath('status').read_text().splitlines():
                 if line.startswith('NSpid:'):
@@ -741,7 +742,7 @@ class ActionRun(lifecycle.Run):
             raise lifecycle.SmokeError('protected host process identity unavailable') from exc
         if start != host_process.get('start_ticks') or cgroup != host_process.get('cgroup') or not nspid:
             raise lifecycle.SmokeError('protected host process identity changed')
-        return {'start_ticks':start,'cgroup':cgroup,'nspid':nspid}
+        return {'start_ticks':start,'cgroup':cgroup,'pid_namespace':pid_namespace,'nspid':nspid}
 
     def _host_cgroup_binds(self, cgroup, unit):
         return any(path.rstrip('/') == '/system.slice/'+unit or path.rstrip('/').endswith('/'+unit)
@@ -854,20 +855,26 @@ def read():
   if key in env:raise RuntimeError("protected process environment duplicated")
   env[key]=value
  ticks=open(target_proc+"/stat").read().rsplit(") ",1)[1].split()[19];cg=open(target_proc+"/cgroup").read()
+ pid_namespace=os.readlink(target_proc+"/ns/pid")
  if not any(line.rsplit(":",1)[-1].rstrip("/") == v["ControlGroup"].rstrip("/") for line in cg.splitlines()):raise RuntimeError("protected cgroup binding")
  if ticks != x["host_start_ticks"]:raise RuntimeError("host/container start identity mismatch")
+ if pid_namespace != x["host_pid_namespace"]:raise RuntimeError("host/container PID namespace mismatch")
  if env.get("LLMSVC_MODEL")!=x["model"] or env.get("LLMSVC_LEASE_ID")!=x["lease"] or env.get("CUDA_VISIBLE_DEVICES")!=str(x["gpu"]):raise RuntimeError("protected process binding")
  return v,main_pid,ticks,cg
 first=read();second=read()
 if any(first[i]!=second[i] for i in (0,1,2,3)):raise RuntimeError("protected unit changed")
-print(json.dumps({"unit":x["unit"],"pid":x["namespace_pid"],"start_ticks":first[2],"cgroup":first[3],"invocation_id":first[0].get("InvocationID","")}))
+print(json.dumps({"unit":x["unit"],"pid":x["namespace_pid"],"start_ticks":first[2],"cgroup":first[3],"pid_namespace":x["host_pid_namespace"],"invocation_id":first[0].get("InvocationID","")}))
 '''
         result=self.container(['python3','-B','-c',code],input=json.dumps({'unit':unit,'model':model,'lease':lease_id,'gpu':self.config['gpu'],
                                                                           'namespace_pid':host_before['nspid'][-1],
-                                                                          'host_start_ticks':host_before['start_ticks']}),limit=3)
+                                                                          'host_start_ticks':host_before['start_ticks'],
+                                                                          'host_pid_namespace':host_before['pid_namespace']}),limit=3)
         host_after=self._host_process_identity(host_process)
         if host_after != host_before:raise lifecycle.SmokeError('protected host process changed during proof')
-        return json.loads(result.stdout)
+        identity=json.loads(result.stdout)
+        if identity.get('start_ticks')!=host_before['start_ticks'] or identity.get('pid_namespace')!=host_before['pid_namespace']:
+            raise lifecycle.SmokeError('host/container process identity mismatch')
+        return identity
 
     def resident_observation(self, gpu, current_processes):
         """Build fresh proof from the independent primary state and ledger."""
@@ -935,7 +942,7 @@ print(json.dumps({"unit":x["unit"],"pid":x["namespace_pid"],"start_ticks":first[
                 for key in ('sm_percent','mem_percent'):
                     value=item.get(key)
                     if value is not None and (type(value) not in (int,float) or not math.isfinite(value)
-                                               or value>resident.get('idle_util_percent',1)):
+                                               or value>0):
                         return False
             return True
         protected=[];protected_names=set()

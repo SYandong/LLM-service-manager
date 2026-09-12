@@ -82,13 +82,15 @@ primary state URL and ledger path are read-only targets; actual serialized
 container unit/proc identity, and the model port's `/health` plus `/is_sleeping`
 responses supply the proof. Protected sleeping full budgets therefore require
 an exact current lease/model/unit/process binding; configured rows are expected
-identities, never proof. External baseline memory and pmon samples are read at
-admission, with the candidate budget bound to configured utilization times the
-observed physical card size. Baseline processes are bound by GPU UUID,
-PID/start identity and cgroup; new, changed, active or unknown occupants,
-stale data, missing inflight proof, or capacity shortfall fail closed. Any
-invalidation aborts and cleanup may stop only the test-owned daemon; short idle
-evidence is not future quiet or production authority.
+identities, never proof. Known protected process SM/memory counters must be zero;
+missing counters stay explicitly unknown under the independent sleeping and
+health checks. External baseline memory and pmon samples are read at admission,
+with the candidate budget bound to configured utilization times the observed
+physical card size. Baseline processes are bound by GPU UUID, PID/start identity
+and cgroup; new, changed, active or unknown occupants, stale data, missing
+inflight proof, or capacity shortfall fail closed. Any invalidation aborts and
+cleanup may stop only the test-owned daemon; short idle evidence is not future
+quiet or production authority.
 
 An enabled resident configuration must provide `primary_state_url`,
 `primary_ledger_path`, and non-empty expected protected identities. The URL and
