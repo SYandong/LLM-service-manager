@@ -404,15 +404,15 @@ class Run:
             owned_processes=getattr(self,'_idle_owned_processes',[])
             if allow_own:
                 current_owned=[row for row in current_processes if cgroup_owned(row.get('cgroup',''),self.unit)]
-                if current_owned:
+                if current_owned and not getattr(self,'_resident_worker_observed',False):
                     owned_processes=current_owned;self._idle_owned_processes=list(current_owned)
                     self._resident_worker_observed=True
                 elif getattr(self,'_resident_worker_observed',False):
-                    owned_processes=[]
-                if (getattr(self,'attempted',False)
-                        and getattr(self,'_resident_worker_observed',False)
-                        and not owned_processes):
-                    raise SmokeError('idle_resident owned daemon identity unknown')
+                    keys=('gpu_uuid','pid','start_ticks','cgroup')
+                    expected={tuple(row.get(key) for key in keys) for row in owned_processes}
+                    observed={tuple(row.get(key) for key in keys) for row in current_owned}
+                    if not expected or observed!=expected or len(current_owned)!=len(owned_processes):
+                        raise SmokeError('idle_resident owned daemon identity unknown or changed')
             observation=self.resident_observation(
                 {'uuid':gpu[1],'total_gb':float(gpu[2])/1024,
                  'free_gb':float(gpu[4])/1024,'utilization_percent':float(gpu[5])},
