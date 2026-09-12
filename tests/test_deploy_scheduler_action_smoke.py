@@ -422,6 +422,22 @@ def test_action_run_idle_resident_allows_unknown_protected_counters_with_sleep_p
     assert run.inventory(allow_resident=True)[1]=='GPU0'
 
 
+def test_action_run_idle_resident_cold_start_allows_pre_worker_then_rejects_loss(monkeypatch,tmp_path):
+    run=_resident_boundary_run(monkeypatch,tmp_path,own=True)
+    protected=run.config['idle_resident']['protected_processes'][0]
+    worker={'gpu_uuid':'GPU0','pid':protected['pid']+1,'start_ticks':'100001',
+            'cgroup':'/system.slice/'+run.unit,'used_memory_mib':'128'}
+    sequence=iter([[{**protected,'used_memory_mib':'128'}],
+                   [{**protected,'used_memory_mib':'128'},worker],
+                   [{**protected,'used_memory_mib':'128'}]])
+    run.process_records=lambda processes,**kwargs:next(sequence)
+    run.attempted=True
+    assert run.inventory(allow_own=True,allow_resident=True)[1]=='GPU0'
+    assert run.inventory(allow_own=True,allow_resident=True)[1]=='GPU0'
+    with pytest.raises(life.SmokeError,match='owned daemon identity'):
+        run.inventory(allow_own=True,allow_resident=True)
+
+
 @pytest.mark.parametrize('sleeping_body', [b'{"is_sleeping": false}', b'not-json'])
 def test_primary_probe_executes_real_loopback_code_and_rejects_bad_sleeping(sleeping_body):
     class Handler(BaseHTTPRequestHandler):

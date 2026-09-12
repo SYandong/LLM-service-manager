@@ -973,8 +973,10 @@ print(json.dumps({"unit":x["unit"],"pid":x["namespace_pid"],"start_ticks":first[
             if not isinstance(probe,dict) or probe.get('health') is not True or probe.get('sleeping') is not True:
                 raise lifecycle.SmokeError('idle_resident protected HTTP proof unavailable')
             checked=self._primary_unit_identity(model.get('unit'),name,lease['lease_id'],current_by_id[key])
-            counter_status=('unknown' if any(item.get('sm_percent') is None or item.get('mem_percent') is None
-                                            for item in pmon.get(identity['pid'],[])) else 'finite_idle')
+            protected_counter_samples=pmon.get(identity['pid'],[])
+            counter_status=('unknown' if not protected_counter_samples or any(
+                item.get('sm_percent') is None or item.get('mem_percent') is None
+                for item in protected_counter_samples) else 'finite_idle')
             protected.append({**identity,'model':name,'ledger_status':'confirmed','model_state':'sleeping',
                               'health_status':'sleeping','full_budget_gb':lease['budget_gb'],
                               'counter_status':counter_status,'unit_identity':checked})
@@ -1018,6 +1020,7 @@ print(json.dumps({"unit":x["unit"],"pid":x["namespace_pid"],"start_ticks":first[
         self.scheduler_unit='llmsvc-ops-action-scheduler-'+self.token+'.service'
         self.source_unit='llmsvc-ops-action-source-'+self.token+'.service'
         self.units=[];self.lease=None;self.preserve=False;self.measured_phases=set();self.phase_measurements={}
+        self._resident_worker_observed=False
 
     def _ledger_release_witness(self, binding):
         code='''import json,sqlite3,sys

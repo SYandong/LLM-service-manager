@@ -92,6 +92,14 @@ inflight proof, or capacity shortfall fail closed. Any invalidation aborts and
 cleanup may stop only the test-owned daemon; short idle evidence is not future
 quiet or production authority.
 
+During cold startup, absence of the test-owned GPU worker before its first
+allocation is an explicit not-yet-observed state and does not fail the run.
+After a worker identity has been observed, disappearance or replacement fails
+closed; no second action or deadline extension is introduced. A protected
+native sleeper with unavailable process counters retains an explicit unknown
+counter status when its independent sleeping, health, lease and unit proof is
+positive.
+
 An enabled resident configuration must provide `primary_state_url`,
 `primary_ledger_path`, and non-empty expected protected identities. The URL and
 path select where to read; they do not assert health, sleeping, lease, unit, or
