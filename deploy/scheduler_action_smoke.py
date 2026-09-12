@@ -885,6 +885,14 @@ print(json.dumps({"unit":x["unit"],"pid":first[1],"start_ticks":first[2],"cgroup
             raise lifecycle.SmokeError('idle_resident protected activity coverage unavailable')
         current_by_id={(row.get('gpu_uuid'),row.get('pid'),row.get('start_ticks'),row.get('cgroup')):row
                        for row in current_processes if isinstance(row,dict)}
+        pmon=self._resident_pmon(self.config['gpu'])
+        def idle_samples(samples):
+            return (isinstance(samples,list) and len(samples)>=2 and all(
+                isinstance(item,dict) and type(item.get('sm_percent')) in (int,float)
+                and type(item.get('mem_percent')) in (int,float)
+                and math.isfinite(item['sm_percent']) and math.isfinite(item['mem_percent'])
+                and item['sm_percent']<=resident.get('idle_util_percent',1)
+                and item['mem_percent']<=resident.get('idle_util_percent',1) for item in samples))
         protected=[];protected_names=set()
         for expected in expected_protected:
             if not isinstance(expected,dict) or not isinstance(expected.get('model'),str):
@@ -907,6 +915,8 @@ print(json.dumps({"unit":x["unit"],"pid":first[1],"start_ticks":first[2],"cgroup
             key=tuple(identity.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup'))
             if any(identity.get(k) in (None,'') for k in ('gpu_uuid','pid','start_ticks','cgroup')) or key not in current_by_id:
                 raise lifecycle.SmokeError('idle_resident protected process identity unavailable')
+            if not idle_samples(pmon.get(identity['pid'])):
+                raise lifecycle.SmokeError('idle_resident protected process is not idle')
             probe=self._primary_probe(model['port'])
             if not isinstance(probe,dict) or probe.get('health') is not True or probe.get('sleeping') is not True:
                 raise lifecycle.SmokeError('idle_resident protected HTTP proof unavailable')
@@ -918,7 +928,7 @@ print(json.dumps({"unit":x["unit"],"pid":first[1],"start_ticks":first[2],"cgroup
                     and model.get('gpu')==self.config['gpu']
                     and model.get('name') not in protected_names):
                 raise lifecycle.SmokeError('idle_resident unclassified protected model')
-        pmon=self._resident_pmon(self.config['gpu']);baseline=[]
+        baseline=[]
         for expected in expected_baseline:
             if not isinstance(expected,dict):raise lifecycle.SmokeError('idle_resident baseline identity malformed')
             key=tuple(expected.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup'))

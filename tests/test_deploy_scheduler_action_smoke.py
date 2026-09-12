@@ -348,8 +348,10 @@ def _resident_boundary_run(monkeypatch, tmp_path, *, stale=False, active_baselin
         if argv[1:2]==['pmon']:
             util='2.0' if active_baseline else '0.0'
             mem='2.0' if active_baseline else '0.0'
-            sample_pid=pid+1 if not own else pid
-            return subprocess.CompletedProcess(argv,0,f'# gpu pid type sm mem enc dec command\n0 {sample_pid} C {util} {mem} 0 0 0 python\n','')
+            other_pid=pid+1
+            other_line=f'0 {other_pid} C {util} {mem} 0 0 0 python\n'
+            return subprocess.CompletedProcess(argv,0,
+                f'# gpu pid type sm mem enc dec command\n0 {pid} C 0.0 0.0 0 0 0 protected\n'+other_line,'')
         raise AssertionError(argv)
     run.command=command
     run.process_records=lambda processes,**kwargs:list(current)
@@ -366,6 +368,9 @@ def _resident_boundary_run(monkeypatch, tmp_path, *, stale=False, active_baselin
     run._primary_probe_reader=lambda port:{'health':True,'sleeping':True}
     run._primary_unit_reader=lambda unit,model,lease,host:{'unit':unit,'pid':host['pid'],
                                                              'start_ticks':host['start_ticks'],'cgroup':host['cgroup']}
+    if own:
+        run._resident_pmon=lambda _gpu:{pid:[{'sm_percent':0.0,'mem_percent':0.0}]*2,
+                                         pid+1:[{'sm_percent':2.0,'mem_percent':2.0}]*2}
     run.json_at=lambda url,path,*args,**kwargs: state_dict
     run.python=lambda code,data,**kwargs: {'events':[{'type':'modelStatus','data':'[]'},
         {'type':'inflight','data':'{"operation":"snapshot","requests":[]}'}],
