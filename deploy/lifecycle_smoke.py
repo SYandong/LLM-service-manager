@@ -49,11 +49,27 @@ def validate(config):
         raise SmokeError('source must contain the reviewed collector and state modules')
     if not 0 < config.get('util', 0.2) < 1:
         raise SmokeError('util must be between zero and one')
-    if config.get('mode','direct') not in ('direct','scheduler-actions'):
+    if config.get('mode','direct') not in ('direct','scheduler-actions','idle_resident'):
         raise SmokeError('unknown lifecycle mode')
     if config.get('mode')=='scheduler-actions':
         from deploy.scheduler_action_smoke import validate as validate_actions
         validate_actions(config)
+    if config.get('mode')=='idle_resident':
+        value=config.get('idle_resident')
+        if not isinstance(value,dict):
+            raise SmokeError('idle_resident settings are required')
+        for key in ('candidate_full_budget_gb','external_baseline_gb','margin_gb','idle_util_percent'):
+            number=value.get(key)
+            if isinstance(number,bool) or type(number) not in (int,float) or not math.isfinite(number) or number<0:
+                raise SmokeError('idle_resident '+key+' must be finite and nonnegative')
+        if type(value.get('inflight')) is not int or value['inflight']<0:
+            raise SmokeError('idle_resident inflight must be a nonnegative integer')
+        if value['idle_util_percent']>100:
+            raise SmokeError('idle_resident idle_util_percent must be <=100')
+        if type(value.get('candidate_full_budget_gb')) not in (int,float):
+            raise SmokeError('idle_resident candidate full budget is required')
+        for key in ('protected_processes','baseline_processes'):
+            if not isinstance(value.get(key),list):raise SmokeError('idle_resident '+key+' is required')
 
 
 def owned(environment, token):
@@ -177,6 +193,61 @@ def check_host_capacity(available_gb, weight_bytes):
         raise SmokeError('insufficient fresh host RAM for the isolated test')
 
 
+def idle_resident_admission(*, gpu, protected_processes, baseline_processes,
+                            current_processes, candidate_full_budget_gb,
+                            external_baseline_gb, inflight, margin_gb=4.0,
+                            idle_util_percent=1.0, owned_processes=()):
+    """Pure opt-in test admission for a card with classified idle residents."""
+    reasons=[]
+    def finite(value):return type(value) in (int,float) and math.isfinite(value) and value>=0
+    if not isinstance(gpu,dict) or not isinstance(gpu.get('uuid'),str) or not gpu['uuid']:
+        reasons.append('gpu_identity_unknown')
+    for key in ('total_gb','free_gb','utilization_percent'):
+        if not finite(gpu.get(key) if isinstance(gpu,dict) else None):reasons.append('gpu_'+key+'_unknown')
+    if inflight!=0:reasons.append('inflight_unknown_or_nonzero')
+    if not finite(candidate_full_budget_gb) or not finite(external_baseline_gb) or not finite(margin_gb):
+        reasons.append('budget_unknown')
+    if not finite(idle_util_percent) or (isinstance(gpu,dict) and gpu.get('utilization_percent',99)>idle_util_percent):
+        reasons.append('gpu_not_idle')
+    def identity(row):
+        return (row.get('gpu_uuid'),row.get('pid'),row.get('start_ticks'),row.get('cgroup')) if isinstance(row,dict) else None
+    def valid_identity(row):
+        value=identity(row)
+        return (value is not None and value[0]==gpu.get('uuid') and type(value[1]) is int and value[1]>0
+                and isinstance(value[2],str) and value[2].isdigit() and isinstance(value[3],str) and bool(value[3]))
+    protected_ids=[]
+    protected_total=0.0
+    for row in protected_processes if isinstance(protected_processes,list) else ():
+        if (not valid_identity(row) or row.get('sleeping_proof') is not True
+                or row.get('health_proof') is not True or not finite(row.get('full_budget_gb'))):
+            reasons.append('protected_identity_or_sleeping_unknown');continue
+        protected_ids.append(identity(row));protected_total+=float(row['full_budget_gb'])
+    baseline_ids=[]
+    for row in baseline_processes if isinstance(baseline_processes,list) else ():
+        samples=row.get('utilization_samples') if isinstance(row,dict) else None
+        if (not valid_identity(row) or identity(row) in protected_ids or not isinstance(samples,list)
+                or len(samples)<2 or any(not finite(x) or x>idle_util_percent for x in samples)):
+            reasons.append('baseline_identity_or_idle_unknown');continue
+        baseline_ids.append(identity(row))
+    owned_ids=[identity(row) for row in owned_processes if valid_identity(row)]
+    allowed=set(protected_ids+baseline_ids+owned_ids)
+    seen=[]
+    for row in current_processes if isinstance(current_processes,list) else ():
+        current_id=identity(row)
+        if not valid_identity(row) or current_id in seen or current_id not in allowed:
+            reasons.append('new_changed_or_unknown_occupant');continue
+        seen.append(current_id)
+    if baseline_ids and not set(baseline_ids)<=set(seen):reasons.append('baseline_process_missing')
+    required=protected_total+float(candidate_full_budget_gb if finite(candidate_full_budget_gb) else 0)+float(external_baseline_gb if finite(external_baseline_gb) else 0)+float(margin_gb if finite(margin_gb) else 0)
+    if isinstance(gpu,dict) and finite(gpu.get('total_gb')) and required>gpu['total_gb']:
+        reasons.append('full_budget_capacity_shortfall')
+    if finite(candidate_full_budget_gb) and finite(margin_gb) and isinstance(gpu,dict) and finite(gpu.get('free_gb')) \
+            and gpu['free_gb'] < candidate_full_budget_gb+margin_gb:
+        reasons.append('current_free_capacity_shortfall')
+    return {'eligible':not reasons,'reasons':sorted(set(reasons)),'required_gb':required,
+            'protected_full_budget_gb':protected_total}
+
+
 class Run:
     scope = 'cached-base collector lifecycle only'
     lora_measured = False
@@ -224,7 +295,7 @@ class Run:
         result = self.container(['python3', '-B', '-c', code], input=json.dumps(data), **kwargs)
         return json.loads(result.stdout)
 
-    def inventory(self, *, allow_own=False):
+    def inventory(self, *, allow_own=False, allow_resident=False):
         g = self.command(['nvidia-smi', '--query-gpu=index,uuid,memory.total,memory.used,memory.free,utilization.gpu', '--format=csv,noheader,nounits']).stdout
         p = self.command(['nvidia-smi', '--query-compute-apps=gpu_uuid,pid,process_name,used_memory', '--format=csv,noheader,nounits']).stdout
         rows = [list(map(str.strip, r)) for r in csv.reader(io.StringIO(g))]
@@ -232,17 +303,49 @@ class Run:
         if not all(math.isfinite(float(value)) for value in gpu[2:]):
             raise SmokeError('GPU observations are not finite')
         processes = [list(map(str.strip, r)) for r in csv.reader(io.StringIO(p)) if r and r[0].strip() == gpu[1]]
+        current_processes=[]
         for process in processes:
+            pid=None;ticks=None;cgroup=None
             try:
-                ours = cgroup_owned((Path('/proc') / process[1] / 'cgroup').read_text(), self.unit)
+                pid=int(process[1]); proc=Path('/proc')/str(pid)
+                ticks=proc.joinpath('stat').read_text().rsplit(') ',1)[1].split()[19]
+                cgroup=proc.joinpath('cgroup').read_text()
+            except (OSError,ValueError,IndexError):
+                if allow_resident: raise SmokeError('resident process identity unknown')
+                ticks=cgroup=None
+            current_processes.append({'gpu_uuid':process[0],'pid':pid,
+                                      'start_ticks':ticks,'cgroup':cgroup,'used_memory_mib':process[3]})
+            try:
+                ours = cgroup_owned(cgroup or '', self.unit)
             except OSError:
                 ours = False
-            if not allow_own or not ours:
+            if not allow_resident and (not allow_own or not ours):
                 raise SmokeError('foreign or unclassified process on candidate GPU')
-        if not allow_own:
+        if not allow_own and not allow_resident:
             need = float(gpu[2]) * self.config.get('util', .2) + 4096
             if float(gpu[4]) < need or float(gpu[3]) > 256 or float(gpu[5]) > 0:
                 raise SmokeError('candidate GPU is not idle with sufficient memory')
+        if allow_resident:
+            resident=self.config.get('idle_resident',{})
+            owned_processes=getattr(self,'_idle_owned_processes',[])
+            if allow_own:
+                current_owned=[row for row in current_processes if cgroup_owned(row.get('cgroup',''),self.unit)]
+                if not owned_processes:
+                    owned_processes=current_owned;self._idle_owned_processes=list(current_owned)
+                if getattr(self,'attempted',False) and not owned_processes:
+                    raise SmokeError('idle_resident owned daemon identity unknown')
+            result=idle_resident_admission(
+                gpu={'uuid':gpu[1],'total_gb':float(gpu[2])/1024,
+                     'free_gb':float(gpu[4])/1024,'utilization_percent':float(gpu[5])},
+                protected_processes=resident.get('protected_processes',[]),
+                baseline_processes=resident.get('baseline_processes',[]),
+                current_processes=current_processes,
+                owned_processes=owned_processes,
+                candidate_full_budget_gb=resident.get('candidate_full_budget_gb'),
+                external_baseline_gb=resident.get('external_baseline_gb'),
+                inflight=resident.get('inflight'),margin_gb=resident.get('margin_gb',4),
+                idle_util_percent=resident.get('idle_util_percent',1))
+            if not result['eligible']:raise SmokeError('idle_resident blocked: '+','.join(result['reasons']))
         state = self.python(PREFLIGHT, {**self.config, 'choose_port': self.port is None})
         if not self.observation_quiet(state) or not state['cached_weights_complete']:
             raise SmokeError('unknown/busy serving or incomplete cached weights')
@@ -386,6 +489,17 @@ shutil.rmtree(p);print('{}')
         return result
 
 
+class IdleResidentRun(Run):
+    """Opt-in test-only lifecycle with explicitly classified idle residents."""
+    scope = 'cached-base lifecycle with classified idle residents; not production policy'
+
+    def observation_quiet(self, preflight):
+        return scheduler_actions_quiet(preflight, self.model)
+
+    def inventory(self, *, allow_own=False):
+        return super().inventory(allow_own=allow_own, allow_resident=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
@@ -402,6 +516,8 @@ def main(argv=None):
         if config.get('mode')=='scheduler-actions':
             from deploy.scheduler_action_smoke import ActionRun
             run = ActionRun(config)
+        elif config.get('mode')=='idle_resident':
+            run = IdleResidentRun(config)
         else:
             run = Run(config)
         result = run.execute()

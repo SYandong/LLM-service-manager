@@ -79,6 +79,47 @@ def test_scheduler_actions_rejects_selected_unknown_or_inflight(states, requests
     assert not smoke.scheduler_actions_quiet(state, 'selected')
 
 
+def _resident_process(pid, start='10', cgroup='/system.slice/external.service', samples=None, **extra):
+    return {'gpu_uuid':'GPU0','pid':pid,'start_ticks':start,'cgroup':cgroup,
+            'utilization_samples':[0.0,0.0] if samples is None else samples, **extra}
+
+
+def test_idle_resident_predicate_accepts_classified_baseline_and_full_budget_margin():
+    protected=_resident_process(10,model='protected',full_budget_gb=42.12041015625,
+                                sleeping_proof=True,health_proof=True,cgroup='/system.slice/vllm-protected.service')
+    baseline=_resident_process(20,model='external',cgroup='/user.slice/external.service')
+    result=smoke.idle_resident_admission(
+        gpu={'uuid':'GPU0','total_gb':140.4013671875,'free_gb':135.0,'utilization_percent':0.0},
+        protected_processes=[protected],baseline_processes=[baseline],
+        current_processes=[protected,baseline],candidate_full_budget_gb=9.828,
+        external_baseline_gb=1.831,inflight=0,margin_gb=4)
+    assert result['eligible'] is True and result['required_gb']==pytest.approx(57.77941015625)
+
+
+@pytest.mark.parametrize('change', ['budget','inflight','active','changed','unknown'])
+def test_idle_resident_predicate_fails_closed_on_capacity_or_identity(change):
+    protected=_resident_process(10,model='protected',full_budget_gb=42.0,sleeping_proof=True,health_proof=True)
+    baseline=_resident_process(20,model='external')
+    current=[protected,baseline]; kwargs={'candidate_full_budget_gb':9.8,'external_baseline_gb':1.8,'inflight':0}
+    gpu={'uuid':'GPU0','total_gb':140.0,'free_gb':120.0,'utilization_percent':0.0}
+    if change=='budget':gpu['total_gb']=50
+    if change=='inflight':kwargs['inflight']=1
+    if change=='active':baseline['utilization_samples']=[0.0,2.0]
+    if change=='changed':current=[protected,{**baseline,'start_ticks':'99'}]
+    if change=='unknown':current=[protected,{**baseline,'gpu_uuid':'GPU1'}]
+    result=smoke.idle_resident_admission(gpu=gpu,protected_processes=[protected],baseline_processes=[baseline],current_processes=current,**kwargs)
+    assert result['eligible'] is False and result['reasons']
+
+
+def test_idle_resident_mode_validation_is_opt_in_and_strict(tmp_path):
+    value=config(tmp_path);value['mode']='idle_resident';value['idle_resident']={
+        'candidate_full_budget_gb':9.828,'external_baseline_gb':1.831,'margin_gb':4,
+        'idle_util_percent':1,'inflight':0,'protected_processes':[],'baseline_processes':[]}
+    smoke.validate(value)
+    value['idle_resident']['candidate_full_budget_gb']=float('nan')
+    with pytest.raises(smoke.SmokeError):smoke.validate(value)
+
+
 def test_cleanup_never_stops_foreign_unit_or_removes_its_files():
     run=smoke.Run.__new__(smoke.Run);run.attempted=True;run.temp_created=True;run.unit='vllm-ops-life-test.service'
     run.verify_owner=lambda **_: False
