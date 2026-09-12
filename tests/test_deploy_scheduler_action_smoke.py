@@ -29,7 +29,7 @@ from llmsvc.config import SchedulerConfig
 from llmsvc.leases import PlacementController,UnitObservation
 from llmsvc.scheduler import Scheduler
 from llmsvc.server import SchedulerHTTPServer
-from llmsvc.state import StateSnapshot,GPUState,MemoryState,ModelState,Activity
+from llmsvc.state import StateSnapshot,GPUState,MemoryState,ModelState,Activity,Lease
 from llmsvc.store import IntentStore
 
 ROOT=Path(__file__).parents[1]
@@ -302,25 +302,43 @@ def test_scheduler_wake_expired_before_worker_invoke_does_not_post(monkeypatch):
     assert posts==[] and closed and closed[0]>0
 
 
-def _resident_boundary_run(monkeypatch, *, stale=False, active_baseline=False, own=False):
+def _resident_boundary_run(monkeypatch, tmp_path, *, stale=False, active_baseline=False, own=False):
     run=smoke.ActionRun.__new__(smoke.ActionRun)
     pid=os.getpid();proc=Path('/proc')/str(pid)
     ticks=proc.joinpath('stat').read_text().rsplit(') ',1)[1].split()[19]
     cgroup=proc.joinpath('cgroup').read_text().split(':',2)[-1].strip().rstrip('/')
     unit=cgroup.rsplit('/',1)[-1] or 'fixture.service'
+    protected={'gpu_uuid':'GPU0','pid':pid,'start_ticks':ticks,
+               'cgroup':'/system.slice/vllm-protected.service','model':'protected'}
+    baseline={'gpu_uuid':'GPU0','pid':pid+1,'start_ticks':'100000',
+              'cgroup':'/user.slice/external.service'}
     run.config={'mode':'scheduler-actions','gpu':0,'util':.07,'nvidia_smi':'nvidia-smi',
                 'idle_resident':{'enabled':True,'margin_gb':4,'idle_util_percent':1,
                     'candidate_full_budget_gb':99,'external_baseline_gb':99,
-                    'inflight':99,'protected_processes':[],
-                    'baseline_processes':[] if own else [{'gpu_uuid':'GPU0','pid':pid,
-                        'start_ticks':ticks,'cgroup':cgroup}]}}
+                    'inflight':99,'protected_processes':[protected],
+                    'baseline_processes':[] if own else [baseline]}}
     run.token='token';run.model='candidate';run.unit=unit;run.deadline=time.monotonic()+10
     run.work_deadline=run.deadline-1;run.profile={'scheduler_url':'http://scheduler'};run.records=[]
     run._idle_owned_processes=[];run.port=None
-    current=[] if own else [{'gpu_uuid':'GPU0','pid':pid,'start_ticks':ticks,'cgroup':cgroup,
-                             'used_memory_mib':'128'}]
-    state={'sampled_at':time.time()-(10 if stale else 0),'read_only':False,'errors':[],
-           'inflight':0,'models':[],'leases':[]}
+    current=[{**protected,'used_memory_mib':'128'}]
+    if not own:
+        current.append({**baseline,'used_memory_mib':'128'})
+    else:
+        current.append({'gpu_uuid':'GPU0','pid':pid+1,'start_ticks':'100001',
+                         'cgroup':'/system.slice/'+unit,'used_memory_mib':'128'})
+    state=StateSnapshot(sampled_at=time.time()-(10 if stale else 0),read_only=False,errors=(),
+        gpus=(GPUState(0,uuid='GPU0',total_gb=140.0,free_gb=139.0,utilization_percent=0.0),),
+        models=(ModelState('protected',state='sleeping',gpu=0,unit='vllm-protected.service',
+                           health_ok=True,is_sleeping=True,port=8101,budget_gb=42),),
+        activity=(Activity('protected',in_flight=0),),leases=())
+    state_dict=json.loads(json.dumps(state.to_dict()))
+    state_dict['errors']=[]
+    store=IntentStore(str(tmp_path/'primary.sqlite'),action_lock=threading.RLock())
+    store.create_lease(Lease('lease-protected','protected',0,.3,time.time()+600,42,'pending'),
+                       'vllm-protected.service')
+    store.transition_lease('lease-protected','confirmed')
+    store.close()
+    ledger_path=tmp_path/'primary.sqlite'
     def command(argv, **kwargs):
         if any(item.startswith('--query-gpu=') for item in argv):
             return subprocess.CompletedProcess(argv,0,'0, GPU0, 143360.0, 1024.0, 142336.0, 0.0\n','')
@@ -329,10 +347,24 @@ def _resident_boundary_run(monkeypatch, *, stale=False, active_baseline=False, o
             return subprocess.CompletedProcess(argv,0,text,'')
         if argv[1:2]==['pmon']:
             util='2.0' if active_baseline else '0.0'
-            return subprocess.CompletedProcess(argv,0,f'# gpu pid type sm mem enc dec command\n0 {pid} C {util} 0 0 0 python\n','')
+            sample_pid=pid+1 if not own else pid
+            return subprocess.CompletedProcess(argv,0,f'# gpu pid type sm mem enc dec command\n0 {sample_pid} C {util} 0 0 0 python\n','')
         raise AssertionError(argv)
     run.command=command
-    run.json_at=lambda url,path,*args,**kwargs: state
+    run.process_records=lambda processes,**kwargs:list(current)
+    run._resident_state=state_dict
+    run._primary_state_reader=lambda:run._resident_state
+    def ledger_reader():
+        db=sqlite3.connect('file:'+str(ledger_path)+'?mode=ro',uri=True)
+        try:
+            return [dict(zip(('lease_id','model','gpu','util','expires_at','budget_gb','status','unit'),row))
+                    for row in db.execute('SELECT lease_id,model,gpu,util,expires_at,budget_gb,status,unit FROM llmsvc_leases')]
+        finally:db.close()
+    run._primary_ledger_reader=ledger_reader
+    run._primary_probe_reader=lambda port:{'health':True,'sleeping':True}
+    run._primary_unit_reader=lambda unit,model,lease,host:{'unit':unit,'pid':host['pid'],
+                                                             'start_ticks':host['start_ticks'],'cgroup':host['cgroup']}
+    run.json_at=lambda url,path,*args,**kwargs: state_dict
     run.python=lambda code,data,**kwargs: {'events':[{'type':'modelStatus','data':'[]'},
         {'type':'inflight','data':'{"operation":"snapshot","requests":[]}'}],
         'cached_weights_complete':True,'weight_bytes':1000000,'port':12345}
@@ -341,8 +373,8 @@ def _resident_boundary_run(monkeypatch, *, stale=False, active_baseline=False, o
 
 
 @pytest.mark.parametrize('case', ['stale_static','active_baseline','own_activity'])
-def test_action_run_idle_resident_uses_fresh_boundary_observation(monkeypatch, case):
-    run=_resident_boundary_run(monkeypatch, stale=case=='stale_static',
+def test_action_run_idle_resident_uses_fresh_boundary_observation(monkeypatch, tmp_path, case):
+    run=_resident_boundary_run(monkeypatch,tmp_path,stale=case=='stale_static',
                                active_baseline=case=='active_baseline', own=case=='own_activity')
     if case=='own_activity':
         assert run.inventory(allow_own=True,allow_resident=True)[1]=='GPU0'
@@ -350,28 +382,19 @@ def test_action_run_idle_resident_uses_fresh_boundary_observation(monkeypatch, c
         with pytest.raises(life.SmokeError):run.inventory(allow_resident=True)
 
 
-def test_action_run_idle_resident_does_not_accept_static_sleeping_booleans(monkeypatch):
-    run=_resident_boundary_run(monkeypatch)
-    run.config['idle_resident']['protected_processes']=[{
-        'model':'protected','gpu_uuid':'GPU0','pid':os.getpid(),'start_ticks':'1',
-        'cgroup':'/system.slice/protected.service','sleeping_proof':True,
-        'health_proof':True,'full_budget_gb':10}]
-    with pytest.raises(life.SmokeError,match='protected'):
+def test_action_run_idle_resident_does_not_accept_static_sleeping_booleans(monkeypatch,tmp_path):
+    run=_resident_boundary_run(monkeypatch,tmp_path)
+    run._resident_state={**run._resident_state,
+        'models':[{'name':'protected','state':'ready','gpu':0,'unit':'vllm-protected.service',
+                   'health_ok':False,'is_sleeping':False,'port':8101,'budget_gb':42}]}
+    run.config['idle_resident']['protected_processes'][0]['sleeping_proof']=True
+    with pytest.raises(life.SmokeError,match='sleep/health'):
         run.inventory(allow_resident=True)
 
 
-def test_action_run_idle_resident_rejects_missing_protected_process_identity(monkeypatch):
-    run=_resident_boundary_run(monkeypatch)
-    run.config['idle_resident']['protected_processes']=[{
-        'model':'protected','gpu_uuid':'GPU0','pid':os.getpid(),
-        'cgroup':'/system.slice/protected.service'}]
-    run.json_at=lambda url,path,*args,**kwargs: {
-        'sampled_at':time.time(),'read_only':False,'errors':[],'inflight':0,
-        'models':[{'name':'protected','state':'sleeping','gpu':0,
-                   'unit':'vllm-protected.service','health_url':'http://health'}],
-        'leases':[{'model':'protected','gpu':0,'unit':'vllm-protected.service',
-                   'lease_id':'lease-protected','status':'confirmed','budget_gb':10}],
-    }
+def test_action_run_idle_resident_rejects_missing_protected_process_identity(monkeypatch,tmp_path):
+    run=_resident_boundary_run(monkeypatch,tmp_path)
+    run.config['idle_resident']['protected_processes'][0].pop('start_ticks')
     with pytest.raises(life.SmokeError,match='protected process identity'):
         run.inventory(allow_resident=True)
 

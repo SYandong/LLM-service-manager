@@ -364,6 +364,23 @@ class Run:
         result = self.container(['python3', '-B', '-c', code], input=json.dumps(data), **kwargs)
         return json.loads(result.stdout)
 
+    def process_records(self, processes, *, allow_own=False, allow_resident=False):
+        current=[]
+        for process in processes:
+            pid=None;ticks=None;cgroup=None
+            try:
+                pid=int(process[1]); proc=Path('/proc')/str(pid)
+                ticks=proc.joinpath('stat').read_text().rsplit(') ',1)[1].split()[19]
+                cgroup=proc.joinpath('cgroup').read_text()
+            except (OSError,ValueError,IndexError):
+                if allow_resident: raise SmokeError('resident process identity unknown')
+            current.append({'gpu_uuid':process[0],'pid':pid,
+                            'start_ticks':ticks,'cgroup':cgroup,'used_memory_mib':process[3]})
+            ours=cgroup_owned(cgroup or '', self.unit)
+            if not allow_resident and (not allow_own or not ours):
+                raise SmokeError('foreign or unclassified process on candidate GPU')
+        return current
+
     def inventory(self, *, allow_own=False, allow_resident=False):
         nvidia_smi=self.config.get('nvidia_smi','nvidia-smi')
         g = self.command([nvidia_smi, '--query-gpu=index,uuid,memory.total,memory.used,memory.free,utilization.gpu', '--format=csv,noheader,nounits']).stdout
@@ -373,24 +390,7 @@ class Run:
         if not all(math.isfinite(float(value)) for value in gpu[2:]):
             raise SmokeError('GPU observations are not finite')
         processes = [list(map(str.strip, r)) for r in csv.reader(io.StringIO(p)) if r and r[0].strip() == gpu[1]]
-        current_processes=[]
-        for process in processes:
-            pid=None;ticks=None;cgroup=None
-            try:
-                pid=int(process[1]); proc=Path('/proc')/str(pid)
-                ticks=proc.joinpath('stat').read_text().rsplit(') ',1)[1].split()[19]
-                cgroup=proc.joinpath('cgroup').read_text()
-            except (OSError,ValueError,IndexError):
-                if allow_resident: raise SmokeError('resident process identity unknown')
-                ticks=cgroup=None
-            current_processes.append({'gpu_uuid':process[0],'pid':pid,
-                                      'start_ticks':ticks,'cgroup':cgroup,'used_memory_mib':process[3]})
-            try:
-                ours = cgroup_owned(cgroup or '', self.unit)
-            except OSError:
-                ours = False
-            if not allow_resident and (not allow_own or not ours):
-                raise SmokeError('foreign or unclassified process on candidate GPU')
+        current_processes=self.process_records(processes,allow_own=allow_own,allow_resident=allow_resident)
         if not allow_own and not allow_resident:
             need = float(gpu[2]) * self.config.get('util', .2) + 4096
             if float(gpu[4]) < need or float(gpu[3]) > 256 or float(gpu[5]) > 0:

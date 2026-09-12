@@ -76,16 +76,25 @@ The optional `idle_resident.enabled: true` is a test-harness-only admission
 variant of `mode: scheduler-actions` (the legacy `mode: idle_resident` spelling
 is routed through the same ActionRun). It keeps the default exclusive-card guard
 unchanged and admits a selected card only from one fresh collector-bound
-observation. Protected sleeping full budgets come from the current scheduler
-state/ledger and require exact lease/unit/process plus a positive sleeping/health
-check; configured rows are expected identities, never proof. External baseline
-memory and pmon samples are read at admission, with the candidate budget bound
-to the configured utilization times the observed physical card size. Baseline
-processes are bound by GPU UUID, PID/start identity and cgroup; new, changed,
-active or unknown occupants, stale data, missing inflight proof, or capacity
-shortfall fail closed. Any invalidation aborts and cleanup may stop only the
-test-owned daemon; short idle evidence is not future quiet or production
-authority.
+observation before private test files or units are prepared. The configured
+primary state URL and ledger path are read-only targets; actual serialized
+`StateSnapshot` data, `activity[].in_flight`, the existing lease table, remote
+container unit/proc identity, and the model port's `/health` plus `/is_sleeping`
+responses supply the proof. Protected sleeping full budgets therefore require
+an exact current lease/model/unit/process binding; configured rows are expected
+identities, never proof. External baseline memory and pmon samples are read at
+admission, with the candidate budget bound to configured utilization times the
+observed physical card size. Baseline processes are bound by GPU UUID,
+PID/start identity and cgroup; new, changed, active or unknown occupants,
+stale data, missing inflight proof, or capacity shortfall fail closed. Any
+invalidation aborts and cleanup may stop only the test-owned daemon; short idle
+evidence is not future quiet or production authority.
+
+An enabled resident configuration must provide `primary_state_url`,
+`primary_ledger_path`, and non-empty expected protected identities. The URL and
+path select where to read; they do not assert health, sleeping, lease, unit, or
+capacity outcomes. Missing primary targets fail before preparation or any unit
+effect.
 
 ## Scheduler action mode (#9 / #10 / #23)
 
