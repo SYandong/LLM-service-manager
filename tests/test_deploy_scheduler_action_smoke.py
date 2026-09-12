@@ -347,8 +347,9 @@ def _resident_boundary_run(monkeypatch, tmp_path, *, stale=False, active_baselin
             return subprocess.CompletedProcess(argv,0,text,'')
         if argv[1:2]==['pmon']:
             util='2.0' if active_baseline else '0.0'
+            mem='2.0' if active_baseline else '0.0'
             sample_pid=pid+1 if not own else pid
-            return subprocess.CompletedProcess(argv,0,f'# gpu pid type sm mem enc dec command\n0 {sample_pid} C {util} 0 0 0 python\n','')
+            return subprocess.CompletedProcess(argv,0,f'# gpu pid type sm mem enc dec command\n0 {sample_pid} C {util} {mem} 0 0 0 python\n','')
         raise AssertionError(argv)
     run.command=command
     run.process_records=lambda processes,**kwargs:list(current)
@@ -357,8 +358,9 @@ def _resident_boundary_run(monkeypatch, tmp_path, *, stale=False, active_baselin
     def ledger_reader():
         db=sqlite3.connect('file:'+str(ledger_path)+'?mode=ro',uri=True)
         try:
-            return [dict(zip(('lease_id','model','gpu','util','expires_at','budget_gb','status','unit'),row))
-                    for row in db.execute('SELECT lease_id,model,gpu,util,expires_at,budget_gb,status,unit FROM llmsvc_leases')]
+            return {'leases':[dict(zip(('lease_id','model','gpu','util','expires_at','budget_gb','status','unit'),row))
+                    for row in db.execute('SELECT lease_id,model,gpu,util,expires_at,budget_gb,status,unit FROM llmsvc_leases')],
+                    'blockers':[]}
         finally:db.close()
     run._primary_ledger_reader=ledger_reader
     run._primary_probe_reader=lambda port:{'health':True,'sleeping':True}
@@ -397,6 +399,66 @@ def test_action_run_idle_resident_rejects_missing_protected_process_identity(mon
     run.config['idle_resident']['protected_processes'][0].pop('start_ticks')
     with pytest.raises(life.SmokeError,match='protected process identity'):
         run.inventory(allow_resident=True)
+
+
+def test_action_run_idle_resident_rejects_missing_primary_activity_coverage(monkeypatch,tmp_path):
+    run=_resident_boundary_run(monkeypatch,tmp_path)
+    run._resident_state={**run._resident_state,'activity':[]}
+    with pytest.raises(life.SmokeError,match='inflight observation'):
+        run.inventory(allow_resident=True)
+
+
+@pytest.mark.parametrize('sleeping_body', [b'{"is_sleeping": false}', b'not-json'])
+def test_primary_probe_executes_real_loopback_code_and_rejects_bad_sleeping(sleeping_body):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*args):pass
+        def do_GET(self):
+            if self.path=='/health':body=b''
+            elif self.path=='/is_sleeping':body=sleeping_body
+            else:self.send_response(404);self.end_headers();return
+            self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.config={'container':'fixture'}
+    def container(argv,**kwargs):
+        result=subprocess.run(argv,input=kwargs.get('input'),capture_output=True,text=True,timeout=3)
+        if result.returncode:raise life.SmokeError(result.stderr or 'probe failed')
+        return result
+    run.container=container
+    try:
+        with pytest.raises(life.SmokeError):run._primary_probe(server.server_port)
+    finally:
+        server.shutdown();server.server_close();thread.join(2)
+
+
+@pytest.mark.parametrize('lease_env,expect_success',[('lease-protected',True),('wrong-lease',False)])
+def test_primary_unit_identity_executes_remote_namespace_and_rechecks_byte_env(tmp_path,monkeypatch,lease_env,expect_success):
+    unit='vllm-protected.service';model='protected';lease='lease-protected';
+    child=subprocess.Popen([sys.executable,'-B','-c','import time;time.sleep(4)'],env={**os.environ,
+        'LLMSVC_MODEL':model,'LLMSVC_LEASE_ID':lease_env,'CUDA_VISIBLE_DEVICES':'0'})
+    control_group=Path('/proc/'+str(child.pid)+'/cgroup').read_text().split(':',2)[-1].strip().rstrip('/')
+    systemctl=tmp_path/'systemctl';systemctl.write_text(
+        '#!/bin/sh\necho Id='+unit+'\necho MainPID='+str(child.pid)+'\necho InvocationID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+        'echo ControlGroup='+control_group+'\necho Environment=LLMSVC_MODEL=protected LLMSVC_LEASE_ID=lease-protected\n')
+    systemctl.chmod(0o700)
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.config={'gpu':0}
+    monkeypatch.setattr(smoke.lifecycle,'cgroup_owned',lambda *args:True)
+    def container(argv,**kwargs):
+        result=subprocess.run(argv,input=kwargs.get('input'),capture_output=True,text=True,timeout=3,
+                              env={**os.environ,'PATH':str(tmp_path)+':'+os.environ.get('PATH','')})
+        if result.returncode:raise life.SmokeError(result.stderr or 'identity failed')
+        return result
+    run.container=container
+    host={'gpu_uuid':'GPU0','pid':child.pid,'start_ticks':'1',
+          'cgroup':control_group}
+    try:
+        if expect_success:
+            identity=run._primary_unit_identity(unit,model,lease,host)
+            assert identity['unit']==unit and identity['pid']==child.pid
+        else:
+            with pytest.raises(life.SmokeError):run._primary_unit_identity(unit,model,lease,host)
+    finally:
+        child.terminate();child.wait(timeout=3)
 
 
 def test_scheduler_wake_postresponse_identity_failure_preserves_response_and_progress():

@@ -82,7 +82,8 @@ def test_scheduler_actions_rejects_selected_unknown_or_inflight(states, requests
 
 def _resident_process(pid, start='10', cgroup='/system.slice/external.service', samples=None, **extra):
     return {'gpu_uuid':'GPU0','pid':pid,'start_ticks':start,'cgroup':cgroup,
-            'utilization_samples':[0.0,0.0] if samples is None else samples, **extra}
+            'utilization_samples':[{'sm_percent':0.0,'mem_percent':0.0},
+                                   {'sm_percent':0.0,'mem_percent':0.0}] if samples is None else samples, **extra}
 
 
 def test_idle_resident_predicate_accepts_classified_baseline_and_full_budget_margin():
@@ -112,13 +113,15 @@ def test_idle_resident_predicate_fails_closed_on_capacity_or_identity(change):
     gpu={'uuid':'GPU0','total_gb':140.0,'free_gb':120.0,'utilization_percent':0.0}
     if change=='budget':gpu['total_gb']=50
     if change=='inflight':kwargs['inflight']=1
-    if change=='active':baseline['utilization_samples']=[0.0,2.0]
+    if change=='active':baseline['utilization_samples']=[{'sm_percent':0.0,'mem_percent':0.0},
+                                                          {'sm_percent':2.0,'mem_percent':0.0}]
     if change=='changed':current=[protected,{**baseline,'start_ticks':'99'}]
     if change=='unknown':current=[protected,{**baseline,'gpu_uuid':'GPU1'}]
     observed_protected={**protected,'ledger_status':'confirmed','model_state':'sleeping',
                         'health_status':'sleeping'}
     observed_baseline={**baseline}
-    if change=='active':observed_baseline['utilization_samples']=[0.0,2.0]
+    if change=='active':observed_baseline['utilization_samples']=[{'sm_percent':0.0,'mem_percent':0.0},
+                                                                    {'sm_percent':2.0,'mem_percent':0.0}]
     observation={'sampled_at':time.time(),'source':'collector','ledger_source':'state+ledger',
                      'unit_source':'systemd+proc','capacity_source':'nvidia-smi',
                      'inflight':1 if change=='inflight' else 0,

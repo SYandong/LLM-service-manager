@@ -288,9 +288,13 @@ def idle_resident_admission(*, gpu, protected_processes, baseline_processes,
         row=next((item for item in observed_baseline
                   if isinstance(item,dict) and identity(item)==identity(expected)),None)
         samples=row.get('utilization_samples') if isinstance(row,dict) else None
+        def idle_sample(value):
+            return (isinstance(value,dict) and finite(value.get('sm_percent'))
+                    and finite(value.get('mem_percent'))
+                    and value['sm_percent']<=idle_util_percent and value['mem_percent']<=idle_util_percent)
         if (not isinstance(expected,dict) or not isinstance(row,dict) or identity(row) in protected_ids
                 or not valid_identity(row) or identity(row)!=identity(expected) or not isinstance(samples,list)
-                or len(samples)<2 or any(not finite(x) or x>idle_util_percent for x in samples)):
+                or len(samples)<2 or any(not idle_sample(x) for x in samples)):
             reasons.append('baseline_identity_or_idle_unknown');continue
         baseline_ids.append(identity(row))
     owned_ids=[identity(row) for row in owned_processes if valid_identity(row)]
