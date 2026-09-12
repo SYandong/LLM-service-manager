@@ -1020,6 +1020,7 @@ print(json.dumps({"unit":x["unit"],"pid":x["namespace_pid"],"start_ticks":first[
         self.scheduler_unit='llmsvc-ops-action-scheduler-'+self.token+'.service'
         self.source_unit='llmsvc-ops-action-source-'+self.token+'.service'
         self.units=[];self.lease=None;self.preserve=False;self.measured_phases=set();self.phase_measurements={}
+        self._submitted_requests=[];self._submitted_receipts=[]
         self._resident_worker_observed=False
 
     def _ledger_release_witness(self, binding):
@@ -1240,6 +1241,9 @@ print('{}')
         unit='llmsvc-ops-action-request-'+request_id+'.service'
         self.control(unit,[self.config['scheduler_python'],'-B',self.temp+'/runtime/deploy/scheduler_action_smoke.py',
                            'request',self.temp+'/profile.json',input_name],seconds+3)
+        self._submitted_requests.append({'id':request_id,'operation':name,'output':output_name,
+                                         'unit':unit,'deadline':request['deadline']})
+        self.log('action_submitted',request_id=request_id,operation=name,unit=unit,output=output_name)
         while time.monotonic()<request['deadline']+3:
             self.inventory(allow_own=True)
             value=self.python("import json,sys;from pathlib import Path;x=json.load(sys.stdin);p=Path(x['root'])/x['name'];print(p.read_text() if p.exists() else '{}')",
@@ -1268,6 +1272,36 @@ print('{}')
                 raise lifecycle.SmokeError('request unit exited without a complete receipt')
             time.sleep(.5)
         raise lifecycle.SmokeError('bounded action request did not complete')
+
+    def _capture_submitted_receipts(self):
+        """Capture only matching bounded receipts before deciding file cleanup."""
+        requests=getattr(self,'_submitted_requests',())
+        if not requests:
+            return
+        code='''import json,sys
+from pathlib import Path
+x=json.load(sys.stdin);p=Path(x['root'])/x['name']
+if not p.is_file():print('null')
+else:
+ raw=p.read_text()
+ if len(raw)>262144:raise RuntimeError('submitted receipt too large')
+ print(raw)
+'''
+        for request in requests:
+            value=None
+            try:
+                value=self.python(code,{'root':self.temp,'name':request['output']},cleanup=True,limit=2)
+            except Exception:
+                value=None
+            if (not isinstance(value,dict) or value.get('local_request_id')!=request['id']
+                    or value.get('operation')!=request['operation']):
+                self.preserve=True
+                self.log('submitted_outcome_unknown',request_id=request['id'],operation=request['operation'],
+                         output=request['output'])
+                continue
+            self._submitted_receipts.append(value)
+            self.log('submitted_receipt_captured',request_id=request['id'],operation=request['operation'],
+                     status=value.get('status'),receipt=value)
 
     def daemon_binding(self, *, cleanup=False):
         code='''import json,sys,subprocess
@@ -1409,6 +1443,10 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity,'control_g
                         lifecycle.remaining(end,2);time.sleep(.2)
                     else:raise lifecycle.SmokeError('control unit did not exit before cleanup deadline')
             except Exception as exc:errors.append(str(exc));self.preserve=True
+        try:
+            self._capture_submitted_receipts()
+        except Exception as exc:
+            errors.append(str(exc));self.preserve=True
         if self.temp_created and not self.preserve:
             self.python("import json,sys,shutil;from pathlib import Path;x=json.load(sys.stdin);p=Path(x['root']);\nif p.exists():\n assert not p.is_symlink() and (p/'owner').read_text()==x['token'];shutil.rmtree(p)\nprint('{}')",
                         {'root':self.temp,'token':self.token},cleanup=True)
