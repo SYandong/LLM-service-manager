@@ -207,7 +207,7 @@ def test_scheduler_wake_cold_route_owns_one_post_and_validates_final_response(re
             evidence=receipt['evidence']
             assert all(field in evidence for field in ('started_wall','started_monotonic','post_returned_monotonic','progress_truncated','identity_checks'))
             assert evidence['progress_truncated'] is False and evidence['identity_checks']['account'] is True
-            run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='model';run.unit='vllm-model.service';run.temp=str(root);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run.config={'scheduler_python':sys.executable};run.log=lambda *a,**k:None;run.inventory=lambda **_:None;run.control=lambda *a,**k:None
+            run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='model';run.unit='vllm-model.service';run.temp=str(root);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run._submitted_requests=[];run._submitted_receipts=[];run.config={'scheduler_python':sys.executable};run.log=lambda *a,**k:None;run.inventory=lambda **_:None;run.control=lambda *a,**k:None
             monkeypatch.setattr(smoke.uuid,'uuid4',lambda:SimpleNamespace(hex=request_id))
             run.python=lambda code,data,**kwargs: (Path(data['root'],data['name']).write_text(json.dumps(data['data'])) or {}) if 'write_text' in code else json.loads(Path(data['root'],data['name']).read_text())
             consumed=run.phase('cold',1)
@@ -546,7 +546,7 @@ def test_scheduler_wake_postresponse_identity_failure_preserves_response_and_pro
 
 
 def test_scheduler_wake_route_checks_warm_latency_independently(tmp_path):
-    run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='model';run.unit='vllm-model.service';run.temp=str(tmp_path);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run.config={'scheduler_python':sys.executable,'cold_route':'scheduler_wake'};run.log=lambda *a,**k:None;run.inventory=lambda **_:None;run.control=lambda *a,**k:None
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='model';run.unit='vllm-model.service';run.temp=str(tmp_path);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run._submitted_requests=[];run._submitted_receipts=[];run.config={'scheduler_python':sys.executable,'cold_route':'scheduler_wake'};run.log=lambda *a,**k:None;run.inventory=lambda **_:None;run.control=lambda *a,**k:None
     def python(code,data,**kwargs):
         if 'write_text' in code:
             receipt={'local_request_id':data['data']['id'],'operation':'wake','status':'passed','evidence':{'http_seconds':4.0}}
@@ -973,7 +973,7 @@ def test_completion_reports_no_measurements_after_preflight_failure():
 
 
 def test_phase_records_measured_receipt_for_completion_reporting(tmp_path):
-    run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='fixture';run.unit='vllm-fixture.service';run.temp=str(tmp_path);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run.config={'scheduler_python':sys.executable};run.log=lambda *a,**k:None
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='fixture';run.unit='vllm-fixture.service';run.temp=str(tmp_path);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run._submitted_requests=[];run._submitted_receipts=[];run.config={'scheduler_python':sys.executable};run.log=lambda *a,**k:None
     run.inventory=lambda **_:None;run.control=lambda *a,**k:None
     captured={}
     def python(code,data,**kwargs):

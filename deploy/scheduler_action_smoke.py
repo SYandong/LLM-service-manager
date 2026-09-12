@@ -1239,10 +1239,17 @@ print('{}')
         self.python("import json,sys;from pathlib import Path;x=json.load(sys.stdin);p=Path(x['root'])/x['name'];p.write_text(json.dumps(x['data']));p.chmod(0o600);print('{}')",
                     {'root':self.temp,'name':input_name,'data':request})
         unit='llmsvc-ops-action-request-'+request_id+'.service'
-        self.control(unit,[self.config['scheduler_python'],'-B',self.temp+'/runtime/deploy/scheduler_action_smoke.py',
-                           'request',self.temp+'/profile.json',input_name],seconds+3)
-        self._submitted_requests.append({'id':request_id,'operation':name,'output':output_name,
-                                         'unit':unit,'deadline':request['deadline']})
+        submitted={'id':request_id,'operation':name,'output':output_name,
+                   'unit':unit,'deadline':request['deadline'],'submission_state':'attempted'}
+        self._submitted_requests.append(submitted)
+        try:
+            self.control(unit,[self.config['scheduler_python'],'-B',self.temp+'/runtime/deploy/scheduler_action_smoke.py',
+                               'request',self.temp+'/profile.json',input_name],seconds+3)
+        except Exception:
+            submitted['submission_state']='unknown'
+            self.log('action_submission_unknown',request_id=request_id,operation=name,unit=unit,output=output_name)
+            raise
+        submitted['submission_state']='submitted'
         self.log('action_submitted',request_id=request_id,operation=name,unit=unit,output=output_name)
         while time.monotonic()<request['deadline']+3:
             self.inventory(allow_own=True)
@@ -1283,9 +1290,10 @@ from pathlib import Path
 x=json.load(sys.stdin);p=Path(x['root'])/x['name']
 if not p.is_file():print('null')
 else:
- raw=p.read_text()
+ with p.open('rb') as stream:
+  raw=stream.read(262145)
  if len(raw)>262144:raise RuntimeError('submitted receipt too large')
- print(raw)
+ print(raw.decode())
 '''
         for request in requests:
             value=None
