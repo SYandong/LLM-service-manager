@@ -123,8 +123,19 @@ systemd `InvocationID` 相符，且已观察到该实例健康服务，或明确
 | 来源 | 登记方式 | 预算 | 生命周期 |
 |---|---|---|---|
 | 常驻模型 | llama-swap 配置里的固定块 | 每模型 `util` 比例（占一张卡） | 永久 |
-| 临时模型（完整权重 fine-tune） | `llm add <path> --name X --base <常驻模型>` | 继承 base 的配置块与预算 | 7 天无人用自动注销 |
+| 临时模型（完整权重 fine-tune） | `llm add <path> --name X --base <常驻模型>`，或把 `llmsvc.json` 放进共享目录后 `llm import NAME` | 继承 base 的配置块与预算，可按 `llmsvc.json` 白名单覆写 | 7 天无人用自动注销 |
 | LoRA 适配器 | `llm add --lora <path> --base <常驻模型>` | 不额外占显存 | 随 base |
+
+### 发现（只读）与导入（显式）
+
+用户把权重放进 `registry.shared_roots` 之下的一层子目录、再写一个 `llmsvc.json`，就完成了登记所需的全部输入。两步严格分开，**发现不等于准入**：
+
+1. **发现**：scheduler 只扫每个 shared root 的一层子目录，读取其中的 `llmsvc.json`。这一步没有副作用——不分配端口、不建 job、不改配置、不起 unit，也不跟随符号链接目录。结果在 `GET /v1/models` 的 `discovered` 里给出 `{name, path, base, util, weights_gb, status, reason}`；`status` 为 `importable` / `imported`（名字已在 llama-swap 配置里）/ `invalid`（带原因）。没有 `llmsvc.json` 的目录不列出。扫描有硬上限（最多 200 条，按名字排序）、描述文件受 `model_config_max_bytes` 约束，并按目录与描述文件 mtime 缓存，避免每次列表都全量重读。
+2. **导入**：`POST /v1/models` 收到 `{"import": NAME}` 时，由 scheduler **重新读取该目录自己的 `llmsvc.json`**，推导出 name/path/base 与覆写项，再走与 `add` 完全相同的校验与提交队列（§3 的安静时刻协议、保护规则、catalog 事务都不变）。覆写永远不来自客户端请求体。
+
+`llmsvc.json` 只接受白名单字段：`base`（必填）、`name`、`util`、`max_model_len`、`aliases`、`weights_gb`。`is_default`、任何 `cmd`/`argv`/shell 片段以及未知键一律 400 拒绝并指出字段——描述文件是**参数**，不是命令。覆写只作用在克隆出来的块上：`util` 改写 block 的 `util` 宏、launcher 的份额与 `--gpu-memory-utilization`（三者必须本来就一致）；`max_model_len` 改写 `--max-model-len`；`aliases` 走既有的保留名冲突校验。字面量命令里如果既没有 `--gpu-memory-utilization` 也没有 `util` 宏，util 覆写被拒绝，而不是只改 launcher 份额、让记账与实际分配对不上。`weights_gb` 缺省时由 `*.safetensors.index.json` 的 `weight_map` 去重求和测量，没有 index 则求和目录下的 `*.safetensors`；这是文件大小，不是实测显存。
+
+导入成功的模型不再需要手写 `collectors.models` 与 `catalog_profiles` 条目：profile 由登记记录派生——`unit=vllm-<name>.service`、`daemon_url` 用分配到的 daemon 端口、`util`/`weights_gb` 取自描述文件、`is_default=false`、`budget_gb = util × 最新快照中最小的已知 GPU total_gb`。快照过期或 GPU 容量未知时导入被阻塞并说明原因，不用猜测的容量记账。手写 profile 仍然优先，但必须与记录一致（unit/daemon_url/port/is_default/util/weights_gb），否则拒绝，避免过期的手写条目把导入的模型指向别的 unit 或端口。
 
 临时模型需要改 llama-swap 配置，而 reload 会重建进程表并让所有醒着的模型 sleep，在途请求会被中断。llama-swap 没有"暂停接收"接口，所以做不到完全原子；scheduler 用下面的**安静时刻协议**把风险压到最小，并把残余风险写明：
 

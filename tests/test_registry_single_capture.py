@@ -49,7 +49,7 @@ def assert_old_capture(result, old):
     for key in ("base", "created_at", "daemon_port"):
         assert row[key] == result["records"]["saved"][key]
     # Internal capture plumbing must not add a field to the public inventory.
-    assert set(result) == {"records", "inventory", "writes_enabled", "blocked_by"}
+    assert set(result) == {"records", "inventory", "discovered", "writes_enabled", "blocked_by"}
     assert set(inventory) == {"models", "config_sha256", "pending_changes", "fenced", "recovery"}
 
 

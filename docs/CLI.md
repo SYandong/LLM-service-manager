@@ -170,6 +170,53 @@ ID 来自 reserve 回执或 `status --json` 中的 reserves。命令发送 URL �
 
 TUI 使用相同的 `unreserve ID` 命令；确认回复后立即刷新，并移除服务器已不再报告的预约标记。`--dry-run` 保留标记和预约。缺失/空/控制字符 ID 在请求前拒绝，`--json` 保留完整回执。
 
+## 把模型放进共享目录并导入
+
+放好权重、写一个 `llmsvc.json`，剩下的由 scheduler 完成：
+
+```sh
+# 1) 权重放在 registry.shared_roots 之下的一层子目录里（线上是 /srv/models）
+#    /srv/models/Foo-7B/{config.json,model*.safetensors,llmsvc.json}
+cat > /srv/models/Foo-7B/llmsvc.json <<'JSON'
+{
+  "base": "qwen3-32b",
+  "name": "foo-7b",
+  "util": 0.45,
+  "max_model_len": 32768,
+  "aliases": ["foo"],
+  "weights_gb": 14.5
+}
+JSON
+
+# 2) 看 scheduler 发现了什么（只读，不写任何配置）
+LLM_URL=http://scheduler:8011 python3 llm models
+
+# 3) 先预览，再导入
+LLM_URL=http://scheduler:8011 python3 llm import foo-7b --dry-run --json
+LLM_URL=http://scheduler:8011 python3 llm import foo-7b
+LLM_URL=http://scheduler:8011 python3 llm import --all --dry-run
+```
+
+`llmsvc.json` 字段（其余键一律 400 拒绝）：
+
+| 字段 | 必填 | 含义 |
+|---|---|---|
+| `base` | 是 | 要克隆的常驻模型名。命令模板、group 归属都来自它 |
+| `name` | 否 | 模型名；缺省用目录名规范化（小写、非法字符转 `-`），仍须通过既有名称校验 |
+| `util` | 否 | `0 < util <= 1`；覆写 base 的 `macros.util` 与 `--gpu-memory-utilization`，并同步 launcher 的份额 |
+| `max_model_len` | 否 | 正整数；覆写 `--max-model-len` |
+| `aliases` | 否 | 字符串数组（≤16）；走既有保留名/别名冲突校验 |
+| `weights_gb` | 否 | 正数；缺省时由 scheduler 从 `*.safetensors.index.json` 的 `weight_map` 去重求和，没有 index 则求和目录下的 `*.safetensors` |
+
+明确拒绝：`is_default`（导入的模型永远不是默认模型）、`cmd`/`cmdStop`/`argv`/`command`/`env`/`shell` 等任何自带命令或 shell 片段、以及任何未列出的键。覆写只在克隆出的块上生效，仍然经过既有的 shell-token 禁令与命令形状校验；base 的配置块不被修改。
+
+- **发现是只读的，导入是显式的**。`models` 输出里的 `discovered` 只说明“这个目录有一份可解析的 `llmsvc.json`”，不代表已准入、已登记或 proxy 已采用。没有 `llmsvc.json` 的目录不会被列出；符号链接目录、不可读的 shared root、解析失败的描述文件列为 `invalid` 并带原因；名字已经在 llama-swap 配置里的列为 `imported`。扫描只看每个 shared root 的**一层**子目录，最多列 200 条，按名字排序，`llmsvc.json` 字节数受 `registry.model_config_max_bytes` 限制，结果按目录/描述文件 mtime 缓存。
+- `import NAME` 只发送 `{"import": NAME}`。**覆写不来自客户端**：scheduler 自己重新读取该目录的 `llmsvc.json`，再走与 `add` 完全相同的路径/权重/名称/端口校验与同一条提交队列。`--dry-run` 与 `add` 一样返回 would/plan/blocked_by 且不写配置；被阻塞的预览返回退出码 1。
+- `import --all` 按列出的顺序逐个提交当前可导入的候选，每个候选单独返回一条结果；某一个失败不会掩盖其它结果，任一失败即退出码非零。没有可导入候选时输出说明并返回 0。
+- 导入成功后，该模型的 `collectors.models` 条目与 catalog profile 由 scheduler 从登记记录生成：`unit=vllm-<name>.service`、`daemon_url=http://127.0.0.1:<分配到的端口>`、`util`/`weights_gb` 取自描述文件、`budget_gb = util × 最新快照里最小的已知 GPU total_gb`、`is_default=false`。**没有新鲜快照或 GPU 容量未知时导入被拒绝并说明原因**，不会用猜测的容量记账。手写的 `catalog_profiles` 条目仍然优先，但必须与描述文件一致（unit/daemon_url/port/is_default/util/weights_gb），否则 400 拒绝。
+- 老版本 scheduler 不返回 `discovered`；此时 `models` 仍正常工作，`import` 明确报“该 scheduler 不提供发现列表”，不猜测候选。
+- TUI 当前不提供 `import` 子命令，请用 CLI。
+
 ## 完整权重模型列表与预览
 
 ```sh
@@ -329,3 +376,4 @@ Reserve 测试直接请求当前 SchedulerHTTPServer 的预览/默认只读 405 
 
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
+<!-- Generated-By: Claude Code / claude-fable-5-1 -->

@@ -32,6 +32,8 @@ collectors: {}
 # Optional registry mount: omitted by default. Uncomment only after configuring
 # the reviewed absolute paths. This enables temporary-model list/dry-run preview
 # only; it neither provisions files nor enables actual writes or a reload worker.
+# The same shared_roots are scanned one level deep for llmsvc.json descriptors;
+# that read-only discovery lists candidates and never imports one by itself.
 # See llmsvc/REGISTRY_API.md for request/result and recovery-blocker semantics.
 # registry:
 #   config_path: /absolute/path/to/llama-swap.yaml

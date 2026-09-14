@@ -5,6 +5,7 @@ import argparse
 import copy
 import json
 import logging
+import math
 import signal
 import sqlite3
 import threading
@@ -94,10 +95,28 @@ def build_registry(config, scheduler):
         wall_clock=scheduler.clock, max_snapshot_age=config.max_snapshot_age_seconds,
         operation_timeout=min(config.request_timeout_seconds, 60),
         **{key: config.registry[key] for key in ("config_max_bytes",) if key in config.registry})
+    limits = {key: config.registry[key] for key in
+              ("model_config_max_bytes", "weight_index_max_bytes") if key in config.registry}
+    from llmsvc.discovery import ModelDiscovery
     return ModelRegistry(queue, shared_roots=config.registry["shared_roots"],
         daemon_port_range=tuple(config.registry["daemon_port_range"]), reserved_ports=reserved_ports,
-        now=scheduler.clock, **{key: config.registry[key] for key in
-            ("model_config_max_bytes", "weight_index_max_bytes") if key in config.registry})
+        now=scheduler.clock, discover=ModelDiscovery(config.registry["shared_roots"], **limits),
+        **limits)
+
+
+def gpu_total_gb(scheduler):
+    """Return the smallest observed card size, or explain why sizing is blocked."""
+    from llmsvc.registry import RegistryError
+    snapshot = scheduler.snapshot()
+    age = scheduler.clock() - snapshot.sampled_at if snapshot.sampled_at is not None else None
+    if snapshot.errors or age is None or not 0 <= age <= scheduler.config.max_snapshot_age_seconds:
+        raise RegistryError("cannot size an imported model: the GPU snapshot is missing or stale")
+    totals = [gpu.total_gb for gpu in snapshot.gpus]
+    if not totals or any(value is None or isinstance(value, bool)
+                         or not isinstance(value, (int, float))
+                         or not math.isfinite(value) or value <= 0 for value in totals):
+        raise RegistryError("cannot size an imported model: observed GPU total memory is unknown")
+    return min(float(value) for value in totals)
 
 
 def maintenance_config(config):
@@ -116,6 +135,47 @@ def maintenance_config(config):
     return replace(config, collectors={**copy.deepcopy(config.collectors), "models": completed})
 
 
+def build_profile_provider(config, scheduler):
+    """Return the trusted profile source for one prospective catalog generation.
+
+    A configured profile always wins but must still agree with the saved
+    descriptor, so a stale hand-written entry cannot silently redirect an
+    imported model's unit, port or endpoint. A model imported from an
+    llmsvc.json descriptor needs no hand-written profile at all: its unit, port
+    and endpoint come from its own record and its budget from the observed card.
+    """
+    from llmsvc.registry import (ModelRegistry, RegistryError, cross_check_catalog_profile,
+                                 generated_catalog_profile)
+    profiles = copy.deepcopy(config.catalog_profiles)
+
+    def trusted_profiles(candidate):
+        document, records = ModelRegistry._decode(candidate)
+        result = {}
+        for name in document["models"]:
+            record = records.get(name)
+            described = (record is not None and record.get("util") is not None
+                         and record.get("weights_gb") is not None)
+            host = "127.0.0.1"
+            if described:
+                base = profiles.get(record.get("base"))
+                host = (urlsplit(str(base.get("daemon_url", ""))).hostname
+                        if isinstance(base, dict) else None) or host
+            if name in profiles:
+                if described:
+                    cross_check_catalog_profile(profiles[name], record, host=host)
+                result[name] = copy.deepcopy(profiles[name])
+            elif described:
+                result[name] = generated_catalog_profile(record, gpu_total_gb=gpu_total_gb(scheduler),
+                                                         host=host)
+            else:
+                raise RegistryError("model " + str(name) + " lacks a trusted maintenance profile; "
+                                    "configure catalog_profiles or import it with an "
+                                    "llmsvc.json descriptor")
+        return result
+
+    return trusted_profiles
+
+
 def build_catalog(config, scheduler):
     from llmsvc.catalog import CatalogRuntime
     if scheduler.registry is None:
@@ -124,18 +184,11 @@ def build_catalog(config, scheduler):
     if config.catalog_mode != "maintenance" or not config.maintenance_command:
         return CatalogRuntime(scheduler, queue)
     from llmsvc.maintenance import CommandBackend, MaintenanceController
-    from llmsvc.registry import ModelRegistry
     controller = MaintenanceController(scheduler, queue, CommandBackend(config.maintenance_command, monotonic=queue.clock))
-    profiles = copy.deepcopy(config.catalog_profiles)
-    def trusted_profiles(candidate):
-        document, _ = ModelRegistry._decode(candidate)
-        try:
-            return {name: copy.deepcopy(profiles[name]) for name in document["models"]}
-        except KeyError as exc:
-            raise ValueError("requested model lacks a trusted maintenance profile") from exc
     queue.validate = controller.validate
     runtime = CatalogRuntime(scheduler, queue, transition=controller, verifier=controller.verify,
-                             profile_provider=trusted_profiles, instance_provider=controller.inspect_instance)
+                             profile_provider=build_profile_provider(config, scheduler),
+                             instance_provider=controller.inspect_instance)
     scheduler.registry.stop_model = controller.stop_model
     scheduler.registry.unit_absent = controller.unit_absent
     if runtime.can_submit():
