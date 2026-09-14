@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """The copied CLI must remain usable without an installed project or extras."""
 
 import ast
@@ -109,6 +110,70 @@ def test_config_rejects_invalid_timeouts(llm, tmp_path, timeout):
 def test_missing_address_is_actionable(llm, tmp_path):
     with pytest.raises(llm["ClientError"], match="LLM_URL"):
         llm["load_config"](environ={}, path=tmp_path / "missing")
+
+
+def test_api_url_is_optional_and_absent_stays_backward_compatible(llm, tmp_path):
+    config = tmp_path / "config"
+    config.write_text("url = http://scheduler:8011\ntimeout = 3\n")
+    result = llm["load_config"](environ={}, path=config)
+    assert result == {"url": "http://scheduler:8011", "timeout": 3.0}
+    assert "api_url" not in result
+    assert "api_url" not in llm["load_config"](environ={"LLM_URL": "http://scheduler:8011"},
+                                              path=tmp_path / "missing")
+    client = llm["SchedulerClient"]("http://scheduler:8011")
+    assert client.api_url is None and client.url == "http://scheduler:8011"
+
+
+def test_api_url_config_precedence_and_normalization(llm, tmp_path):
+    config = tmp_path / "config"
+    config.write_text("url = http://scheduler:8011\napi_url = https://data-plane:9443/open-ai\n")
+    result = llm["load_config"](environ={}, path=config)
+    assert result["api_url"] == "https://data-plane:9443/open-ai"  # Non-root base path kept.
+    result = llm["load_config"](
+        environ={"LLM_URL": "http://scheduler:8011", "LLM_API_URL": "https://env-plane:9443/"},
+        path=config,
+    )
+    assert result["api_url"] == "https://env-plane:9443/v1"  # Env overrides config; root -> /v1.
+    client = llm["SchedulerClient"]("http://scheduler:8011", api_url="https://data-plane:9443")
+    assert client.api_url == "https://data-plane:9443/v1"
+    assert client.url == "http://scheduler:8011"
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("https://data-plane.example.invalid", "https://data-plane.example.invalid/v1"),
+    ("https://data-plane.example.invalid/", "https://data-plane.example.invalid/v1"),
+    ("http://host:8080", "http://host:8080/v1"),
+    ("https://host/v1", "https://host/v1"),
+    ("https://host/openai/v1/", "https://host/openai/v1"),
+])
+def test_api_url_normalizes_root_only(llm, value, expected):
+    assert llm["normalize_api_url"](value) == expected
+
+
+@pytest.mark.parametrize("value", ["file:///etc/passwd", "localhost:8011", "http://user:secret@host",
+                                   "http://host/v1?q=1", "http://host/v1#frag", "http://host/v1\n",
+                                   "http://host/v1\r"])
+def test_api_url_rejects_credentials_query_fragment_and_control_bytes(llm, value):
+    with pytest.raises(llm["ClientError"], match="Inference URL"):
+        llm["normalize_api_url"](value)
+    with pytest.raises(llm["ClientError"]):
+        llm["load_config"](environ={"LLM_URL": "http://scheduler:8011", "LLM_API_URL": value},
+                           path="/nonexistent")
+
+
+def test_unknown_config_keys_are_still_rejected_with_api_url(llm, tmp_path):
+    config = tmp_path / "config"
+    config.write_text("url = http://scheduler:8011\napi_uri = https://data-plane\n")
+    with pytest.raises(llm["ClientError"], match="api_url"):
+        llm["load_config"](environ={}, path=config)
+
+
+def test_app_version_reads_the_single_argparse_literal(llm):
+    parser = llm["build_parser"]()
+    action = next(action for action in parser._actions if action.dest == "version")
+    assert isinstance(action.version, str) and action.version
+    assert llm["app_version"]() == action.version
+
 
 
 def test_http_request_uses_timeout_and_preserves_json(llm):

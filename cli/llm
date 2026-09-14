@@ -45,7 +45,7 @@ def clean_text(value):
     )
 
 
-def validate_url(value):
+def validate_url(value, label="Scheduler"):
     try:
         parsed = urlsplit(value)
         valid = (
@@ -58,8 +58,22 @@ def validate_url(value):
     except ValueError:
         valid = False
     if not valid:
-        raise ClientError("Scheduler URL must be an http(s) URL without credentials, query or fragment")
+        raise ClientError("%s URL must be an http(s) URL without credentials, query or fragment" % label)
     return value.rstrip("/")
+
+
+def normalize_api_url(value):
+    """Validate the shared OpenAI-compatible inference base URL.
+
+    A root path (``/`` or empty) is normalized to ``/v1`` so the caller can
+    append ``/chat/completions``; an explicitly supplied non-root base path is
+    preserved as given.  The same stdlib http(s) validation as the scheduler
+    URL rejects credentials, query, fragment and control bytes.
+    """
+    base = validate_url(value, label="Inference")
+    if urlsplit(base).path in ("", "/"):
+        return base + "/v1"
+    return base
 
 
 def positive_timeout(value):
@@ -89,16 +103,22 @@ def load_config(environ=None, path=None, url=None, timeout=None):
                 content = "[llm]\n" + content
             parser.read_string(content)
             values = dict(parser["llm"])
-            unknown = set(values) - {"url", "timeout"}
+            unknown = set(values) - {"url", "timeout", "api_url"}
             if unknown or parser.sections() != ["llm"]:
-                raise ValueError("Only [llm] keys url and timeout are supported")
+                raise ValueError("Only [llm] keys url, timeout and api_url are supported")
         except (configparser.Error, KeyError, ValueError) as exc:
             raise ClientError("Invalid config: " + str(exc)) from None
     address = url or environ.get("LLM_URL") or values.get("url")
     if not address:
         raise ClientError("Set LLM_URL or url in ~/.config/llm/config to the scheduler address")
     wait = timeout if timeout is not None else environ.get("LLM_TIMEOUT", values.get("timeout", "10"))
-    return {"url": validate_url(address), "timeout": positive_timeout(wait)}
+    config = {"url": validate_url(address), "timeout": positive_timeout(wait)}
+    # The inference endpoint is an independent, optional setting: old config
+    # files and copied CLI invocations keep working unchanged when it is absent.
+    api = environ.get("LLM_API_URL") or values.get("api_url")
+    if api:
+        config["api_url"] = normalize_api_url(api)
+    return config
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -111,9 +131,12 @@ def invalid_constant(value):
 
 
 class SchedulerClient:
-    def __init__(self, url, timeout=10, opener=None):
+    def __init__(self, url, timeout=10, opener=None, api_url=None):
         self.url = validate_url(url)
         self.timeout = positive_timeout(timeout)
+        # Optional OpenAI-compatible inference base URL carried for the UI; the
+        # management ``url`` above is a different endpoint and is never reused.
+        self.api_url = normalize_api_url(api_url) if api_url else None
         self.opener = opener or build_opener(NoRedirect()).open
 
     def request(self, method, path, payload=None, *, timeout=None):
@@ -1266,6 +1289,19 @@ def build_parser(parser_class=argparse.ArgumentParser):
     unreserve.add_argument("--dry-run", action="store_true")
     unreserve.add_argument("--json", action="store_true")
     return parser
+
+
+def app_version(parser_class=argparse.ArgumentParser):
+    """Return the running application version from its single argparse literal.
+
+    The publisher already verifies the ``--version`` action string in this file;
+    reading it here keeps the CLI and TUI on one source instead of a second
+    hardcoded release literal.
+    """
+    for action in build_parser(parser_class)._actions:
+        if action.dest == "version":
+            return str(action.version)
+    return "unknown"
 
 
 def submit_import(args, client, name):

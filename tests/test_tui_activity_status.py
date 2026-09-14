@@ -1,6 +1,12 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Claude Code / claude-fable-5-1
-"""Activity availability and source attribution are independent UI observations."""
+# Generated-By: OpenCode / deepseek-v4.1-flash
+"""Activity availability and source attribution are independent UI observations.
+
+The former model-name/detail line below the model list is intentionally gone
+(#250): readable counts stay in the table while failure reasons stay in the
+footer and in ``status --json``.
+"""
 import asyncio
 import copy
 import json
@@ -12,12 +18,8 @@ from textual.widgets import DataTable, Static
 from test_tui import make_app, snapshot
 
 
-@pytest.mark.parametrize('sources, expected', [
-    (['unknown'], 'source unavailable'),
-    ([], 'source unavailable'),
-    (['lab', 'unknown'], 'from lab · some sources unavailable'),
-])
-def test_successful_counts_are_kept_when_source_is_unavailable(snapshot, sources, expected):
+@pytest.mark.parametrize('sources', [['unknown'], [], ['lab', 'unknown']])
+def test_successful_counts_are_kept_when_source_is_unavailable(snapshot, sources):
     async def scenario():
         snapshot['errors'] = []
         snapshot['activity'][1]['by'] = sources
@@ -29,10 +31,8 @@ def test_successful_counts_are_kept_when_source_is_unavailable(snapshot, sources
             table.move_cursor(row=1, animate=False)
             await pilot.pause()
             assert table.get_cell('research-model', '10m').plain == '12'
-            detail = str(app.query_one('#details', Static).render())
-            assert expected in detail
-            assert 'from unknown' not in detail and 'not recorded' not in detail
-            assert 'activity unavailable' not in detail
+            # The removed detail line leaves no widget and no stale hint behind.
+            assert not app.query('#details')
             assert 'Updated' in str(app.query_one('#event-status', Static).render())
             assert app.snapshot == original
     asyncio.run(scenario())
@@ -73,11 +73,11 @@ def test_failed_read_is_partial_and_never_displays_stale_counts(snapshot, code, 
             assert table.get_cell('research-model', '10m').plain == '?'
             assert table.get_cell('research-model', 'USED').plain == '?'
             result = str(app.query_one('#event-status', Static).render())
-            detail = str(app.query_one('#details', Static).render())
+            # The failure reason stays a real diagnostic in the footer.
             assert 'Partial update' in result and 'activity unavailable' in result
-            assert reason in result and reason in detail
-            assert 'Updated' not in result and 'SECRET' not in result + detail
-            assert 'ValueError' not in result + detail
+            assert reason in result
+            assert 'Updated' not in result and 'SECRET' not in result
+            assert 'ValueError' not in result
             assert app.snapshot == failed  # Keep raw structured diagnostics intact.
             args = app.api.build_parser().parse_args(['status', '--json'])
             await app.refresh_state(args).wait()
@@ -85,5 +85,4 @@ def test_failed_read_is_partial_and_never_displays_stale_counts(snapshot, code, 
             client.snapshot = snapshot
             await app.refresh_state().wait()
             assert table.get_cell('research-model', '10m').plain == '12'
-            assert 'from ctr-b' in str(app.query_one('#details', Static).render())
     asyncio.run(scenario())

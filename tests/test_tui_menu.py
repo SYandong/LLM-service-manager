@@ -108,9 +108,9 @@ async def choose(app, pilot, option_id):
 
 
 @pytest.mark.parametrize("name, disabled", [
-    ("default-model", {"preload", "sleep", "stop", "cancel-queue"}),   # sleeping, default, no queue
-    ("research-model", {"wake", "preload", "cancel-queue"}),           # awake, no queue
-    ("cold-model", {"sleep", "stop", "cancel-queue"}),                 # stopped, no queue
+    ("default-model", {"preload", "sleep", "stop", "cancel-queue", "copy-endpoint"}),   # sleeping, default, no queue
+    ("research-model", {"wake", "preload", "cancel-queue", "copy-endpoint"}),           # awake, no queue
+    ("cold-model", {"sleep", "stop", "cancel-queue", "copy-endpoint"}),                 # stopped, no queue
 ])
 def test_menu_is_english_fixed_order_and_greys_out_by_state(snapshot, name, disabled):
     async def scenario():
@@ -121,10 +121,11 @@ def test_menu_is_english_fixed_order_and_greys_out_by_state(snapshot, name, disa
             assert app.menu_model == name
             options = menu_options(menu(app))
             assert [option.id for option in options] == [key for key, _ in MENU_ITEMS]
-            assert [str(option.prompt) for option in options][:8] == [
+            assert [str(option.prompt) for option in options][:9] == [
                 "Load into memory", "Bring online", "Sleep to memory",
                 "Free from memory" + (" (default)" if name == "default-model" else ""),
-                "Cancel queued operations", "Copy name", "Copy status line", "Insert into command line"]
+                "Cancel queued operations", "Copy name", "Copy status line",
+                "Copy endpoint (needs api_url)", "Insert into command line"]
             assert {option.id for option in options if option.disabled} == disabled
             # Greyed-out entries stay visible rather than disappearing.
             assert len(options) == len(MENU_ITEMS)
@@ -251,6 +252,49 @@ def test_copy_entries_use_the_clipboard_and_the_command_line(snapshot):
     asyncio.run(scenario())
 
 
+def test_copy_endpoint_address_is_unavailable_without_config(snapshot):
+    async def scenario():
+        app, client = action_app(snapshot)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await settle(app, pilot)
+            for timer in app._ui_timers:
+                timer.pause()
+            before = list(client.calls)
+            await open_menu(app, pilot, "research-model")
+            # The disabled entry itself states the reason: no invocation needed.
+            options = menu_options(menu(app))
+            assert options[7].disabled
+            assert "needs api_url" in str(options[7].prompt)
+            assert "Menu for" not in output(app)
+            app.action_help()
+            assert "api_url" in output(app)  # Plus a help path to the setup.
+            app.menu_action("copy-endpoint", "research-model")
+            assert clipboard(app) == ""
+            assert client.calls == before  # No network/model request on the unavailable path.
+    asyncio.run(scenario())
+
+
+def test_copy_endpoint_address_copies_the_configured_base_url(snapshot):
+    async def scenario():
+        app, client = action_app(snapshot)
+        client.api_url = "https://data-plane.example.invalid/v1"
+        async with app.run_test(size=(100, 30)) as pilot:
+            await settle(app, pilot)
+            for timer in app._ui_timers:
+                timer.pause()
+            before = list(client.calls)
+            await open_menu(app, pilot, "research-model")
+            assert not menu_options(menu(app))[7].disabled
+            assert str(menu_options(menu(app))[7].prompt) == "Copy model endpoint address"
+            await choose(app, pilot, "copy-endpoint")
+            await settle(app, pilot)
+            assert clipboard(app) == "https://data-plane.example.invalid/v1"
+            assert entry(app).value == ""  # Never inserted into the command line.
+            assert client.calls == before  # Copying talks only to the terminal clipboard.
+            assert "endpoint address" in bottom(app)
+    asyncio.run(scenario())
+
+
 def test_clicking_a_gpu_line_or_an_event_line_copies_it(snapshot):
     async def scenario():
         app, _ = action_app(snapshot)
@@ -338,7 +382,7 @@ def test_clicking_blank_panel_or_composer_closes_the_menu(snapshot):
         app, _ = action_app(snapshot)
         async with app.run_test(size=(100, 30)) as pilot:
             await settle(app, pilot)
-            for target in ["#details", "#command", "#memory", "#events"]:
+            for target in ["#command", "#memory", "#events"]:
                 await open_menu(app, pilot, "research-model")
                 assert app.menu_model == "research-model" and menu(app).display
                 await pilot.click(target)
