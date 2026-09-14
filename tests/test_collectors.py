@@ -185,9 +185,20 @@ def test_slow_probes_share_round_deadline_and_do_not_accumulate():
         c.close()
 
 
-def test_deadline_must_be_below_two_seconds():
+def test_deadline_must_be_at_most_twelve_seconds():
     with pytest.raises(ValueError):
-        collector(deadline=2)
+        collector(deadline=12.5)
+    with pytest.raises(ValueError):
+        collector(deadline=0)
+    collector(deadline=6).close()
+
+
+def test_probe_timeout_bounds():
+    from llmsvc.collectors import build_collector
+    for bad in (0, 6.5, True, "1"):
+        with pytest.raises(ValueError):
+            build_collector({'swap_url': 'http://localhost:8000', 'models': {}, 'probe_timeout': bad})
+    build_collector({'swap_url': 'http://localhost:8000', 'models': {}, 'probe_timeout': 4, 'deadline': 6}).close()
 
 
 def test_build_collector_config_adapter_and_no_upstream_probes():

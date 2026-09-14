@@ -22,8 +22,10 @@ class Collector:
     def __init__(self, models, *, swap_url, activity_reader=None, probes=None,
                  deadline=1.8, memory_budget_gb=200, host_min_available_gb=150,
                  max_workers=32):
-        if not 0 < deadline < 2:
-            raise ValueError("collector deadline must be between zero and two seconds")
+        # The scheduler samples every 15 s; nvidia-smi alone can take several
+        # seconds on a heavily loaded host, so allow most of one cadence.
+        if not 0 < deadline <= 12:
+            raise ValueError("collector deadline must be between zero and twelve seconds")
         self.models = {name: dict(value) for name, value in models.items()}
         self.probes = probes or Probes(swap_url)
         self.activity_reader = activity_reader
@@ -226,8 +228,8 @@ def build_collector(config):
         if "/upstream" in parts.path:
             raise ValueError("daemon probes must use direct endpoints, never upstream routing")
     timeout = config.get("probe_timeout", .5)
-    if not isinstance(timeout, (int, float)) or not 0 < timeout < 1:
-        raise ValueError("probe_timeout must be between zero and one second")
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 6:
+        raise ValueError("probe_timeout must be between zero and six seconds")
     probes = Probes(config["swap_url"], timeout=timeout,
                     **{k: config[k] for k in ("nvidia_smi", "systemctl", "proc_root", "host_meminfo_path") if k in config})
     reader = ActivityReader(config["activity_path"], config.get("ip_containers")) if config.get("activity_path") else None
