@@ -14,7 +14,39 @@ import zipfile
 REPO = 'SYandong/LLM-service-manager'
 FABLE_LOGIN = 'lushuyu'  # Shared account; exact harness/head marker is also required.
 SHA = re.compile(r'[0-9a-f]{40}')
-VERSION = re.compile(r'0\.1\.0a([1-9][0-9]*)')
+# Alpha series (0.1.0aN -> v0.1.0-alpha.N) and stable releases (X.Y.Z -> vX.Y.Z).
+VERSION = re.compile(r'0\.1\.0a([1-9][0-9]*)|(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')
+TAG = re.compile(r'v0\.1\.0-alpha\.([1-9][0-9]*)|v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')
+
+
+def tag_for(version):
+    """Map a Python distribution version to its immutable tag name."""
+    match = VERSION.fullmatch(version)
+    if not match:
+        raise ValueError('Invalid version')
+    return 'v0.1.0-alpha.' + match[1] if match[1] else 'v' + version
+
+
+def is_prerelease(tag):
+    match = TAG.fullmatch(tag)
+    if not match:
+        raise ValueError('Invalid tag')
+    return match[1] is not None
+
+
+def order_key(tag):
+    """Total order over published tags: every alpha precedes every stable release."""
+    match = TAG.fullmatch(tag)
+    if not match:
+        raise ValueError('Invalid tag')
+    if match[1]:
+        return (0, 1, 0, 0, int(match[1]))
+    return (int(match[2]), int(match[3]), int(match[4]), 1, 0)
+
+
+def latest_flag(tag):
+    """Stable releases become the repository's latest; prereleases never do."""
+    return 'false' if is_prerelease(tag) else 'true'
 
 
 def run(*args, cwd=None):
@@ -74,7 +106,7 @@ def validate_assets(directory, commit, tag):
         raise ValueError('Existing release identity differs')
     names = set(m['assets'])
     version = m['python_version']
-    if not VERSION.fullmatch(version) or tag != 'v0.1.0-alpha.' + VERSION.fullmatch(version)[1]:
+    if not VERSION.fullmatch(version) or tag != tag_for(version):
         raise ValueError('Invalid version/tag')
     expected = {'llm', f'llmsvc-{version}-py3-none-any.whl', f'llmsvc-{version}.tar.gz', 'deployment.tar.gz'}
     if names != expected:
@@ -132,15 +164,18 @@ def guard(event):
     match = VERSION.fullmatch(version)
     if not match or f'"{version}"' not in Path('llmsvc/__init__.py').read_text() or f'version="{version}"' not in Path('cli/llm').read_text():
         raise ValueError('Version literals differ')
-    tag = 'v0.1.0-alpha.' + match[1]
+    tag = tag_for(version)
     if pr['title'] != 'chore(release): ' + tag:
         raise ValueError('Release title/version differ')
     if not Path('CHANGELOG.md').read_text().split('\n## ', 2)[1].startswith(tag[1:] + ' — '):
         raise ValueError('Changelog version differs')
     releases = pages(f'repos/{REPO}/releases')
-    prior = [r for r in releases if not r['draft'] and re.fullmatch(r'v0\.1\.0-alpha\.[1-9][0-9]*', r['tag_name']) and r['tag_name'] != tag]
-    previous = max(prior, key=lambda r: int(r['tag_name'].rsplit('.', 1)[1]))
-    if int(match[1]) != int(previous['tag_name'].rsplit('.', 1)[1]) + 1:
+    prior = [r for r in releases if not r['draft'] and TAG.fullmatch(r['tag_name']) and r['tag_name'] != tag]
+    previous = max(prior, key=lambda r: order_key(r['tag_name']))
+    if order_key(tag) <= order_key(previous['tag_name']):
+        raise ValueError('Release version does not advance the published series')
+    if is_prerelease(tag) and (not is_prerelease(previous['tag_name'])
+                               or order_key(tag)[4] != order_key(previous['tag_name'])[4] + 1):
         raise ValueError('Release version is not the next alpha')
     baseline = run('git', 'rev-parse', previous['tag_name'] + '^{commit}')
     run('git', 'merge-base', '--is-ancestor', baseline, commit)
@@ -241,10 +276,10 @@ def publish(evidence, root):
         remote = root / 'existing'; remote.mkdir()
         run('gh', 'release', 'download', tag, '--repo', REPO, '--dir', str(remote))
         validate_assets(remote, commit, tag)
-        if not existing[0]['prerelease']:
-            raise ValueError('Existing release is not a prerelease')
+        if bool(existing[0]['prerelease']) != is_prerelease(tag):
+            raise ValueError('Existing release prerelease flag differs')
         if existing[0]['draft']:
-            run('gh', 'release', 'edit', tag, '--repo', REPO, '--draft=false', '--latest=false')
+            run('gh', 'release', 'edit', tag, '--repo', REPO, '--draft=false', '--latest=' + latest_flag(tag))
         return  # Published release is immutable; complete draft resumes without rebuild.
     artifacts = build(evidence, root)
     if not refs:
@@ -255,13 +290,13 @@ def publish(evidence, root):
     changelog = Path('CHANGELOG.md').read_text().split('\n## ', 2)[1]
     notes.write_text(changelog.split('\n', 1)[1] + '\n\nExact commit: `' + commit + '`. Verify SHA256SUMS and release-manifest.json. Deployment is owned by the outbound host consumer under #169.\n\nGenerated-By: Codex / gpt-6-astra\n')
     run('gh', 'release', 'create', tag, *map(str, sorted(artifacts.iterdir())), '--repo', REPO, '--verify-tag', '--target', commit,
-        '--draft', '--prerelease', '--title', tag, '--notes-file', str(notes))
+        '--draft', *(('--prerelease',) if is_prerelease(tag) else ()), '--title', tag, '--notes-file', str(notes))
     remote = root / 'downloaded'; remote.mkdir()
     run('gh', 'release', 'download', tag, '--repo', REPO, '--dir', str(remote))
     validate_assets(remote, commit, tag)
     if any(sha256(p) != sha256(remote / p.name) for p in artifacts.iterdir()):
         raise ValueError('Uploaded bytes differ')
-    run('gh', 'release', 'edit', tag, '--repo', REPO, '--draft=false', '--latest=false')
+    run('gh', 'release', 'edit', tag, '--repo', REPO, '--draft=false', '--latest=' + latest_flag(tag))
 
 
 def main():
@@ -275,7 +310,7 @@ def main():
         return
     args.work.mkdir(parents=True, exist_ok=False)
     publish(evidence, args.work.resolve())
-    print('Verified prerelease: ' + evidence['tag'])
+    print(('Verified prerelease: ' if is_prerelease(evidence['tag']) else 'Verified release: ') + evidence['tag'])
 
 
 if __name__ == '__main__':
