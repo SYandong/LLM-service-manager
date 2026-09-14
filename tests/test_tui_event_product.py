@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 pytest.importorskip('textual')
 from textual.widgets import Button, Input, RichLog, Static, TextArea
-from test_tui import make_app, snapshot
+from test_tui import make_app, open_details, snapshot
 from test_tui_events import BufferedEvents
 
 
@@ -68,7 +68,7 @@ def test_details_copy_is_explicit_and_save_is_portable_without_overwrite(snapsho
             app.update_events()
             frozen = app.event_export_text()
             with patch.object(app, 'copy_to_clipboard', side_effect=copied.append):
-                await pilot.press('e')
+                await open_details(app, pilot)
                 await pilot.pause()
                 area = app.screen.query_one('#event-text', TextArea)
                 assert area.read_only and area.text == frozen and copied == []
@@ -119,7 +119,7 @@ def test_normal_copy_uses_compact_summary_for_200_raw_records(snapshot):
             assert len(raw.encode('utf-8')) > 65536
             assert len(summary.encode('utf-8')) < 65536
             with patch.object(app, 'copy_to_clipboard', side_effect=copied.append):
-                await pilot.press('e')
+                await open_details(app, pilot)
                 await pilot.pause()
                 assert app.screen.query_one('#event-text', TextArea).selected_text == ''
                 assert copied == []
@@ -143,7 +143,7 @@ def test_copy_fallback_and_cancel_do_not_write_files_or_clipboard(snapshot, tmp_
         async with app.run_test(size=(40, 24)) as pilot:
             await app.workers.wait_for_complete()
             with patch.object(app, 'copy_to_clipboard', None):
-                await pilot.press('e')
+                await open_details(app, pilot)
                 await pilot.pause()
                 target = tmp_path / 'cancelled.txt'
                 app.screen.query_one('#export-path', Input).value = str(target)
@@ -152,7 +152,7 @@ def test_copy_fallback_and_cancel_do_not_write_files_or_clipboard(snapshot, tmp_
                 await pilot.press('escape')
                 assert not target.exists()
             with patch.object(app, 'copy_to_clipboard', side_effect=OSError('private backend message')):
-                await pilot.press('e')
+                await open_details(app, pilot)
                 await pilot.pause()
                 await pilot.click('#event-copy')
                 result = str(app.screen.query_one('#export-status', Static).render())
@@ -202,7 +202,7 @@ def test_saving_can_finish_after_details_close_without_touching_removed_widgets(
         started, release, finished = threading.Event(), threading.Event(), threading.Event()
         async with app.run_test(size=(100, 30)) as pilot:
             await app.workers.wait_for_complete()
-            await pilot.press('e')
+            await open_details(app, pilot)
             await pilot.pause()
             dialog = app.screen
             writer = dialog.write_text
@@ -237,7 +237,7 @@ def test_real_textual_copy_emits_osc52_only_after_user_activation(snapshot):
             await app.workers.wait_for_complete()
             packets = []
             with patch.object(app._driver, 'write', side_effect=packets.append):
-                await pilot.press('e')
+                await open_details(app, pilot)
                 await pilot.pause()
                 assert not any(packet.startswith('\x1b]52;') for packet in packets)
                 expected = app.event_summary_text()
@@ -265,7 +265,7 @@ def test_export_path_enter_never_runs_a_scheduler_command(snapshot):
         app, client = make_app(snapshot)
         async with app.run_test(size=(100, 30)) as pilot:
             await app.workers.wait_for_complete()
-            await pilot.press('e')
+            await open_details(app, pilot)
             await pilot.pause()
             dialog = app.screen
             path = dialog.query_one('#export-path', Input)

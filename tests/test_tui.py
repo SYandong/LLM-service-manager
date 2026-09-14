@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Claude Code / claude-fable-5-1
 """Headless tests for the optional, read-only terminal UI."""
 
 import asyncio
@@ -14,7 +15,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from textual.widgets import DataTable, Input, Static
+from textual.widgets import DataTable, Input, RichLog, Static
 from tui.app import SchedulerApp
 from test_llm import snapshot
 
@@ -43,6 +44,14 @@ class IdleEvents:
         return {"generation": 0, "events": [], "status": "SSE fixture", "dropped": 0}
 
 
+async def open_details(app, pilot):
+    """The frozen event view is a UI command now, not a printable shortcut."""
+    field = app.dashboard.query_one("#command", Input)
+    field.value = "/events"
+    await pilot.press("enter")
+    await pilot.pause()
+
+
 def make_app(snapshot):
     path = Path(__file__).resolve().parents[1] / "cli" / "llm"
     api = SimpleNamespace(**runpy.run_path(str(path)))
@@ -59,6 +68,7 @@ def test_layout_and_selection(snapshot, size):
             await pilot.pause()
             table = app.query_one("#models", DataTable)
             command = app.query_one("#command", Input)
+            assert app.focused is command  # Opening the UI is opening a command line.
             assert table.row_count == 4
             assert table.size.height >= 3
             assert command.region.bottom <= size[1]
@@ -71,10 +81,35 @@ def test_layout_and_selection(snapshot, size):
                 assert panel.region.x >= table.region.right
             assert panel.region.bottom <= app.query_one("#details").region.y
             assert app.screen.has_class("narrow") == (size[0] < 100)
-            await pilot.press("down")
+            await pilot.press("shift+down")
             assert app.selected_model() == "research-model"
             assert "ctr-b" in str(app.query_one("#details", Static).render())
             assert set(client.calls) == {("GET", "/v1/state")}
+    asyncio.run(scenario())
+
+
+def test_command_line_keeps_focus_through_every_panel_click(snapshot):
+    async def scenario():
+        app, _ = make_app(snapshot)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            command = app.query_one("#command", Input)
+            for target in ["#models", "#gpus", "#memory", "#events", "#source-status",
+                           "#details", "#result", "#event-panel", "#summary"]:
+                await pilot.click(target)
+                await pilot.pause()
+                assert app.focused is command, target
+            # Non-focusable panels are the mechanism, not an accident of ordering.
+            for widget in app.query("DataTable, RichLog, Button, VerticalScroll, OptionList"):
+                assert not widget.can_focus, widget.id
+            # The Details button opens its own screen and hands focus back on close.
+            await pilot.click("#event-details")
+            await pilot.pause()
+            assert app.screen is not app.dashboard
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.focused is command
     asyncio.run(scenario())
 
 
@@ -83,9 +118,9 @@ def test_command_refresh_and_parser_errors(snapshot):
         app, client = make_app(snapshot)
         async with app.run_test(size=(100, 30)) as pilot:
             await app.workers.wait_for_complete()
-            await pilot.pause()
+            for timer in app._ui_timers:
+                timer.pause()  # Count only the requests this test issues.
             command = app.query_one("#command", Input)
-            command.focus()
             command.value = "status"
             await pilot.press("enter")
             await app.workers.wait_for_complete()
@@ -106,12 +141,13 @@ def test_failed_refresh_retains_snapshot_and_selection(snapshot):
         async with app.run_test(size=(100, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            await pilot.press("down")
+            await pilot.press("shift+down")
             client.error = "connection refused"
             await app.refresh_state().wait()
             assert app.snapshot == snapshot
             assert app.selected_model() == "research-model"
-            assert "connection refused" in str(app.query_one("#result", Static).render())
+            bar = str(app.query_one("#event-status", Static).render())
+            assert "connection refused" in bar and "Refresh failed at" in bar
             client.error = None
             await app.refresh_state().wait()
             assert app.selected_model() == "research-model"
@@ -124,7 +160,7 @@ def test_resize_preserves_selection(snapshot):
         async with app.run_test(size=(100, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            await pilot.press("down")
+            await pilot.press("shift+down")
             await pilot.resize_terminal(40, 24)
             await pilot.pause()
             assert app.screen.has_class("narrow")
@@ -133,15 +169,71 @@ def test_resize_preserves_selection(snapshot):
     asyncio.run(scenario())
 
 
-def test_polling_interval_is_five_seconds(snapshot):
+def test_wide_table_shows_the_memory_budget_column(snapshot):
+    async def scenario():
+        snapshot["models"][1]["budget_gb"] = 80
+        app, _ = make_app(snapshot)
+        async with app.run_test(size=(200, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            table = app.query_one("#models", DataTable)
+            assert [str(column.label) for column in table.columns.values()] == [
+                "MODEL", "STATE", "GPU", "MEM", "BUDGET", "USED", "10m", "PIN"]
+            assert table.get_cell("research-model", "BUDGET").plain.strip() == "80G"
+            assert table.get_cell("cold-model", "BUDGET").plain.strip() == "?G"
+    asyncio.run(scenario())
+
+
+def test_polling_interval_is_half_a_second(snapshot):
     async def scenario():
         app, client = make_app(snapshot)
         async with app.run_test(size=(100, 30)) as pilot:
             await app.workers.wait_for_complete()
+            assert app.refresh_seconds == 0.5
             assert len(client.calls) == 1
-            await pilot.pause(5.2)
+            await pilot.pause(0.7)
             await app.workers.wait_for_complete()
-            assert len(client.calls) == 2
+            assert len(client.calls) >= 2
+    asyncio.run(scenario())
+
+
+def test_refresh_interval_is_configurable(snapshot, monkeypatch):
+    path = Path(__file__).resolve().parents[1] / "cli" / "llm"
+    api = SimpleNamespace(**runpy.run_path(str(path)))
+    assert SchedulerApp(FakeClient(snapshot), api, event_reader=IdleEvents(),
+                        refresh=2).refresh_seconds == 2
+    monkeypatch.setenv("LLM_TUI_REFRESH", "1.5")
+    assert SchedulerApp(FakeClient(snapshot), api, event_reader=IdleEvents()).refresh_seconds == 1.5
+    monkeypatch.setenv("LLM_TUI_REFRESH", "not-a-number")
+    assert SchedulerApp(FakeClient(snapshot), api, event_reader=IdleEvents()).refresh_seconds == 0.5
+    monkeypatch.setenv("LLM_TUI_REFRESH", "0")
+    assert SchedulerApp(FakeClient(snapshot), api, event_reader=IdleEvents()).refresh_seconds == 0.5
+
+
+def test_scheduler_event_triggers_an_immediate_state_read(snapshot):
+    async def scenario():
+        app, client = make_app(snapshot)
+        events = []
+
+        class Reader(IdleEvents):
+            def drain(self):
+                batch, events[:] = list(events), []
+                return {"generation": 0, "events": batch, "status": "connected", "dropped": 0}
+
+        app.event_reader = Reader()
+        async with app.run_test(size=(100, 30)) as pilot:
+            await app.workers.wait_for_complete()
+            for timer in app._ui_timers:
+                timer.pause()  # Only the event may cause the next read.
+            before = len(client.calls)
+            events.append({"id": 7, "timestamp": 7, "kind": "sleep", "model": "research-model"})
+            app.update_events()
+            await app.workers.wait_for_complete()
+            assert len(client.calls) == before + 1
+            assert any("research-model" in line.text for line in app.query_one("#events", RichLog).lines)
+            # A drain with no new event must not add another request.
+            app.update_events()
+            await app.workers.wait_for_complete()
+            assert len(client.calls) == before + 1
     asyncio.run(scenario())
 
 
@@ -158,12 +250,15 @@ def test_slow_refresh_does_not_overlap_or_block_input(snapshot):
 
         async with app.run_test(size=(100, 30)) as pilot:
             await app.workers.wait_for_complete()
+            for timer in app._ui_timers:
+                timer.pause()
             client.request = slow
             first = app.refresh_state()
             try:
                 assert await asyncio.to_thread(started.wait, 2)
                 await app.refresh_state().wait()
-                await pilot.press("slash")
+                await pilot.press("s", "t", "a", "t", "u", "s")
+                assert app.query_one("#command", Input).value == "status"
                 assert app.query_one("#command", Input).has_focus
             finally:
                 release.set()

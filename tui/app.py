@@ -1,5 +1,6 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Codex / gpt-5.6-luna
+# Generated-By: Claude Code / claude-fable-5-1
 """Scheduler dashboard; command semantics come from the standalone CLI."""
 
 import argparse
@@ -7,6 +8,7 @@ import asyncio
 from datetime import datetime, timezone
 import json
 import math
+import os
 import shlex
 import threading
 import time
@@ -17,9 +19,30 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Input, RichLog, Static
+from textual.widgets import Button, DataTable, Input, OptionList, RichLog, Static
+from textual.widgets.option_list import Option
 
 from .event_view import EventDetails, EventPresentation
+
+
+# Item menu order is fixed; the identifier of the first four is the CLI verb the
+# entry submits through the ordinary command path.
+MENU_ITEMS = (
+    ("preload", "Load into memory"),
+    ("wake", "Bring online"),
+    ("sleep", "Sleep to memory"),
+    ("stop", "Free from memory"),
+    ("copy-name", "Copy name"),
+    ("copy-row", "Copy status line"),
+    ("insert", "Insert into command line"),
+)
+
+# UI-layer actions only. Model commands stay in cli/llm's parser.
+SLASH_COMMANDS = ("/clear", "/copy", "/events", "/help", "/quit", "/refresh", "/usage")
+
+HINT = "Enter run · Tab complete · Ctrl+O menu · /help"
+
+INTERRUPT_WINDOW = 2.0
 
 
 class CommandMessage(Exception):
@@ -35,6 +58,31 @@ class UIParser(argparse.ArgumentParser):
 
     def error(self, message):
         raise CommandMessage(message)
+
+
+class CommandInput(Input):
+    """The only focusable dashboard widget; UI keys never reach it as text."""
+
+    async def on_key(self, event):
+        handler = getattr(self.app, "handle_command_key", None)
+        if handler is None:
+            return
+        if handler(event.key, event.is_printable, event.character):
+            event.stop()
+            event.prevent_default()
+
+
+class ModelTable(DataTable, can_focus=False):
+    """A click selects a row and opens its menu without taking focus."""
+
+    def on_click(self, event):
+        # Runs before DataTable's own handler, which still moves its cursor after
+        # this; the menu takes the clicked row from the click metadata directly.
+        meta = event.style.meta
+        row = meta.get("row")
+        opener = getattr(self.app, "open_model_menu", None)
+        if opener is not None and isinstance(row, int) and row >= 0 and not meta.get("out_of_bounds", False):
+            opener(row)
 
 
 class ConfirmRam(ModalScreen):
@@ -77,14 +125,12 @@ class EventsChanged(Message):
 class SchedulerApp(App):
     TITLE = "LLM service status"
     CSS = """
-    Screen { background: #171717; color: #d4d4d4; }
+    Screen { background: #171717; color: #d4d4d4; layers: base overlay; }
     DataTable { background: #171717; }
     DataTable > .datatable--header { background: #242424; color: #b0b0b0; text-style: none; }
     DataTable > .datatable--cursor { background: #34302a; color: #faf3e6; text-style: bold; }
     DataTable > .datatable--hover { background: #242424; }
     RichLog { background: #171717; padding: 0 1; }
-    Input { background: #202020; border: tall #383838; }
-    Input:focus { border: tall #ad8c63; }
     #event-title { color: #ad8c63; padding: 0 1; }
     #event-status { color: #a3a3a3; background: #242424; padding: 0 1; }
     #details { color: #a3a3a3; }
@@ -116,26 +162,27 @@ class SchedulerApp(App):
     #usage-text { height: auto; padding: 0 1; }
     Screen.usage #summary, Screen.usage #content, Screen.usage #details-view { display: none; }
     Screen.usage #usage-view { display: block; }
-    #command { height: 3; }
+    #command-row { height: 1; background: #202020; }
+    #prompt { width: 2; height: 1; color: #ad8c63; }
+    #command { width: 1fr; height: 1; border: none; padding: 0; background: #202020; }
+    #model-menu { layer: overlay; display: none; width: 34; height: auto; max-height: 12;
+                  background: #202020; border: tall #ad8c63; }
     """
-    BINDINGS = [("q", "quit", "Quit"), ("r", "refresh_state", "Refresh"),
-                ("slash", "command", "Command"), ("question_mark", "help", "Help"),
-                ("ctrl+r", "reset_events", "Reset events"), ("u", "usage", "Usage"),
-                ("f", "prepare_free", "Free"), ("p", "prepare_pin", "Pin"),
-                ("w", "prepare_wake", "Wake"), ("e", "event_details", "Event details")]
+    # Printable keys belong to the command line; only control chords bind here.
+    BINDINGS = [("ctrl+r", "reset_events", "Reset events")]
 
-    def __init__(self, client, api, event_reader=None, **kwargs):
+    def __init__(self, client, api, event_reader=None, refresh=None, **kwargs):
         super().__init__(**kwargs)
         self.client = client
         self.api = api
         self.snapshot = None
         self.fetching = False
         self._write_busy = False
-        self._shortcut_target = None
         self._registry_generation = 0
         self._state_generation = 0
         self.model_names = []
         self.terminal_width = 100
+        self.refresh_seconds = self.configured_refresh(refresh)
         self.event_reader = event_reader if event_reader is not None else api.EventReader(client)
         self.event_history = []
         self.event_presentation = EventPresentation(api.clean_text, api.format_wake_progress)
@@ -155,6 +202,26 @@ class SchedulerApp(App):
         self.usage_error = "Loading usage…"
         self.usage_generation = 0
         self.usage_fetching = False
+        self.history = []
+        self.history_index = None
+        self.history_draft = ""
+        self.menu_model = None
+        self.pending_confirm = None
+        self._interrupt_at = None
+        self._notice = None
+        self._observation = None
+        self._connection = "SSE connecting"
+
+    @staticmethod
+    def configured_refresh(refresh):
+        """Seconds between /v1/state polls; LLM_TUI_REFRESH overrides the default."""
+        if refresh is None:
+            refresh = os.environ.get("LLM_TUI_REFRESH")
+        try:
+            seconds = float(0.5 if refresh is None else refresh)
+        except (TypeError, ValueError):
+            return 0.5
+        return seconds if math.isfinite(seconds) and seconds > 0 else 0.5
 
     @property
     def dashboard(self):
@@ -167,7 +234,7 @@ class SchedulerApp(App):
             yield Static("Loading GPU observations…", id="gpus", markup=False)
             yield Static("Loading RAM observations…", id="memory", markup=False)
         with Horizontal(id="content"):
-            yield DataTable(id="models", cursor_type="row")
+            yield ModelTable(id="models", cursor_type="row")
             with Vertical(id="event-panel"):
                 with Horizontal(id="event-heading"):
                     yield Static("Events via scheduler", id="event-title", markup=False)
@@ -182,22 +249,29 @@ class SchedulerApp(App):
             with VerticalScroll(id="usage-scroll"):
                 yield Static("Loading usage…", id="usage-text", markup=False)
         with VerticalScroll(id="details-view"):
-            yield Static("Select a model with ↑/↓", id="details", markup=False)
+            yield Static("Select a model with Shift+↑/↓", id="details", markup=False)
         with VerticalScroll(id="result-view"):
-            yield Static("Status · refresh every 5 seconds", id="result", markup=False)
-        command = Input(placeholder="status | free --gpu 0 | wake MODEL | pin MODEL --for 8h", id="command")
-        # Newer Textual selects all on focus; typing a parameter must append at
-        # the requested cursor instead of replacing the prefilled command.
-        if hasattr(command, "select_on_focus"):
-            command.select_on_focus = False
-        yield command
-        yield Static("SSE connecting · / command · ? help · q quit", id="event-status", markup=False)
+            yield Static("Status · refresh every %ss · Ctrl+O opens the item menu" % self.api.number(
+                self.refresh_seconds), id="result", markup=False)
+        with Horizontal(id="command-row"):
+            yield Static("› ", id="prompt", markup=False)
+            command = CommandInput(placeholder="status | wake MODEL | sleep MODEL | /help", id="command")
+            # Newer Textual selects all on focus; typing a parameter must append at
+            # the requested cursor instead of replacing the prefilled command.
+            if hasattr(command, "select_on_focus"):
+                command.select_on_focus = False
+            yield command
+        yield OptionList(id="model-menu", markup=False)
+        yield Static(self._connection + " · " + HINT, id="event-status", markup=False)
 
     def on_mount(self):
-        self.dashboard.query_one("#models", DataTable).focus()
+        # Only the command line accepts focus; every panel is click-only.
+        for widget in self.dashboard.query("RichLog, Button, VerticalScroll, OptionList"):
+            widget.can_focus = False
+        self.dashboard.query_one("#command", Input).focus()
         self._event_status = self.dashboard.query_one("#event-status", Static)
         self._event_log = self.dashboard.query_one("#events", RichLog)
-        self._ui_timers.append(self.set_interval(5, self.refresh_current))
+        self._ui_timers.append(self.set_interval(self.refresh_seconds, self.refresh_current))
         self.refresh_state()
         self._event_driven = hasattr(self.event_reader, "set_notify")
         self._event_timer = self.set_interval(0.5, self.update_events, pause=self._event_driven)
@@ -222,6 +296,7 @@ class SchedulerApp(App):
     def on_resize(self, event):
         self.terminal_width = event.size.width
         self.dashboard.set_class(event.size.width < 100, "narrow")
+        self.close_menu()
         if self.snapshot is not None:
             self.render_snapshot()
         if self.usage_active:
@@ -272,6 +347,9 @@ class SchedulerApp(App):
             return
         self.fetching = True
         generation = self._state_generation
+        # A half-second poll must never overwrite what a command printed; only a
+        # typed status command owns the result area.
+        typed = args is not None
         try:
             args = args or self.api.build_parser(UIParser).parse_args(["status"])
             snapshot = await asyncio.to_thread(self.api.execute_command, args, self.client)
@@ -285,16 +363,22 @@ class SchedulerApp(App):
                 message = json.dumps(snapshot, ensure_ascii=False)
             else:
                 message = self.snapshot_message()
-            if not self.usage_active:
-                self.show_result(message)
+            if typed:
+                if not self.usage_active:
+                    self.show_result(message)
+            else:
+                self.show_observation(message)
         except Exception as exc:
-            if self.is_running and not self.usage_active and generation == self._state_generation:
-                self.show_result("Refresh failed; last snapshot retained: " + str(exc))
+            if self.is_running and generation == self._state_generation:
+                # Keep the last good snapshot and say when the failed read happened.
+                failure = "Refresh failed at %s; last snapshot retained: %s" % (
+                    datetime.now(timezone.utc).strftime("%H:%M:%SZ"), exc)
+                if typed and not self.usage_active:
+                    self.show_result(failure)
+                else:
+                    self.show_observation(failure)
         finally:
             self.fetching = False
-
-    def action_refresh_state(self):
-        self.refresh_current()
 
     @work
     async def show_models(self, args):
@@ -393,17 +477,11 @@ class SchedulerApp(App):
         else:
             self.refresh_state()
 
-    def action_usage(self):
-        if self.usage_active:
-            self.show_status()
-        else:
-            self.show_usage(self.usage_args)
-
     def show_status(self):
         self.usage_active = False
         self.usage_generation += 1
         self.dashboard.remove_class("usage")
-        self.dashboard.query_one("#models", DataTable).focus()
+        self.dashboard.query_one("#command", Input).focus()
         self.refresh_state()
 
     def show_usage(self, args):
@@ -412,9 +490,10 @@ class SchedulerApp(App):
         self.usage_generation += 1
         self.usage_snapshot = None
         self.usage_error = "Loading usage…"
+        self.close_menu()
         self.dashboard.add_class("usage")
         self.render_usage()
-        self.dashboard.query_one("#usage-7", Button).focus()
+        self.dashboard.query_one("#command", Input).focus()
         self.refresh_usage()
 
     @work
@@ -461,6 +540,7 @@ class SchedulerApp(App):
             days = event.button.id.removeprefix("usage-")
             args = self.api.build_parser(UIParser).parse_args(["usage", "--days", days, "--by", self.usage_args.by])
             self.show_usage(args)
+        self.dashboard.query_one("#command", Input).focus()
 
     def update_static(self, name, text):
         if self._rendered.get(name) != text:
@@ -470,21 +550,36 @@ class SchedulerApp(App):
     def show_result(self, text):
         self.update_static("result", self.api.clean_text(text))
 
+    def show_notice(self, text):
+        """Transient UI feedback; a background poll must never overwrite it."""
+        self._notice = text
+        self.render_event_status()
+
+    def show_observation(self, text):
+        """The latest background read; it has its own slot beside user feedback."""
+        self._observation = text
+        self.render_event_status()
+
+    def gpu_text(self, gpu):
+        return "GPU%s %s/%sG  llmsvc %s  ext %s" % (
+            gpu["index"], self.api.number(gpu.get("used_gb")), self.api.number(gpu.get("total_gb")),
+            self.api.number(gpu.get("managed_gb")), self.api.number(gpu.get("external_gb")))
+
+    @staticmethod
+    def gpu_style(gpu):
+        total, used = gpu.get("total_gb"), gpu.get("used_gb")
+        if not (total is not None and total > 0 and used is not None):
+            return "dim"
+        percent = min(100, max(0, used / total * 100))
+        return "#6f9f6f" if percent < 60 else "#ad8c63" if percent < 85 else "#c46a6a"
+
     def render_snapshot(self):
         state = self.snapshot
         # The server filters active intents with its own clock.
         reserved = {r["gpu"] for r in state.get("reserves", [])}
         lines = Text()
         for gpu in state.get("gpus", []):
-            total, used = gpu.get("total_gb"), gpu.get("used_gb")
-            known = total is not None and total > 0 and used is not None
-            percent = min(100, max(0, used / total * 100)) if known else None
-            filled = round(10 * percent / 100) if known else 0
-            lines.append("GPU%s " % gpu["index"], style="bold")
-            lines.append("█" * filled + "░" * (10 - filled), style="#ad8c63" if known else "dim")
-            lines.append(" %3s%% %s/%s GiB" % (
-                round(percent) if known else "?", self.api.number(used), self.api.number(total)),
-                style=None if known else "dim")
+            lines.append(self.gpu_text(gpu), style=self.gpu_style(gpu))
             if gpu["index"] in reserved:
                 lines.append(" · reserved for placement", style="cyan")
             lines.append("\n")
@@ -497,12 +592,14 @@ class SchedulerApp(App):
         table = self.dashboard.query_one("#models", DataTable)
         previous = self.selected_model()
         table_width = self.terminal_width if self.terminal_width < 100 else int(self.terminal_width * 0.6)
-        narrow = table_width < 100
+        # 65 = the fixed columns plus DataTable's per-cell padding; below that the
+        # wide set cannot fit and the compact one is used instead.
+        narrow = table_width < 78
         columns = [("MODEL", max(8, min(26, table_width - (33 if narrow else 65)))), ("STATE", 8), ("GPU", 3), ("MEM", 6)]
         if narrow:
             columns.append(("PIN", 3))
         else:
-            columns.extend([("USED", 6), ("10m", 4), ("FROM", 10), ("PIN", 16)])
+            columns.extend([("BUDGET", 6), ("USED", 6), ("10m", 4), ("PIN", 16)])
         if self._table_columns != columns:
             # Only a schema/terminal-width change rebuilds the table.
             table.clear(columns=True)
@@ -532,11 +629,11 @@ class SchedulerApp(App):
                 row.append("yes" if pin else "-")
             else:
                 used = None if now is None or stats.get("last_request_at") is None else now - stats["last_request_at"]
-                row.extend([self.api.age(used), "?" if stats.get("requests_last_10m") is None else str(stats["requests_last_10m"]),
-                            ",".join(source for source in stats.get("by", []) if source and source != "unknown") or "?",
+                row.extend([self.api.number(model.get("budget_gb")) + "G", self.api.age(used),
+                            "?" if stats.get("requests_last_10m") is None else str(stats["requests_last_10m"]),
                             self.api.expiry(pin["until"]) if pin else "-"])
             cells = tuple(Text(self.api.clean_text(value),
-                               justify="right" if columns[index][0] in ("GPU", "MEM", "USED", "10m") else "left",
+                               justify="right" if columns[index][0] in ("GPU", "MEM", "BUDGET", "USED", "10m") else "left",
                                style="dim" if value in ("?", "?G", "-", "unknown") else "")
                           for index, value in enumerate(row))
             old = self._table_rows.get(name)
@@ -555,6 +652,10 @@ class SchedulerApp(App):
     def selected_model(self):
         row = self.dashboard.query_one("#models", DataTable).cursor_row
         return self.model_names[row] if 0 <= row < len(self.model_names) else None
+
+    def model_status_line(self, name):
+        cells = self._table_rows.get(name)
+        return None if cells is None else "  ".join(cell.plain.strip() for cell in cells)
 
     def update_details(self):
         name = self.selected_model()
@@ -578,77 +679,292 @@ class SchedulerApp(App):
         if self.snapshot is not None and event.data_table.is_attached:
             self.update_details()
 
-    def action_command(self):
-        self.dashboard.query_one("#command", Input).focus()
+    # ---------------------------------------------------------------- keyboard
 
-    def shortcut_model_present(self, name):
-        return self.snapshot is not None and name is not None and sum(
-            item.get("name") == name for item in self.snapshot.get("models", [])) == 1
-
-    def prepare_command(self, command):
-        # Printable keys belong to focused inputs. A modal owns its interaction
-        # until dismissed; no shortcut may edit the command hidden underneath it.
-        if not self.is_running or self.screen is not self.dashboard or isinstance(self.focused, Input):
-            return
-        if self._write_busy:
-            self.show_result("An operation is already running; wait for its result (no request queued)")
-            return
+    def handle_command_key(self, key, printable, character):
+        """Return True when the key is a UI action instead of command-line text."""
+        if not self.is_running or self.screen is not self.dashboard:
+            return False
+        if key != "ctrl+c":
+            self._interrupt_at = None
+        if self.pending_confirm is not None:
+            if printable or key in ("enter", "escape"):
+                self.resolve_confirm(character if printable else None)
+                return True
+            return False
+        if self.menu_model is not None:
+            if key in ("up", "down", "enter", "escape", "ctrl+o"):
+                self.menu_key(key)
+                return True
+            return False
         entry = self.dashboard.query_one("#command", Input)
-        if entry.value.strip():
-            entry.focus()
-            self.show_result("Existing command draft retained; edit or clear it before choosing another shortcut")
+        if key == "question_mark":
+            if entry.value:
+                return False
+            self.action_help()
+            return True
+        if key == "escape":
+            entry.value = ""
+            return True
+        if key == "ctrl+c":
+            self.interrupt(entry)
+            return True
+        if key == "ctrl+d":
+            if entry.value:
+                return False
+            self.exit()
+            return True
+        if key == "tab":
+            self.complete(entry)
+            return True
+        if key in ("up", "down"):
+            self.recall_history(entry, -1 if key == "up" else 1)
+            return True
+        if key in ("shift+tab", "shift+down", "shift+up"):
+            self.move_selection(-1 if key == "shift+up" else 1)
+            return True
+        if key == "ctrl+o":
+            self.open_model_menu()
+            return True
+        if key == "ctrl+l":
+            self._event_log.clear()
+            self.event_presentation.reset_display()
+            self.show_notice("Event log display cleared; cursor and history kept")
+            return True
+        return False
+
+    def interrupt(self, entry):
+        if entry.value:
+            entry.value = ""
+            self._interrupt_at = None
+            self.show_notice("Input cleared")
             return
-        name = self.selected_model() if command != "free" else None
-        if command != "free":
-            if not self.shortcut_model_present(name):
-                self.show_result("No current model selection; refresh and select a model first")
+        now = time.monotonic()
+        if self._interrupt_at is not None and now - self._interrupt_at <= INTERRUPT_WINDOW:
+            self.exit()
+            return
+        self._interrupt_at = now
+        self.show_notice("Press Ctrl+C again to exit")
+
+    def remember(self, value):
+        if value and (not self.history or self.history[-1] != value):
+            self.history.append(value)
+        self.history_index = None
+        self.history_draft = ""
+
+    def recall_history(self, entry, direction):
+        if not self.history:
+            return
+        if self.history_index is None:
+            if direction > 0:
                 return
-            try:
-                self.api.model_name(name)
-            except argparse.ArgumentTypeError as exc:
-                self.show_result(str(exc))
-                return
-            self._shortcut_target = (command, name)
+            self.history_draft = entry.value
+            self.history_index = len(self.history)
+        index = self.history_index + direction
+        if index >= len(self.history):
+            self.history_index = None
+            entry.value = self.history_draft
         else:
-            self._shortcut_target = None
-        if command == "pin":
-            # Empty duration intentionally fails the shared parser on Enter.
-            # -- ends options before every name, including leading-dash names.
-            entry.value = "pin --for  -- " + shlex.quote(name)
-            cursor = len("pin --for ")
-            message = "Enter a positive pin duration at the cursor (for example 1h), then press Enter; nothing sent"
+            self.history_index = max(0, index)
+            entry.value = self.history[self.history_index]
+        entry.cursor_position = len(entry.value)
+
+    def command_names(self):
+        parser = self.api.build_parser(UIParser)
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                return sorted(action.choices)
+        return []
+
+    def complete(self, entry):
+        value = entry.value
+        head, _, token = value.rpartition(" ")
+        first = not head.strip()
+        if first and token.startswith("/"):
+            candidates = [name for name in SLASH_COMMANDS if name.startswith(token)]
+        elif first:
+            candidates = [name for name in self.command_names() if name.startswith(token)]
         else:
-            entry.value = "free " if command == "free" else "wake -- " + shlex.quote(name)
-            cursor = len(entry.value)
-            message = "Review/edit the command, then press Enter; nothing sent"
-        entry.focus()
-        entry.cursor_position = cursor
-        # 0.70 moves the cursor to the end when the queued Focus arrives.
-        # Restore the parameter position after focus/layout, without overwriting
-        # text typed meanwhile or touching widgets after shutdown.
-        self.call_after_refresh(self.position_prefill_cursor, entry, entry.value, cursor)
-        self.show_result(message)
+            candidates = [name for name in self.model_names if name.startswith(token)]
+        if not candidates:
+            self.show_notice("No completion for %r" % self.api.clean_text(token))
+            return
+        if len(candidates) == 1:
+            entry.value = (head + " " if head else "") + candidates[0] + " "
+            entry.cursor_position = len(entry.value)
+            return
+        self.show_result("Completions: " + " ".join(self.api.clean_text(name) for name in candidates))
 
-    def position_prefill_cursor(self, entry, value, cursor):
-        if self.is_running and entry.is_attached and entry.has_focus and entry.value == value:
-            entry.cursor_position = cursor
-
-    def action_prepare_free(self):
-        self.prepare_command("free")
-
-    def action_prepare_pin(self):
-        self.prepare_command("pin")
-
-    def action_prepare_wake(self):
-        self.prepare_command("wake")
+    def move_selection(self, delta):
+        if not self.model_names:
+            self.show_notice("No model rows to select")
+            return
+        table = self.dashboard.query_one("#models", DataTable)
+        row = min(len(self.model_names) - 1, max(0, table.cursor_row + delta))
+        table.move_cursor(row=row, animate=False)
+        self.update_details()
 
     def action_help(self):
-        self.show_result("f prefill free · p prefill selected pin (duration required) · w prefill selected wake · Enter submits · free --ram confirms separately · free [--gpu N] [--need 80G] [--ram] · wake MODEL [--wait 930] · pin MODEL --for 8h · unpin MODEL · unreserve ID · models · registry · add PATH --name X --base BASE · rm NAME · reserve --gpu N --size 80G --for 4h · all operations accept --dry-run · status · usage --days 7|30 · u usage · / command · e event details/copy/save · Ctrl+R reset events after known restart · q quit")
+        self.show_result(
+            "Enter run · Tab complete · ↑/↓ history · Shift+↑/↓ or Shift+Tab select model · "
+            "Ctrl+O item menu · Ctrl+L clear event log · Ctrl+R reset event cursor · "
+            "Esc close menu or clear input · Ctrl+C clear then exit · Ctrl+D exit · "
+            "click a row for its menu, a GPU line or an event line to copy it · "
+            "/help /quit /usage [7|30] /events /clear /copy [MODEL|gpu N|events] /refresh · "
+            "commands use the llm CLI: status · usage --days 7|30 · wake MODEL · sleep MODEL · "
+            "stop MODEL · preload MODEL · free [--gpu N] [--need 80G] [--ram] · pin MODEL --for 8h · "
+            "unpin MODEL · reserve --gpu N --size 80G --for 4h · unreserve ID · models · registry · "
+            "add PATH --name X --base BASE · rm NAME · all operations accept --dry-run")
 
     def action_reset_events(self):
         self.event_reader.reset_cursor()
         self.update_events()
         self.show_result("Event cursor reset locally; replaying available scheduler history")
+
+    # -------------------------------------------------------------- item menu
+
+    def open_model_menu(self, row=None):
+        if not self.is_running or self.screen is not self.dashboard:
+            return
+        table = self.dashboard.query_one("#models", DataTable)
+        if row is not None and 0 <= row < len(self.model_names):
+            table.move_cursor(row=row, animate=False)
+            self.update_details()
+        name = self.selected_model()
+        model = next((item for item in (self.snapshot or {}).get("models", []) if item["name"] == name), None)
+        if model is None:
+            self.show_result("No current model selection; refresh and select a model first")
+            return
+        state, default = model.get("state"), bool(model.get("is_default"))
+        disabled = {"awake": {"wake", "preload"}, "sleeping": {"preload", "sleep"},
+                    "stopped": {"sleep", "stop"}}.get(state, set()) | ({"stop"} if default else set())
+        menu = self.dashboard.query_one("#model-menu", OptionList)
+        menu.clear_options()
+        menu.add_options([Option(label + (" (default)" if default and key == "stop" else ""),
+                                 id=key, disabled=key in disabled) for key, label in MENU_ITEMS])
+        menu.display = True
+        menu.highlighted = next((index for index, (key, _) in enumerate(MENU_ITEMS) if key not in disabled), 0)
+        menu.styles.offset = self.menu_offset(table, self.model_names.index(name))
+        self.menu_model = name
+        self.dashboard.query_one("#command", Input).focus()
+        self.show_result("Menu for %s · ↑/↓ choose · Enter run · Esc close" % self.api.clean_text(name))
+
+    def menu_offset(self, table, row):
+        height, width = len(MENU_ITEMS) + 2, 34
+        region = table.content_region
+        y = region.y + (table.header_height if table.show_header else 0) + row - int(table.scroll_y) + 1
+        return (max(0, min(region.x + 2, self.size.width - width)),
+                max(0, min(y, self.size.height - height)))
+
+    def close_menu(self, notice=None):
+        if self.menu_model is None:
+            return
+        self.menu_model = None
+        menu = self.dashboard.query_one("#model-menu", OptionList)
+        menu.display = False
+        menu.clear_options()
+        self.dashboard.query_one("#command", Input).focus()
+        if notice:
+            self.show_notice(notice)
+
+    def menu_key(self, key):
+        menu = self.dashboard.query_one("#model-menu", OptionList)
+        if key == "up":
+            menu.action_cursor_up()
+        elif key == "down":
+            menu.action_cursor_down()
+        elif key == "enter":
+            menu.action_select()
+        else:
+            self.close_menu("Menu closed; nothing sent")
+
+    def on_option_list_option_selected(self, event):
+        event.stop()
+        if event.option_list.id != "model-menu":
+            return
+        choice, name = event.option.id, self.menu_model
+        self.close_menu()
+        if name is not None:
+            self.menu_action(choice, name)
+
+    def menu_action(self, choice, name):
+        if choice in ("preload", "wake", "sleep"):
+            self.submit_command("%s -- %s" % (choice, shlex.quote(name)))
+        elif choice == "stop":
+            self.pending_confirm = ("stop -- " + shlex.quote(name), name)
+            self.show_result("Free %s from memory? [y/N]" % self.api.clean_text(name))
+        elif choice == "copy-name":
+            self.copy_text(name, "model name")
+            self.append_to_command(name)
+        elif choice == "copy-row":
+            line = self.model_status_line(name)
+            if line is None:
+                self.show_notice("No status line for this model yet")
+            else:
+                self.copy_text(line, "status line")
+        elif choice == "insert":
+            self.append_to_command(name)
+
+    def resolve_confirm(self, character):
+        command, name = self.pending_confirm
+        self.pending_confirm = None
+        if character in ("y", "Y"):
+            self.submit_command(command)
+        else:
+            self.show_result("Free %s from memory cancelled; no request sent" % self.api.clean_text(name))
+
+    def append_to_command(self, text):
+        entry = self.dashboard.query_one("#command", Input)
+        value = entry.value
+        if value and not value.endswith(" "):
+            value += " "
+        entry.value = value + text
+        entry.cursor_position = len(entry.value)
+        entry.focus()
+
+    def copy_text(self, text, label):
+        """Requesting the terminal clipboard can silently fail; always say so."""
+        copier = getattr(self, "copy_to_clipboard", None)
+        if not callable(copier) or getattr(self, "_driver", None) is None:
+            self.show_notice("Clipboard unavailable here; %s not copied" % label)
+            return False
+        try:
+            copier(text)
+        except Exception:
+            self.show_notice("Clipboard request failed; %s not copied" % label)
+            return False
+        self.show_notice("Copy requested: %s (terminals may block clipboard access)" % label)
+        return True
+
+    # ------------------------------------------------------------------ mouse
+
+    def on_click(self, event):
+        if not self.is_running or self.screen is not self.dashboard:
+            return
+        widget = getattr(event, "widget", None)
+        identifier = getattr(widget, "id", None)
+        if identifier == "gpus":
+            self.copy_gpu_line(event.screen_offset.y - widget.content_region.y)
+        elif identifier == "events":
+            self.copy_event_line(event.screen_offset.y - widget.content_region.y + int(widget.scroll_offset.y))
+        if identifier != "model-menu":
+            self.dashboard.query_one("#command", Input).focus()
+
+    def copy_gpu_line(self, index):
+        gpus = (self.snapshot or {}).get("gpus", [])
+        if 0 <= index < len(gpus):
+            self.copy_text(self.gpu_text(gpus[index]), "gpu %s" % gpus[index]["index"])
+        else:
+            self.show_notice("No GPU observation on that line")
+
+    def copy_event_line(self, index):
+        lines = self._event_log.lines
+        if 0 <= index < len(lines):
+            self.copy_text(lines[index].text, "event line")
+        else:
+            self.show_notice("No event on that line")
+
+    # --------------------------------------------------------------- events
 
     def notify_events(self):
         # Called by the SSE reader thread. post_message is thread-safe; coalesce
@@ -660,6 +976,15 @@ class SchedulerApp(App):
     def on_events_changed(self, message):
         if self.is_running and not self._ui_closed:
             self._event_timer.resume()
+
+    def render_event_status(self):
+        # Connection, then the newest background read, then user feedback; the
+        # hint is last because it is the only part safe to clip.
+        parts = [self._connection, self._observation, self._notice, HINT]
+        status = " · ".join(self.api.clean_text(part) for part in parts if part)
+        if self._rendered.get("event-status") != status:
+            self._event_status.update(status)
+            self._rendered["event-status"] = status
 
     def update_events(self):
         # Textual marks the app stopped before pruning widgets, but closes the
@@ -688,10 +1013,8 @@ class SchedulerApp(App):
             status += " · %s events unavailable in server history" % update["missed"]
         if update["dropped"]:
             status += " · %s events dropped from delivery queue" % update["dropped"]
-        status = self.api.clean_text(status) + " · / command · ? help · q quit"
-        if self._rendered.get("event-status") != status:
-            self._event_status.update(status)
-            self._rendered["event-status"] = status
+        self._connection = status
+        self.render_event_status()
         if not changed:
             self.render_progress()
             return
@@ -716,6 +1039,9 @@ class SchedulerApp(App):
                 log.write(line)
         self.update_static("source-status", self.event_presentation.status())
         self.render_progress()
+        # Any scheduler observation is a reason to re-read state immediately;
+        # the in-flight guard merges this with the ordinary poll.
+        self.refresh_current()
 
     def event_export_text(self):
         header = ("Events: frozen copy of retained scheduler history (at most 200 records).\n"
@@ -725,7 +1051,7 @@ class SchedulerApp(App):
                   "and source bounds. Connection/inflight events and repeated errors/snapshots remain in raw records.\n")
         metadata = {"source_counters": self.event_presentation.counters(),
                     "delivery": self.event_delivery,
-                    "connection_status": self._rendered.get("event-status", "unknown"),
+                    "connection_status": self._connection or "unknown",
                     "events": self.event_history}
         return header + "\n" + "\n".join(self.format_event(item).plain for item in self.event_history) + "\n\nRaw JSON:\n" + json.dumps(metadata, ensure_ascii=False, indent=2, allow_nan=False)
 
@@ -740,8 +1066,8 @@ class SchedulerApp(App):
         return "\n".join(lines) + "\n\n" + self.event_presentation.status()
 
     def action_event_details(self):
-        if (self.is_running and self.screen is self.dashboard
-                and not isinstance(self.focused, Input)):
+        if self.is_running and self.screen is self.dashboard:
+            self.close_menu()
             self.push_screen(EventDetails(self.event_export_text(), self.event_summary_text()))
 
     def observe_progress(self, item):
@@ -825,26 +1151,40 @@ class SchedulerApp(App):
             line = line[:2048] + " …"
         return Text(self.api.clean_text(line), style=color)
 
+    # ---------------------------------------------------------------- commands
+
     def on_input_submitted(self, event):
         if (not self.is_running or self.screen is not self.dashboard
                 or event.input.id != "command"):
             return
+        value = event.value
+        event.input.value = ""
+        self.remember(value.strip())
+        self.submit_command(value)
+
+    def submit_command(self, text):
+        """The single entry point for typed, recalled and menu-issued commands."""
+        text = text.strip()
+        if not text:
+            return
+        self.close_menu()
+        if text.startswith("/"):
+            self.run_slash(text)
+            return
         try:
-            args = self.api.build_parser(UIParser).parse_args(shlex.split(event.value))
+            args = self.api.build_parser(UIParser).parse_args(shlex.split(text))
             if args.url or args.config or args.timeout:
                 raise CommandMessage("Connection settings are fixed for this session; restart llm to change them")
-            if self._shortcut_target == (args.command, getattr(args, "model", None)):
-                if not self.shortcut_model_present(args.model):
-                    raise CommandMessage("Shortcut model is no longer in the snapshot; refresh and select it again")
             if args.command == "usage":
                 self.show_usage(args)
             elif args.command in ("models", "registry"):
                 self.show_models(args)
-            elif args.command in ("pin", "unpin", "free", "wake", "reserve", "unreserve", "add", "rm"):
+            elif args.command in ("pin", "unpin", "free", "wake", "reserve", "unreserve",
+                                  "add", "rm", "sleep", "stop", "preload"):
                 if self._write_busy:
                     self.show_result("An operation is already running; wait for its result (no request queued)")
                 elif args.command == "free" and args.ram and not args.dry_run:
-                    self.confirm_ram(args, event.value)
+                    self.confirm_ram(args, text)
                 else:
                     self.run_write(args)
             else:
@@ -854,5 +1194,53 @@ class SchedulerApp(App):
                 self.refresh_state(args)
         except (CommandMessage, ValueError) as exc:
             self.show_result(str(exc))
-        self._shortcut_target = None
-        event.input.value = ""
+
+    def run_slash(self, text):
+        """UI-layer actions; these are not model commands and have no parser."""
+        parts = text.split()
+        name, rest = parts[0], parts[1:]
+        if name == "/help":
+            self.action_help()
+        elif name == "/quit":
+            self.exit()
+        elif name == "/refresh":
+            self.refresh_current()
+            self.show_notice("Refresh requested")
+        elif name == "/clear":
+            self._event_log.clear()
+            self.event_presentation.reset_display()
+            self.show_result("Cleared")
+        elif name == "/events":
+            self.action_event_details()
+        elif name == "/usage":
+            days = rest[0] if rest else "7"
+            if days not in ("7", "30"):
+                self.show_result("/usage accepts 7 or 30")
+                return
+            self.show_usage(self.api.build_parser(UIParser).parse_args(
+                ["usage", "--days", days, "--by", self.usage_args.by]))
+        elif name == "/copy":
+            self.run_copy(rest)
+        else:
+            self.show_result("Unknown UI command %s · try %s" % (
+                self.api.clean_text(name), " ".join(SLASH_COMMANDS)))
+
+    def run_copy(self, rest):
+        if rest and rest[0] == "events":
+            self.copy_text(self.event_summary_text(), "event summary")
+            return
+        if rest and rest[0] == "gpu":
+            gpus = (self.snapshot or {}).get("gpus", [])
+            index = next((position for position, gpu in enumerate(gpus)
+                          if len(rest) > 1 and str(gpu["index"]) == rest[1]), None)
+            if index is None:
+                self.show_result("/copy gpu N needs an observed GPU index")
+            else:
+                self.copy_gpu_line(index)
+            return
+        name = " ".join(rest) if rest else self.selected_model()
+        line = None if name is None else self.model_status_line(name)
+        if line is None:
+            self.show_result("/copy needs a model in the current snapshot, gpu N, or events")
+        else:
+            self.copy_text(line, "status line")

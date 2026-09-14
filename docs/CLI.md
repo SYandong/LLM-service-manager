@@ -294,27 +294,65 @@ python -m pip install '.[tui]'
 LLM_URL=http://scheduler:8011 python cli/llm
 ```
 
-状态面板每 5 秒刷新，显示 GPU 占用条、内存预算和可选择的模型表。100×30 时事件流在模型表右侧；小于 100 列时上方改为单列、事件流移到模型表下方。空间不足时模型表保留名称、状态、GPU、显存和 PIN 标记，选中模型的来源、pin 到期与 owner 在下方显示。鼠标可滚动较长的详情、命令结果和事件。
+界面以命令行为中心：启动就聚焦底部的 `› ` 输入框。`/v1/state` 每 0.5 秒刷新一次（用 `LLM_TUI_REFRESH` 指定秒数可改，非法或非正值回落 0.5 秒），收到任何 scheduler 事件也立刻再读一次状态；在途请求不会叠加轮询，也不会阻塞按键。顶部是每张卡一行的 GPU 行（`GPU0 87/144G  llmsvc 77  ext 10`，颜色随占用，未知量显示 `?` 并暗显）和内存预算行。中部左侧是模型表、右侧是事件面板；100×30 时并排，小于 100 列时改为上下排列。结果区在命令行上方，可滚动。底栏依次是连接状态、最近一次后台读取结果、最近一次界面操作提示，以及 `Enter run · Tab complete · Ctrl+O menu · /help`。
 
-- `↑` / `↓` 选择模型，`r` 刷新当前视图，`/` 聚焦命令框，`u` 在状态与 usage 之间切换，`?` 帮助，`q` 退出。用 `Tab` 聚焦详情或结果滚动区后，可用方向键翻动长内容；长错误不会限制在可见的两行内。
-- `f` 聚焦命令框并预填 `free`，可补充 `--gpu` / `--need` / `--ram`；`p` 预填所选模型的 pin 命令，把光标放在空的 `--for` 参数处；`w` 预填所选模型的 wake 命令。**三者都不发请求，编辑/核对后按 Enter 才提交。** Pin 必须手动填入正时长（例如 `1h`），快捷键不提供默认或永久 pin；空时长/零时长沿用共享解析器报错。
-- p/w 固定预填时的模型名，不因后续光标移动而改成另一模型；名称按 shell 引号规则保留并使用 `--` 分隔，支持空格、引号、Unicode、百分号和前导 `-`。没有选择、目标已从最新快照消失或选择失效时提示刷新/重新选择，不发送旧目标命令。服务器仍负责执行前的最新保护与状态检查。
-- 命令框获得焦点时，`f` / `p` / `w` / `u` / `?` / `q` 等可打印按键都是输入文字；用 Tab 将焦点移出输入框后才能使用快捷键。已有非空草稿不会被快捷键覆盖；正在执行写请求时不会预填或排队另一个操作。RAM 确认框打开期间 f/p/w 不修改下面的命令，Esc 仍取消且不发请求。
-- 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL`、`unreserve ID`、`models`、`registry`、`add PATH --name X --base BASE`、`rm NAME`、`free`、`wake MODEL`、`reserve --gpu N --size 80G --for 4h` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。
-- Pin/unpin 成功后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态。结果保留服务端 owner/actor；刷新失败会单独说明，已成功的写入不会因此重试。同一时刻只执行一个写请求（pin/unpin/free/wake/reserve/unreserve/add/rm），不会把重复提交排队。
-- usage 视图提供 7 天、30 天和返回状态按钮，每 5 秒刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
-- 活动读取失败显示 `Partial update · activity unavailable` 和受限安全原因（预算、锁、schema、parse 等）；旧版 `ValueError` 或未知原因只显示 `reason unavailable`。该轮活动数值按未知显示，不沿用旧计数；完整当前 snapshot/errors 保留在 `status --json`，不会被人类文案改写。读取成功而来源为 unknown/空时显示 `source unavailable`，仍保留已读取的计数；不能据此推断“未记录来源”、容器身份或数据库读取失败。部分来源已知时保留已知标签并标注其余来源不可用。
-- 请求在后台线程执行，慢请求不会叠加轮询或阻塞按键。连接失败保留上一份快照，并显示错误；新快照到达后保留选中模型。
-- 实际 `free --ram` 先弹出二次确认，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。Free/wake 完成后立即刷新，部分结果与错误仍保留；后台执行期间 UI 与事件面板继续响应。
-- Reserve 的预览、只读拒绝与实际回执语义见上节；默认入口的模型实际写入仍关闭；具有显式 catalog 提交能力的服务器可以排队 add/rm，queued 不等于 applied 或全局动作可用。安全列表/预览保持可用。不能用本客户端命令启用生产调度。
+### 键位
+
+| 键 | 作用 |
+|---|---|
+| Enter | 提交当前命令 |
+| Tab | 补全子命令名、`/` 开头的界面命令或模型名；唯一候选直接补全，多候选列在结果区 |
+| ↑ / ↓ | 浏览本会话的命令历史；走到底恢复尚未提交的草稿 |
+| Shift+↑ / Shift+↓ / Shift+Tab | 在模型表内移动选中行 |
+| Ctrl+O | 对当前选中模型打开条目菜单 |
+| Esc | 有菜单先关菜单，否则清空输入 |
+| Ctrl+C | 输入非空则清空；空输入时先在底栏提示 `Press Ctrl+C again to exit`，2 秒内再按才退出 |
+| Ctrl+D | 空输入退出；非空时仍是删除光标右侧字符 |
+| Ctrl+L | 只清空事件日志显示，不动游标和本地事件历史 |
+| Ctrl+R | 确认 daemon 已重启后重置事件游标 |
+| `?` | 仅在输入为空时显示帮助，否则就是普通字符 |
+
+旧的可打印快捷键 `f` / `p` / `w` / `u` / `r` / `q` / `e` 已删除，它们现在都是普通输入字符。对应功能改为界面命令：`/help`、`/quit`、`/usage [7|30]`、`/events`、`/clear`、`/copy [MODEL|gpu N|events]`、`/refresh`。**`/` 开头的是界面动作，不是模型命令**：TUI 不维护第二套命令语义，其余输入一律交给 `cli/llm` 的解析器与执行函数。
+
+命令行始终持有焦点：模型表、事件面板、GPU 行、结果区、滚动区和按钮都不可聚焦，鼠标点击处理完后焦点仍在输入框，点击面板不会打断正在输入的命令。
+
+### 条目菜单
+
+点击模型行或按 Ctrl+O，会在该行旁边弹出浮层菜单（不是模态窗口），英文条目顺序固定：
+
+1. `Load into memory` → `preload MODEL`
+2. `Bring online` → `wake MODEL`
+3. `Sleep to memory` → `sleep MODEL`
+4. `Free from memory` → `stop MODEL`
+5. `Copy name`
+6. `Copy status line`
+7. `Insert into command line`
+
+按当前状态置灰但仍然显示：`awake` 置灰 `Bring online` 与 `Load into memory`；`sleeping` 置灰 `Load into memory` 与 `Sleep to memory`；`stopped` 置灰 `Sleep to memory` 与 `Free from memory`；默认模型的 `Free from memory` 置灰并标 `(default)`。上下键跳过置灰项，Enter 执行，Esc 关闭，鼠标同样可用；菜单打开期间命令行保持焦点，按键先路由给菜单。
+
+前三项立刻通过与手输完全相同的命令路径执行，复用单写互斥和结果区的进度显示。`Free from memory` 先在结果区显示内联确认 `Free MODEL from memory? [y/N]`，按 `y` 才执行，其他任意键取消且不发请求，不弹窗。`preload` / `sleep` / `stop` 是上节的同名 CLI 子命令；菜单只把命令字符串送进同一条路径，模型名按 shell 引号规则保留并用 `--` 分隔，支持空格、引号、Unicode、百分号和前导 `-`。未知子命令由共享解析器报 `invalid choice`，菜单不会自己编造请求。
+
+`Copy name` 请求终端剪贴板并把模型名追加到命令行末尾；`Copy status line` 复制该模型在表格中的整行文本；点击 GPU 行复制该行的 `GPU N …` 描述；点击事件行复制该条的可见文本（换行的长事件按点中的可见行复制）。剪贴板成功与否都在底栏说明，不冒充复制成功。
+
+### 命令与刷新
+
+- 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL`、`unreserve ID`、`models`、`registry`、`add PATH --name X --base BASE`、`rm NAME`、`free`、`wake MODEL`、`sleep MODEL`、`stop MODEL`、`preload MODEL`、`reserve --gpu N --size 80G --for 4h` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。
+- 同一时刻只执行一个写请求（pin/unpin/free/wake/reserve/unreserve/add/rm/sleep/stop/preload），不会把重复提交排队。写请求完成后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态，刷新失败会单独说明，已成功的写入不会因此重试。
+- 后台轮询只写底栏，不覆盖命令结果；显式 `status` / `status --json` 才写结果区。刷新失败保留上一份快照，并在底栏显示错误和 UTC 时间。
+- 实际 `free --ram` 仍先弹出二次确认窗口，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。
+- usage 视图用 `/usage`、`/usage 30` 进入，`status` 命令或 Status 按钮返回，按同一刷新间隔刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
+- 活动读取失败在底栏显示 `Partial update · activity unavailable` 和受限安全原因（预算、锁、schema、parse 等）；旧版 `ValueError` 或未知原因只显示 `reason unavailable`。该轮活动数值按未知显示，不沿用旧计数；完整当前 snapshot/errors 保留在 `status --json`，不会被人类文案改写。读取成功而来源为 unknown/空时，选中模型的详情行显示 `source unavailable`，仍保留已读取的计数；不能据此推断“未记录来源”、容器身份或数据库读取失败。
+- Reserve 的预览、只读拒绝与实际回执语义见上节；默认入口的模型实际写入仍关闭；具有显式 catalog 提交能力的服务器可以排队 add/rm，queued 不等于 applied 或全局动作可用。不能用本客户端命令启用生产调度。
 
 ### 紧凑界面与真实进度（#168）
 
-深灰配色、暖色资源条和底部一行连接/快捷键替代 Header/Footer。GPU 同时显示
-已用百分比与 GiB；未知量暗显，不用规划值补齐。模型表固定列宽、数值右对齐，
-不变快照不重建，单元格按模型 key 更新。模型增删或源排序变化保留当前有效选择；
-窗口宽度变化才重排列。窄终端上下排列，原有长详情/结果滚动、命令输入与 RAM
-确认行为保留。
+深灰配色、暖色资源行和底部一行连接/提示替代 Header/Footer。GPU 行同时显示已用、
+总量、llmsvc 记账与外部占用；未知量暗显，不用规划值补齐。模型表固定列宽、数值
+右对齐，不变快照不重建，单元格按模型 key 更新。宽终端列为 MODEL / STATE / GPU /
+MEM / BUDGET / USED / 10m / PIN，窄终端保留 MODEL / STATE / GPU / MEM / PIN，默认
+模型标 `*`；选中模型的活动来源、pin 到期与 owner 在表格下方一行显示。模型增删或
+源排序变化保留当前有效选择；窗口宽度变化才重排列。窄终端上下排列，原有长详情/
+结果滚动与 RAM 确认行为保留。
 
 等待命令显示目标、实际耗时和可用阶段。`wake` 的新目标事件可显示请求提交、
 放置授予、unit/account 确认、原始 state/swap 观测；标为 `observed`，因为现有事件
@@ -325,14 +363,17 @@ LLM_URL=http://scheduler:8011 python cli/llm
 不触发重试或绕过只读/保护检查。
 
 实现依据 [Textual DataTable 的稳定 key 与 update_cell](https://textual.textualize.io/widgets/data_table/#updating-data)、
-[线程安全消息](https://textual.textualize.io/guide/workers/#posting-messages)，并参考
-[btop 的更新间隔、终端同步输出和跟随选择原则](https://github.com/aristocratos/btop)。
+[线程安全消息](https://textual.textualize.io/guide/workers/#posting-messages)、
+[OptionList](https://textual.textualize.io/widgets/option_list/) 与
+[Textual 的终端剪贴板请求](https://textual.textualize.io/api/app/#textual.app.App.copy_to_clipboard)，
+并参考 [btop 的更新间隔、终端同步输出和跟随选择原则](https://github.com/aristocratos/btop)
+以及 Claude Code 的命令行优先键位。
 
 ### Scheduler 与数据面事件流
 
 事件读取在独立线程中进行，只在数据/连接变化时通知界面，合并为最多每 0.5 秒更新一次。SSE 注释心跳不进入日志；不变连接状态不重绘。正常事件只追加，明确游标重置或乱序时间戳才重排有界日志。面板标题为 `Events via scheduler`；默认行显示 UTC 时间、`[scheduler]` 或 `[data-plane]`、全局 scheduler 事件 ID 与简短变化。连接/在途状态固定显示；相同重连快照和重复错误不刷屏，实际变化/新错误类别仍显示，错误与本地丢弃计数持续更新。完整 JSON 与长来源/信任说明放在 Details 中。日志按 scheduler 时间戳/ID 排序并着色，保留最近 200 条；单条可见文本最多 2048 字符，原始字段仍保存在这 200 条本地历史中。连接失败后以 1–30 秒退避重连，携带上次完整接收的 `since` / `Last-Event-ID`，重复事件不会再显示。退出界面会中断活动流并等待读取线程关闭。
 
-点击 Details 或在非输入框焦点时按 `e`，可打开冻结的详情文本。原始最多 200 条事件、source/received_at、unknown/null、quiet-untrusted 和独立投递/丢弃计数完整保留。Shift+方向键选择文字；不承诺未验证的远程鼠标选择。Copy 复制选区；没有选区则请求复制简洁摘要。普通 200 条记录的冗长原文即使超过 64KiB，也不影响默认摘要复制；选区/摘要过大时明确提示 Save text，不静默截断。
+点击 Details 按钮或输入 `/events`，可打开冻结的详情文本。原始最多 200 条事件、source/received_at、unknown/null、quiet-untrusted 和独立投递/丢弃计数完整保留。Shift+方向键选择文字；不承诺未验证的远程鼠标选择。Copy 复制选区；没有选区则请求复制简洁摘要。普通 200 条记录的冗长原文即使超过 64KiB，也不影响默认摘要复制；选区/摘要过大时明确提示 Save text，不静默截断。
 
 [合成场景的实际主界面、详情截图与 PTY 录制](../tests/test_tui_artifacts/168-events/README.md)展示了重复事件合并、计数保留和窄屏入口。
 
@@ -363,7 +404,7 @@ python -m pytest -q tests/test_llm_pin.py tests/test_tui_pin.py
 python -m pytest -q tests/test_llm_reserve.py tests/test_llm_reserve_http.py tests/test_tui_reserve.py
 python -m pytest -q tests/test_llm_unreserve.py tests/test_tui_unreserve.py
 python -m pytest -q tests/test_llm_actions.py tests/test_tui_actions.py
-python -m pytest -q tests/test_tui_shortcuts.py
+python -m pytest -q tests/test_tui_shortcuts.py tests/test_tui_menu.py
 python -m pytest -q tests/test_llm_models.py tests/test_llm_models_http.py tests/test_tui_models.py
 python -m pytest -q tests/test_llm_registry_status.py tests/test_tui_registry_status.py
 python -m pytest -q tests/test_llm_model_details.py tests/test_llm_model_details_http.py tests/test_tui_model_details.py
@@ -371,7 +412,7 @@ python -m pytest -q tests/test_llm_model_details.py tests/test_llm_model_details
 
 测试使用核心包的状态结构生成 JSON，并在临时 loopback HTTP 服务上验证单文件复制、无 site-packages 的 Python 启动、JSON 保真与窄屏。Python 3.10 可用时直接执行该解释器的复制测试；CI 使用 Python 3.10。客户端测试不访问生产服务或 GPU。
 
-没有安装 Textual 时，headless UI 测试明确跳过；CLI 降级测试仍运行。界面测试使用 Textual 的 [headless Pilot](https://textual.textualize.io/guide/testing/) 检查尺寸、选择、定时刷新、输入与错误恢复。
+没有安装 Textual 时，headless UI 测试明确跳过；CLI 降级测试仍运行。界面测试使用 Textual 的 [headless Pilot](https://textual.textualize.io/guide/testing/) 检查尺寸、选择、定时刷新、输入与错误恢复；#168 的命令行改造以实际安装的 Textual 8.2.8 跑通，不靠跳过验收。
 
 可用已安装 Textual 的 Python 运行实际 PTY 基准（输出目录必须不存在，防止覆盖旧证据）：
 
@@ -397,7 +438,7 @@ Pin/unpin 测试仅使用明确 opt-in 的临时 SQLite/loopback scheduler。覆
 
 Free/wake 验证使用实际 core HTTP、临时 SQLite 和显式模拟的模型状态变化；另一个 loopback 数据面夹具验证 unload/upstream 路径。包括超时传参、零写入预览、空 wake body、编码名称、HTTP 200 阻塞、未知/部分实测、二次确认、迟到结果和退出生命周期。模拟的 12 GiB GPU 净变化与 25 GiB 宿主变化只证明协议和显示，不是 GPU 实测。
 
-快捷键测试通过 headless Pilot 实际按键，覆盖输入焦点、草稿保留、所选模型/失效目标、引号与前导连字符、空/零 pin 时长拒绝、显式提交与刷新、RAM 确认/取消，以及现有 usage/help/quit。它们复用上述临时服务，不进行实机模型操作。
+键位与菜单测试通过 headless Pilot 实际按键和实际点击，覆盖启动默认焦点、点击各面板不失焦、历史、Tab 补全、Ctrl+C 两次退出、Ctrl+D、Ctrl+L、Shift 选择、`?` 仅空行帮助、全部 `/` 界面命令，以及条目菜单的固定顺序、按状态置灰、键盘/鼠标选择、内联 `[y/N]` 确认、复制与插入。菜单动作断言实际发出的 `POST /v1/{preload,wake,sleep,stop}/…` 与手输同一命令完全一致，并覆盖空格/引号/Unicode/百分号/前导连字符的模型名；未知子命令断言显示共享解析器的 `invalid choice` 且不发请求，证明 TUI 没有第二套命令语义。0.5 秒轮询与“收到事件立即再读一次状态”分别以暂停定时器的方式单独验证。它们复用上述临时服务或本地夹具客户端，不进行实机模型操作。
 
 Reserve 测试直接请求当前 SchedulerHTTPServer 的预览/默认只读 405 路径，并以临时 SQLite 字节、状态、事件和采集次数及写入陷阱验证零副作用。实际挂载的 POST/DELETE 通过 core 的临时 HTTP/SQLite 与模拟受管 unit 夹具验证：complete/blocked/partial、伪造标签后的权威 owner、保存 ID、不完整 evacuation 后保留意图、幂等删除、响应前删除/到期及真实保存后丢失回复不重试。TUI 也使用此实际 API 刷新预约；额外的响应夹具仅保留为无效响应/格式化单测，不代替实际链路。预览保留纯策略计划；它不是执行保证。实际执行时，未登记租约的 sleeping 模型会以 `unleased_model` 阻塞；即使此前预览成功，也不能跳过实际回执的 evacuation 状态。单文件 `-I -S`、非法参数、丢失响应无重试、线程屏障和退出回调也纳入检查。
 

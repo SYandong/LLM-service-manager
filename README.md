@@ -96,8 +96,10 @@ python3 -m venv .venv
 
 安装依赖需要可用的软件源或管理员准备的离线 wheelhouse。已安装包的 `llm`
 无参数、在 TTY 且 Textual 可用时启动 TUI；否则降级为状态输出。
-`r` 刷新、`/` 输入命令、`u` 查看用量、`?` 帮助、`q` 退出。
-`f/p/w` 只预填命令，按 Enter 才提交。TUI 事件经 scheduler 转发；缺少数据面
+进去就是命令行：Enter 执行、Tab 补全、↑/↓ 翻历史、Shift+↑/↓ 选模型、
+Ctrl+O 打开选中模型的菜单（load / online / sleep / free、复制、插入命令行）、
+`/help` `/quit` `/usage` `/events` `/copy` 等界面命令，Ctrl+C 两次退出。
+状态每 0.5 秒刷新，收到事件立即再读一次。TUI 事件经 scheduler 转发；缺少数据面
 事件不代表无活动，`stopped` 事件也不能单独证明 unit 退出或资源释放。
 新版面板按变化更新模型单元格和事件，保留当前选择，心跳仅更新连接状态。
 等待操作展示目标、已用时间及可用的已观测阶段；没有可信估计时显示 ETA unknown，
@@ -220,3 +222,4 @@ SIGHUP。生产策略、TTL/reaper、宿主来源及其他用户服务的变更�
 
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
+<!-- Generated-By: Claude Code / claude-fable-5-1 -->

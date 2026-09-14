@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Claude Code / claude-fable-5-1
 """Free/wake UI against real core HTTP; all model effects are synthetic fixtures."""
 
 import asyncio
@@ -32,6 +33,8 @@ def test_free_wake_refresh_and_ram_confirmation(pin_api, action_service, size):
         app = app_for(pin_api, action_service)
         async with app.run_test(size=size) as pilot:
             await app.workers.wait_for_complete()
+            for timer in app._ui_timers:
+                timer.pause()  # Count only the requests this scenario issues.
             await submit(app, pilot, "free --need 10G")
             assert "Free status: complete" in output(app) and "12 GiB" in output(app)
             assert app.snapshot["models"][0]["state"] == "sleeping"
