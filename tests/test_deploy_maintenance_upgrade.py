@@ -4,6 +4,7 @@
 import json
 import hashlib
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -13,12 +14,21 @@ from pathlib import Path
 
 import pytest
 
+import llmsvc
 from deploy.maintenance_upgrade import Error, MaintenanceUpgrade
 from deploy.upgrade import Upgrade
 from llmsvc.state import Pin
 from llmsvc.store import IntentStore
 
 ROOT=Path(__file__).parents[1]
+# The candidate stages the repository's own llmsvc package, so the bundle must
+# carry the same version whatever the checkout currently declares.
+VERSION=llmsvc.__version__
+
+
+def tag_for(version):
+    alpha=re.fullmatch(r"0\.1\.0a([1-9][0-9]*)",version)
+    return "v0.1.0-alpha."+alpha[1] if alpha else "v"+version
 
 
 def sha(path): return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -38,7 +48,7 @@ def tree_snapshot(root):
     return result
 
 
-def make_bundle(path, version="0.1.0a14"):
+def make_bundle(path, version=VERSION):
     (path/"wheelhouse").mkdir(parents=True)
     cli=b"#!/usr/bin/env python3\nprint("+repr(version).encode()+b")\n"
     (path/"llm").write_bytes(cli)
@@ -47,7 +57,7 @@ def make_bundle(path, version="0.1.0a14"):
         z.writestr("llmsvc-"+version+".dist-info/METADATA","Metadata-Version: 2.1\nName: llmsvc\nVersion: "+version+"\n")
         z.writestr("llmsvc-"+version+".data/scripts/llm",b"#!python\n"+cli.split(b"\n",1)[1])
     pip=path/"wheelhouse/pip-26.2.1-py3-none-any.whl"; pip.write_bytes(b"pip")
-    info={"schema_version":1,"tag":"v0.1.0-alpha.14","version":version,"commit":"a"*40,
+    info={"schema_version":1,"tag":tag_for(version),"version":version,"commit":"a"*40,
           "scope":"read_only","app_wheel":"wheelhouse/"+wheel.name,"cli":"llm",
           "bootstrap_pip":"wheelhouse/"+pip.name,"install_wheels":["wheelhouse/"+wheel.name],
           "files":{n:sha(path/n) for n in ("llm","wheelhouse/"+wheel.name,"wheelhouse/"+pip.name)}}
@@ -93,7 +103,7 @@ def test_preflight_uses_actual_candidate_reader_and_no_writes(tmp_path):
     result=MaintenanceUpgrade(settings,tmp_path).preflight(bundle)
     assert result["status"]=="preflight" and result["apply_supported"] is False and result["writes"] is False
     assert result["candidate_reader"]["read_only"] is True
-    assert result["candidate_reader"]["version"]=="0.1.0a14"
+    assert result["candidate_reader"]["version"]==VERSION
     assert str(staged/"llmsvc") in result["candidate_reader"]["origin"]
     assert db.read_bytes()==before_db and config.read_bytes()==before_config
     assert tree_snapshot(tmp_path)==before_tree
@@ -104,7 +114,7 @@ def test_preflight_uses_actual_candidate_reader_and_no_writes(tmp_path):
 def test_preflight_rejects_staged_runtime_drift_before_reader(tmp_path):
     db=tmp_path/"ledger.sqlite"; store=IntentStore(db,action_lock=threading.RLock()); store.close()
     bundle=make_bundle(tmp_path/"bundle"); staged,config,settings=make_candidate(tmp_path,db,bundle)
-    before_db=db.read_bytes(); (staged/"llmsvc/__init__.py").write_text("__version__ = '0.1.0a14'\n")
+    before_db=db.read_bytes(); (staged/"llmsvc/__init__.py").write_text("__version__ = '0.0.0'\n")
     with pytest.raises(Error,match="staged candidate runtime manifest is invalid"):
         MaintenanceUpgrade(settings,tmp_path).preflight(bundle)
     assert db.read_bytes()==before_db

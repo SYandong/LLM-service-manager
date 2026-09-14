@@ -276,7 +276,9 @@ def test_export_path_enter_never_runs_a_scheduler_command(snapshot):
             await pilot.pause()
             assert app.screen is dialog
             assert path.value == 'free --ram'
-            assert client.calls == before
+            # The 0.5 s background poll may add GET /v1/state reads; no command may run.
+            polls = {('GET', '/v1/state')}
+            assert [c for c in client.calls if c not in polls] == [c for c in before if c not in polls]
             assert not app._write_busy
             await pilot.press('escape')
     asyncio.run(scenario())

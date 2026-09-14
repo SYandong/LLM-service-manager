@@ -1,5 +1,65 @@
 # Changelog
 
+## 1.0.0 — 2026-09-14
+
+First stable release; Python distribution `1.0.0`. The qualifying PRs since
+alpha.14 are #227, #229, #231, #233, #235, #241, #242, #243, #244 and #245.
+
+### Scheduling
+
+- Placement chooses from a configurable pool (`placement_gpus`) with
+  `first_fit` or `best_fit` packing; accounting still covers every observed
+  GPU and the exclusive GPU (`exclusive_gpu`) must be inside the pool. The
+  shared-card external-usage threshold is a configuration key
+  (`shared_external_threshold_gb`) instead of a hard-coded 1 GB, and every
+  controller starts from the same `SchedulerConfig.policy_settings()` (#241).
+- The launcher terminates a waiting `vllm-wrapper` when the scheduler refuses
+  placement, so llama-swap reports the failure at once instead of after the
+  wrapper's full wait timeout; lock timeouts and dry runs never signal (#241).
+- Per-model actions `POST /v1/sleep/{model}`, `POST /v1/stop/{model}` and
+  `POST /v1/preload/{model}` with `llm sleep`, `llm stop` and `llm preload`;
+  protections (in-flight, pin, default model never stops) and memory admission
+  apply, and previews are pure (#243).
+- Bounded cold-wake progress and the scheduler wake cold route (#233, #235);
+  mutations are rejected after scheduler stopping (#227); read-only
+  maintenance preflight (#229); cleanup observation after daemon exit is
+  bounded (#231).
+
+### Models
+
+- Models placed under a shared root with an `llmsvc.json` descriptor
+  (`base`, optional `name`, `util`, `max_model_len`, `aliases`, `weights_gb`)
+  are discovered read-only, listed by `llm models` and `GET /v1/models`, and
+  imported explicitly with `llm import NAME` or `llm import --all`. Weights are
+  measured from the safetensors index and the scheduler profile is generated
+  from the import, so imported models need no hand-written catalog profile
+  (#244).
+
+### TUI
+
+- The TUI is command-first: the command line has focus on start and keeps it
+  through mouse clicks; keys follow Claude Code (Enter, Tab completion,
+  history, Esc, double Ctrl+C, Ctrl+D, Ctrl+L, Ctrl+O). Model rows open an
+  English menu (Load into memory, Bring online, Sleep to memory, Free from
+  memory, Copy name, Copy status line, Insert into command line) with inline
+  confirmation for stops; GPU bars and event lines are copyable; state
+  refreshes every 0.5 s and on every scheduler event (#245).
+
+### Release process
+
+- The publisher accepts stable `vX.Y.Z` tags alongside the alpha series,
+  orders every alpha before every stable tag and marks stable releases as the
+  repository's latest (#242).
+
+### Compatibility and validation limits
+
+Default configuration behaves as alpha.14: `placement_gpus` unset means every
+GPU, `first_fit`, a 1 GB external threshold, and automation, fault recovery and
+sleeping recovery stay default-off. This release does not claim tensor-parallel
+placement, automatic reload outside `catalog_mode: maintenance`, or unattended
+deployment; site enablement of the new keys and the per-model actions is an
+operator configuration step.
+
 ## 0.1.0-alpha.14 — 2026-09-11
 
 Incremental startup and isolated scheduler-action safety release; Python distribution
