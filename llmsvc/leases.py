@@ -77,10 +77,11 @@ class LeaseUnitProbe:
 
 
 class PlacementController:
-    def __init__(self, scheduler, transport, *, probe=None, monotonic=time.monotonic):
+    def __init__(self, scheduler, transport, *, probe=None, monotonic=time.monotonic, settings=None):
         self.scheduler = scheduler
         self.transport = transport
         self.monotonic = monotonic
+        self.settings = settings or scheduler.config.policy_settings()
         self.probe = probe or LeaseUnitProbe(transport, monotonic=monotonic)
         self._reconcile_cursor = 0
         self._configuration_alerts = set()
@@ -218,7 +219,7 @@ class PlacementController:
         protected = replace(snapshot, models=tuple(models))
         recovery_options = ({"gpu_exclusions": gpu_exclusions,
                              "settings": self.scheduler.sleeping_recovery.controller.settings}
-                            if recovery_claim is not None else {})
+                            if recovery_claim is not None else {"settings": self.settings})
         decision = plan_placement(protected, request, waiting=waiting, exclusions=guarded, **recovery_options)
         blockers = decision.blocked_by
         if (self.scheduler.store is not None and self.scheduler.store.bootstrap_pending() and self.scheduler.store.bootstrap_authorized()

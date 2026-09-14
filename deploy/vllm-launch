@@ -16,6 +16,7 @@ import math
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -40,6 +41,9 @@ DEFAULT_CONFIG = {
     "command_timeout_seconds": 30,
     "lock_timeout_seconds": 120,
     "unit_suffix": ".service",
+    # A placement rejection (exit 75) otherwise leaves vllm-wrapper polling
+    # /health for its whole --wait-timeout before llama-swap reports failure.
+    "terminate_wrapper_on_placement_failure": True,
     "systemd_run": {
         "collect": True,
         "quiet": True,
@@ -473,9 +477,33 @@ def model_lock(config: dict[str, Any], model: str, dry_run: bool) -> Iterator[No
         os.close(fd)
 
 
+def parent_command_name(pid: int) -> str:
+    try:
+        return Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def fail_fast_wrapper(config: dict[str, Any]) -> bool:
+    """Terminate a waiting vllm-wrapper parent so llama-swap fails the request now."""
+    if not config.get("terminate_wrapper_on_placement_failure", True):
+        return False
+    ppid = os.getppid()
+    if parent_command_name(ppid) != "vllm-wrapper":
+        return False
+    try:
+        os.kill(ppid, signal.SIGTERM)
+    except OSError as exc:
+        log("wrapper_terminate_failed", pid=ppid, error=str(exc))
+        return False
+    log("wrapper_terminated", pid=ppid, reason="placement_failed")
+    return True
+
+
 def _main(argv: list[str] | None = None) -> int:
     global COMMAND_TIMEOUT_SECONDS
     argv = sys.argv[1:] if argv is None else argv
+    config: dict[str, Any] = DEFAULT_CONFIG
     try:
         args = parse_args(argv)
         call = _CALL.get()
@@ -521,6 +549,8 @@ def _main(argv: list[str] | None = None) -> int:
             return monitor_startup(config, args, placement)
     except LaunchError as exc:
         log("launch_error", error=str(exc), exit_code=exc.exit_code)
+        if exc.exit_code == 75:
+            fail_fast_wrapper(config)
         return exc.exit_code
     except (ValueError, TypeError, KeyError) as exc:
         log("invalid_input", error=str(exc))

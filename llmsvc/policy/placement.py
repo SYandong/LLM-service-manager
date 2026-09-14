@@ -1,5 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
-"""Single-GPU placement with exhaustive feasible eviction sets (DESIGN §4.2)."""
+"""Single-GPU placement over a configurable pool with exhaustive feasible eviction sets (DESIGN §4.2)."""
 
 from dataclasses import dataclass
 from itertools import combinations
@@ -131,6 +131,9 @@ def plan_placement(
         if gpu.index in excluded_gpus:
             blockers.append(Blocker(None, excluded_gpus[gpu.index], gpu.index))
             continue
+        if settings.placement_gpus is not None and gpu.index not in settings.placement_gpus:
+            blockers.append(Blocker(None, "outside_placement_pool", gpu.index))
+            continue
         if not known_number(gpu.total_gb) or gpu.total_gb <= 0 or not known_number(gpu.external_gb):
             blockers.append(Blocker(None, "unknown_gpu_capacity", gpu.index))
             continue
@@ -149,11 +152,14 @@ def plan_placement(
         available = gpu.total_gb - gpu.external_gb - sum(
             amount for index, amount in allocations.values() if index == gpu.index)
         if available >= budget:
-            feasible.append((gpu.index, budget))
+            feasible.append((gpu.index, budget, available))
         candidate_cards.append((gpu, budget, available))
     # A free fit always wins over even a zero-score eviction on another card.
     if feasible:
-        gpu, budget = min(feasible)
+        if settings.placement_fit == "best_fit":
+            gpu, budget, _ = min(feasible, key=lambda item: (item[2] - item[1], item[0]))
+        else:
+            gpu, budget, _ = min(feasible)
         return PlacementDecision(actions=(Action("place", request.name, "placement", gpu),),
                                  gpu=gpu, budget_gb=budget)
     options = []

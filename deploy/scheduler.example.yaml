@@ -18,6 +18,15 @@ event_heartbeat_seconds: 15
 # Candidate GiB budgets; production stakeholder approval remains pending.
 memory_budget_gb: 200
 host_min_available_gb: 150
+# Placement pool and packing (DESIGN §4.2). Accounting always covers every
+# observed GPU; the pool only limits destinations. exclusive_gpu must be in it.
+# exclusive_gpu: 0
+# placement_gpus: [0, 1, 2, 3]
+# placement_fit: best_fit   # first_fit (default) or best_fit
+# Shared cards whose external usage reaches this are not placement targets.
+# External usage is already subtracted from availability, so keep this well
+# above the residue of neighbours' small processes.
+# shared_external_threshold_gb: 30
 # Empty collectors intentionally report unknown. Supply the integrated #4/#5
 # adapter settings before bounded observation/preview checks; unknown is not zero.
 collectors: {}

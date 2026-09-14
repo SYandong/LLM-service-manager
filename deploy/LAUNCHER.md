@@ -71,6 +71,12 @@ permission to enable the path in production.
 | `blockers[].reason: unleased_model` | The model has no eligible confirmed durable account; this path cannot adopt or stop it speculatively. |
 | `blockers[].reason: operation_in_progress` | Another pending model operation or free operation protects the model from a duplicate stop. |
 
+When placement is rejected (launcher exit 75) and the launcher's parent process
+is `vllm-wrapper`, the launcher sends that parent SIGTERM so llama-swap reports
+the failure immediately instead of after the wrapper's whole `--wait-timeout`.
+Set `terminate_wrapper_on_placement_failure: false` in the launcher config to
+keep the wrapper waiting. Other parents are never signalled.
+
 Blocker reasons can also appear in previews or the final HTTP409
 `placement_timeout`; they are not separate stop commands. On a placement-stage
 failure from `POST /v1/place`, no lease was granted to this launch attempt.

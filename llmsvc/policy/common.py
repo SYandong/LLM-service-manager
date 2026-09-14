@@ -9,6 +9,9 @@ from llmsvc.state import Action, Activity, Blocker, ModelState, StateSnapshot
 from .ranking import keep_value
 
 
+PLACEMENT_FITS = ("first_fit", "best_fit")
+
+
 @dataclass(frozen=True)
 class PolicySettings:
     exclusive_gpu: int = 0
@@ -18,13 +21,32 @@ class PolicySettings:
     shared_external_threshold_gb: float = 1.0
     shared_free_threshold_gb: float = 10.0
     sleeping_residual_gb: float = 2.0
+    # Destination pool for placement. None keeps every observed GPU a candidate;
+    # a tuple restricts destinations (accounting still covers every GPU) and must
+    # contain the exclusive GPU so the default model always has a home.
+    placement_gpus: Optional[Tuple[int, ...]] = None
+    # first_fit: lowest index that fits. best_fit: least remaining budget after
+    # the fit, lowest index on ties, so large holes stay open for large models.
+    placement_fit: str = "first_fit"
 
     def __post_init__(self):
         if isinstance(self.exclusive_gpu, bool) or not isinstance(self.exclusive_gpu, int) or self.exclusive_gpu < 0:
             raise ValueError("exclusive_gpu must be a non-negative integer")
         for key, value in vars(self).items():
-            if key != "exclusive_gpu" and not known_number(value):
+            if key in ("exclusive_gpu", "placement_gpus", "placement_fit"):
+                continue
+            if not known_number(value):
                 raise ValueError(f"{key} must be finite and non-negative")
+        if self.placement_gpus is not None:
+            pool = self.placement_gpus
+            if (not isinstance(pool, tuple) or not pool
+                    or any(isinstance(index, bool) or not isinstance(index, int) or index < 0 for index in pool)
+                    or len(set(pool)) != len(pool)):
+                raise ValueError("placement_gpus must be a nonempty tuple of unique non-negative integers")
+            if self.exclusive_gpu not in pool:
+                raise ValueError("placement_gpus must include exclusive_gpu")
+        if self.placement_fit not in PLACEMENT_FITS:
+            raise ValueError("placement_fit must be first_fit or best_fit")
 
 
 @dataclass(frozen=True)

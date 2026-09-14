@@ -189,10 +189,11 @@ def main():
             store = IntentStore(config.state_db_path, action_lock=threading.RLock(), read_only=config.read_only)
         scheduler = Scheduler(config, collect=collector, store=store, usage=build_usage(collector), event_relay=event_relay)
         scheduler.registry = build_registry(config, scheduler)
+        settings = config.policy_settings()
         if config.model_actions_enabled:
-            scheduler.model_actions = ModelActionController(scheduler, transport)
+            scheduler.model_actions = ModelActionController(scheduler, transport, settings=settings)
         if config.placement_enabled:
-            scheduler.placement = PlacementController(scheduler, transport)
+            scheduler.placement = PlacementController(scheduler, transport, settings=settings)
         if config.automation_enabled:
             scheduler.automation = AutomaticPolicyController(scheduler)
         if config.sleeping_recovery_enabled:
