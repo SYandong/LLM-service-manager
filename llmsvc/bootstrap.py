@@ -322,7 +322,6 @@ class BootstrapController:
             s.sample_once()  # Publish fresh physical observations before the HTTP lease request.
 
     def _start_admission(self,record):
-        from llmsvc.policy import PolicySettings
         s=self.scheduler;row=s.store.lease(record['lease_id'])
         if row is None or row[0].status not in ('pending','stale') or row[0].expires_at<=s.clock():
             raise BootstrapError('bootstrap prepared lease is not current')
@@ -332,7 +331,7 @@ class BootstrapController:
             observed=s.placement._inspect(self.model,self.deadline)
             if not s.placement._fresh(snapshot) or observed.exists is not False:
                 raise BootstrapError('bootstrap start lacks fresh unit absence')
-        if unit!=self.unit or lease.gpu!=PolicySettings().exclusive_gpu:
+        if unit!=self.unit or lease.gpu!=s.config.policy_settings().exclusive_gpu:
             raise BootstrapError('bootstrap default placement binding changed')
         gpu=next((value for value in snapshot.gpus if value.index==lease.gpu),None)
         available=snapshot.memory.host_available_gb

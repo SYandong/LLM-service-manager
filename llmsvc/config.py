@@ -5,7 +5,7 @@ import ipaddress
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 
@@ -49,6 +49,11 @@ class SchedulerConfig:
     max_snapshot_age_seconds: float = 30.0
     placement_enabled: bool = False
     placement_wait_seconds: float = 120.0
+    # Base policy settings shared by placement, free/wake and automation.
+    exclusive_gpu: int = 0
+    placement_gpus: Optional[list] = None
+    placement_fit: str = "first_fit"
+    shared_external_threshold_gb: float = 1.0
     lease_timeout_seconds: float = 900.0
     lease_probe_seconds: float = 1.0
     model_actions_enabled: bool = False
@@ -59,6 +64,8 @@ class SchedulerConfig:
     automation_policy: str = "fixed_idle"
     automation_exclusive_ttl_seconds: float = 3600.0
     automation_shared_ttl_seconds: float = 300.0
+    # Applies only to the gpu_pressure automation cycle; keep it consistent
+    # with shared_external_threshold_gb, which placement and free/wake use.
     automation_shared_external_threshold_gb: float = 1.0
     automation_shared_free_threshold_gb: float = 10.0
     sleeping_recovery_enabled: bool = False
@@ -112,11 +119,24 @@ class SchedulerConfig:
                 raise ValueError(f"{name} must be an integer in 1..4096")
         if not isinstance(self.automation_policy, str) or self.automation_policy not in ("fixed_idle", "gpu_pressure"):
             raise ValueError("automation_policy must be fixed_idle or gpu_pressure")
-        for name in ("automation_shared_external_threshold_gb", "automation_shared_free_threshold_gb"):
+        for name in ("automation_shared_external_threshold_gb", "automation_shared_free_threshold_gb",
+                     "shared_external_threshold_gb"):
             value = getattr(self, name)
             if (isinstance(value, bool) or not isinstance(value, (int, float))
                     or not math.isfinite(value) or value < 0):
                 raise ValueError(f"{name} must be a finite non-negative number")
+        if isinstance(self.exclusive_gpu, bool) or type(self.exclusive_gpu) is not int or self.exclusive_gpu < 0:
+            raise ValueError("exclusive_gpu must be a non-negative integer")
+        if self.placement_gpus is not None:
+            pool = self.placement_gpus
+            if (not isinstance(pool, list) or not pool
+                    or any(isinstance(index, bool) or type(index) is not int or index < 0 for index in pool)
+                    or len(set(pool)) != len(pool)):
+                raise ValueError("placement_gpus must be a nonempty list of unique non-negative integers")
+            if self.exclusive_gpu not in pool:
+                raise ValueError("placement_gpus must include exclusive_gpu")
+        if self.placement_fit not in ("first_fit", "best_fit"):
+            raise ValueError("placement_fit must be first_fit or best_fit")
         if type(self.fault_recovery_enabled) is not bool:
             raise ValueError("fault_recovery_enabled must be a boolean")
         if self.fault_interval_seconds > 1 or self.fault_timeout_seconds > 120:
@@ -192,6 +212,16 @@ class SchedulerConfig:
             if source in normalized and normalized[source] != owner:
                 raise ValueError("conflicting container mappings for the same IP")
             normalized[source] = owner
+
+    def policy_settings(self):
+        """Base PolicySettings every controller starts from; automation layers its TTLs on top."""
+        from llmsvc.policy import PolicySettings
+        return PolicySettings(
+            exclusive_gpu=self.exclusive_gpu,
+            placement_gpus=None if self.placement_gpus is None else tuple(self.placement_gpus),
+            placement_fit=self.placement_fit,
+            shared_external_threshold_gb=self.shared_external_threshold_gb,
+            shared_free_threshold_gb=self.automation_shared_free_threshold_gb)
 
     def owner_for_ip(self, source_ip: str) -> str:
         """Use the socket peer, never a body label or forwarded header."""
