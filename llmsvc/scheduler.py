@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Claude Code / claude-fable-5-1
 """Sampling, usage and opt-in intent writes under one accounting lock."""
 
 import copy
@@ -240,6 +241,7 @@ class Scheduler:
                     or now - sampled > self.config.max_snapshot_age_seconds):
                 snapshot = replace(snapshot, errors=snapshot.errors + ("stale_snapshot",))
             decision = None
+            planned_blockers = None
             if operation == "free":
                 self._keys(payload, {"gpu", "ram", "need_gb"})
                 if "gpu" in payload:
@@ -265,6 +267,14 @@ class Scheduler:
                         {"kind": "wake", "model": model.name, "reason": "user_wake", "gpu": model.gpu}]}
                 except ActionDispatchError as exc:
                     return {"would": [], "blocked_by": [{"model": payload["model"], "reason": exc.reason}]}
+            elif operation in ("sleep", "stop", "preload"):
+                self._keys(payload, {"model"}, required={"model"})
+                nonempty(payload["model"], "model")
+                if self.model_actions is None:
+                    return {"would": [], "blocked_by": [{"model": payload["model"], "reason": "operation_not_enabled"}]}
+                plan = self.model_actions.plan_model_action(snapshot, operation, payload["model"])
+                result = {"would": plan["would"]}
+                planned_blockers = plan["blocked_by"]
             elif operation == "pin":
                 self._keys(payload, {"model", "until", "by"}, required={"model", "until", "by"})
                 pin = Pin(payload["model"], self._until(payload["until"], now), payload["by"])
@@ -289,7 +299,8 @@ class Scheduler:
                 result = {"would": [{"kind": operation, key: payload[key]}]}
             else:
                 raise ValueError("unsupported preview operation")
-            result["blocked_by"] = [asdict(b) for b in decision.blocked_by] if decision else []
+            result["blocked_by"] = ([asdict(b) for b in decision.blocked_by] if decision
+                                    else planned_blockers if planned_blockers is not None else [])
             if snapshot.errors:
                 result = {"would": [], "blocked_by": [{"model": None, "reason": error} for error in snapshot.errors]}
             LOG.info(json.dumps({"kind": "action_preview", "operation": operation, "dry_run": True, **result}, allow_nan=False))
@@ -309,10 +320,12 @@ class Scheduler:
         try:
             if operation == "free":
                 return self.model_actions.free(payload, by=owner)
-            if operation == "wake":
+            if operation in ("wake", "sleep", "stop", "preload"):
                 self._keys(payload, {"model"}, required={"model"})
                 nonempty(payload["model"], "model")
-                return self.model_actions.wake(payload["model"], by=owner)
+                runner = {"wake": self.model_actions.wake, "sleep": self.model_actions.sleep_model,
+                          "stop": self.model_actions.stop_model, "preload": self.model_actions.preload}[operation]
+                return runner(payload["model"], by=owner)
             raise IntentWriteError(405, "operation_not_enabled")
         except ActionDispatchError as exc:
             status = 409 if exc.reason in ("free_in_progress", "operation_in_progress") else 503

@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Claude Code / claude-fable-5-1
 """Standard-library HTTP state endpoint and bounded-history SSE stream."""
 
 import json
@@ -151,13 +152,16 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 registry_path = "/v1/models" if self.command == "POST" else "/v1/models/" + unquote(target.path[len("/v1/models/"):])
             operation = "registry" if registry_path is not None else None
             payload = {}
-            wake_model = None
+            action_model = None
             lease_id = None
             if self.command == "POST":
                 operation = {"/v1/free": "free", "/v1/pin": "pin", "/v1/reserve": "reserve", "/v1/place": "place"}.get(target.path, operation)
-                if target.path.startswith("/v1/wake/"):
-                    operation = "wake"
-                    wake_model = unquote(target.path[len("/v1/wake/"):])
+                for name in ("wake", "sleep", "stop", "preload"):
+                    prefix = "/v1/" + name + "/"
+                    if target.path.startswith(prefix):
+                        operation = name
+                        action_model = unquote(target.path[len(prefix):])
+                        break
                 parts = target.path.split("/")
                 if len(parts) == 5 and parts[:3] == ["", "v1", "place"] and parts[4] in ("confirm", "release"):
                     operation = parts[4]
@@ -169,10 +173,10 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                     if target.path.startswith(prefix):
                         operation = op
                         payload[key] = unquote(target.path[len(prefix):])
-            if operation is None or (not dry_run and operation not in ("pin", "unpin", "free", "wake", "place", "confirm", "release", "reserve", "unreserve", "registry")):
+            if operation is None or (not dry_run and operation not in ("pin", "unpin", "free", "wake", "sleep", "stop", "preload", "place", "confirm", "release", "reserve", "unreserve", "registry")):
                 self._reject_write()
                 return
-            if not dry_run and operation in ("free", "wake") and (not self.server.scheduler.config.model_actions_enabled or self.server.scheduler.model_actions is None):
+            if not dry_run and operation in ("free", "wake", "sleep", "stop", "preload") and (not self.server.scheduler.config.model_actions_enabled or self.server.scheduler.model_actions is None):
                 self._reject_write()
                 return
             if not dry_run and operation in ("place", "confirm", "release") and (not self.server.scheduler.config.placement_enabled or self.server.scheduler.placement is None):
@@ -196,10 +200,10 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 def reject_constant(value):
                     raise ValueError("non-finite JSON number")
                 payload = json.loads(data, parse_constant=reject_constant)
-            if operation == "wake":
+            if action_model is not None:
                 if payload != {}:
-                    raise ValueError("wake accepts an empty body")
-                payload = {"model": wake_model}
+                    raise ValueError("per-model actions accept an empty body")
+                payload = {"model": action_model}
             if lease_id is not None:
                 if payload != {}:
                     raise ValueError("lease transition accepts an empty body")
@@ -214,7 +218,7 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                     result = self.server.scheduler.preview(operation, payload)
                 elif operation in ("place", "confirm", "release"):
                     result = self.server.scheduler.run_placement(operation, payload)
-                elif operation in ("free", "wake"):
+                elif operation in ("free", "wake", "sleep", "stop", "preload"):
                     result = self.server.scheduler.run_model_action(operation, payload, source_ip=self.client_address[0])
                 else:
                     result = self.server.scheduler.write_pin(operation, payload, source_ip=self.client_address[0])

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Codex / gpt-5.6-luna
+# Generated-By: Claude Code / claude-fable-5-1
 """A standalone, standard-library scheduler client; reusable by the optional TUI."""
 
 import argparse
@@ -794,13 +795,19 @@ def validate_action_result(args, result):
         else:
             if result["model"] != args.model or result["status"] not in ("ready", "blocked", "failed", "partial", "timeout"):
                 raise ValueError
-            if type(result["ready"]) is not bool or type(result["cold_start"]) is not bool:
-                raise ValueError
-            if result["status"] == "ready" and not result["ready"]:
-                raise ValueError
             if not finite(result["elapsed_seconds"]):
                 raise ValueError
-        if "error" in result and not isinstance(result["error"], str):
+            if args.command == "wake":
+                if type(result["ready"]) is not bool or type(result["cold_start"]) is not bool:
+                    raise ValueError
+                if result["status"] == "ready" and not result["ready"]:
+                    raise ValueError
+            else:
+                if result["state"] is not None and not isinstance(result["state"], str):
+                    raise ValueError
+                if args.command == "preload" and type(result["already_resident"]) is not bool:
+                    raise ValueError
+        if result.get("error") is not None and not isinstance(result["error"], str):
             raise ValueError
     except (KeyError, TypeError, ValueError):
         raise ClientError("Invalid %s response; outcome may be unknown. Check status/events before retrying" % args.command) from None
@@ -826,11 +833,17 @@ def format_action_result(args, result):
         for key in ("slept", "stopped"):
             lines.append("%s: %s" % (key.capitalize(), ", ".join(result[key]) or "none"))
         lines += ["Skipped: " + json.dumps(item, ensure_ascii=False, sort_keys=True) for item in result["skipped"]]
-    else:
+    elif args.command == "wake":
         lines = ["Wake %s status: %s" % (result["model"], result["status"]),
                  "Ready: %s; cold start: %s; elapsed: %s seconds" % (
                      "yes" if result["ready"] else "no", "yes" if result["cold_start"] else "no",
                      result["elapsed_seconds"])]
+    else:
+        lines = ["%s %s status: %s" % (args.command.capitalize(), result["model"], result["status"]),
+                 "Observed state: %s; elapsed: %s seconds" % (
+                     result["state"] if result["state"] is not None else "unknown", result["elapsed_seconds"])]
+        if args.command == "preload":
+            lines.append("Weights already resident: %s" % ("yes" if result["already_resident"] else "no"))
     if result.get("error"):
         lines.append("Error: " + result["error"])
     if result.get("error_model") is not None:
@@ -849,11 +862,11 @@ def result_exit_code(args, result):
         return 0 if result["status"] == "applied" else 1
     if args.command == "usage":
         return 0 if result["known"] else 1
-    if args.command in ("pin", "unpin", "free", "wake", "reserve", "unreserve") and args.dry_run:
+    if args.command in ("pin", "unpin", "free", "wake", "sleep", "stop", "preload", "reserve", "unreserve") and args.dry_run:
         return 1 if result["blocked_by"] else 0
     if args.command == "reserve":
         return 0 if result["evacuation"]["status"] == "complete" else 1
-    if args.command in ("free", "wake"):
+    if args.command in ("free", "wake", "sleep", "stop", "preload"):
         return 0 if result["status"] == ("complete" if args.command == "free" else "ready") else 1
     return 0
 
@@ -1111,7 +1124,7 @@ def build_parser(parser_class=argparse.ArgumentParser):
     parser.add_argument("--version", action="version", version="0.1.0a14")
     parser.add_argument("--url", help="Scheduler URL (overrides LLM_URL and config)")
     parser.add_argument("--config", help="Config file (default: ~/.config/llm/config)")
-    parser.add_argument("--timeout", help="HTTP timeout in seconds (free/wake/reserve use --wait instead)")
+    parser.add_argument("--timeout", help="HTTP timeout in seconds (model actions and reserve use --wait instead)")
     commands = parser.add_subparsers(dest="command")
     status = commands.add_parser("status", help="Show GPU, memory and model status")
     status.add_argument("--json", action="store_true", help="Print the complete JSON snapshot")
@@ -1135,6 +1148,16 @@ def build_parser(parser_class=argparse.ArgumentParser):
             action.add_argument("--need", type=memory_amount, help="Additional GiB desired, for example 80G")
         else:
             action.add_argument("model", type=model_name)
+        action.add_argument("--wait", type=action_timeout, default=wait,
+                            help="HTTP response wait in seconds (default: %s); does not change server deadline" % wait)
+        action.add_argument("--dry-run", action="store_true", help="Preview without model actions or persistent writes")
+        action.add_argument("--json", action="store_true", help="Print the full server outcome, including partial failures")
+    for command, wait in (("sleep", 150), ("stop", 150), ("preload", 960)):
+        action = commands.add_parser(command, help={
+            "sleep": "Move one awake model to sleeping (weights stay in host RAM)",
+            "stop": "Stop one model; the next request pays a cold start",
+            "preload": "Make weights resident without holding VRAM"}[command])
+        action.add_argument("model", type=model_name)
         action.add_argument("--wait", type=action_timeout, default=wait,
                             help="HTTP response wait in seconds (default: %s); does not change server deadline" % wait)
         action.add_argument("--dry-run", action="store_true", help="Preview without model actions or persistent writes")
@@ -1205,7 +1228,7 @@ def execute_command(args, client, *, now=None):
                 raise
             raise ClientError(str(exc) + "; reservation may have persisted: check status before retrying; no automatic POST retry") from None
         return validate_reserve_result(args, result)
-    if args.command in ("free", "wake"):
+    if args.command in ("free", "wake", "sleep", "stop", "preload"):
         query = "?dry_run=1" if args.dry_run else ""
         if args.command == "free":
             payload = {"ram": args.ram}
@@ -1215,7 +1238,7 @@ def execute_command(args, client, *, now=None):
                 payload["need_gb"] = args.need
             path = "/v1/free"
         else:
-            path, payload = "/v1/wake/" + quote(args.model, safe=""), None
+            path, payload = "/v1/" + args.command + "/" + quote(args.model, safe=""), None
         try:
             result = client.request("POST", path + query, payload, timeout=args.wait)
         except ClientError as exc:
@@ -1250,7 +1273,7 @@ def format_result(args, result, width=100):
         return format_usage(result, width=width)
     if args.command in ("pin", "unpin"):
         return format_pin_result(args, result)
-    if args.command in ("free", "wake"):
+    if args.command in ("free", "wake", "sleep", "stop", "preload"):
         return format_action_result(args, result)
     if args.command == "reserve":
         return format_reserve_result(args, result)
