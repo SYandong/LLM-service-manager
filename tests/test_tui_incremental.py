@@ -25,8 +25,10 @@ def test_steady_snapshot_changes_only_changed_cells_and_keeps_selection(snapshot
             rows = dict(table.rows)
             gpu_text = str(app.query_one("#gpus").render())
             assert "GPU0 used" in gpu_text and "87/144G" in gpu_text
-            assert "llmsvc" in gpu_text and "77G" in gpu_text and "ext 10" in gpu_text and "free 57" in gpu_text
-            assert "GPU1 used" in gpu_text and "?/?G" in gpu_text  # Unknown never becomes zero.
+            assert all(token in gpu_text for token in ("llmsvc", "77G", "ext", "10", "free", "57"))
+            gpu1 = next(line for line in gpu_text.splitlines() if "GPU1" in line)
+            assert "GPU1 used" in gpu_text and "?" in gpu1  # Unknown never becomes zero.
+            assert "0/144G" not in gpu1
             with patch.object(table, "clear", wraps=table.clear) as clear, \
                  patch.object(table, "update_cell", wraps=table.update_cell) as update:
                 for _ in range(3):

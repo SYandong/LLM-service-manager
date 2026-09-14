@@ -308,3 +308,65 @@ def test_six_gpus_fit_the_summary_without_clipping_a_row(snapshot, size):
                 assert max(visual_lines, memory_lines) <= 14
             assert "RAM" in str(app.query_one("#memory", Static).render())
     asyncio.run(scenario())
+
+
+def rendered_lines(app):
+    """Plain text of each rendered GPU row (fixture legend excluded)."""
+    return [item["rich"].plain for item in app._gpu_render if not item.get("legend")]
+
+
+@pytest.mark.parametrize("gpus", [
+    [gpu(0, used=0.5, managed=0, total=144),
+     gpu(1, used=9, managed=9, total=144),
+     gpu(2, used=10, managed=10, total=144),
+     gpu(3, used=99, managed=99, total=144),
+     gpu(4, used=100, managed=100, total=144),
+     gpu(5, used=144, managed=144, total=144)],
+    [gpu(0, used=10, managed=5, total=144),
+     gpu(1, used=None, managed=None, total=None),
+     gpu(2, used=100, managed=2, total=144)],
+])
+def test_mixed_width_values_keep_bars_and_labels_in_fixed_columns(snapshot, gpus):
+    async def scenario():
+        app = make_app(six_gpu_snapshot(snapshot, gpus))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            lines = rendered_lines(app)
+            assert len(lines) == len(gpus)
+            # Every variable-width field stays in the same column across rows.
+            for marker in ("used", "llmsvc", "ext", "free"):
+                starts = {line.index(marker) for line in lines}
+                assert len(starts) == 1, (marker, starts, lines)
+            # Unknown values still render as ? and never become zero.
+            if gpus[1]["used_gb"] is None:
+                assert "?" in lines[1]
+    asyncio.run(scenario())
+
+
+def test_variable_gpu_indices_keep_the_bar_column_aligned(snapshot):
+    async def scenario():
+        app = make_app(six_gpu_snapshot(snapshot, [gpu(0, used=5, managed=1),
+                                                   gpu(10, used=100, managed=50)]))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            lines = rendered_lines(app)
+            assert lines[0].startswith("GPU 0") and lines[1].startswith("GPU10")
+            assert len({line.index("used") for line in lines}) == 1
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("size", [(40, 24), (60, 24)])
+def test_compact_fraction_and_unknown_rows_align(snapshot, size):
+    async def scenario():
+        app = make_app(six_gpu_snapshot(snapshot, [gpu(0, used=0.5, managed=0),
+                                                   gpu(1, used=None, managed=None, total=None),
+                                                   gpu(2, used=100, managed=99),
+                                                   gpu(3, used=10, managed=10)]))
+        async with app.run_test(size=size) as pilot:
+            await app.workers.wait_for_complete()
+            lines = rendered_lines(app)
+            assert len(lines) == 4
+            assert len({line.index(" l") for line in lines}) == 1, lines
+            assert len({line.index("u") for line in lines}) == 1, lines
+            assert "?" in lines[1]  # Unknown stays unknown, not zero.
+    asyncio.run(scenario())

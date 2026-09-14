@@ -20,14 +20,26 @@ LLM_URL=http://scheduler:8011 python3 llm status --json
 url = http://scheduler:8011
 # 普通 HTTP 请求超时秒数，必须为正数；默认 10。free/wake/reserve 单独使用 --wait。
 timeout = 10
+# 可选：共享 llama-swap OpenAI 兼容推理地址，仅用于 TUI 的 endpoint 复制。
+# 根路径会规范化为 /v1；显式非根 base path 原样保留。它不是 scheduler 地址。
+# api_url = https://data-plane.example.invalid/v1
 ```
 
-优先级为命令行参数 > 环境变量 `LLM_URL` / `LLM_TIMEOUT` > 配置文件。全局参数放在子命令前：
+优先级为命令行参数 > 环境变量 > 配置文件：`--url` > `LLM_URL` > `url`；
+`--timeout` > `LLM_TIMEOUT` > `timeout`；`LLM_API_URL` > `api_url`。全局参数
+放在子命令前：
 
 ```sh
 python3 llm --config ./client.conf --timeout 3 status
 python3 llm --url http://scheduler:8011 status --json
+LLM_API_URL='https://data-plane.example.invalid' python3 llm
 ```
+
+`api_url` / `LLM_API_URL` 是**可选**的独立推理地址，只被 TUI 的「Copy model
+endpoint address」使用，绝不等于 scheduler 管理地址、也不从管理端口推断。
+地址必须是 http(s)、不带凭据/query/fragment 或控制字符；根路径规范化为 `/v1`，
+显式非根 base path 保留。省略时旧配置与所有 CLI 行为不变（复制的菜单项在 TUI
+中置灰并提示如何设置）。
 
 缺少地址、连接失败、HTTP 错误和无效响应会在 stderr 输出解释，并返回退出码 1；参数错误返回 2，Ctrl-C 返回 130。HTTP 重定向不会自动跟随，配置应使用最终服务地址。
 
@@ -295,7 +307,7 @@ python -m pip install '.[tui]'
 LLM_URL=http://scheduler:8011 python cli/llm
 ```
 
-界面以命令行为中心：启动就聚焦底部的 `› ` 输入框。`/v1/state` 每 0.5 秒刷新一次（用 `LLM_TUI_REFRESH` 指定秒数可改，非法或非正值回落 0.5 秒），收到任何 scheduler 事件也立刻再读一次状态；在途请求不会叠加轮询，也不会阻塞按键。顶部是每张卡一行的 GPU 行（`GPU0 87/144G  llmsvc 77  ext 10`，颜色随占用，未知量显示 `?` 并暗显）和内存预算行。中部左侧是模型表、右侧是事件面板；100×30 时并排，小于 100 列时改为上下排列。结果区在命令行上方，可滚动。底栏依次是连接状态、最近一次后台读取结果、最近一次界面操作提示，以及 `Enter run · Tab complete · Ctrl+O menu · /help`。
+界面以命令行为中心：启动就聚焦底部的 `› ` 输入框。`/v1/state` 每 0.5 秒刷新一次（用 `LLM_TUI_REFRESH` 指定秒数可改，非法或非正值回落 0.5 秒），收到任何 scheduler 事件也立刻再读一次状态；在途请求不会叠加轮询，也不会阻塞按键。顶部是每张卡一行的 GPU 行（`GPU0 used … 87/144G llmsvc … ext 10 free 57`，颜色随占用，未知量显示 `?` 并暗显；数值字段右对齐到同一宽度，一/二/三位数与分数、未知值都不会让占用条和标签错位）和内存预算行。中部左侧是模型表、右侧是事件面板；100×30 时并排，小于 100 列时改为上下排列。结果区在命令行上方，可滚动。底栏最前面固定显示当前运行版本（如 `v1.1.0`），其后是连接状态、最近一次后台读取结果、最近一次界面操作提示和队列，最后是 `Enter run · Tab complete · Ctrl+O menu · /help`；长提示只会挤掉尾部的快捷键，不会挤掉版本。
 
 ### 键位
 
@@ -325,15 +337,17 @@ LLM_URL=http://scheduler:8011 python cli/llm
 2. `Bring online` → `wake MODEL`
 3. `Sleep to memory` → `sleep MODEL`
 4. `Free from memory` → `stop MODEL`
-5. `Copy name`
-6. `Copy status line`
-7. `Insert into command line`
+5. `Cancel queued operations`
+6. `Copy name`
+7. `Copy status line`
+8. `Copy model endpoint address`
+9. `Insert into command line`
 
-按当前状态置灰但仍然显示：`awake` 置灰 `Bring online` 与 `Load into memory`；`sleeping` 置灰 `Load into memory` 与 `Sleep to memory`；`stopped` 置灰 `Sleep to memory` 与 `Free from memory`；默认模型的 `Free from memory` 置灰并标 `(default)`。上下键跳过置灰项，Enter 执行，Esc 关闭，鼠标同样可用；菜单打开期间命令行保持焦点，按键先路由给菜单。
+按当前状态置灰但仍然显示：`awake` 置灰 `Bring online` 与 `Load into memory`；`sleeping` 置灰 `Load into memory` 与 `Sleep to memory`；`stopped` 置灰 `Sleep to memory` 与 `Free from memory`；默认模型的 `Free from memory` 置灰并标 `(default)`。未配置 `api_url` / `LLM_API_URL` 时该项置灰并直接显示为 `Copy endpoint (needs api_url)`，`/help` 也说明配置方式——无需选中置灰项即可看到原因。上下键跳过置灰项，Enter 执行，Esc 关闭，鼠标同样可用；菜单打开期间命令行保持焦点，按键先路由给菜单。打开菜单不再打印 `Menu for …` 之类的重复提示，命令结果与错误仍保留。
 
 前三项立刻通过与手输完全相同的命令路径执行，复用单写互斥和结果区的进度显示。`Free from memory` 先在结果区显示内联确认 `Free MODEL from memory? [y/N]`，按 `y` 才执行，其他任意键取消且不发请求，不弹窗。`preload` / `sleep` / `stop` 是上节的同名 CLI 子命令；菜单只把命令字符串送进同一条路径，模型名按 shell 引号规则保留并用 `--` 分隔，支持空格、引号、Unicode、百分号和前导 `-`。未知子命令由共享解析器报 `invalid choice`，菜单不会自己编造请求。
 
-`Copy name` 请求终端剪贴板并把模型名追加到命令行末尾；`Copy status line` 复制该模型在表格中的整行文本；点击 GPU 行复制该行的 `GPU N …` 描述；点击事件行复制该条的可见文本（换行的长事件按点中的可见行复制）。剪贴板成功与否都在底栏说明，不冒充复制成功。
+`Copy name` 请求终端剪贴板并把模型名追加到命令行末尾；`Copy status line` 复制该模型在表格中的整行文本；`Copy model endpoint address` 复制配置的共享 OpenAI base URL（`api_url` / `LLM_API_URL`，根路径规范化为 `/v1`），调用方仍使用当前模型名，复制不发任何模型请求、不改服务状态；未配置时明确提示。点击 GPU 行复制该行的 `GPU N …` 描述；点击事件行复制该条的可见文本（换行的长事件按点中的可见行复制）。剪贴板成功与否都在底栏说明，不冒充复制成功。
 
 ### 命令与刷新
 
@@ -342,7 +356,7 @@ LLM_URL=http://scheduler:8011 python cli/llm
 - 后台轮询只写底栏，不覆盖命令结果；显式 `status` / `status --json` 才写结果区。刷新失败保留上一份快照，并在底栏显示错误和 UTC 时间。
 - 实际 `free --ram` 仍先弹出二次确认窗口，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。
 - usage 视图用 `/usage`、`/usage 30` 进入，`status` 命令或 Status 按钮返回，按同一刷新间隔刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
-- 活动读取失败在底栏显示 `Partial update · activity unavailable` 和受限安全原因（预算、锁、schema、parse 等）；旧版 `ValueError` 或未知原因只显示 `reason unavailable`。该轮活动数值按未知显示，不沿用旧计数；完整当前 snapshot/errors 保留在 `status --json`，不会被人类文案改写。读取成功而来源为 unknown/空时，选中模型的详情行显示 `source unavailable`，仍保留已读取的计数；不能据此推断“未记录来源”、容器身份或数据库读取失败。
+- 活动读取失败在底栏显示 `Partial update · activity unavailable` 和受限安全原因（预算、锁、schema、parse 等）；旧版 `ValueError` 或未知原因只显示 `reason unavailable`。该轮活动数值按未知显示，不沿用旧计数；完整当前 snapshot/errors 保留在 `status --json`，不会被人类文案改写。读取成功而来源为 unknown/空时仍保留已读取的计数，不据此推断“未记录来源”、容器身份或数据库读取失败；模型名与 `source unavailable` 的冗余详情行已去掉，诊断保留在底栏与 `status --json`。
 - Reserve 的预览、只读拒绝与实际回执语义见上节；默认入口的模型实际写入仍关闭；具有显式 catalog 提交能力的服务器可以排队 add/rm，queued 不等于 applied 或全局动作可用。不能用本客户端命令启用生产调度。
 
 ### 紧凑界面与真实进度（#168）
@@ -351,9 +365,18 @@ LLM_URL=http://scheduler:8011 python cli/llm
 总量、llmsvc 记账与外部占用；未知量暗显，不用规划值补齐。模型表固定列宽、数值
 右对齐，不变快照不重建，单元格按模型 key 更新。宽终端列为 MODEL / STATE / GPU /
 MEM / BUDGET / USED / 10m / PIN，窄终端保留 MODEL / STATE / GPU / MEM / PIN，默认
-模型标 `*`；选中模型的活动来源、pin 到期与 owner 在表格下方一行显示。模型增删或
-源排序变化保留当前有效选择；窗口宽度变化才重排列。窄终端上下排列，原有长详情/
-结果滚动与 RAM 确认行为保留。
+模型标 `*`。模型增删或源排序变化保留当前有效选择；窗口宽度变化才重排列。
+窄终端上下排列，结果滚动与 RAM 确认行为保留。原先表格下方的模型名/`source
+unavailable` 详情行已删除并归还空间；诊断在底栏与 `status --json` 中保留。
+
+提交模型操作（点击菜单或手输）后，STATE 单元立即显示本次命令的目标过渡相
+（`SSDtoMEM` / `SSDtoGPU` / `MEMtoGPU` / `GPUtoMEM`，stop 为 `GPUtoSSD` /
+`MEMtoSSD`），不必等后端观测。它由已知的观测起始态与命令目标推导，只是本会话
+的意图显示：不改 snapshot、不伪造字节进度；起始态未知时诚实显示 `loading` /
+`queued`，不臆造 SSD。队列位置仍是模型名后的独立 `[qN]` 标记（排队不等于在跑），
+同一模型先显示正在执行的目标，执行完再显示下一个排队意图；取消、失败、完成、
+dry-run、被拒绝的解析和取消的确认都不会残留过渡，迟到响应也不能复活已结束的
+意图；没有本地操作时继续显示后端自己的过渡态。
 
 等待命令显示目标、实际耗时和可用阶段。`wake` 的新目标事件可显示请求提交、
 放置授予、unit/account 确认、原始 state/swap 观测；标为 `observed`，因为现有事件
@@ -446,3 +469,4 @@ Reserve 测试直接请求当前 SchedulerHTTPServer 的预览/默认只读 405 
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
 <!-- Generated-By: Claude Code / claude-fable-5-1 -->
+<!-- Generated-By: OpenCode / deepseek-v4.1-flash -->

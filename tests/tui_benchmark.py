@@ -1,5 +1,6 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Claude Code / claude-fable-5-1
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Manual actual-PTY benchmark, synthetic loopback only; not an automatic test.
 
 Run with the installed Textual interpreter:
@@ -97,7 +98,6 @@ def child(args):
             self.call_after_refresh(self.capture)
 
         def capture(self):
-            self.update_details()
             self.selected_at_start = self.selected_model()
             self.initial_clears = self.clears
             (output/'screen.svg').write_text(self.export_screenshot(title='llm · synthetic read-only fixture'))

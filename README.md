@@ -71,6 +71,13 @@ python3 llm usage --days 7 --by model
 源码目录中的等价命令是 `python3 cli/llm status`。`LLM_URL` 使用上面设置的
 scheduler 地址；参数/配置优先级及完整命令见 [CLI 使用说明](docs/CLI.md)。
 
+TUI 的「Copy model endpoint address」复制的是**共享 llama-swap OpenAI 地址**，
+调用方仍使用当前选中的模型名。它来自独立的可选配置 `api_url`（或环境变量
+`LLM_API_URL`），**不是** scheduler 管理地址，也不会从管理端口猜测推理端口：
+在配置文件里把 `api_url` 设成与上面 `OPENAI_BASE_URL` 相同的值即可（根路径会
+规范化为 `/v1`，显式非根 base path 原样保留）。未配置时菜单项置灰并给出设置
+提示，复制只请求终端剪贴板，不发任何模型请求、不改变服务状态。
+
 `status` 展示各 GPU 的服务/外部占用、空闲量、模型状态、pin/reserve、租约和
 阻塞原因。下列为**合成示例**，不是当前服务器测量：
 
@@ -97,13 +104,15 @@ python3 -m venv .venv
 安装依赖需要可用的软件源或管理员准备的离线 wheelhouse。已安装包的 `llm`
 无参数、在 TTY 且 Textual 可用时启动 TUI；否则降级为状态输出。
 进去就是命令行：Enter 执行、Tab 补全、↑/↓ 翻历史、Shift+↑/↓ 选模型、
-Ctrl+O 打开选中模型的菜单（load / online / sleep / free、复制、插入命令行）、
+Ctrl+O 打开选中模型的菜单（load / online / sleep / free、复制名称/状态行、
+复制模型 endpoint 地址、插入命令行）、
 `/help` `/quit` `/usage` `/events` `/copy` 等界面命令，Ctrl+C 两次退出。
 状态每 0.5 秒刷新，收到事件立即再读一次。TUI 事件经 scheduler 转发；缺少数据面
 事件不代表无活动，`stopped` 事件也不能单独证明 unit 退出或资源释放。
 新版面板按变化更新模型单元格和事件，保留当前选择，心跳仅更新连接状态。
 等待操作展示目标、已用时间及可用的已观测阶段；没有可信估计时显示 ETA unknown，
 配置中的冷启动总时长不会冒充实时剩余时间。
+底栏固定以当前运行版本（如 `v1.1.0`）开头，即使连接/队列提示很长也不会被挤掉。
 事件栏默认显示精简变化，连接/在途/错误计数固定显示；重复快照不会逐条刷屏。
 点 `Details`（或在输入框外按 `e`）查看冻结详情并选择文本。`Copy` 仅在你点击时
 请求终端剪贴板；无选区时复制精简摘要，过大选区会提示改用导出，不静默截断。

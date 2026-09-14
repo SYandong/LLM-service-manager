@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Event-panel integration uses only synthetic scheduler/loopback observations."""
 
 import asyncio
@@ -99,7 +100,7 @@ def test_bounded_history(api, snapshot):
     asyncio.run(scenario())
 
 
-def test_long_result_and_details_are_scrollable(api, snapshot):
+def test_long_result_is_scrollable(api, snapshot):
     async def scenario():
         snapshot["models"][0]["name"] = "long model details " * 100 + "END"
         app = SchedulerApp(FakeClient(snapshot), SimpleNamespace(**api), event_reader=BufferedEvents())
@@ -108,10 +109,9 @@ def test_long_result_and_details_are_scrollable(api, snapshot):
             await pilot.pause()
             app.show_result("long explanation " * 100 + "END")
             await pilot.pause()
-            for name in ["result", "details"]:
-                view = app.query_one("#" + name + "-view", VerticalScroll)
-                assert view.max_scroll_y > 0
-                view.scroll_end(animate=False)
-                await pilot.pause()
-                assert view.scroll_y == view.max_scroll_y
+            view = app.query_one("#result-view", VerticalScroll)
+            assert view.max_scroll_y > 0
+            view.scroll_end(animate=False)
+            await pilot.pause()
+            assert view.scroll_y == view.max_scroll_y
     asyncio.run(scenario())

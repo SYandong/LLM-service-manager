@@ -17,7 +17,7 @@ import pytest
 pytest.importorskip("textual")
 
 from textual.widgets import DataTable, Input, RichLog, Static
-from tui.app import SchedulerApp
+from tui.app import QueueEntry, SchedulerApp
 from test_llm import snapshot
 
 
@@ -113,17 +113,16 @@ def test_layout_and_selection(snapshot, size):
             assert table.size.height >= 3
             assert command.region.bottom <= size[1]
             assert command.region.width <= size[0]
-            assert table.region.bottom <= app.query_one("#details").region.y
+            assert table.region.bottom <= app.query_one("#result-view").region.y
             panel = app.query_one("#event-panel")
             if size[0] < 100:
                 assert panel.region.y >= table.region.bottom
             else:
                 assert panel.region.x >= table.region.right
-            assert panel.region.bottom <= app.query_one("#details").region.y
+            assert panel.region.bottom <= app.query_one("#result-view").region.y
             assert app.screen.has_class("narrow") == (size[0] < 100)
             await pilot.press("shift+down")
             assert app.selected_model() == "research-model"
-            assert "ctr-b" in str(app.query_one("#details", Static).render())
             assert set(client.calls) == {("GET", "/v1/state")}
     asyncio.run(scenario())
 
@@ -136,7 +135,7 @@ def test_command_line_keeps_focus_through_every_panel_click(snapshot):
             await pilot.pause()
             command = app.query_one("#command")
             for target in ["#models", "#gpus", "#memory", "#events", "#source-status",
-                           "#details", "#result", "#event-panel", "#summary"]:
+                           "#result", "#event-panel", "#summary"]:
                 await pilot.click(target)
                 await pilot.pause()
                 assert app.focused is command, target
@@ -247,6 +246,30 @@ def test_refresh_interval_is_configurable(snapshot, monkeypatch):
     assert SchedulerApp(FakeClient(snapshot), api, event_reader=IdleEvents()).refresh_seconds == 0.5
     monkeypatch.setenv("LLM_TUI_REFRESH", "0")
     assert SchedulerApp(FakeClient(snapshot), api, event_reader=IdleEvents()).refresh_seconds == 0.5
+
+
+def test_footer_shows_the_real_version_even_with_long_status(snapshot):
+    async def scenario():
+        app, _ = make_app(snapshot)
+        async with app.run_test(size=(40, 24)) as pilot:
+            await app.workers.wait_for_complete()
+            for timer in app._ui_timers:
+                timer.pause()
+            version = app.api.app_version()
+            assert app.version_label() == "v" + version
+            # A long connection/read notice must not squeeze the version out.
+            app.show_notice("very long status " * 20)
+            await pilot.pause()
+            bar = str(app.query_one("#event-status", Static).render())
+            assert bar.startswith("v" + version)
+            # Neither may a long queue message.
+            app._current_write = QueueEntry(
+                1, SimpleNamespace(command="wake", model="cold-model"),
+                "wake cold-model", "wake", "cold-model", "cold-model")
+            app.render_event_status()
+            bar = str(app.query_one("#event-status", Static).render())
+            assert bar.startswith("v" + version)
+    asyncio.run(scenario())
 
 
 def test_scheduler_event_triggers_an_immediate_state_read(snapshot):

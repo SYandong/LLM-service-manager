@@ -46,7 +46,6 @@ def test_pin_and_unpin_refresh_column_with_server_owner(pin_api, pin_service, mo
             table = app.query_one("#models", DataTable)
             row = table.get_row_at(app.model_names.index("model"))
             assert str(row[-1]) == "yes"
-            assert "actual-owner" in str(app.query_one("#details", Static).render())
             output = str(app.query_one("#result", Static).render())
             assert "owner actual-owner" in output and "spoof-owner" not in output
             write_index = pin_service.requests.index(("POST", "/v1/pin"))

@@ -41,6 +41,7 @@ MENU_ITEMS = (
     ("cancel-queue", "Cancel queued operations"),
     ("copy-name", "Copy name"),
     ("copy-row", "Copy status line"),
+    ("copy-endpoint", "Copy model endpoint address"),
     ("insert", "Insert into command line"),
 )
 
@@ -62,6 +63,20 @@ TRANSITION_ACTIONS = {
     "GPUtoMEM": "sleep", "GPUtoSSD": "stop", "MEMtoSSD": "stop",
 }
 
+# UI-only command intents shown in STATE before the backend observes anything.
+# Only a known observed source state picks a target phase; an unknown source
+# stays honest ("loading"/"queued") and never invents an SSD start.
+INTENT_TARGETS = {
+    "wake": {"stopped": "SSDtoGPU", "sleeping": "MEMtoGPU"},
+    "preload": {"stopped": "SSDtoMEM"},
+    "sleep": {"awake": "GPUtoMEM"},
+    "stop": {"awake": "GPUtoSSD", "sleeping": "MEMtoSSD"},
+}
+OBSERVED_STATES = ("awake", "sleeping", "stopped")
+
+# Distinguishes "not captured yet" from a captured no-op/unknown label (None).
+UNSET = object()
+
 
 def transition_action(label):
     return TRANSITION_ACTIONS.get(label) if isinstance(label, str) else None
@@ -77,6 +92,9 @@ class QueueEntry:
     command: str
     model: Optional[str]
     target: str
+    # Active operations freeze their target phase at dispatch so a changing
+    # observed state cannot silently drop or replace it mid-flight.
+    transition: object = UNSET
 
 
 class CommandMessage(Exception):
@@ -244,7 +262,6 @@ class SchedulerApp(App):
     RichLog { background: #171717; padding: 0 1; }
     #event-title { color: #ad8c63; padding: 0 1; }
     #event-status { color: #a3a3a3; background: #242424; padding: 0 1; }
-    #details { color: #a3a3a3; }
     #summary { height: auto; max-height: 14; }
     #gpus { width: 2fr; height: auto; padding: 0 1; }
     #memory { width: 1fr; height: auto; padding: 0 1; }
@@ -262,16 +279,14 @@ class SchedulerApp(App):
     Screen.narrow #content { layout: vertical; }
     Screen.narrow #models { width: 1fr; }
     Screen.narrow #event-panel { width: 1fr; height: 5; }
-    #details-view { height: 1; }
     #result-view { height: 2; }
-    #details, #result { height: auto; min-height: 1; padding: 0 1; }
-    #result { color: $text-muted; }
+    #result { height: auto; min-height: 1; padding: 0 1; color: $text-muted; }
     #usage-view { display: none; height: 1fr; }
     #usage-controls { height: 3; }
     #usage-controls Button { width: 1fr; min-width: 0; }
     #usage-scroll { height: 1fr; }
     #usage-text { height: auto; padding: 0 1; }
-    Screen.usage #summary, Screen.usage #content, Screen.usage #details-view { display: none; }
+    Screen.usage #summary, Screen.usage #content { display: none; }
     Screen.usage #usage-view { display: block; }
     #command-row { height: auto; min-height: 3; max-height: 6; background: #202020;
                    border: tall #3a3a3a; padding: 0 1; align: left top; }
@@ -336,6 +351,13 @@ class SchedulerApp(App):
         self._gpu_order = []
         self._gpu_lines = []
         self._gpu_render = []
+        # The single CLI version source; the footer shows it even when long
+        # connection/queue text clips.
+        reader = getattr(api, "app_version", None)
+        try:
+            self.version = str(reader()) if callable(reader) else "unknown"
+        except Exception:
+            self.version = "unknown"
 
     def composer(self):
         return self.dashboard.query_one("#command", CommandComposer)
@@ -366,6 +388,15 @@ class SchedulerApp(App):
             return 0.5
         return seconds if math.isfinite(seconds) and seconds > 0 else 0.5
 
+    def version_label(self):
+        """Anchored footer prefix: clipped status text must never hide it."""
+        return "v" + self.version
+
+    def inference_url(self):
+        """The configured shared OpenAI base URL, or None when unset."""
+        value = getattr(self.client, "api_url", None)
+        return value if isinstance(value, str) and value else None
+
     @property
     def dashboard(self):
         # Textual 0.70 App.query_one searches only the active modal screen.
@@ -391,18 +422,16 @@ class SchedulerApp(App):
                 yield Button("Status", id="usage-status")
             with VerticalScroll(id="usage-scroll"):
                 yield Static("Loading usage…", id="usage-text", markup=False)
-        with VerticalScroll(id="details-view"):
-            yield Static("Select a model with Shift+↑/↓", id="details", markup=False)
         with VerticalScroll(id="result-view"):
-            yield Static("Status · refresh every %ss · Ctrl+O opens the item menu" % self.api.number(
-                self.refresh_seconds), id="result", markup=False)
+            yield Static("", id="result", markup=False)
         with Horizontal(id="command-row"):
             yield Static("› ", id="prompt", markup=False)
             command = CommandComposer(placeholder="status | wake MODEL | sleep MODEL | /help",
                                       id="command", soft_wrap=True)
             yield command
         yield OptionList(id="model-menu")
-        yield Static(self._connection + " · " + HINT, id="event-status", markup=False)
+        yield Static(self.version_label() + " · " + self._connection + " · " + HINT,
+                     id="event-status", markup=False)
 
     def on_mount(self):
         # Only the command line accepts focus; every panel is click-only.
@@ -463,14 +492,6 @@ class SchedulerApp(App):
             if isinstance(error, str) and error.startswith("activity:"):
                 return reasons.get(error.partition(":")[2].strip(), "reason unavailable")
         return None
-
-    @staticmethod
-    def activity_sources(stats):
-        sources = stats.get("by", [])
-        known = [source for source in sources if source and source != "unknown"]
-        if not known:
-            return "source unavailable"
-        return "from " + ", ".join(known) + (" · some sources unavailable" if len(known) < len(sources) else "")
 
     def snapshot_message(self):
         errors = self.snapshot.get("errors", [])
@@ -586,7 +607,6 @@ class SchedulerApp(App):
                 self.render_snapshot()
                 if getattr(args, "model", None) in self.model_names:
                     self.dashboard.query_one("#models", DataTable).move_cursor(row=self.model_names.index(args.model))
-                    self.update_details()
             except Exception as exc:
                 message += "\nState refresh failed: " + str(exc)
             if self.is_running:
@@ -636,6 +656,13 @@ class SchedulerApp(App):
             while self.is_running and self._queue:
                 entry = self._queue.popleft()
                 self._current_write = entry
+                # The target phase is derived once, from the freshest observed
+                # source at dispatch, and then held for the whole ownership
+                # lifetime so later samples cannot drop it or leak a queued
+                # fallback.  This never edits the snapshot.
+                entry.transition = self.intent_label(entry, active=True)
+                if self.snapshot is not None:
+                    self.render_snapshot()
                 try:
                     await self._perform_write(entry.args)
                 except Exception as exc:
@@ -871,36 +898,67 @@ class SchedulerApp(App):
         percent = min(100, max(0, used / total * 100))
         return "#6f9f6f" if percent < 60 else "#ad8c63" if percent < 85 else "#c46a6a"
 
-    def gpu_line(self, gpu, reserved, compact=False):
-        """One subdued labelled line: used bar and llmsvc bar over total GiB."""
+    def gpu_layout(self, ordered, compact):
+        """Shared right-aligned widths so every row keeps the same columns.
+
+        ``ordered`` is an iterable of ``(index, gpu, fresh)``.  Each numeric
+        field gets its own maximum width so a wide value (a fraction or a
+        three-digit total) cannot pad every other field and force a wrap.
+        """
+        def width(keys):
+            values = [len(str(self.api.number(gpu.get(key))))
+                      for _, gpu, fresh in ordered if fresh and gpu is not None
+                      for key in keys]
+            return max(values or [1])
+
+        return {"index": max([len(str(index)) for index, _, _ in ordered] or [1]),
+                "pair": width(("used_gb", "total_gb")),
+                "managed": width(("managed_gb",)),
+                "external": width(("external_gb",)),
+                "free": width(("free_gb",))}
+
+    def gpu_line(self, gpu, reserved, compact=False, layout=None):
+        """One subdued labelled line: used bar and llmsvc bar over total GiB.
+
+        Numeric fields are right-aligned to a shared per-render width so one-,
+        two- and three-digit values (and fractions/unknown) never shift the bars
+        or labels.
+        """
+        if layout is None:
+            layout = self.gpu_layout([(gpu.get("index"), gpu, True)], compact)
         index = gpu.get("index")
+
+        def num(key, width):
+            return self.api.number(gpu.get(key)).rjust(width)
+
         bar_width = 6 if compact else 10
         used_label = "u" if compact else "used "
         managed_label = "l" if compact else "llmsvc "
         text = Text()
-        text.append("GPU%s " % index, style="bold #c8c8c8")
+        text.append("GPU%s " % str(index).rjust(layout["index"]), style="bold #c8c8c8")
         text.append(used_label, style="#8a8a8a")
         bar = self.gpu_bar(gpu.get("used_gb"), gpu.get("total_gb"), bar_width)
         text.append(bar if bar is not None else "?" * bar_width,
                     style=self.gpu_style(gpu) if bar is not None else "dim")
-        text.append(" %s/%sG " % (self.api.number(gpu.get("used_gb")), self.api.number(gpu.get("total_gb"))),
+        text.append(" %s/%sG " % (num("used_gb", layout["pair"]), num("total_gb", layout["pair"])),
                     style=self.gpu_style(gpu))
         text.append(managed_label, style="#8a8a8a")
         mbar = self.gpu_bar(gpu.get("managed_gb"), gpu.get("total_gb"), bar_width)
         text.append(mbar if mbar is not None else "?" * bar_width, style="#8a9fb0" if mbar is not None else "dim")
-        text.append(" %sG " % self.api.number(gpu.get("managed_gb")), style="#b0c0cc")
+        text.append(" %sG " % num("managed_gb", layout["managed"]), style="#b0c0cc")
         if not compact:
-            text.append("ext %s  free %s" % (self.api.number(gpu.get("external_gb")),
-                                             self.api.number(gpu.get("free_gb"))), style="#7a7a7a")
+            text.append("ext %s  free %s" % (num("external_gb", layout["external"]),
+                                             num("free_gb", layout["free"])), style="#7a7a7a")
         if index in reserved:
             text.append(" · reserved for placement", style="cyan")
         return text
 
     @staticmethod
-    def gpu_stale_line(index, compact=False):
+    def gpu_stale_line(index, compact=False, layout=None):
+        index_text = str(index).rjust((layout or {}).get("index", 1))
         if compact:
-            return Text("GPU%s unavailable (stale)" % index, style="dim #8a8a8a")
-        return Text("GPU%s unavailable · stale observation (probe missing)" % index, style="dim #8a8a8a")
+            return Text("GPU%s unavailable (stale)" % index_text, style="dim #8a8a8a")
+        return Text("GPU%s unavailable · stale observation (probe missing)" % index_text, style="dim #8a8a8a")
 
     def refresh_gpu_view(self, observed):
         """UI-only merge that preserves known indices across partial/empty probes.
@@ -949,12 +1007,16 @@ class SchedulerApp(App):
             gpu = entry.get("gpu") if entry else None
             fresh = bool(entry and entry.get("fresh"))
             self._gpu_lines.append({"index": index, "gpu": gpu, "fresh": fresh})
-            if fresh and gpu is not None:
-                rich = self.gpu_line(gpu, reserved, compact)
+        # One shared layout keeps every row's bars/labels in the same columns.
+        ordered = [(row["index"], row["gpu"], row["fresh"]) for row in self._gpu_lines]
+        layout = self.gpu_layout(ordered, compact)
+        for row in self._gpu_lines:
+            if row["fresh"] and row["gpu"] is not None:
+                rich = self.gpu_line(row["gpu"], reserved, compact, layout)
             else:
-                rich = self.gpu_stale_line(index, compact)
-            self._gpu_render.append({"index": index, "gpu": gpu, "fresh": fresh,
-                                     "legend": False, "rich": rich})
+                rich = self.gpu_stale_line(row["index"], compact, layout)
+            self._gpu_render.append({"index": row["index"], "gpu": row["gpu"],
+                                     "fresh": row["fresh"], "legend": False, "rich": rich})
             lines.append_text(rich)
             lines.append("\n")
         lines.rstrip()
@@ -1043,10 +1105,10 @@ class SchedulerApp(App):
             width = max(1, columns[0][1] - 2 - len(marker))
             base = self.api.fit(name, width).rstrip()
             label = base + (" *" if model.get("is_default") else "") + marker
-            # The command target phase takes the STATE cell while owned; the
+            # The local command target outranks a delayed backend transition; the
             # stable observed state returns once the operation is cleaned up.
             # It is dimmed because it is intent, not a measured state.
-            transition = model.get("transition")
+            transition = self.local_transition(name) or model.get("transition")
             state_label = transition or model.get("state", "unknown")
             row = [label, state_label, "-" if model.get("gpu") is None else str(model["gpu"]),
                    self.api.number(model.get("resident_gb")) + "G"]
@@ -1073,7 +1135,6 @@ class SchedulerApp(App):
             self._table_rows[name] = cells
         if previous in self.model_names and table.cursor_row != self.model_names.index(previous):
             table.move_cursor(row=self.model_names.index(previous), animate=False)
-        self.update_details()
         self.refresh_open_menu()
 
     def selected_model(self):
@@ -1083,28 +1144,6 @@ class SchedulerApp(App):
     def model_status_line(self, name):
         cells = self._table_rows.get(name)
         return None if cells is None else "  ".join(cell.plain.strip() for cell in cells)
-
-    def update_details(self):
-        name = self.selected_model()
-        text = "No model observations" if name is None else name
-        if name:
-            stats = next((item for item in self.snapshot.get("activity", []) if item["model"] == name), {})
-            now = self.snapshot.get("sampled_at")
-            observed_at = self.api.time.time() if now is None else now
-            pin = next((item for item in self.snapshot.get("pins", [])
-                        if item["model"] == name and item["until"] > observed_at), None)
-            failure = self.activity_failure()
-            if failure is not None:
-                text += " · activity unavailable: " + failure + " · source unavailable"
-            else:
-                text += " · " + self.activity_sources(stats)
-            if pin:
-                text += " · pin %s (%s)" % (self.api.expiry(pin["until"]), pin["by"])
-        self.update_static("details", self.api.clean_text(text))
-
-    def on_data_table_row_highlighted(self, event):
-        if self.snapshot is not None and event.data_table.is_attached:
-            self.update_details()
 
     # ---------------------------------------------------------------- keyboard
 
@@ -1229,7 +1268,6 @@ class SchedulerApp(App):
         table = self.dashboard.query_one("#models", DataTable)
         row = min(len(self.model_names) - 1, max(0, table.cursor_row + delta))
         table.move_cursor(row=row, animate=False)
-        self.update_details()
 
     def action_interrupt(self):
         if self.is_running and self.screen is self.dashboard:
@@ -1241,6 +1279,7 @@ class SchedulerApp(App):
             "Ctrl+O item menu · Ctrl+L clear event log · Ctrl+R reset event cursor · "
             "Esc close menu or clear input · Ctrl+C clear then exit · Ctrl+D exit · "
             "click a row for its menu, a GPU line or an event line to copy it · "
+            "menu Copy endpoint copies the configured api_url / LLM_API_URL · "
             "/help /quit /usage [7|30] /events /clear /refresh /copy [MODEL|gpu N|events] "
             "/queue /cancel ID|MODEL · "
             "commands use the llm CLI: status · usage --days 7|30 · wake MODEL · sleep MODEL · "
@@ -1264,6 +1303,48 @@ class SchedulerApp(App):
             return current.command
         return transition_action(model.get("transition"))
 
+    def observed_state(self, name):
+        """The last observed state for a model; None when it is unknown."""
+        for model in (self.snapshot or {}).get("models", []):
+            if model.get("name") == name:
+                state = model.get("state")
+                return state if isinstance(state, str) else None
+        return None
+
+    def intent_label(self, entry, active):
+        """Target phase for one local command, or None for a no-op/dry-run.
+
+        A known observed source picks SSDtoMEM / SSDtoGPU / MEMtoGPU / GPUtoMEM
+        (stop: GPUtoSSD / MEMtoSSD).  An unknown source stays honest instead of
+        inventing an SSD start.
+        """
+        table = INTENT_TARGETS.get(entry.command)
+        if table is None or getattr(entry.args, "dry_run", False):
+            return None
+        state = self.observed_state(entry.model)
+        if state in OBSERVED_STATES:
+            return table.get(state)
+        return "loading" if active else "queued"
+
+    def local_transition(self, name):
+        """Local active transition first, then the next queued intent for a model.
+
+        An active operation owns the STATE cell for its whole lifetime: its
+        target phase is captured at dispatch and returned even when a later
+        sample would map to a different phase or to no phase.  A captured no-op
+        or unknown label (None) therefore never falls through to a queued intent
+        that is not running yet.  Display-only intent; the snapshot is untouched.
+        """
+        current = self._current_write
+        if current is not None and current.model == name:
+            if current.transition is UNSET:
+                current.transition = self.intent_label(current, active=True)
+            return current.transition
+        for entry in self._queue:
+            if entry.model == name:
+                return self.intent_label(entry, active=False)
+        return None
+
     def menu_disabled(self, model, name):
         """Actions greyed out for this model's current state, queue and loading."""
         state, default = model.get("state"), bool(model.get("is_default"))
@@ -1275,19 +1356,38 @@ class SchedulerApp(App):
             disabled = disabled | {loading}
         if not any(entry.model == name for entry in self._queue):
             disabled = disabled | {"cancel-queue"}
+        if self.inference_url() is None:
+            # Visibly unavailable rather than a copy that silently does nothing.
+            disabled = disabled | {"copy-endpoint"}
         return disabled
+
+    def option_label(self, model, name, key, disabled=None, loading=None):
+        """One menu label; an unavailable endpoint explains itself in place.
+
+        The not-configured reason is visible on the disabled entry (and in
+        ``/help``) so a user need not invoke an unselectable item to learn it.
+        """
+        if disabled is None:
+            disabled = self.menu_disabled(model, name)
+        if loading is None:
+            loading = self.loading_action(model, name)
+        label = dict(MENU_ITEMS)[key]
+        if bool(model.get("is_default")) and key == "stop":
+            label += " (default)"
+        if key == "copy-endpoint" and self.inference_url() is None:
+            label = "Copy endpoint (needs api_url)"
+        if key == loading and key in disabled:
+            label += " (running…)"
+        return label
 
     def menu_options(self, model, name):
         """Build the ordered menu options, labelling the action that is loading."""
         disabled = self.menu_disabled(model, name)
         loading = self.loading_action(model, name)
-        default = bool(model.get("is_default"))
         options = []
-        for key, label in MENU_ITEMS:
-            text = label + (" (default)" if default and key == "stop" else "")
-            if key == loading and key in disabled:
-                text += " (running…)"
-            options.append(Option(text, id=key, disabled=key in disabled))
+        for key, _ in MENU_ITEMS:
+            options.append(Option(self.option_label(model, name, key, disabled, loading),
+                                  id=key, disabled=key in disabled))
         return options
 
     def refresh_open_menu(self):
@@ -1300,16 +1400,13 @@ class SchedulerApp(App):
             return
         disabled = self.menu_disabled(model, name)
         loading = self.loading_action(model, name)
-        default = bool(model.get("is_default"))
         menu = self.dashboard.query_one("#model-menu", OptionList)
         changed = False
-        for key, label in MENU_ITEMS:
+        for key, _ in MENU_ITEMS:
             option = menu.get_option(key)
             if option is None:
                 continue
-            text = label + (" (default)" if default and key == "stop" else "")
-            if key == loading and key in disabled:
-                text += " (running…)"
+            text = self.option_label(model, name, key, disabled, loading)
             if str(option.prompt) != text:
                 menu.replace_option_prompt(key, text)
                 changed = True
@@ -1337,7 +1434,6 @@ class SchedulerApp(App):
         table = self.dashboard.query_one("#models", DataTable)
         if row is not None and 0 <= row < len(self.model_names):
             table.move_cursor(row=row, animate=False)
-            self.update_details()
         name = self.selected_model()
         model = next((item for item in (self.snapshot or {}).get("models", []) if item["name"] == name), None)
         if model is None:
@@ -1357,7 +1453,6 @@ class SchedulerApp(App):
         menu.styles.offset = self.menu_offset(table, self.model_names.index(name))
         self.menu_model = name
         self.focus_composer()
-        self.show_result("Menu for %s · ↑/↓ choose · Enter run · Esc close" % self.api.clean_text(name))
 
     def menu_offset(self, table, row):
         height, width = len(MENU_ITEMS) + 2, 34
@@ -1414,6 +1509,15 @@ class SchedulerApp(App):
                 self.show_notice("No status line for this model yet")
             else:
                 self.copy_text(line, "status line")
+        elif choice == "copy-endpoint":
+            url = self.inference_url()
+            if url is None:
+                self.show_result(
+                    "Inference endpoint not configured: set api_url in ~/.config/llm/config "
+                    "or LLM_API_URL (http(s), no credentials) to enable copying it")
+            else:
+                # The shared OpenAI base URL the caller uses with this model name.
+                self.copy_text(url, "model endpoint address")
         elif choice == "insert":
             self.append_to_command(name)
 
@@ -1525,10 +1629,11 @@ class SchedulerApp(App):
             self._event_timer.resume()
 
     def render_event_status(self):
-        # Connection, then the newest background read, then user feedback; the
-        # hint is last because it is the only part safe to clip.
+        # Version first (never clipped), then connection, the newest background
+        # read, user feedback and the queue; the hint is last because it is the
+        # only part safe to clip.
         queue = self.queue_text() if (self._queue or self._current_write is not None) else None
-        parts = [self._connection, self._observation, self._notice, queue, HINT]
+        parts = [self.version_label(), self._connection, self._observation, self._notice, queue, HINT]
         status = " · ".join(self.api.clean_text(part) for part in parts if part)
         if self._rendered.get("event-status") != status:
             self._event_status.update(status)
