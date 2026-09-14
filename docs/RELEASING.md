@@ -2,40 +2,48 @@
 
 ## Cadence and ownership
 
-The user authorized GitHub prereleases and PR-count batching in #90.
-Prepare one alpha whenever **five qualifying PRs** have merged into main since
-its last published tag commit. Count feature, fix, test, documentation and
+The user authorized stable releases in #248: feature work increments the minor
+version, bugfix-only work increments the patch version, and no new alpha
+prerelease is published. The historical alpha series stays parseable and
+verifiable for already-published artifacts, but it is closed.
+
+Prepare a release when the intended batch is complete and reviewed. Stable
+releases require **five qualifying merged PRs** since the previous published tag
+commit, unless the reviewed release PR records an explicit delivery exception
+tied to the user's authority. Count feature, fix, test, documentation and
 maintenance PRs; exclude pure `chore(release)` version/changelog maintenance PRs
 so publication cannot trigger itself. Recount against the actual remote tag
 and main, not a stale status snapshot.
 
 There is no daily cap, date delay, complete-feature-group or milestone
-prerequisite. An alpha may be an incremental snapshot with explicit limits.
-Urgent fixes may release below five PRs with the reason recorded by integration.
-Keep at most one candidate in flight; continue that candidate instead of opening
-a duplicate. Additional merged PRs included in its actual release commit belong
-to the same batch. After publication, reset the counting baseline to that exact
-tag commit. Unchanged state requires neither a release nor a model wakeup.
+prerequisite. Urgent fixes may release below five PRs with the reason recorded
+by integration. Keep at most one candidate in flight; continue that candidate
+instead of opening a duplicate. Additional merged PRs included in its actual
+release commit belong to the same batch. After publication, reset the counting
+baseline to that exact tag commit. Unchanged state requires neither a release
+nor a model wakeup.
 
-The initial series uses GitHub tags `v0.1.0-alpha.N` and Python distribution
-versions `0.1.0aN`. Advance N only for a new immutable release. The first alpha
-covers the read-only scheduler/CLI/TUI evaluation path. Later alphas describe
-newly included behavior and remaining acceptance without implying completion.
-An alpha does not close incomplete milestone issues.
+Historical releases used GitHub tags `v0.1.0-alpha.N` and Python distribution
+versions `0.1.0aN`. The publisher still parses those tags so old artifacts
+verify and publish idempotently, but it rejects any further alpha once a stable
+tag exists. An alpha does not close incomplete milestone issues.
 
 Stable releases use tags `vX.Y.Z` with Python versions `X.Y.Z` (no suffix).
-The publisher orders every alpha before every stable tag, requires each new
-release to advance the published series, and rejects a further alpha once a
-stable tag exists. Stable releases are published without the prerelease flag
-and become the repository's latest release. The same guard (release PR title,
-version literals, changelog heading, Fable marker, CI, resolved threads and
-cadence or a recorded exception) applies to both series.
+Increment Y for feature releases such as the #247 TUI command queue and Z for
+bugfix-only releases; never move a tag. The publisher orders every alpha before
+every stable tag, requires each new release to advance the published series, and
+rejects a further alpha once a stable tag exists. Stable releases are published
+without the prerelease flag and become the repository's latest release. The same
+guard (release PR title, version literals, changelog heading, current trusted
+review, CI, resolved threads and cadence or a recorded exception) applies to
+both series.
 
 Per the user's #108 instruction, validation uses bounded minutes-scale checks
 and deterministic regression/replay rather than mandatory day/week soak waits.
 Record the measured window and unmeasured long-term behavior explicitly; do not
 use elapsed calendar time as a release gate or claim short tests prove long-term
-stability. Existing correctness, Fable/CI and relevant operational gates remain.
+stability. Existing correctness, trusted-review/CI and relevant operational gates
+remain.
 
 Integration owns subsequent release coordination. A single release owner
 prepares the version bump, changelog and artifacts in an isolated worktree.
@@ -59,9 +67,18 @@ Root owns the initial #76 release. Use a `chore/<issue>-release-...` branch and 
    receipts retain their historical exclusions; do not copy those exclusions
    into current validation. Model-running deployment harnesses remain separately
    owned by ops and require their actual idle/protection gates.
-3. Require explicit Fable approval of the current release PR head, current
-   successful CI and resolved blockers. Apply the ROADMAP's squash/commit
-   verification rules. New commits invalidate prior approval.
+3. Require an explicit approval of the current release PR head from a recognized
+   trusted harness (Fable or Codex) under the shared trusted account, current
+   successful CI and resolved blockers. The single latest review from that account
+   decides, and it must itself carry exactly one recognized **full watermark line**
+   (`Generated-By: Claude Code / claude-fable-5-1` or
+   `Generated-By: Codex / gpt-6-astra`, no suffix) plus exactly one matching full
+   marker line (`FABLE-APPROVED <sha>` or `CODEX-APPROVED <sha>`) naming the exact
+   head. Filtering is applied only after the latest account review is chosen, so a
+   later rejection, stale commit, missing/ambiguous/suffixed/embedded watermark,
+   conflicting marker or equal-timestamp tie fails closed instead of skipping to an
+   earlier approval. Apply the ROADMAP's squash/commit verification rules. New
+   commits invalidate prior approval.
 4. Pin the merged release commit. Build wheel and sdist from a clean checkout
    of that commit using the project's setuptools build backend. Verify the
    wheel installs and reports the same version through `llmsvc`,
@@ -69,9 +86,10 @@ Root owns the initial #76 release. Use a `chore/<issue>-release-...` branch and 
    TUI outside the checkout. Rebuild the wheel from the sdist and verify its
    installed entry points too.
 5. Create an annotated tag pointing at that exact reviewed commit, not whatever
-   `main` points to later. Publish a GitHub prerelease with the wheel, sdist,
-   standalone `llm` script, `SHA256SUMS` and a release manifest identifying the
-   commit, versions and validation evidence. Do not tag an unreviewed worktree.
+   `main` points to later. Publish the GitHub release (not a prerelease for a
+   stable tag) with the wheel, sdist, standalone `llm` script, `SHA256SUMS` and a
+   release manifest identifying the commit, versions and validation evidence. Do
+   not tag an unreviewed worktree.
 6. Verify the remote tag, prerelease flag and uploaded asset names/checksums.
    Record the release URL and completed version in the coordination issue.
    If publication is interrupted, inspect the existing tag/release and finish
@@ -91,14 +109,15 @@ conditions remain; authorization is not evidence that they hold.
 `.github/workflows/release.yml` runs after **successful `ci` push runs on this
 repository's main branch**. It never publishes for PR/fork events, tag pushes or
 ordinary feature merges. The publisher re-fetches the CI run and checks the
-unique merged `chore(release): <tag>` PR (`v0.1.0-alpha.N` or `vX.Y.Z`), exact final-head Fable marker
-and reviewer identity, successful head CI, resolved review threads, identical
+unique merged `chore(release): <tag>` PR (`vX.Y.Z`; historical `v0.1.0-alpha.N` remains
+verifiable), exact final-head trusted marker and reviewer identity for a
+recognized harness, successful head CI, resolved review threads, identical
 merge/head trees, version literals and changelog. Checkout credentials are not
 persisted. One concurrency group serializes publication; the workflow uses only
 GitHub's scoped token and never obtains host deployment credentials.
 
 Prepare the next release PR after five qualifying merged PRs. The publisher
-recounts first-parent PR merges from the previous published alpha tag; release
+recounts first-parent PR merges from the previous published tag commit; release
 maintenance does not count. A reviewed release PR may explicitly record an early
 release as `Release-Exception: #ISSUE — concrete reason`. Integration must tie
 that exception to the user's authority and actual urgent/delivery need; elapsed
@@ -132,7 +151,10 @@ alpha.8's completed five-asset publication) remain immutable and are not silentl
 retrofitted with a wheelhouse.
 
 `release-manifest.json` binds tag, Python version, exact merge, reviewed head,
-Fable review URL, merge CI URL, previous baseline and qualifying PRs. Its `assets`
+generic `review_url`/`review_harness` metadata plus a legacy `fable_review` URL
+for actual Fable reviews only, merge CI URL, previous baseline and qualifying
+PRs. The generic fields are additive, so a Codex approval is never mislabeled as
+a Fable review and manifest consumers keep a stable shape. Its `assets`
 map contains payload byte lengths and SHA-256 values; `SHA256SUMS` covers those
 payloads plus the manifest. After upload, the publisher downloads and verifies
 all six assets before making the draft public. The tag is annotated and never
@@ -155,3 +177,4 @@ unrelated process shutdowns and group announcements remain separate. Publication
 itself changes no site settings or production processes.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+<!-- Generated-By: OpenCode / deepseek-v4.1-flash -->

@@ -4,7 +4,7 @@ llama-swap 之上的多 GPU 控制面：查看模型与用量、请求释放/唤
 pin 与 GPU reserve，并提供可选终端面板。llama-swap 和 vllm-wrapper
 负责推理路由、排队及后端 sleep/wake；scheduler 负责资源记账、保护和调度。
 
-当前文档面向 [v1.0.0 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v1.0.0)。
+当前文档面向 [v1.1.0 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v1.1.0)。
 发布功能不等于所在部署已启用它们：scheduler 默认只读，模型动作、放置、
 自动策略、故障恢复及 sleeping recovery 各有独立开关。实现与现场验收进度见 [ROADMAP](docs/ROADMAP.md)。
 
@@ -57,7 +57,7 @@ PYREQUEST
 
 ## 用户：CLI、状态与可选 TUI
 
-从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v1.0.0)
+从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v1.1.0)
 下载 `llm` 和 `SHA256SUMS`，核对对应 SHA-256 后，将脚本放在当前目录：
 
 ```sh
@@ -90,7 +90,7 @@ RAM   llmsvc 86/200 GiB budget  host available 823 GiB
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install './llmsvc-1.0.0-py3-none-any.whl[tui]'
+.venv/bin/python -m pip install './llmsvc-1.1.0-py3-none-any.whl[tui]'
 .venv/bin/llm
 ```
 
@@ -223,3 +223,4 @@ SIGHUP。生产策略、TTL/reaper、宿主来源及其他用户服务的变更�
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
 <!-- Generated-By: Claude Code / claude-fable-5-1 -->
+<!-- Generated-By: OpenCode / deepseek-v4.1-flash -->

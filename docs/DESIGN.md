@@ -748,6 +748,36 @@ Save text 仅由显式按钮把完整冻结详情写入用户选定的新 UTF-8 
 下载到用户笔记本。背景事件不会改动用户正在选择的文本，关闭后的保存结果
 不会更新已卸载组件。此 UI 改动与 #185 传输修复、#184 测试诊断分别交付。
 
+### 命令队列、过渡态与六卡摘要（#247，2026-09-15）
+
+在 #168 的命令行交互上，本版补充以下经用户确认的约束：
+
+- **有界管理命令队列**：本 TUI 会话内的写命令（`wake`/`sleep`/`stop`/`preload`/
+  `free`/`pin`/`reserve`/登记等）进最多 32 项的 FIFO。入队同步发生在调度 worker
+  之前，单 worker 串行执行；失败不重试、未知传输结果不重放，剩余队列继续。
+  `/queue` 列出，`/cancel ID|MODEL` 与模型菜单条目 “Cancel queued operations”
+  只移除尚未提交 HTTP 的队列项；正在执行的项不可取消，对应菜单动作置灰，菜单在
+  打开期间随过渡/队列变化实时更新置灰状态。只读状态刷新不被写操作阻塞（代际
+  守卫防止写前读取覆盖动作结果）。RAM / stop 确认在入队前完成；退出丢弃本会话
+  未提交项，不声称取消远端操作。
+- **过渡态是命令目标而非观测**：`ModelState.state` 保持稳定观测语义，仍是纯策略
+  输入；新增可选 `ModelState.transition` 表达当前受管命令的目标相 `SSDtoMEM` /
+  `SSDtoGPU` / `MEMtoGPU` / `GPUtoMEM`（stop 用 `GPUtoSSD` / `MEMtoSSD`）。它由
+  操作开始时登记、`finally` 清除，并发下首个 owner 独占、嵌套 preload 的
+  wake+sleep 不覆盖或提前释放外层；未知起始态不补造 SSD，dry-run 不登记。
+  `GET /v1/state` 在操作等待期间可见，只表示命令意图，不伪装字节拷贝进度。
+  TUI 的 STATE 栏在有过渡时优先显示过渡，队列位置单列在模型名后。
+- **六卡显存摘要**：每卡一行，`used` 与 `llmsvc` 两条 bar 共用同一实际
+  `total_gb` 分母，GiB 可读、未知为 `?`。空或部分采集保留已知 index 并显式标为
+  unavailable / stale，不把旧值当当前测量，恢复后回填；窄终端压缩为 `u`/`l`
+  短标签并附图例，六卡在 40×24 / 60×24 / 100×30 / 120×40 下全部可见（不裁剪
+  任何一行）。摘要宽度不硬编码卡数；点击按 Rich 换行后的可视行映射到稳定 GPU
+  index，`/copy gpu N` 同样按 index。UI 不修改真实 snapshot 或策略。
+- **更大的命令输入区**：带边框的多行 TextArea（软换行），Enter 提交、
+  Shift/Alt/Ctrl+Enter 换行；补全、历史、`/` 命令、转义与确认框保持不变。
+  兼容声明的最低 Textual 0.70：`placeholder` 仅在新版存在时传入，跨版本读取
+  option 用 `get_option`，GPU/事件行点击由部件自身处理，避免依赖 App 冒泡。
+
 ## 7. 部署与验证
 
 ### 维护替换 preflight（#228）
@@ -811,3 +841,4 @@ native/model effect 已结算、候选可写启动、健康检查、单 writer �
 <!-- Generated-By: Claude Code / claude-fable-5-1 -->
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
+<!-- Generated-By: OpenCode / deepseek-v4.1-flash -->

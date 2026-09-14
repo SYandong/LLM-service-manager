@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Trusted main-CI release publisher. No deployment or PR execution surface."""
 import argparse
 import hashlib
@@ -12,7 +13,22 @@ import tarfile
 import zipfile
 
 REPO = 'SYandong/LLM-service-manager'
-FABLE_LOGIN = 'lushuyu'  # Shared account; exact harness/head marker is also required.
+TRUSTED_LOGIN = 'lushuyu'  # Shared trusted account; an exact harness watermark and marker are also required.
+FABLE_LOGIN = TRUSTED_LOGIN  # Retained alias for historical callers/tests.
+# Recognized reviewer harnesses and their exact approval marker.
+HARNESSES = {'Fable': 'FABLE-APPROVED', 'Codex': 'CODEX-APPROVED'}
+# Exact watermark line -> harness. Watermarks are matched as whole lines only, so a
+# suffix such as `...-astra-fake` or a quoted/embedded occurrence is not recognized.
+WATERMARK_HARNESS = {
+    'Generated-By: Claude Code / claude-fable-5-1': 'Fable',
+    'Generated-By: Codex / gpt-6-astra': 'Codex',
+}
+WATERMARKS = re.compile(r'^(' + '|'.join(re.escape(w) for w in WATERMARK_HARNESS) + r')$', re.M)
+# Any line starting with an approval marker name, so a malformed, duplicate or
+# conflicting marker is detected rather than silently ignored.
+MARKER_LINES = re.compile(r'^(FABLE-APPROVED|CODEX-APPROVED)\b.*$', re.M)
+# The one line that must be present: a harness marker plus the full 40-hex head.
+MARKERS = re.compile(r'^(FABLE-APPROVED|CODEX-APPROVED) ([0-9a-fA-F]{40})\s*$', re.M)
 SHA = re.compile(r'[0-9a-f]{40}')
 # Alpha series (0.1.0aN -> v0.1.0-alpha.N) and stable releases (X.Y.Z -> vX.Y.Z).
 VERSION = re.compile(r'0\.1\.0a([1-9][0-9]*)|(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')
@@ -79,16 +95,44 @@ def validate_event(event):
     return r['head_sha']
 
 
+def review_harness(body):
+    """Return the single recognized harness whose full watermark line appears, else None."""
+    found = WATERMARKS.findall(body)
+    return WATERMARK_HARNESS[found[0]] if len(found) == 1 else None
+
+
+def approves(body, harness, head):
+    """True only for exactly one marker line that matches the harness and the head."""
+    lines = MARKER_LINES.findall(body)
+    markers = MARKERS.findall(body)
+    return (len(lines) == 1 and len(markers) == 1
+            and markers[0][0] == HARNESSES[harness] and markers[0][1] == head)
+
+
 def approval(reviews, head):
-    fable = [r for r in reviews if r['user']['login'] == FABLE_LOGIN
-             and 'Generated-By: Claude Code / claude-fable-5-1' in r['body']]
-    if not fable:
-        raise ValueError('Missing Fable review')
-    latest = sorted(fable, key=lambda r: r['submitted_at'])[-1]
+    """The single latest trusted-account review must approve the exact head.
+
+    Every review from the shared account is considered before any harness filtering,
+    so a later malformed/missing/ambiguous watermark or a rejection blocks an earlier
+    approval. The latest review must carry exactly one recognized full watermark line
+    and exactly one matching full approval marker; equal latest timestamps are
+    ambiguous and fail closed.
+    """
+    trusted = [r for r in reviews if r['user']['login'] == TRUSTED_LOGIN]
+    if not trusted:
+        raise ValueError('Missing trusted review')
+    latest_at = max(r['submitted_at'] for r in trusted)
+    latest = [r for r in trusted if r['submitted_at'] == latest_at]
+    if len(latest) != 1:
+        raise ValueError('Ambiguous latest trusted review timestamp')
+    latest = latest[0]
+    harness = review_harness(latest['body'])
+    if harness is None:
+        raise ValueError('Latest trusted review has no single recognized harness watermark')
     if (latest['commit_id'] != head or latest['state'] not in ('APPROVED', 'COMMENTED')
-            or not re.search(r'^FABLE-APPROVED ' + re.escape(head) + r'\s*$', latest['body'], re.M)):
-        raise ValueError('Latest Fable review does not approve exact head')
-    return latest['html_url']
+            or not approves(latest['body'], harness, head)):
+        raise ValueError('Latest trusted review does not approve exact head')
+    return {'url': latest['html_url'], 'harness': harness}
 
 
 def sha256(path):
@@ -192,7 +236,9 @@ def guard(event):
     if len(batch) < 5 and not exception:
         raise ValueError('Five-PR cadence not reached; no reviewed exception')
     return {'tag': tag, 'python_version': version, 'commit': commit,
-            'release_pr': pr['html_url'], 'reviewed_head': head, 'fable_review': reviewed,
+            'release_pr': pr['html_url'], 'reviewed_head': head,
+            'review_url': reviewed['url'], 'review_harness': reviewed['harness'],
+            'fable_review': reviewed['url'] if reviewed['harness'] == 'Fable' else None,
             'previous_tag_commit': baseline, 'qualifying_prs': list(reversed(batch)),
             'cadence_exception': exception[0] if exception else None,
             'merge_ci': current['html_url'], 'generated_by': 'Codex / gpt-6-astra'}

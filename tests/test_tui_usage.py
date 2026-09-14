@@ -1,5 +1,6 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Claude Code / claude-fable-5-1
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Usage views reconcile with the real read-only backend, without live probes."""
 
 import asyncio
@@ -18,12 +19,12 @@ from test_tui import IdleEvents
 
 async def enter_usage(app, pilot):
     """The usage window is a UI command now; no printable key toggles it."""
-    app.query_one("#command", Input).value = "/usage"
+    app.query_one("#command").value = "/usage"
     await pilot.press("enter")
 
 
 async def leave_usage(app, pilot):
-    app.query_one("#command", Input).value = "status"
+    app.query_one("#command").value = "status"
     await pilot.press("enter")
 
 
@@ -68,7 +69,7 @@ def test_usage_command_grouping_and_unknown_source_clear_old_totals(usage_api, u
         app = app_for(usage_api, usage_service)
         async with app.run_test(size=(100, 30)) as pilot:
             await app.workers.wait_for_complete()
-            command = app.query_one("#command", Input)
+            command = app.query_one("#command")
             command.focus()
             command.value = "usage --days 30 --by model"
             await pilot.press("enter")
