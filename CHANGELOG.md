@@ -1,5 +1,79 @@
 # Changelog
 
+## 1.1.1 — 2026-09-15
+
+Stable patch release; Python distribution `1.1.1`. It carries the merged
+bugfix-only batch #251, #252 and #253. That is below the normal five-PR cadence,
+so the reviewed release PR records `Release-Exception: #254` for the
+user-authorized v1.1.1 patch delivery.
+
+### Models
+
+- `llm import` works on a site whose `catalog_mode: maintenance` `cmdStop` uses
+  the native-maintenance helper form (`helper` subcommand with a single
+  `--model <base>`): the clone rewrites only that model token and keeps the
+  remaining tokens verbatim, while the `--vllm-url` form and its port-consistency
+  check are unchanged and the two forms stay mutually exclusive (#251).
+- Import derives the candidate's maintenance-profile row from the configured
+  `maintenance_command` `--profile` path and rewrites it atomically (temp file
+  plus rename, mode 0600, other fields and key order preserved) before the
+  adapter's first scoped command; a rejected submission rolls back, and a
+  removed model's row is dropped only after the transaction is released. Dry
+  runs and non-maintenance modes never touch that file (#251).
+
+### Scheduling
+
+- Model import accepts thin-launcher options after the unit token
+  (`vllm-launch <util> <unit> --config ...`); those options are copied verbatim
+  while a second unit-like token or delimiter is still rejected (#252).
+- The collector deadline may be up to 12 s and the probe timeout up to 6 s
+  (booleans still rejected), so a heavily loaded host's slow `nvidia-smi` no
+  longer leaves an error snapshot that blocks placement. Site configuration
+  chooses the actual values and the default behavior is unchanged (#252).
+
+### TUI
+
+- The model menu gains `Copy model endpoint address`, which copies the shared
+  llama-swap OpenAI-compatible base URL from the optional independent
+  `api_url` / `LLM_API_URL` setting (a root path is normalized to `/v1`). It is
+  never derived from the scheduler management `url`; when unset the item is
+  greyed with a `needs api_url` reason and `/help` explains the setting. Copying
+  only requests the terminal clipboard and sends no model request (#253).
+- GPU card numbers right-align to a shared width per render, so one/two/three
+  digit values, fractions and unknown `?` no longer misalign the bars or labels;
+  both bars keep the same real `total_gb` denominator (#253).
+- Submitting a model action writes the target transition phase into the STATE
+  cell immediately, before HTTP or polling. The start state is captured once at
+  dispatch from the latest observation and kept through execution; unknown
+  starts show honest `loading`/`queued` and the separate `[qN]` queue marker is
+  preserved. It is a local session-intent display only: the snapshot, policy
+  inputs and byte progress are untouched, and cancel, failure, completion and
+  dry-run leave no residue (#253).
+- The footer always leads with the running version, read from the CLI's single
+  argparse literal via `app_version`, so no new release literal is added; long
+  connection/queue messages no longer push it off. The redundant model-name /
+  `source unavailable` detail row and the `Menu for ...` notice are removed,
+  while real errors, confirmations and `status --json` diagnostics remain
+  (#253).
+
+### Release process
+
+- The #248 publisher gate is unchanged. This patch delivery records an explicit
+  reviewed `Release-Exception: #254` in the release PR because the batch has
+  three qualifying PRs rather than five.
+
+### Compatibility and validation limits
+
+This entry describes the merged behavior; it does not claim live site
+validation, production deployment or GPU operations. Import, launcher-option and
+maintenance-profile behavior is covered by the merged regression tests, not by a
+live maintenance run. Collector deadline/timeout values are configuration
+choices, not calibrated facts, and a slower deadline is not proof of reliable
+host sampling. TUI endpoint copying depends on `api_url` being configured and
+on terminal clipboard support, and the presentation changes are not visual
+acceptance. Default read-only behavior, protection gates, dry-run and ledger
+constraints are unchanged.
+
 ## 1.1.0 — 2026-09-14
 
 Feature release; Python distribution `1.1.0`. It carries the #247 TUI
