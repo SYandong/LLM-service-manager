@@ -90,6 +90,24 @@ already configured or invalid candidate returns HTTP400 with its reason.
 `*.safetensors.index.json`, or of the directory's `*.safetensors` when there is
 no index; those are file sizes, not a measured GPU allocation.
 
+A base model may stop through either supported `cmdStop` shape, and the clone
+keeps that shape. The wrapper form carrying `--vllm-url` has its upstream port
+rewritten and must agree with `cmd`. The native maintenance helper form
+(`... helper --profile <profile> --model <base> --pid '${PID}'`) carries no
+port: only `--model <base>` becomes `--model <name>`, every other token is
+preserved verbatim, the daemon port comes from `cmd` alone, and a `--model`
+naming anything but the base model is rejected. The two shapes are mutually
+exclusive; a `cmdStop` matching neither is rejected. On such a site the import
+also synchronizes the maintenance profile: before the candidate reaches the
+adapter's `validate`, the new model's `{unit, backend_origin, process_argv}`
+row is written atomically (temporary file plus rename, mode 0600) into the JSON
+named by the configured `maintenance_command`'s `--profile`, preserving every
+other field and key order. A submission that is refused withdraws the row it
+added; a removed model's row is dropped only after its transaction is released,
+because the adapter hashes that file into every scope observation. A dry run
+writes nothing, and a missing or misshapen profile is reported without any
+write.
+
 A model imported this way needs no hand-written `catalog_profiles` entry. Its
 collector/catalog profile is derived from the saved record: `unit` and
 `daemon_url` from the allocated daemon port, `util`/`weights_gb` from the

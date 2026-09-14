@@ -241,6 +241,7 @@ LLM_URL=http://scheduler:8011 python3 llm import --all --dry-run
 - `import NAME` 只发送 `{"import": NAME}`。**覆写不来自客户端**：scheduler 自己重新读取该目录的 `llmsvc.json`，再走与 `add` 完全相同的路径/权重/名称/端口校验与同一条提交队列。`--dry-run` 与 `add` 一样返回 would/plan/blocked_by 且不写配置；被阻塞的预览返回退出码 1。
 - `import --all` 按列出的顺序逐个提交当前可导入的候选，每个候选单独返回一条结果；某一个失败不会掩盖其它结果，任一失败即退出码非零。没有可导入候选时输出说明并返回 0。
 - 导入成功后，该模型的 `collectors.models` 条目与 catalog profile 由 scheduler 从登记记录生成：`unit=vllm-<name>.service`、`daemon_url=http://127.0.0.1:<分配到的端口>`、`util`/`weights_gb` 取自描述文件、`budget_gb = util × 最新快照里最小的已知 GPU total_gb`、`is_default=false`。**没有新鲜快照或 GPU 容量未知时导入被拒绝并说明原因**，不会用猜测的容量记账。手写的 `catalog_profiles` 条目仍然优先，但必须与描述文件一致（unit/daemon_url/port/is_default/util/weights_gb），否则 400 拒绝。
+- 在 native-maintenance 站点上导入会同步维护 profile：scheduler 在候选被适配器校验前，把新模型的 `unit`/`backend_origin`/`process_argv` 行原子写入 `maintenance_command` 里 `--profile` 指向的那份 JSON（提交被拒时撤回，`rm` 的行在事务结清后才删）。`--dry-run` 不写该文件。
 - 老版本 scheduler 不返回 `discovered`；此时 `models` 仍正常工作，`import` 明确报“该 scheduler 不提供发现列表”，不猜测候选。
 - TUI 当前不提供 `import` 子命令，请用 CLI。
 
