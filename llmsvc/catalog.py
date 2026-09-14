@@ -56,6 +56,7 @@ class CatalogRuntime:
         self.epoch = scheduler.catalog_epoch
         self.jobs = {}
         self.pending = None
+        self.profile_retire = None
         previous = scheduler.catalog
         if previous is not None and previous.busy:
             raise ReloadError("catalog owner is still active")
@@ -325,6 +326,7 @@ class CatalogRuntime:
             if dry_run:
                 return {"would": [{"kind": "install_catalog", "models": sorted(json.loads(prepared.manifest_json)["active"])}]}
             self._enabled(); self._idle()
+            restore, removed = self._sync_native_profile(original, prepared.candidate)
             job_id = None
             def combined_precheck():
                 manifest = json.loads(prepared.manifest_json)
@@ -349,12 +351,62 @@ class CatalogRuntime:
                 if cleanup is not None:
                     cleanup(deadline=deadline)
                 self._after_apply(deadline)
-            options = {"maintenance": self.transition.descriptor(prepared)} if self.transition is not None else {}
-            result = self.queue.enqueue(transform, description=description or {"kind": "install_catalog"},
-                after_apply=after, precheck=combined_precheck, witness_binding=prepared.binding, **options)
+            try:
+                options = {"maintenance": self.transition.descriptor(prepared)} if self.transition is not None else {}
+                result = self.queue.enqueue(transform, description=description or {"kind": "install_catalog"},
+                    after_apply=after, precheck=combined_precheck, witness_binding=prepared.binding, **options)
+            except BaseException:
+                if restore is not None:
+                    restore()
+                raise
             job_id = result["id"]
             self.jobs[job_id] = prepared
+            if removed:
+                self.profile_retire = (job_id, removed)
             return result
+
+    def _sync_native_profile(self, original, candidate):
+        """Give every candidate model a native maintenance profile row.
+
+        The adapter validates each candidate model against its private profile,
+        so an imported row must exist before the candidate is staged, and it is
+        written once, ahead of the transaction's first adapter command, because
+        that file is hashed into every scope observation. Returns the rollback
+        for a submission that never reaches the queue plus the models whose rows
+        `_retire_native_profile` drops after release; both are empty outside
+        native maintenance.
+        """
+        profile = self.transition.native_profile() if self.transition is not None else None
+        if profile is None:
+            return None, ()
+        from llmsvc.native_profile import candidate_profile_entries
+        from llmsvc.registry import ModelRegistry
+        before = set(ModelRegistry._decode(original)[0]["models"])
+        after = set(ModelRegistry._decode(candidate)[0]["models"])
+        added, removed = sorted(after - before), tuple(sorted(before - after))
+        if not added:
+            return None, removed
+        raw = profile.add(candidate_profile_entries(candidate, added))
+        return (lambda: profile.restore(raw)), removed
+
+    def _retire_native_profile(self, job_id):
+        """Drop the rows of the models a released transaction removed.
+
+        Deferred until after release because the adapter hashes the profile
+        into every scope observation: editing it earlier would invalidate the
+        instance identity the transaction captured. A leftover row still
+        satisfies validation, so a failure here is logged, not fenced.
+        """
+        pending, self.profile_retire = self.profile_retire, None
+        if pending is None or pending[0] != job_id or self.transition is None:
+            return
+        try:
+            profile = self.transition.native_profile()
+            if profile is not None:
+                profile.remove(pending[1])
+        except (OSError, ValueError, ReloadError) as exc:
+            self.queue.log({"kind": "native_profile_retire_failed", "models": list(pending[1]),
+                            "error": type(exc).__name__})
 
     def submit_change(self, transform, *, description, dry_run=False, precheck=None, after_apply=None):
         """Existing registry callback shape; no fallback around a catalog error."""
@@ -504,6 +556,7 @@ class CatalogRuntime:
                     self.transition.finish(released)
                 self.pending = None
                 s.catalog_fenced = False
+                self._retire_native_profile(record["job_id"])
                 s.emit("catalog_installed", detail={"catalog_epoch": self.epoch, "job_id": record["job_id"]})
                 return result
         finally:

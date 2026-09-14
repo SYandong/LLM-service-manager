@@ -294,7 +294,7 @@ def _clone_model_block(base_model: str, name: str, base_block: dict[str, Any], m
     stop_argv = _command_argv(base_block["cmdStop"])
     cmd_port = _extract_vllm_url_port(cmd_argv)
     stop_port = _extract_vllm_url_port(stop_argv)
-    if cmd_port is None or stop_port is None or cmd_port != stop_port:
+    if _helper_stop_model_index(stop_argv) is None and stop_port is not None and cmd_port != stop_port:
         raise RegistryError("cmd and cmdStop must use the same upstream daemon port")
     block["cmd"] = _same_shape_command(
         base_block["cmd"],
@@ -304,7 +304,7 @@ def _clone_model_block(base_model: str, name: str, base_block: dict[str, Any], m
         block["aliases"] = list(overrides.aliases)
     block["cmdStop"] = _same_shape_command(
         base_block["cmdStop"],
-        _transform_cmd_stop(stop_argv, daemon_port),
+        _transform_cmd_stop(stop_argv, daemon_port, base_model=base_model, name=name),
     )
     return block
 
@@ -481,10 +481,45 @@ def _apply_util_override(argv: list[str], block: dict[str, Any] | None, launch_i
         target["util"] = util_text
 
 
-def _transform_cmd_stop(argv: list[str], daemon_port: int) -> list[str]:
+def _helper_stop_model_index(argv: Sequence[str]) -> int | None:
+    """Return the index of a maintenance helper ``--model`` value, else None.
+
+    A native-maintenance site stops each model through its reviewed helper
+    (``... helper --profile <profile> --model <name> --pid '${PID}'``) instead
+    of the wrapper's ``--vllm-url`` form. The helper argv must be spelled
+    exactly as the adapter rebuilds it, so only one separate ``--model`` token
+    is accepted.
+    """
+    if "helper" not in argv[1:]:
+        return None
+    options = [index for index, token in enumerate(argv)
+               if token == "--model" or token.startswith("--model=")]
+    if len(options) != 1 or argv[options[0]] != "--model" or options[0] + 1 >= len(argv):
+        raise RegistryError("maintenance helper cmdStop must carry one --model <name> option")
+    return options[0] + 1
+
+
+def _transform_cmd_stop(argv: list[str], daemon_port: int, *, base_model: str, name: str) -> list[str]:
+    """Rewrite a stop template for the cloned model.
+
+    Two mutually exclusive shapes are supported: the wrapper form carrying
+    ``--vllm-url``, whose upstream port is rewritten, and the native
+    maintenance helper form, where only ``--model <base>`` becomes
+    ``--model <name>`` and every other token is preserved verbatim. The helper
+    argv carries no daemon port; the cloned port comes from ``cmd`` alone.
+    """
+    helper_index = _helper_stop_model_index(argv)
     old_port = _extract_vllm_url_port(argv)
+    if helper_index is not None:
+        if old_port is not None:
+            raise RegistryError("cmdStop must use the maintenance helper or --vllm-url, not both")
+        if argv[helper_index] != base_model:
+            raise RegistryError("cmdStop helper --model must name the base model")
+        result = list(argv)
+        result[helper_index] = name
+        return result
     if old_port is None:
-        raise RegistryError("cmdStop template must include --vllm-url")
+        raise RegistryError("cmdStop must use the maintenance helper form or --vllm-url")
     return _rewrite_daemon_ports(argv, old_port, daemon_port, rewrite_vllm_port=False)
 
 

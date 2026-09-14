@@ -197,6 +197,16 @@ class MaintenanceController:
         self._inspection = identity(result.get("identity"))
         return instance(self._inspection)
 
+    def native_profile(self):
+        """Return the adapter's private profile editor, or None when unused.
+
+        The profile is the one named by the configured adapter argv, so the
+        rows core writes are exactly the rows the adapter validates against.
+        """
+        from llmsvc.native_profile import NativeMaintenanceProfile, maintenance_profile_path
+        path = maintenance_profile_path(self.scheduler.config.maintenance_command)
+        return NativeMaintenanceProfile(path) if path else None
+
     def descriptor(self, prepared):
         import uuid
         self._enabled()
