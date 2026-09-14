@@ -337,8 +337,13 @@ def _transform_cmd(argv: list[str], base_model: str, name: str, model_path: str,
         raise RegistryError("unsupported wrapper command template")
     launch = argv[delimiters[0] + 1:delimiters[1]]
     expected_units = {f"vllm-{base_model}", "vllm-${MODEL_ID}"}
-    if len(launch) != 3 or launch[2] not in expected_units:
+    # <launcher> <util> <unit> [launcher options...]: the thin launcher takes
+    # e.g. `--config /etc/llmsvc/launcher.json` after the unit; those options are
+    # copied verbatim and must not smuggle a second unit or delimiter.
+    if len(launch) < 3 or launch[2] not in expected_units:
         raise RegistryError("launcher must target the base model unit")
+    if any(token.startswith("vllm-") or token == "--" for token in launch[3:]):
+        raise RegistryError("launcher options must not name another unit")
     journal = [argv[i + 1] for i, token in enumerate(argv[:delimiters[0]])
                if token == "--journal-unit" and i + 1 < delimiters[0]]
     if len(journal) != 1 or journal[0] not in {unit + ".service" for unit in expected_units}:
