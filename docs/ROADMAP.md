@@ -71,6 +71,7 @@
 - #23 事件流面板
 - #24 命令行内执行操作并即时刷新
 - #25 usage 视图
+- #247 TUI 命令队列、过渡态、六卡显存摘要与多行输入（v1.1；详见 DESIGN §6）
 
 ### M6 收尾
 
@@ -177,3 +178,4 @@ GPU 空闲时的简短测试已获准，由 ops 独占调度并持有共享 `gpu
 
 <!-- Generated-By: Claude Code / claude-fable-5-1 -->
 <!-- Generated-By: Codex / gpt-6-astra -->
+<!-- Generated-By: OpenCode / deepseek-v4.1-flash -->

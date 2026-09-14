@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Shared immutable observations and JSON contract for the control plane.
 
 Timestamps are Unix seconds (UTC). Memory fields ending in ``_gb`` use GiB
@@ -11,6 +12,37 @@ from typing import Any, Literal, Optional, Tuple
 
 
 ModelStatus = Literal["awake", "sleeping", "stopped", "unknown"]
+
+# Transition phases name where a model's weights are expected to live while an
+# explicit management command is in flight: GPU = VRAM, MEM = host RAM,
+# SSD = only on disk.  ``ModelState.transition`` is the *command target phase*
+# from the observed starting phase, e.g. ``GPUtoMEM`` for an explicit sleep.
+# It is owned by the running operation, is not a byte-copy measurement, and
+# must never be inferred from an unknown starting state.
+TransitionPhase = Literal["GPU", "MEM", "SSD"]
+
+_OBSERVED_PHASE: dict[str, TransitionPhase] = {
+    "awake": "GPU",
+    "sleeping": "MEM",
+    "stopped": "SSD",
+}
+
+
+def observed_phase(state: Optional[str]) -> Optional[TransitionPhase]:
+    """Map a stable observed model state to a phase; unknown stays unknown."""
+    return _OBSERVED_PHASE.get(state) if isinstance(state, str) else None
+
+
+def transition_name(start_state: Optional[str], target_phase: TransitionPhase) -> Optional[str]:
+    """Name the command transition from an observed state to a target phase.
+
+    Returns None when the starting phase is unknown (never assume SSD) or when
+    the model already occupies the target phase, so no transition is claimed.
+    """
+    start = observed_phase(start_state)
+    if start is None or start == target_phase:
+        return None
+    return "%sto%s" % (start, target_phase)
 
 
 @dataclass(frozen=True)
@@ -52,6 +84,9 @@ class ModelState:
     port: Optional[int] = None
     is_default: bool = False
     cold_start_seconds: Optional[float] = None
+    # Command target phase while an owned explicit operation is active; None
+    # otherwise.  Display/observation only: pure policy keeps reading ``state``.
+    transition: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -141,8 +176,17 @@ class StateSnapshot:
     schema_version: int = 1
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a detached JSON-ready mapping (tuples encode as arrays)."""
-        return asdict(self)
+        """Return a detached JSON-ready mapping (tuples encode as arrays).
+
+        The additive ``ModelState.transition`` observation is omitted when it is
+        inactive (None) so historical payloads round-trip unchanged; an active
+        transition is included.  Every other field, null and error is preserved.
+        """
+        data = asdict(self)
+        for model in data["models"]:
+            if model.get("transition") is None:
+                model.pop("transition", None)
+        return data
 
 
 @dataclass(frozen=True)

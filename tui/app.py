@@ -1,25 +1,31 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Codex / gpt-5.6-luna
 # Generated-By: Claude Code / claude-fable-5-1
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Scheduler dashboard; command semantics come from the standalone CLI."""
 
 import argparse
 import asyncio
+from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
+import inspect
 import json
 import math
 import os
 import shlex
 import threading
 import time
+from typing import Optional
 
+from rich.console import Console
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Input, OptionList, RichLog, Static
+from textual.widgets import Button, DataTable, OptionList, RichLog, Static, TextArea
 from textual.widgets.option_list import Option
 
 from .event_view import EventDetails, EventPresentation
@@ -32,17 +38,45 @@ MENU_ITEMS = (
     ("wake", "Bring online"),
     ("sleep", "Sleep to memory"),
     ("stop", "Free from memory"),
+    ("cancel-queue", "Cancel queued operations"),
     ("copy-name", "Copy name"),
     ("copy-row", "Copy status line"),
     ("insert", "Insert into command line"),
 )
 
 # UI-layer actions only. Model commands stay in cli/llm's parser.
-SLASH_COMMANDS = ("/clear", "/copy", "/events", "/help", "/quit", "/refresh", "/usage")
+SLASH_COMMANDS = ("/cancel", "/clear", "/copy", "/events", "/help", "/queue", "/quit", "/refresh", "/usage")
 
 HINT = "Enter run · Tab complete · Ctrl+O menu · /help"
 
 INTERRUPT_WINDOW = 2.0
+
+# A bounded current-session FIFO. It only covers management writes typed here;
+# the scheduler API remains the single source of truth for execution.
+MAX_QUEUED_WRITES = 32
+
+# Map an owned/observed transition to the explicit command it represents, so an
+# operation started by another session also greys its action in this UI.
+TRANSITION_ACTIONS = {
+    "SSDtoMEM": "preload", "SSDtoGPU": "wake", "MEMtoGPU": "wake",
+    "GPUtoMEM": "sleep", "GPUtoSSD": "stop", "MEMtoSSD": "stop",
+}
+
+
+def transition_action(label):
+    return TRANSITION_ACTIONS.get(label) if isinstance(label, str) else None
+
+
+@dataclass
+class QueueEntry:
+    """One not-yet-finished management write owned by this TUI session."""
+
+    id: int
+    args: object
+    text: str
+    command: str
+    model: Optional[str]
+    target: str
 
 
 class CommandMessage(Exception):
@@ -60,8 +94,21 @@ class UIParser(argparse.ArgumentParser):
         raise CommandMessage(message)
 
 
-class CommandInput(Input):
-    """The only focusable dashboard widget; UI keys never reach it as text."""
+class CommandComposer(TextArea):
+    """Multi-line command composer; UI keys are routed through the app first.
+
+    Textual 0.70+ is supported: TextArea exists there and ``text`` is the
+    document content.  ``placeholder`` is only passed when the running Textual
+    accepts it.  A plain ``value`` alias keeps the single-string command path
+    (and copied standalone usage) unchanged.
+    """
+
+    _HAS_PLACEHOLDER = "placeholder" in inspect.signature(TextArea.__init__).parameters
+
+    def __init__(self, *args, placeholder=None, **kwargs):
+        if placeholder is not None and self._HAS_PLACEHOLDER:
+            kwargs["placeholder"] = placeholder
+        super().__init__(*args, **kwargs)
 
     async def on_key(self, event):
         handler = getattr(self.app, "handle_command_key", None)
@@ -70,6 +117,63 @@ class CommandInput(Input):
         if handler(event.key, event.is_printable, event.character):
             event.stop()
             event.prevent_default()
+            return
+        if event.key == "enter":
+            submit = getattr(self.app, "submit_composer", None)
+            if submit is not None:
+                event.stop()
+                event.prevent_default()
+                submit(self)
+        elif event.key in ("shift+enter", "alt+enter", "ctrl+enter"):
+            self.insert("\n")
+            event.stop()
+            event.prevent_default()
+        elif event.key == "ctrl+d" and self.text:
+            self.action_delete_right()
+            event.stop()
+            event.prevent_default()
+
+    def on_mouse_down(self, event):
+        closer = getattr(self.app, "close_menu_for_click", None)
+        if closer is not None:
+            closer(self)
+
+    @property
+    def value(self):
+        return self.text
+
+    @value.setter
+    def value(self, text):
+        self.load_text("" if text is None else str(text))
+        self._cursor_to_end()
+
+    def _cursor_to_end(self):
+        lines = self.text.split("\n")
+        self.move_cursor((len(lines) - 1, len(lines[-1])))
+        self.cursor_blink = True
+
+    async def action_submit(self):
+        submit = getattr(self.app, "submit_composer", None)
+        if submit is not None:
+            submit(self)
+
+
+class EventLog(RichLog, can_focus=False):
+    """Event log that owns its clicks on every supported Textual."""
+
+    def on_click(self, event):
+        handler = getattr(self.app, "click_event_row", None)
+        if handler is not None:
+            handler(event, self)
+
+
+class GpuRows(Static, can_focus=False):
+    """GPU summary text that owns its clicks on every supported Textual."""
+
+    def on_click(self, event):
+        handler = getattr(self.app, "click_gpu_row", None)
+        if handler is not None:
+            handler(event, self)
 
 
 class ModelTable(DataTable, can_focus=False):
@@ -80,9 +184,16 @@ class ModelTable(DataTable, can_focus=False):
         # this; the menu takes the clicked row from the click metadata directly.
         meta = event.style.meta
         row = meta.get("row")
-        opener = getattr(self.app, "open_model_menu", None)
-        if opener is not None and isinstance(row, int) and row >= 0 and not meta.get("out_of_bounds", False):
-            opener(row)
+        if isinstance(row, int) and row >= 0 and not meta.get("out_of_bounds", False):
+            opener = getattr(self.app, "open_model_menu", None)
+            if opener is not None:
+                opener(row)
+        else:
+            # Blank space below/around the rows is an outside click: it closes
+            # an open menu instead of leaving it stale.
+            closer = getattr(self.app, "close_menu_for_blank_table", None)
+            if closer is not None:
+                closer()
 
 
 class ConfirmRam(ModalScreen):
@@ -134,7 +245,7 @@ class SchedulerApp(App):
     #event-title { color: #ad8c63; padding: 0 1; }
     #event-status { color: #a3a3a3; background: #242424; padding: 0 1; }
     #details { color: #a3a3a3; }
-    #summary { height: auto; max-height: 12; }
+    #summary { height: auto; max-height: 14; }
     #gpus { width: 2fr; height: auto; padding: 0 1; }
     #memory { width: 1fr; height: auto; padding: 0 1; }
     Screen.narrow #summary { layout: vertical; }
@@ -150,7 +261,7 @@ class SchedulerApp(App):
     #events { height: 1fr; }
     Screen.narrow #content { layout: vertical; }
     Screen.narrow #models { width: 1fr; }
-    Screen.narrow #event-panel { width: 1fr; height: 7; }
+    Screen.narrow #event-panel { width: 1fr; height: 5; }
     #details-view { height: 1; }
     #result-view { height: 2; }
     #details, #result { height: auto; min-height: 1; padding: 0 1; }
@@ -162,14 +273,18 @@ class SchedulerApp(App):
     #usage-text { height: auto; padding: 0 1; }
     Screen.usage #summary, Screen.usage #content, Screen.usage #details-view { display: none; }
     Screen.usage #usage-view { display: block; }
-    #command-row { height: 1; background: #202020; }
+    #command-row { height: auto; min-height: 3; max-height: 6; background: #202020;
+                   border: tall #3a3a3a; padding: 0 1; align: left top; }
     #prompt { width: 2; height: 1; color: #ad8c63; }
-    #command { width: 1fr; height: 1; border: none; padding: 0; background: #202020; }
+    #command { width: 1fr; height: 3; border: none; padding: 0; background: #202020; }
     #model-menu { layer: overlay; display: none; width: 34; height: auto; max-height: 12;
                   background: #202020; border: tall #ad8c63; }
     """
     # Printable keys belong to the command line; only control chords bind here.
-    BINDINGS = [("ctrl+r", "reset_events", "Reset events")]
+    # ctrl+c is bound so newer/older Textual defaults cannot quit before the
+    # composer's own key handler clears the line.
+    BINDINGS = [("ctrl+r", "reset_events", "Reset events"),
+                ("ctrl+c", "interrupt", "Clear or exit")]
 
     def __init__(self, client, api, event_reader=None, refresh=None, **kwargs):
         super().__init__(**kwargs)
@@ -211,6 +326,34 @@ class SchedulerApp(App):
         self._notice = None
         self._observation = None
         self._connection = "SSE connecting"
+        # Bounded current-session FIFO for management writes typed here.
+        self._queue = deque()
+        self._queue_seq = 0
+        self._queue_draining = False
+        self._current_write = None
+        # UI-only GPU view: preserve known indices across partial/empty probes.
+        self._gpu_view = {}
+        self._gpu_order = []
+        self._gpu_lines = []
+        self._gpu_render = []
+
+    def composer(self):
+        return self.dashboard.query_one("#command", CommandComposer)
+
+    def focus_composer(self):
+        if not self.is_running:
+            return
+        try:
+            self.composer().focus()
+        except Exception:
+            pass
+
+    def write_target(self, args):
+        target = getattr(args, "model", None)
+        if target is None:
+            target = "GPU %s" % args.gpu if getattr(args, "gpu", None) is not None else \
+                "host RAM" if getattr(args, "ram", False) else "eligible models"
+        return target
 
     @staticmethod
     def configured_refresh(refresh):
@@ -231,7 +374,7 @@ class SchedulerApp(App):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="summary"):
-            yield Static("Loading GPU observations…", id="gpus", markup=False)
+            yield GpuRows("Loading GPU observations…", id="gpus", markup=False)
             yield Static("Loading RAM observations…", id="memory", markup=False)
         with Horizontal(id="content"):
             yield ModelTable(id="models", cursor_type="row")
@@ -240,7 +383,7 @@ class SchedulerApp(App):
                     yield Static("Events via scheduler", id="event-title", markup=False)
                     yield Button("Details", id="event-details")
                 yield Static(self.event_presentation.status(), id="source-status", markup=False)
-                yield RichLog(id="events", max_lines=500, min_width=1, wrap=True, markup=False, highlight=False)
+                yield EventLog(id="events", max_lines=500, min_width=1, wrap=True, markup=False, highlight=False)
         with Vertical(id="usage-view"):
             with Horizontal(id="usage-controls"):
                 yield Button("7 days", id="usage-7")
@@ -255,20 +398,17 @@ class SchedulerApp(App):
                 self.refresh_seconds), id="result", markup=False)
         with Horizontal(id="command-row"):
             yield Static("› ", id="prompt", markup=False)
-            command = CommandInput(placeholder="status | wake MODEL | sleep MODEL | /help", id="command")
-            # Newer Textual selects all on focus; typing a parameter must append at
-            # the requested cursor instead of replacing the prefilled command.
-            if hasattr(command, "select_on_focus"):
-                command.select_on_focus = False
+            command = CommandComposer(placeholder="status | wake MODEL | sleep MODEL | /help",
+                                      id="command", soft_wrap=True)
             yield command
-        yield OptionList(id="model-menu", markup=False)
+        yield OptionList(id="model-menu")
         yield Static(self._connection + " · " + HINT, id="event-status", markup=False)
 
     def on_mount(self):
         # Only the command line accepts focus; every panel is click-only.
         for widget in self.dashboard.query("RichLog, Button, VerticalScroll, OptionList"):
             widget.can_focus = False
-        self.dashboard.query_one("#command", Input).focus()
+        self.composer().focus()
         self._event_status = self.dashboard.query_one("#event-status", Static)
         self._event_log = self.dashboard.query_one("#events", RichLog)
         self._ui_timers.append(self.set_interval(self.refresh_seconds, self.refresh_current))
@@ -291,6 +431,11 @@ class SchedulerApp(App):
             self.event_reader.set_notify(None)
         for timer in self._ui_timers:
             timer.stop()
+        # Teardown discards local, not-yet-dispatched queue entries. It never
+        # claims to cancel a remote operation that is already running.
+        self._queue.clear()
+        self._current_write = None
+        self._queue_draining = False
         await asyncio.to_thread(self.event_reader.close)
 
     def on_resize(self, event):
@@ -342,8 +487,10 @@ class SchedulerApp(App):
 
     @work
     async def refresh_state(self, args=None):
-        # A slow HTTP request must not start overlapping polls or freeze keyboard input.
-        if not self.is_running or self.fetching or self._write_busy:
+        # A slow HTTP request must not start overlapping polls or freeze keyboard
+        # input. A queued write must not suppress read-only refresh either: the
+        # generation guard stops a pre-write read from overwriting its result.
+        if not self.is_running or self.fetching:
             return
         self.fetching = True
         generation = self._state_generation
@@ -397,19 +544,23 @@ class SchedulerApp(App):
 
     @work
     async def run_write(self, args):
+        """Direct single write; the queue worker reuses the same serialized path."""
         if not self.is_running:
             return
         if self._write_busy:
             self.show_result("An operation is already running; wait for its result (no request queued)")
+            return
+        await self._perform_write(args)
+
+    async def _perform_write(self, args):
+        if not self.is_running:
             return
         self._write_busy = True
         self._state_generation += 1
         self.usage_active = False
         self.usage_generation += 1
         self.dashboard.remove_class("usage")
-        target = getattr(args, "model", None)
-        if target is None:
-            target = "GPU %s" % args.gpu if getattr(args, "gpu", None) is not None else "host RAM" if getattr(args, "ram", False) else "eligible models"
+        target = self.write_target(args)
         model = next((m for m in (self.snapshot or {}).get("models", []) if m["name"] == target), {})
         estimate = model.get("cold_start_seconds") if args.command == "wake" and model.get("state") == "stopped" else None
         self._progress = {"command": args.command, "target": target, "started": time.monotonic(),
@@ -447,7 +598,141 @@ class SchedulerApp(App):
         finally:
             self._write_busy = False
             self._progress = None
+            # Invalidate any read launched during this write: it shares the
+            # generation of the pre-action snapshot and must never overwrite the
+            # fresh post-action read that just finished.
+            self._state_generation += 1
             # A pending SSE notification must still be drained after completion.
+
+    # ------------------------------------------------------------------ queue
+
+    def enqueue_write(self, args, text, model=None):
+        """Register a management write synchronously, then drain in FIFO order.
+
+        Enqueue happens on the UI thread before any worker is scheduled, so a
+        burst of commands keeps its submission order.  Only not-yet-dispatched
+        entries can be cancelled; the entry currently executing cannot.
+        """
+        if not self.is_running:
+            return None
+        if len(self._queue) >= MAX_QUEUED_WRITES:
+            self.show_result("Queue full (%d pending); wait for an operation to finish" % MAX_QUEUED_WRITES)
+            return None
+        self._queue_seq += 1
+        target = self.write_target(args)
+        entry = QueueEntry(self._queue_seq, args, text, args.command,
+                           getattr(args, "model", None), target)
+        self._queue.append(entry)
+        if self.snapshot is not None:
+            self.render_snapshot()
+        if not self._queue_draining:
+            self._queue_draining = True
+            self.drain_queue()
+        return entry
+
+    @work
+    async def drain_queue(self):
+        try:
+            while self.is_running and self._queue:
+                entry = self._queue.popleft()
+                self._current_write = entry
+                try:
+                    await self._perform_write(entry.args)
+                except Exception as exc:
+                    # One failed request never retries and never stops the queue.
+                    if self.is_running:
+                        self.show_result("%s request failed: %s" % (entry.command, exc))
+                finally:
+                    self._current_write = None
+                if self.is_running and self.snapshot is not None:
+                    self.render_snapshot()
+        finally:
+            self._current_write = None
+            self._queue_draining = False
+            # An entry appended in the flag-reset window is drained by this kick.
+            if self.is_running and self._queue:
+                self._queue_draining = True
+                self.drain_queue()
+
+    def queued_positions(self):
+        positions = {}
+        for position, entry in enumerate(self._queue, start=1):
+            if entry.model and entry.model not in positions:
+                positions[entry.model] = position
+        return positions
+
+    def queue_text(self):
+        entries = list(self._queue)
+        if not entries and self._current_write is None:
+            return "Queue empty"
+        parts = []
+        if self._current_write is not None:
+            parts.append("running id%d %s %s" % (self._current_write.id, self._current_write.command,
+                                                 self.api.clean_text(self._current_write.target)))
+        for position, entry in enumerate(entries, start=1):
+            # The immutable id is what /cancel takes; the position is display only.
+            parts.append("id%d (#%d) %s %s" % (entry.id, position, entry.command,
+                                               self.api.clean_text(entry.target)))
+        return "Queue: " + " · ".join(parts)
+
+    def cancel_queue(self, ident):
+        ident = (ident or "").strip()
+        if not ident:
+            self.show_result("Cancel needs a queue id (see /queue) or a model name")
+            return False
+        # Accept both the numeric id and the displayed "idN" token from /queue.
+        numeric = ident
+        if numeric[:2].lower() == "id" and numeric[2:].isdigit():
+            numeric = numeric[2:]
+        # An exact immutable queue id removes exactly that entry.
+        if numeric.isdigit():
+            entry = next((item for item in list(self._queue) if str(item.id) == numeric), None)
+            if entry is not None:
+                self._queue.remove(entry)
+                self.show_notice("Cancelled queued id%s %s %s (not dispatched)" % (
+                    entry.id, entry.command, self.api.clean_text(entry.target)))
+                if self.snapshot is not None:
+                    self.render_snapshot()
+                return True
+            current = self._current_write
+            if current is not None and str(current.id) == numeric:
+                self.show_result("Cannot cancel id%s %s: already dispatched; wait for its result" % (
+                    current.id, self.api.clean_text(current.target)))
+                return False
+            self.show_result("No pending queue entry with id %s (positions are not ids; see /queue)" % numeric)
+            return False
+        # A model/target name cancels every pending entry for it.
+        matches = [item for item in list(self._queue) if item.model == ident or item.target == ident]
+        if matches:
+            for item in matches:
+                self._queue.remove(item)
+            self.show_notice("Cancelled %d queued operation(s) for %s (not dispatched)" % (
+                len(matches), self.api.clean_text(ident)))
+            if self.snapshot is not None:
+                self.render_snapshot()
+            return True
+        current = self._current_write
+        if current is not None and (current.model == ident or current.target == ident):
+            self.show_result("Cannot cancel %s: already dispatched; wait for its result" % self.api.clean_text(current.target))
+        else:
+            self.show_result("No pending queue entry for %s" % self.api.clean_text(ident))
+        return False
+
+    def cancel_queued_for_model(self, name):
+        removed = [entry for entry in list(self._queue) if entry.model == name]
+        if not removed:
+            self.show_result("No queued operation to cancel for %s" % self.api.clean_text(name))
+            return 0
+        for entry in removed:
+            try:
+                self._queue.remove(entry)
+            except ValueError:
+                pass
+        self.show_notice("Cancelled %d queued operation(s) for %s (not dispatched)" % (
+            len(removed), self.api.clean_text(name)))
+        if self.snapshot is not None:
+            self.render_snapshot()
+        return len(removed)
 
     def render_progress(self):
         if not self.is_running or not self._progress:
@@ -466,7 +751,7 @@ class SchedulerApp(App):
             if not self.is_running:
                 return
             if confirmed:
-                self.run_write(args)
+                self.enqueue_write(args, text)
             else:
                 self.show_result("Free --ram cancelled; no request sent")
         self.push_screen(ConfirmRam(self.api.clean_text(text)), decided)
@@ -481,7 +766,7 @@ class SchedulerApp(App):
         self.usage_active = False
         self.usage_generation += 1
         self.dashboard.remove_class("usage")
-        self.dashboard.query_one("#command", Input).focus()
+        self.focus_composer()
         self.refresh_state()
 
     def show_usage(self, args):
@@ -493,7 +778,7 @@ class SchedulerApp(App):
         self.close_menu()
         self.dashboard.add_class("usage")
         self.render_usage()
-        self.dashboard.query_one("#command", Input).focus()
+        self.focus_composer()
         self.refresh_usage()
 
     @work
@@ -532,6 +817,7 @@ class SchedulerApp(App):
         self.dashboard.query_one("#usage-text", Static).update(text)
 
     def on_button_pressed(self, event):
+        self.close_menu()
         if event.button.id == "event-details":
             self.action_event_details()
         elif event.button.id == "usage-status":
@@ -540,7 +826,7 @@ class SchedulerApp(App):
             days = event.button.id.removeprefix("usage-")
             args = self.api.build_parser(UIParser).parse_args(["usage", "--days", days, "--by", self.usage_args.by])
             self.show_usage(args)
-        self.dashboard.query_one("#command", Input).focus()
+        self.focus_composer()
 
     def update_static(self, name, text):
         if self._rendered.get(name) != text:
@@ -560,10 +846,22 @@ class SchedulerApp(App):
         self._observation = text
         self.render_event_status()
 
+    @staticmethod
+    def gpu_bar(used, total, width=10):
+        """Same actual total-capacity denominator for used and llmsvc bars."""
+        known = (lambda value: isinstance(value, (int, float)) and not isinstance(value, bool)
+                 and math.isfinite(value) and value >= 0)
+        if not (known(total) and total > 0 and known(used)):
+            return None
+        filled = int(round(min(1.0, max(0.0, used / total)) * width))
+        return "█" * filled + "░" * (width - filled)
+
     def gpu_text(self, gpu):
-        return "GPU%s %s/%sG  llmsvc %s  ext %s" % (
+        """Plain clipboard/export form; never used for a stale observation."""
+        return "GPU%s used %s/%sG  llmsvc %sG  ext %s  free %s" % (
             gpu["index"], self.api.number(gpu.get("used_gb")), self.api.number(gpu.get("total_gb")),
-            self.api.number(gpu.get("managed_gb")), self.api.number(gpu.get("external_gb")))
+            self.api.number(gpu.get("managed_gb")), self.api.number(gpu.get("external_gb")),
+            self.api.number(gpu.get("free_gb")))
 
     @staticmethod
     def gpu_style(gpu):
@@ -573,18 +871,136 @@ class SchedulerApp(App):
         percent = min(100, max(0, used / total * 100))
         return "#6f9f6f" if percent < 60 else "#ad8c63" if percent < 85 else "#c46a6a"
 
-    def render_snapshot(self):
-        state = self.snapshot
-        # The server filters active intents with its own clock.
+    def gpu_line(self, gpu, reserved, compact=False):
+        """One subdued labelled line: used bar and llmsvc bar over total GiB."""
+        index = gpu.get("index")
+        bar_width = 6 if compact else 10
+        used_label = "u" if compact else "used "
+        managed_label = "l" if compact else "llmsvc "
+        text = Text()
+        text.append("GPU%s " % index, style="bold #c8c8c8")
+        text.append(used_label, style="#8a8a8a")
+        bar = self.gpu_bar(gpu.get("used_gb"), gpu.get("total_gb"), bar_width)
+        text.append(bar if bar is not None else "?" * bar_width,
+                    style=self.gpu_style(gpu) if bar is not None else "dim")
+        text.append(" %s/%sG " % (self.api.number(gpu.get("used_gb")), self.api.number(gpu.get("total_gb"))),
+                    style=self.gpu_style(gpu))
+        text.append(managed_label, style="#8a8a8a")
+        mbar = self.gpu_bar(gpu.get("managed_gb"), gpu.get("total_gb"), bar_width)
+        text.append(mbar if mbar is not None else "?" * bar_width, style="#8a9fb0" if mbar is not None else "dim")
+        text.append(" %sG " % self.api.number(gpu.get("managed_gb")), style="#b0c0cc")
+        if not compact:
+            text.append("ext %s  free %s" % (self.api.number(gpu.get("external_gb")),
+                                             self.api.number(gpu.get("free_gb"))), style="#7a7a7a")
+        if index in reserved:
+            text.append(" · reserved for placement", style="cyan")
+        return text
+
+    @staticmethod
+    def gpu_stale_line(index, compact=False):
+        if compact:
+            return Text("GPU%s unavailable (stale)" % index, style="dim #8a8a8a")
+        return Text("GPU%s unavailable · stale observation (probe missing)" % index, style="dim #8a8a8a")
+
+    def refresh_gpu_view(self, observed):
+        """UI-only merge that preserves known indices across partial/empty probes.
+
+        It never edits the scheduler snapshot.  A missing index keeps its slot
+        but is marked unavailable and shows no old numbers as current; a fresh
+        observation restores the values.
+        """
+        for gpu in observed:
+            index = gpu.get("index")
+            if index is None:
+                continue
+            if index not in self._gpu_view:
+                self._gpu_order.append(index)
+            self._gpu_view[index] = {"gpu": gpu, "fresh": True}
+        # An empty/partial observation marks every known index unavailable; it
+        # must not keep showing old numbers as if they were current.
+        seen = {gpu.get("index") for gpu in observed}
+        for index in self._gpu_order:
+            if index not in seen:
+                self._gpu_view[index]["fresh"] = False
+        self._gpu_order = sorted(set(self._gpu_order))
+
+    def render_gpus(self, state):
         reserved = {r["gpu"] for r in state.get("reserves", [])}
+        observed = state.get("gpus", [])
+        # A truly empty observation with probe errors must not erase known rows.
+        self.refresh_gpu_view(observed)
+        self._gpu_lines = []
+        self._gpu_render = []
         lines = Text()
-        for gpu in state.get("gpus", []):
-            lines.append(self.gpu_text(gpu), style=self.gpu_style(gpu))
-            if gpu["index"] in reserved:
-                lines.append(" · reserved for placement", style="cyan")
+        compact = self.terminal_width < 80
+        if not self._gpu_order:
+            message = "GPU observations unavailable"
+            lines.append(message, style="dim")
+            self._gpu_render.append({"index": None, "gpu": None, "fresh": False,
+                                     "legend": False, "rich": Text(message, style="dim")})
+        elif compact:
+            # A legend keeps the shorter u/l labels unambiguous at 40 columns.
+            legend = "GPU · u=used l=llmsvc GiB (same total denominator)"
+            lines.append(legend + "\n", style="#8a8a8a")
+            self._gpu_render.append({"index": None, "gpu": None, "fresh": False,
+                                     "legend": True, "rich": Text(legend, style="#8a8a8a")})
+        for index in self._gpu_order:
+            entry = self._gpu_view.get(index)
+            gpu = entry.get("gpu") if entry else None
+            fresh = bool(entry and entry.get("fresh"))
+            self._gpu_lines.append({"index": index, "gpu": gpu, "fresh": fresh})
+            if fresh and gpu is not None:
+                rich = self.gpu_line(gpu, reserved, compact)
+            else:
+                rich = self.gpu_stale_line(index, compact)
+            self._gpu_render.append({"index": index, "gpu": gpu, "fresh": fresh,
+                                     "legend": False, "rich": rich})
+            lines.append_text(rich)
             lines.append("\n")
         lines.rstrip()
         self.update_static("gpus", lines)
+
+    def gpu_visual_line(self, widget, visual_line):
+        """Map a rendered visual line (Rich wrapping included) to a GPU entry."""
+        width = max(1, int(widget.content_region.width))
+        console = Console(width=width, no_color=True, legacy_windows=False, force_terminal=False)
+        row = 0
+        for item in self._gpu_render:
+            span = max(1, len(item["rich"].wrap(console, width)))
+            if visual_line < row + span:
+                return item
+            row += span
+        return None
+
+    def copy_gpu_row(self, visual_line, widget):
+        item = self.gpu_visual_line(widget, visual_line)
+        if item is None:
+            self.show_notice("No GPU observation on that line")
+            return
+        if item.get("legend"):
+            self.show_notice("GPU summary legend; no observation to copy")
+            return
+        if item.get("fresh") and item.get("gpu") is not None:
+            gpu = item["gpu"]
+            self.copy_text(self.gpu_text(gpu), "gpu %s" % gpu["index"])
+        else:
+            self.show_notice("No current GPU observation on that line (stale or unavailable)")
+
+    def copy_gpu_index(self, gpu_index):
+        """Copy by the stable GPU index, never by a snapshot list position."""
+        item = next((entry for entry in self._gpu_render if entry.get("index") == gpu_index), None)
+        if item is None or item.get("legend"):
+            self.show_notice("No GPU observation with index %s" % self.api.clean_text(str(gpu_index)))
+            return
+        if item.get("fresh") and item.get("gpu") is not None:
+            gpu = item["gpu"]
+            self.copy_text(self.gpu_text(gpu), "gpu %s" % gpu["index"])
+        else:
+            self.show_notice("GPU%s is unavailable (stale); nothing current to copy" % gpu_index)
+
+    def render_snapshot(self):
+        state = self.snapshot
+        self.render_gpus(state)
         memory = state.get("memory", {})
         self.update_static("memory", Text("RAM %s/%s GiB budget\nHost free %s GiB" % (
             self.api.number(memory.get("sleeping_weights_gb")), self.api.number(memory.get("budget_gb")),
@@ -614,6 +1030,7 @@ class SchedulerApp(App):
         observed_at = self.api.time.time() if now is None else now
         pins = {item["model"]: item for item in state.get("pins", []) if item["until"] > observed_at}
         models = {model["name"]: model for model in state.get("models", [])}
+        queued = self.queued_positions()
         for name in list(self.model_names):
             if name not in models:
                 table.remove_row(name)
@@ -622,8 +1039,16 @@ class SchedulerApp(App):
         for model in state.get("models", []):
             name = model["name"]
             stats, pin = activity.get(name, {}), pins.get(name)
-            label = self.api.fit(name, columns[0][1] - 2).rstrip() + " *" if model.get("is_default") else name
-            row = [label, model.get("state", "unknown"), "-" if model.get("gpu") is None else str(model["gpu"]),
+            marker = " [q%d]" % queued[name] if name in queued else ""
+            width = max(1, columns[0][1] - 2 - len(marker))
+            base = self.api.fit(name, width).rstrip()
+            label = base + (" *" if model.get("is_default") else "") + marker
+            # The command target phase takes the STATE cell while owned; the
+            # stable observed state returns once the operation is cleaned up.
+            # It is dimmed because it is intent, not a measured state.
+            transition = model.get("transition")
+            state_label = transition or model.get("state", "unknown")
+            row = [label, state_label, "-" if model.get("gpu") is None else str(model["gpu"]),
                    self.api.number(model.get("resident_gb")) + "G"]
             if narrow:
                 row.append("yes" if pin else "-")
@@ -634,7 +1059,8 @@ class SchedulerApp(App):
                             self.api.expiry(pin["until"]) if pin else "-"])
             cells = tuple(Text(self.api.clean_text(value),
                                justify="right" if columns[index][0] in ("GPU", "MEM", "BUDGET", "USED", "10m") else "left",
-                               style="dim" if value in ("?", "?G", "-", "unknown") else "")
+                               style="dim" if (value in ("?", "?G", "-", "unknown")
+                                               or (columns[index][0] == "STATE" and transition is not None)) else "")
                           for index, value in enumerate(row))
             old = self._table_rows.get(name)
             if old is None:
@@ -648,6 +1074,7 @@ class SchedulerApp(App):
         if previous in self.model_names and table.cursor_row != self.model_names.index(previous):
             table.move_cursor(row=self.model_names.index(previous), animate=False)
         self.update_details()
+        self.refresh_open_menu()
 
     def selected_model(self):
         row = self.dashboard.query_one("#models", DataTable).cursor_row
@@ -697,7 +1124,7 @@ class SchedulerApp(App):
                 self.menu_key(key)
                 return True
             return False
-        entry = self.dashboard.query_one("#command", Input)
+        entry = self.composer()
         if key == "question_mark":
             if entry.value:
                 return False
@@ -718,6 +1145,8 @@ class SchedulerApp(App):
             self.complete(entry)
             return True
         if key in ("up", "down"):
+            if "\n" in entry.value:
+                return False  # Multi-line content: let the composer move the cursor.
             self.recall_history(entry, -1 if key == "up" else 1)
             return True
         if key in ("shift+tab", "shift+down", "shift+up"):
@@ -767,7 +1196,6 @@ class SchedulerApp(App):
         else:
             self.history_index = max(0, index)
             entry.value = self.history[self.history_index]
-        entry.cursor_position = len(entry.value)
 
     def command_names(self):
         parser = self.api.build_parser(UIParser)
@@ -791,7 +1219,6 @@ class SchedulerApp(App):
             return
         if len(candidates) == 1:
             entry.value = (head + " " if head else "") + candidates[0] + " "
-            entry.cursor_position = len(entry.value)
             return
         self.show_result("Completions: " + " ".join(self.api.clean_text(name) for name in candidates))
 
@@ -804,13 +1231,18 @@ class SchedulerApp(App):
         table.move_cursor(row=row, animate=False)
         self.update_details()
 
+    def action_interrupt(self):
+        if self.is_running and self.screen is self.dashboard:
+            self.interrupt(self.composer())
+
     def action_help(self):
         self.show_result(
             "Enter run · Tab complete · ↑/↓ history · Shift+↑/↓ or Shift+Tab select model · "
             "Ctrl+O item menu · Ctrl+L clear event log · Ctrl+R reset event cursor · "
             "Esc close menu or clear input · Ctrl+C clear then exit · Ctrl+D exit · "
             "click a row for its menu, a GPU line or an event line to copy it · "
-            "/help /quit /usage [7|30] /events /clear /copy [MODEL|gpu N|events] /refresh · "
+            "/help /quit /usage [7|30] /events /clear /refresh /copy [MODEL|gpu N|events] "
+            "/queue /cancel ID|MODEL · "
             "commands use the llm CLI: status · usage --days 7|30 · wake MODEL · sleep MODEL · "
             "stop MODEL · preload MODEL · free [--gpu N] [--need 80G] [--ram] · pin MODEL --for 8h · "
             "unpin MODEL · reserve --gpu N --size 80G --for 4h · unreserve ID · models · registry · "
@@ -822,6 +1254,82 @@ class SchedulerApp(App):
         self.show_result("Event cursor reset locally; replaying available scheduler history")
 
     # -------------------------------------------------------------- item menu
+
+    def loading_action(self, model, name):
+        """The action currently loading for this model, whether owned here or by
+        another session (observed through the backend transition)."""
+        current = self._current_write
+        if (current is not None and current.model == name
+                and current.command in ("wake", "sleep", "stop", "preload")):
+            return current.command
+        return transition_action(model.get("transition"))
+
+    def menu_disabled(self, model, name):
+        """Actions greyed out for this model's current state, queue and loading."""
+        state, default = model.get("state"), bool(model.get("is_default"))
+        disabled = {"awake": {"wake", "preload"}, "sleeping": {"preload", "sleep"},
+                    "stopped": {"sleep", "stop"}}.get(state, set()) | ({"stop"} if default else set())
+        loading = self.loading_action(model, name)
+        if loading is not None:
+            # A conflicting immediate operation is not offered while one loads.
+            disabled = disabled | {loading}
+        if not any(entry.model == name for entry in self._queue):
+            disabled = disabled | {"cancel-queue"}
+        return disabled
+
+    def menu_options(self, model, name):
+        """Build the ordered menu options, labelling the action that is loading."""
+        disabled = self.menu_disabled(model, name)
+        loading = self.loading_action(model, name)
+        default = bool(model.get("is_default"))
+        options = []
+        for key, label in MENU_ITEMS:
+            text = label + (" (default)" if default and key == "stop" else "")
+            if key == loading and key in disabled:
+                text += " (running…)"
+            options.append(Option(text, id=key, disabled=key in disabled))
+        return options
+
+    def refresh_open_menu(self):
+        """Keep an open item menu's disabled actions and labels live."""
+        if self.menu_model is None:
+            return
+        name = self.menu_model
+        model = next((item for item in (self.snapshot or {}).get("models", []) if item["name"] == name), None)
+        if model is None:
+            return
+        disabled = self.menu_disabled(model, name)
+        loading = self.loading_action(model, name)
+        default = bool(model.get("is_default"))
+        menu = self.dashboard.query_one("#model-menu", OptionList)
+        changed = False
+        for key, label in MENU_ITEMS:
+            option = menu.get_option(key)
+            if option is None:
+                continue
+            text = label + (" (default)" if default and key == "stop" else "")
+            if key == loading and key in disabled:
+                text += " (running…)"
+            if str(option.prompt) != text:
+                menu.replace_option_prompt(key, text)
+                changed = True
+            should = key in disabled
+            if bool(option.disabled) != should:
+                if should:
+                    menu.disable_option(key)
+                else:
+                    menu.enable_option(key)
+                changed = True
+        if changed:
+            options = [menu.get_option(key) for key, _ in MENU_ITEMS]
+            if menu.highlighted is not None and 0 <= menu.highlighted < len(options):
+                if options[menu.highlighted] is not None and options[menu.highlighted].disabled:
+                    menu.highlighted = next(
+                        (index for index, option in enumerate(options)
+                         if option is not None and not option.disabled), 0)
+            refresh = getattr(menu, "refresh", None)
+            if callable(refresh):
+                refresh()
 
     def open_model_menu(self, row=None):
         if not self.is_running or self.screen is not self.dashboard:
@@ -835,18 +1343,20 @@ class SchedulerApp(App):
         if model is None:
             self.show_result("No current model selection; refresh and select a model first")
             return
-        state, default = model.get("state"), bool(model.get("is_default"))
-        disabled = {"awake": {"wake", "preload"}, "sleeping": {"preload", "sleep"},
-                    "stopped": {"sleep", "stop"}}.get(state, set()) | ({"stop"} if default else set())
         menu = self.dashboard.query_one("#model-menu", OptionList)
+        if self.menu_model == name and menu.display:
+            # Clicking the selected row again toggles its menu closed.
+            self.close_menu()
+            self.show_notice("Menu closed; nothing sent")
+            return
+        disabled = self.menu_disabled(model, name)
         menu.clear_options()
-        menu.add_options([Option(label + (" (default)" if default and key == "stop" else ""),
-                                 id=key, disabled=key in disabled) for key, label in MENU_ITEMS])
+        menu.add_options(self.menu_options(model, name))
         menu.display = True
         menu.highlighted = next((index for index, (key, _) in enumerate(MENU_ITEMS) if key not in disabled), 0)
         menu.styles.offset = self.menu_offset(table, self.model_names.index(name))
         self.menu_model = name
-        self.dashboard.query_one("#command", Input).focus()
+        self.focus_composer()
         self.show_result("Menu for %s · ↑/↓ choose · Enter run · Esc close" % self.api.clean_text(name))
 
     def menu_offset(self, table, row):
@@ -863,7 +1373,7 @@ class SchedulerApp(App):
         menu = self.dashboard.query_one("#model-menu", OptionList)
         menu.display = False
         menu.clear_options()
-        self.dashboard.query_one("#command", Input).focus()
+        self.focus_composer()
         if notice:
             self.show_notice(notice)
 
@@ -893,6 +1403,8 @@ class SchedulerApp(App):
         elif choice == "stop":
             self.pending_confirm = ("stop -- " + shlex.quote(name), name)
             self.show_result("Free %s from memory? [y/N]" % self.api.clean_text(name))
+        elif choice == "cancel-queue":
+            self.cancel_queued_for_model(name)
         elif choice == "copy-name":
             self.copy_text(name, "model name")
             self.append_to_command(name)
@@ -914,12 +1426,11 @@ class SchedulerApp(App):
             self.show_result("Free %s from memory cancelled; no request sent" % self.api.clean_text(name))
 
     def append_to_command(self, text):
-        entry = self.dashboard.query_one("#command", Input)
+        entry = self.composer()
         value = entry.value
         if value and not value.endswith(" "):
             value += " "
         entry.value = value + text
-        entry.cursor_position = len(entry.value)
         entry.focus()
 
     def copy_text(self, text, label):
@@ -938,24 +1449,60 @@ class SchedulerApp(App):
 
     # ------------------------------------------------------------------ mouse
 
+    def close_menu_for_click(self, widget):
+        """Dismiss an open menu for a click outside it and the model table.
+
+        Widgets that consume their own click events call this too, so blank,
+        composer and panel clicks all close the menu.  A click on the model row
+        that opened the menu is owned by the row handler and must not dismiss it
+        here, and an option-list click is the menu acting on itself.
+        """
+        if not self.is_running or self.screen is not self.dashboard:
+            return
+        if self.menu_model is None:
+            return
+        if isinstance(widget, ModelTable):
+            return
+        if getattr(widget, "id", None) == "model-menu":
+            return
+        self.close_menu()
+
+    def close_menu_for_blank_table(self):
+        """A click on table space that is not a model row closes an open menu."""
+        if not self.is_running or self.screen is not self.dashboard:
+            return
+        if self.menu_model is None:
+            return
+        self.close_menu()
+
     def on_click(self, event):
         if not self.is_running or self.screen is not self.dashboard:
             return
         widget = getattr(event, "widget", None)
         identifier = getattr(widget, "id", None)
-        if identifier == "gpus":
-            self.copy_gpu_line(event.screen_offset.y - widget.content_region.y)
-        elif identifier == "events":
-            self.copy_event_line(event.screen_offset.y - widget.content_region.y + int(widget.scroll_offset.y))
-        if identifier != "model-menu":
-            self.dashboard.query_one("#command", Input).focus()
+        if identifier == "model-menu":
+            return
+        self.close_menu_for_click(widget)
+        if isinstance(widget, ModelTable):
+            self.focus_composer()
+            return
+        self.focus_composer()
 
-    def copy_gpu_line(self, index):
-        gpus = (self.snapshot or {}).get("gpus", [])
-        if 0 <= index < len(gpus):
-            self.copy_text(self.gpu_text(gpus[index]), "gpu %s" % gpus[index]["index"])
-        else:
-            self.show_notice("No GPU observation on that line")
+    def click_gpu_row(self, event, widget):
+        """Widget-level GPU click; App bubbling differs across Textual versions."""
+        if not self.is_running or self.screen is not self.dashboard:
+            return
+        self.close_menu_for_click(widget)
+        self.copy_gpu_row(event.screen_offset.y - widget.content_region.y, widget)
+        self.focus_composer()
+
+    def click_event_row(self, event, widget):
+        """Widget-level event-log click; App bubbling differs across versions."""
+        if not self.is_running or self.screen is not self.dashboard:
+            return
+        self.close_menu_for_click(widget)
+        self.copy_event_line(event.screen_offset.y - widget.content_region.y + int(widget.scroll_offset.y))
+        self.focus_composer()
 
     def copy_event_line(self, index):
         lines = self._event_log.lines
@@ -980,7 +1527,8 @@ class SchedulerApp(App):
     def render_event_status(self):
         # Connection, then the newest background read, then user feedback; the
         # hint is last because it is the only part safe to clip.
-        parts = [self._connection, self._observation, self._notice, HINT]
+        queue = self.queue_text() if (self._queue or self._current_write is not None) else None
+        parts = [self._connection, self._observation, self._notice, queue, HINT]
         status = " · ".join(self.api.clean_text(part) for part in parts if part)
         if self._rendered.get("event-status") != status:
             self._event_status.update(status)
@@ -1153,12 +1701,13 @@ class SchedulerApp(App):
 
     # ---------------------------------------------------------------- commands
 
-    def on_input_submitted(self, event):
-        if (not self.is_running or self.screen is not self.dashboard
-                or event.input.id != "command"):
+    def submit_composer(self, composer=None):
+        """Enter on the composer; the only path that turns text into a command."""
+        if not self.is_running or self.screen is not self.dashboard:
             return
-        value = event.value
-        event.input.value = ""
+        entry = composer if composer is not None else self.composer()
+        value = entry.value
+        entry.value = ""
         self.remember(value.strip())
         self.submit_command(value)
 
@@ -1181,12 +1730,12 @@ class SchedulerApp(App):
                 self.show_models(args)
             elif args.command in ("pin", "unpin", "free", "wake", "reserve", "unreserve",
                                   "add", "rm", "sleep", "stop", "preload"):
-                if self._write_busy:
-                    self.show_result("An operation is already running; wait for its result (no request queued)")
-                elif args.command == "free" and args.ram and not args.dry_run:
+                if args.command == "free" and args.ram and not args.dry_run:
+                    # RAM reclamation is confirmed BEFORE anything is queued, so a
+                    # cancelled confirmation leaves no queue entry behind.
                     self.confirm_ram(args, text)
                 else:
-                    self.run_write(args)
+                    self.enqueue_write(args, text)
             else:
                 self.usage_active = False
                 self.usage_generation += 1
@@ -1197,7 +1746,10 @@ class SchedulerApp(App):
 
     def run_slash(self, text):
         """UI-layer actions; these are not model commands and have no parser."""
-        parts = text.split()
+        try:
+            parts = shlex.split(text)
+        except ValueError:
+            parts = text.split()
         name, rest = parts[0], parts[1:]
         if name == "/help":
             self.action_help()
@@ -1219,6 +1771,11 @@ class SchedulerApp(App):
                 return
             self.show_usage(self.api.build_parser(UIParser).parse_args(
                 ["usage", "--days", days, "--by", self.usage_args.by]))
+        elif name == "/queue":
+            self.show_result(self.queue_text())
+        elif name == "/cancel":
+            # Quoted model names with spaces survive shlex; an id is one token.
+            self.cancel_queue(" ".join(rest) if rest else "")
         elif name == "/copy":
             self.run_copy(rest)
         else:
@@ -1230,13 +1787,14 @@ class SchedulerApp(App):
             self.copy_text(self.event_summary_text(), "event summary")
             return
         if rest and rest[0] == "gpu":
-            gpus = (self.snapshot or {}).get("gpus", [])
-            index = next((position for position, gpu in enumerate(gpus)
-                          if len(rest) > 1 and str(gpu["index"]) == rest[1]), None)
-            if index is None:
+            if len(rest) < 2 or not rest[1].isdigit():
                 self.show_result("/copy gpu N needs an observed GPU index")
-            else:
-                self.copy_gpu_line(index)
+                return
+            index = int(rest[1])
+            if not any(entry.get("index") == index for entry in self._gpu_lines):
+                self.show_result("/copy gpu N needs an observed GPU index")
+                return
+            self.copy_gpu_index(index)
             return
         name = " ".join(rest) if rest else self.selected_model()
         line = None if name is None else self.model_status_line(name)

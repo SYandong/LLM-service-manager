@@ -1,5 +1,6 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Claude Code / claude-fable-5-1
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Free/wake UI against real core HTTP; all model effects are synthetic fixtures."""
 
 import asyncio
@@ -81,7 +82,7 @@ def test_ram_preview_needs_no_confirmation_and_does_not_write(pin_api, action_se
     asyncio.run(scenario())
 
 
-def test_slow_wake_stays_responsive_and_never_queues_second_write(pin_api, action_service):
+def test_slow_wake_stays_responsive_and_read_refresh_is_not_queued(pin_api, action_service):
     async def scenario():
         app = app_for(pin_api, action_service)
         started, release = threading.Event(), threading.Event()
@@ -104,13 +105,16 @@ def test_slow_wake_stays_responsive_and_never_queues_second_write(pin_api, actio
                 await pilot.press("slash")
                 assert app.focused.id == "command"
                 app.update_events()
+                # A read-only refresh stays responsive while the write waits.
                 await app.refresh_state().wait()
-                assert calls == [("POST", "/v1/wake/model", {"timeout": 930})]
+                assert ("GET", "/v1/state", {}) in calls
+                assert [call[:2] for call in calls if call[0] == "POST"] == [("POST", "/v1/wake/model")]
             finally:
                 release.set()
             await pending.wait()
             assert "status: ready" in output(app)
-            assert [call[:2] for call in calls] == [("POST", "/v1/wake/model"), ("GET", "/v1/state")]
+            assert [call[:2] for call in calls][:1] == [("POST", "/v1/wake/model")]
+            assert [call[:2] for call in calls][-1] == ("GET", "/v1/state")
     asyncio.run(scenario())
 
 

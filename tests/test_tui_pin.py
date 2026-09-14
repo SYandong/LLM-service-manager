@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Pin input and immediate refresh against real, isolated core pin persistence."""
 
 import asyncio
@@ -23,7 +24,7 @@ def app_for(api, service):
 
 
 async def submit(app, pilot, text):
-    entry = app.query_one("#command", Input)
+    entry = app.query_one("#command")
     entry.focus()
     entry.value = text
     await pilot.press("enter")
@@ -38,6 +39,8 @@ def test_pin_and_unpin_refresh_column_with_server_owner(pin_api, pin_service, mo
         app = app_for(pin_api, pin_service)
         async with app.run_test(size=size) as pilot:
             await app.workers.wait_for_complete()
+            for timer in app._ui_timers:
+                timer.pause()  # Only this scenario's requests are counted.
             await submit(app, pilot, "pin model --for 1h")
             assert app.snapshot["pins"][0]["by"] == "actual-owner"
             table = app.query_one("#models", DataTable)
@@ -46,7 +49,8 @@ def test_pin_and_unpin_refresh_column_with_server_owner(pin_api, pin_service, mo
             assert "actual-owner" in str(app.query_one("#details", Static).render())
             output = str(app.query_one("#result", Static).render())
             assert "owner actual-owner" in output and "spoof-owner" not in output
-            assert pin_service.requests[-2:] == [("POST", "/v1/pin"), ("GET", "/v1/state")]
+            write_index = pin_service.requests.index(("POST", "/v1/pin"))
+            assert ("GET", "/v1/state") in pin_service.requests[write_index + 1:]
             await submit(app, pilot, "unpin model")
             assert app.snapshot["pins"] == []
             assert str(table.get_row_at(app.model_names.index("model"))[-1]) == "-"

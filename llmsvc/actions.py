@@ -1,6 +1,7 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Codex / gpt-5.6-luna
 # Generated-By: Claude Code / claude-fable-5-1
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Guarded single-action dispatch; no live transport or HTTP mount is defaulted.
 
 Submission is not a confirmed state transition or measured resource release.
@@ -20,9 +21,54 @@ from urllib.parse import quote
 
 from llmsvc.wake_progress import WakeProgressReader
 
-from llmsvc.state import Action, StateSnapshot
+from llmsvc.state import Action, StateSnapshot, transition_name
 
 LOG = logging.getLogger("llmsvc.actions")
+
+
+class TransitionRegistry:
+    """Concurrency-safe owned transition observations for explicit actions.
+
+    Each entry maps a model name to the command target transition and the token
+    of the owner that created it.  An entry is advisory command intent, not
+    measured copy progress.  Acquisition is first-owner-wins: a duplicate or
+    nested ``begin`` never overwrites the stored owner and returns a distinct
+    token that grants no cleanup rights, so its ``end`` cannot remove another
+    operation's transition.  Only the matching owner token removes an entry.
+    """
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._entries: dict[str, tuple[int, Optional[str]]] = {}
+        self._next_token = 0
+
+    def begin(self, model: str, transition: Optional[str]) -> Optional[int]:
+        if transition is None:
+            return None
+        with self._lock:
+            self._next_token += 1
+            token = self._next_token
+            if model not in self._entries:
+                self._entries[model] = (token, transition)
+            # A duplicate acquisition gets a fresh token that is not stored, so
+            # its ``end`` is a no-op and cannot release the active owner.
+            return token
+
+    def end(self, model: str, token: Optional[int]) -> None:
+        if token is None:
+            return
+        with self._lock:
+            existing = self._entries.get(model)
+            if existing is not None and existing[0] == token:
+                del self._entries[model]
+
+    def snapshot(self) -> dict[str, str]:
+        with self._lock:
+            return {model: label for model, (_, label) in self._entries.items() if label is not None}
+
+    def active(self, model: str) -> bool:
+        with self._lock:
+            return model in self._entries
 
 
 class ActionExecutor(Protocol):
@@ -389,6 +435,7 @@ class ModelActionController:
         self.progress_reader_factory = progress_reader_factory
         self.pending = set()
         self.free_active = False
+        self.transitions = TransitionRegistry()
         self.dispatcher = ModelActionDispatcher(
             action_lock=scheduler.action_lock, snapshot=self._snapshot,
             http_request=transport.http_request, stop_unit=transport.stop_unit,
@@ -787,7 +834,7 @@ class ModelActionController:
                 raise ActionDispatchError("insufficient_gpu_memory")
         return model
 
-    def wake(self, name, *, by, dry_run=False, _recovery=None, _deadline=None):
+    def wake(self, name, *, by, dry_run=False, _recovery=None, _deadline=None, _transition=True):
         if dry_run:
             return self.scheduler.preview("wake", {"model": name})
         started = self.monotonic()
@@ -799,6 +846,7 @@ class ModelActionController:
         result = {"model": name, "status": "blocked", "ready": False, "elapsed_seconds": 0.0, "cold_start": False}
         owned = False
         progress_reader = None
+        transition_token = None
         try:
             self._enabled()
             if _recovery is not None and (_recovery is not getattr(self.scheduler, "sleeping_recovery", None)
@@ -816,6 +864,8 @@ class ModelActionController:
                     return result
                 self.pending.add(name)
                 owned = True
+                if _transition:
+                    transition_token = self.transitions.begin(name, transition_name(model.state, "GPU"))
                 faults = getattr(self.scheduler, "faults", None)
                 if faults is not None and model.state == "sleeping":
                     faults.note_wake(name)
@@ -881,6 +931,7 @@ class ModelActionController:
             with self.scheduler.changed:
                 if owned:
                     self.pending.discard(name)
+                    self.transitions.end(name, transition_token)
                     faults = getattr(self.scheduler, "faults", None)
                     if faults is not None:
                         faults.waking.discard(name)
@@ -960,7 +1011,7 @@ class ModelActionController:
         blockers = [asdict(item) for item in projection.blockers if item.model == name]
         return {"would": [], "blocked_by": blockers or [{"model": name, "reason": "memory_budget"}]}
 
-    def _model_action(self, kind, name, *, by, started, deadline):
+    def _model_action(self, kind, name, *, by, started, deadline, _transition=True):
         """Dispatch one explicit sleep/stop and confirm the observed final state.
 
         Nothing here releases lease or memory accounting: a submitted action is
@@ -968,10 +1019,12 @@ class ModelActionController:
         a confirmed exit.
         """
         target = "sleeping" if kind == "sleep" else "stopped"
+        target_phase = "MEM" if kind == "sleep" else "SSD"
         result = {"model": name, "status": "blocked", "error": None, "elapsed_seconds": 0.0, "state": None}
         owned = False
         action = None
         dispatch_error = None
+        transition_token = None
         try:
             self._enabled()
             self._refresh(deadline)
@@ -995,6 +1048,8 @@ class ModelActionController:
                 action = Action(kind, name, step["reason"], step["gpu"])
                 self.pending.add(name)
                 owned = True
+                if _transition:
+                    transition_token = self.transitions.begin(name, transition_name(model.state, target_phase))
                 self.scheduler.emit(kind + "_requested", model=name, detail={"by": by, "state": model.state})
                 try:
                     self.dispatcher.execute(action, dry_run=False, deadline=deadline)
@@ -1024,27 +1079,30 @@ class ModelActionController:
             with self.scheduler.changed:
                 if owned:
                     self.pending.discard(name)
+                    self.transitions.end(name, transition_token)
                 self.scheduler.emit(kind + "_result", model=name, detail={"by": by, **result})
                 self.scheduler.changed.notify_all()
         return result
 
-    def sleep_model(self, name, *, by, dry_run=False):
+    def sleep_model(self, name, *, by, dry_run=False, _transition=True):
         """awake → sleeping for one explicit request (DESIGN §4.1 protection)."""
         if dry_run:
             return self.scheduler.preview("sleep", {"model": name})
         started = self.monotonic()
         return self._model_action("sleep", name, by=by, started=started,
-                                  deadline=started + self.scheduler.config.free_timeout_seconds)
+                                  deadline=started + self.scheduler.config.free_timeout_seconds,
+                                  _transition=_transition)
 
-    def stop_model(self, name, *, by, dry_run=False):
+    def stop_model(self, name, *, by, dry_run=False, _transition=True):
         """awake/sleeping → stopped for one explicit request (DESIGN §4.3)."""
         if dry_run:
             return self.scheduler.preview("stop", {"model": name})
         started = self.monotonic()
         return self._model_action("stop", name, by=by, started=started,
-                                  deadline=started + self.scheduler.config.free_timeout_seconds)
+                                  deadline=started + self.scheduler.config.free_timeout_seconds,
+                                  _transition=_transition)
 
-    def preload(self, name, *, by, dry_run=False):
+    def preload(self, name, *, by, dry_run=False, _transition=True):
         """Resident weights without VRAM: cold start, then sleep the new daemon."""
         if dry_run:
             return self.scheduler.preview("preload", {"model": name})
@@ -1053,6 +1111,7 @@ class ModelActionController:
         deadline = wake_deadline + self.scheduler.config.action_observe_seconds
         result = {"model": name, "status": "blocked", "error": None, "elapsed_seconds": 0.0,
                   "state": None, "already_resident": False}
+        transition_token = None
         try:
             self._enabled()
             self._refresh(deadline)
@@ -1073,17 +1132,22 @@ class ModelActionController:
                 if model.state != "stopped":
                     raise ActionDispatchError("unknown_model_state")
                 self.wake_model(snapshot, name)
+                # The outer preload owns a single SSDtoMEM intent for its whole
+                # lifetime; the nested wake/sleep must not replace it.
+                if _transition:
+                    transition_token = self.transitions.begin(name, transition_name(model.state, "MEM"))
                 self.scheduler.emit("preload_requested", model=name, detail={"by": by, "state": model.state})
             # The wake and the sleep each take self.pending in turn and revalidate
             # under the lock; neither step reuses the admission checked above.
-            woken = self.wake(name, by=by, _deadline=wake_deadline)
+            woken = self.wake(name, by=by, _deadline=wake_deadline, _transition=False)
             if woken["status"] != "ready":
                 state = self._observed_state(self._snapshot(), name)
                 if state is not None:
                     result["state"] = state
                 result.update(status=woken["status"], error=woken.get("error") or "wake_not_ready")
                 return result
-            slept = self._model_action("sleep", name, by=by, started=self.monotonic(), deadline=deadline)
+            slept = self._model_action("sleep", name, by=by, started=self.monotonic(),
+                                       deadline=deadline, _transition=False)
             # The cold start already happened, so an unfinished sleep is partial
             # progress rather than a request that changed nothing.
             result.update(status=slept["status"] if slept["status"] in ("ready", "timeout") else "partial",
@@ -1093,6 +1157,7 @@ class ModelActionController:
         finally:
             result["elapsed_seconds"] = max(0.0, self.monotonic() - started)
             with self.scheduler.changed:
+                self.transitions.end(name, transition_token)
                 self.scheduler.emit("preload_result", model=name, detail={"by": by, **result})
                 self.scheduler.changed.notify_all()
         return result

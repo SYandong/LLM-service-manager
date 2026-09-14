@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.1.0 — 2026-09-14
+
+Feature release; Python distribution `1.1.0`. It carries the #247 TUI
+management work under the reviewed #248 delivery exception, which also closes
+the alpha series in favour of stable minor (features) and patch (bugfix)
+releases.
+
+### TUI
+
+- Management commands are queued for the current TUI session in submit order
+  and executed one at a time through the existing scheduler API, so a second
+  command for a busy model is no longer dropped (#247).
+- A model's queued command can be cancelled before it submits HTTP; the active
+  command cannot be cancelled. Cancellation and dequeue races cannot emit a
+  cancelled item, and exit discards unsubmitted session items without replaying
+  unknown results or claiming a remote operation was interrupted (#247).
+- Model state exposes an optional `transition` field describing the scheduler's
+  active management operation (`SSDtoMEM`, `SSDtoGPU`, `MEMtoGPU`, `GPUtoMEM`,
+  and, when freeing, `GPUtoSSD`/`MEMtoSSD`). The TUI shows a queued marker and
+  the grounded transition rather than pretending to observe byte copies, does
+  not invent a starting location, and shows no transition for dry runs (#247).
+- Clicking outside the model menu, including into the command input, dismisses
+  it; in-menu actions and right-click cancellation keep working (#247).
+- GPU cards keep their index across empty, partially missing and recovered
+  samples and mark unknown values as unavailable instead of dropping rows or
+  reusing stale readings; the six-GPU capacity bars and the larger bordered
+  command input are visible on wide and narrow terminals (#247).
+
+### Release process
+
+- The publisher accepts a real Codex approval (`CODEX-APPROVED <full SHA>` with
+  the exact `Generated-By: Codex / gpt-6-astra` watermark) from the same shared
+  trusted account as Fable. It checks the single latest review from that account
+  before any harness filtering, so a later rejection, stale commit,
+  missing/ambiguous/suffixed watermark, conflicting marker or equal-timestamp
+  tie fails closed instead of falling back to an earlier approval (#248).
+- `release-manifest.json` records generic `review_url`/`review_harness` fields
+  additively and keeps the legacy `fable_review` URL only for actual Fable
+  reviews, so a Codex approval is never mislabeled (#248).
+- Stable feature releases increment the minor version and bugfix releases
+  increment the patch version; the alpha series is historical and remains
+  parseable/verifiable but no new alpha is published (#248).
+
+### Compatibility and validation limits
+
+This entry describes the merged behavior; it does not claim live site
+validation, production deployment or GPU operations, and the per-issue
+acceptance evidence for #247 remains tracked on that issue. Existing
+protection, dry-run and ledger constraints are unchanged.
+
 ## 1.0.0 — 2026-09-14
 
 First stable release; Python distribution `1.0.0`. The qualifying PRs since
@@ -774,3 +824,4 @@ Release process and cadence: [docs/RELEASING.md](docs/RELEASING.md).
 
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
+<!-- Generated-By: OpenCode / deepseek-v4.1-flash -->

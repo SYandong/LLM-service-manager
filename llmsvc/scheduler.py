@@ -1,5 +1,6 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Claude Code / claude-fable-5-1
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Sampling, usage and opt-in intent writes under one accounting lock."""
 
 import copy
@@ -205,6 +206,15 @@ class Scheduler:
             if self.catalog_fenced or (self.store and self.store.catalog_pending()):
                 from llmsvc.state import Blocker
                 snapshot = replace(snapshot, blocked_by=snapshot.blocked_by+(Blocker(None, "catalog_reconciliation_required"),))
+            # Adjacent observation: the target phase of an owned explicit
+            # command.  It is layered onto the published snapshot only, so the
+            # stored collector result and policy inputs stay measured values.
+            transitions = getattr(self.model_actions, "transitions", None) if self.model_actions is not None else None
+            if transitions is not None:
+                active = transitions.snapshot()
+                if active:
+                    snapshot = replace(snapshot, models=tuple(
+                        replace(model, transition=active.get(model.name)) for model in snapshot.models))
             return snapshot
 
     def check_catalog(self, epoch=None):

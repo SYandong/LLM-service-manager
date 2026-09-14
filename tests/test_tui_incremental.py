@@ -1,6 +1,7 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Codex / gpt-5.6-luna
 # Generated-By: Claude Code / claude-fable-5-1
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Dirty rendering preserves model identity, cursor and event delivery semantics."""
 import asyncio
 import copy
@@ -23,8 +24,9 @@ def test_steady_snapshot_changes_only_changed_cells_and_keeps_selection(snapshot
             selected = app.selected_model()
             rows = dict(table.rows)
             gpu_text = str(app.query_one("#gpus").render())
-            assert "GPU0 87/144G" in gpu_text and "llmsvc 77  ext 10" in gpu_text
-            assert "GPU1 ?/?G  llmsvc ?  ext ?" in gpu_text  # Unknown never becomes zero.
+            assert "GPU0 used" in gpu_text and "87/144G" in gpu_text
+            assert "llmsvc" in gpu_text and "77G" in gpu_text and "ext 10" in gpu_text and "free 57" in gpu_text
+            assert "GPU1 used" in gpu_text and "?/?G" in gpu_text  # Unknown never becomes zero.
             with patch.object(table, "clear", wraps=table.clear) as clear, \
                  patch.object(table, "update_cell", wraps=table.update_cell) as update:
                 for _ in range(3):

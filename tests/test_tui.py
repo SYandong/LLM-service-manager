@@ -1,5 +1,6 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Claude Code / claude-fable-5-1
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Headless tests for the optional, read-only terminal UI."""
 
 import asyncio
@@ -18,6 +19,45 @@ pytest.importorskip("textual")
 from textual.widgets import DataTable, Input, RichLog, Static
 from tui.app import SchedulerApp
 from test_llm import snapshot
+
+
+def record_clipboard(app):
+    """Capture clipboard requests across Textual versions.
+
+    8.x's test driver stores the text on ``app._clipboard``; 0.70's driver only
+    writes an OSC 52 escape, so a recording wrapper is needed for assertions.
+    """
+    log = []
+    original = getattr(app, "copy_to_clipboard", None)
+
+    def capture(text):
+        log.append(text)
+        if callable(original):
+            try:
+                original(text)
+            except Exception:
+                pass
+
+    app.copy_to_clipboard = capture
+    app._clipboard_log = log
+    if hasattr(app, "_clipboard"):
+        app._clipboard = ""
+    return app
+
+
+def clipboard(app):
+    log = getattr(app, "_clipboard_log", None)
+    if log:
+        return log[-1]
+    return getattr(app, "_clipboard", "")
+
+
+def reset_clipboard(app):
+    log = getattr(app, "_clipboard_log", None)
+    if log is not None:
+        log.clear()
+    if hasattr(app, "_clipboard"):
+        app._clipboard = ""
 
 
 class FakeClient:
@@ -46,7 +86,7 @@ class IdleEvents:
 
 async def open_details(app, pilot):
     """The frozen event view is a UI command now, not a printable shortcut."""
-    field = app.dashboard.query_one("#command", Input)
+    field = app.dashboard.query_one("#command")
     field.value = "/events"
     await pilot.press("enter")
     await pilot.pause()
@@ -56,7 +96,7 @@ def make_app(snapshot):
     path = Path(__file__).resolve().parents[1] / "cli" / "llm"
     api = SimpleNamespace(**runpy.run_path(str(path)))
     client = FakeClient(snapshot)
-    return SchedulerApp(client, api, event_reader=IdleEvents()), client
+    return record_clipboard(SchedulerApp(client, api, event_reader=IdleEvents())), client
 
 
 @pytest.mark.parametrize("size", [(100, 30), (60, 24), (40, 24)])
@@ -67,7 +107,7 @@ def test_layout_and_selection(snapshot, size):
             await app.workers.wait_for_complete()
             await pilot.pause()
             table = app.query_one("#models", DataTable)
-            command = app.query_one("#command", Input)
+            command = app.query_one("#command")
             assert app.focused is command  # Opening the UI is opening a command line.
             assert table.row_count == 4
             assert table.size.height >= 3
@@ -94,7 +134,7 @@ def test_command_line_keeps_focus_through_every_panel_click(snapshot):
         async with app.run_test(size=(100, 30)) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            command = app.query_one("#command", Input)
+            command = app.query_one("#command")
             for target in ["#models", "#gpus", "#memory", "#events", "#source-status",
                            "#details", "#result", "#event-panel", "#summary"]:
                 await pilot.click(target)
@@ -120,7 +160,7 @@ def test_command_refresh_and_parser_errors(snapshot):
             await app.workers.wait_for_complete()
             for timer in app._ui_timers:
                 timer.pause()  # Count only the requests this test issues.
-            command = app.query_one("#command", Input)
+            command = app.query_one("#command")
             command.value = "status"
             await pilot.press("enter")
             await app.workers.wait_for_complete()
@@ -258,8 +298,8 @@ def test_slow_refresh_does_not_overlap_or_block_input(snapshot):
                 assert await asyncio.to_thread(started.wait, 2)
                 await app.refresh_state().wait()
                 await pilot.press("s", "t", "a", "t", "u", "s")
-                assert app.query_one("#command", Input).value == "status"
-                assert app.query_one("#command", Input).has_focus
+                assert app.query_one("#command").value == "status"
+                assert app.query_one("#command").has_focus
             finally:
                 release.set()
             await first.wait()

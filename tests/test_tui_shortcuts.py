@@ -1,5 +1,6 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Claude Code / claude-fable-5-1
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Actual keyboard interactions on the command line; no model effects here."""
 
 import asyncio
@@ -15,7 +16,7 @@ from test_tui import make_app, snapshot
 
 
 def entry(app):
-    return app.dashboard.query_one("#command", Input)
+    return app.dashboard.query_one("#command")
 
 
 def output(app):
@@ -98,7 +99,7 @@ def test_tab_completes_commands_models_and_ui_actions(snapshot):
             assert entry(app).value == "re"  # Ambiguous prefixes only list candidates.
             assert "registry" in output(app) and "reserve" in output(app)
             entry(app).value = ""
-            await pilot.press("slash", "q", "tab")
+            await pilot.press("slash", "q", "u", "i", "tab")
             assert entry(app).value == "/quit "
             entry(app).value = ""
             await pilot.press("z", "z", "tab")
