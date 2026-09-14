@@ -1,273 +1,248 @@
 # Generated-By: Codex / gpt-6-astra
-"""Actual keyboard interactions; HTTP/SQLite are disposable and effects simulated."""
+# Generated-By: Claude Code / claude-fable-5-1
+"""Actual keyboard interactions on the command line; no model effects here."""
 
 import asyncio
-import shlex
-from dataclasses import replace
+import time
 
 import pytest
 
 pytest.importorskip("textual")
 
-from textual.widgets import DataTable, Input
-from tui.app import ConfirmRam
-from test_llm_actions import action_service, pin_api, pin_service
-from test_tui_actions import app_for, output
+from textual.widgets import DataTable, Input, RichLog, Static
+from tui.app import INTERRUPT_WINDOW
+from test_tui import make_app, snapshot
 
 
 def entry(app):
     return app.dashboard.query_one("#command", Input)
 
 
-def select(app, name):
-    table = app.dashboard.query_one("#models", DataTable)
-    table.move_cursor(row=app.model_names.index(name))
-    table.focus()
+def output(app):
+    return str(app.dashboard.query_one("#result", Static).render())
 
 
-async def finish(app, pilot):
+def bottom(app):
+    return str(app.dashboard.query_one("#event-status", Static).render())
+
+
+async def settle(app, pilot):
     await app.workers.wait_for_complete()
     await pilot.pause()
 
 
-@pytest.mark.parametrize("size", [(100, 30), (40, 24)])
-def test_free_shortcut_only_prefills_and_retains_ram_confirmation(pin_api, action_service, monkeypatch, size):
+def test_former_shortcut_letters_are_plain_text_now(snapshot):
     async def scenario():
-        action_service.effects["model"] = replace(action_service.effects["model"],
-            state="sleeping", is_sleeping=True, resident_gb=2)
-        action_service.scheduler.sample_once()
-        app = app_for(pin_api, action_service)
-        displayed = []
-        show_result = app.show_result
-
-        def record_result(text):
-            displayed.append(text)
-            show_result(text)
-
-        monkeypatch.setattr(app, "show_result", record_result)
-
-        def writes():
-            return [request for request in action_service.requests if request[0] != "GET"]
-
-        async with app.run_test(size=size) as pilot:
-            await finish(app, pilot)
-            await pilot.press("f")
-            assert app.focused is entry(app) and entry(app).value == "free "
-            assert writes() == []
-            await pilot.press(*"--ram --need 20G", "enter")
-            assert isinstance(app.screen, ConfirmRam)
-            assert app.screen.focused.id == "ram-cancel"
-            assert writes() == []
-            # Printable shortcuts cannot edit the hidden field or issue actions.
-            await pilot.press("f", "p", "w")
-            assert isinstance(app.screen, ConfirmRam) and entry(app).value == ""
-            assert writes() == []
-            await pilot.press("escape")
-            assert app.screen is app.dashboard and "cancelled" in output(app)
-            assert not action_service.effects["calls"]
-            # The same prefill plus explicit submit still reaches the common executor.
-            select(app, "model")
-            await pilot.press("f")
-            await pilot.press(*"--ram --need 20G", "enter")
-            confirmation_start = len(action_service.requests)
-            await pilot.click("#ram-confirm")
-            await finish(app, pilot)
-
-            def assert_confirmed_refresh():
-                # Exactly one write in the entire interaction, after confirmation,
-                # followed by a refresh. Background GETs may occur anywhere.
-                assert writes() == [("POST", "/v1/free")]
-                confirmed = action_service.requests[confirmation_start:]
-                post = confirmed.index(("POST", "/v1/free"))
-                assert ("GET", "/v1/state") in confirmed[post + 1:]
-
-            assert_confirmed_refresh()  # Prove the action's refresh before adding a poll.
-            # Deterministically exercise the same callback used by the five-second
-            # timer, so the old final-two-requests assumption cannot pass by luck.
-            app.refresh_current()
-            await finish(app, pilot)
-            assert_confirmed_refresh()
-            assert app.snapshot["models"][0]["state"] == "stopped"
-            # A later poll may replace the result with "Updated"; the action must
-            # still have displayed its successful outcome through the real widget.
-            assert any(text.startswith("Free status: complete\n") for text in displayed)
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("name", ["model", "org/a b?#%/模型", "literal%2Fmodel", "-leading-dash"])
-def test_pin_shortcut_requires_typed_duration_and_keeps_exact_model(pin_api, pin_service, name):
-    async def scenario():
-        app = app_for(pin_api, pin_service)
-        async with app.run_test(size=(40, 24)) as pilot:
-            await finish(app, pilot)
-            select(app, name)
-            before = list(pin_service.requests)
-            await pilot.press("p")
-            assert app.focused is entry(app)
-            assert entry(app).value == "pin --for  -- " + shlex.quote(name)
-            assert entry(app).cursor_position == len("pin --for ")
-            assert pin_service.requests == before
-            await pilot.press("enter")  # Blank duration cannot create a pin.
-            await finish(app, pilot)
-            assert pin_service.requests == before and not pin_service.scheduler.snapshot().pins
-            select(app, name)
-            await pilot.press("p", "0", "h", "enter")
-            await finish(app, pilot)
-            assert pin_service.requests == before and not pin_service.scheduler.snapshot().pins
-            select(app, name)
-            await pilot.press("p", "1", "h", "enter")
-            await finish(app, pilot)
-            pins = pin_service.scheduler.snapshot().pins
-            assert len(pins) == 1 and pins[0].model == name and pins[0].by == "actual-owner"
-            assert "owner actual-owner" in output(app)
-            assert pin_service.requests[-2:] == [("POST", "/v1/pin"), ("GET", "/v1/state")]
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("name", ["org/a b?#%/模型", "literal%2Fmodel", "-leading-dash"])
-def test_wake_shortcut_uses_safe_name_and_waits_for_enter(pin_api, action_service, name):
-    async def scenario():
-        index = action_service.names.index(name)
-        action_service.effects["model"] = replace(action_service.effects["model"], name=name,
-            unit="vllm-%s.service" % index, state="sleeping", is_sleeping=True, resident_gb=2)
-        action_service.scheduler.sample_once()
-        app = app_for(pin_api, action_service)
+        app, client = make_app(snapshot)
         async with app.run_test(size=(100, 30)) as pilot:
-            await finish(app, pilot)
-            before = list(action_service.requests)
-            await pilot.press("w")
-            assert shlex.split(entry(app).value) == ["wake", "--", name]
-            assert action_service.requests == before and not action_service.effects["calls"]
-            await pilot.press("enter")
-            await finish(app, pilot)
-            assert app.snapshot["models"][0]["state"] == "awake"
-            assert "status: ready" in output(app)
-            assert action_service.requests[-2:] == [("POST", "/v1/wake/" + pin_api["quote"](name, safe="")), ("GET", "/v1/state")]
+            await settle(app, pilot)
+            for timer in app._ui_timers:
+                timer.pause()
+            before = list(client.calls)
+            await pilot.press("f", "p", "w", "u", "r", "q", "e", "slash")
+            assert entry(app).value == "fpwurqe/"
+            assert app.is_running and not app.usage_active
+            assert client.calls == before
     asyncio.run(scenario())
 
 
-def test_printable_keys_belong_to_input_and_keep_drafts(pin_api, pin_service):
+def test_question_mark_helps_only_on_an_empty_line(snapshot):
     async def scenario():
-        app = app_for(pin_api, pin_service)
-        async with app.run_test(size=(40, 24)) as pilot:
-            await finish(app, pilot)
-            before = list(pin_service.requests)
-            await pilot.press("slash")
-            assert app.focused is entry(app)
-            await pilot.press("f", "p", "w", "u", "question_mark", "q", "r", "slash")
-            assert entry(app).value == "fpwu?qr/"
-            assert app.is_running and not app.usage_active and pin_service.requests == before
-            select(app, "model")
-            await pilot.press("w")
-            assert entry(app).value == "fpwu?qr/" and app.focused is entry(app)
-            assert "draft retained" in output(app)
-            assert pin_service.requests == before
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("key", ["p", "w"])
-def test_absent_or_stale_selection_never_prefills_or_submits(pin_api, pin_service, key):
-    async def scenario():
-        app = app_for(pin_api, pin_service)
+        app, _ = make_app(snapshot)
         async with app.run_test(size=(100, 30)) as pilot:
-            await finish(app, pilot)
-            before = list(pin_service.requests)
-            original = app.snapshot
-            app.snapshot = dict(original, models=[])
-            # Old table/cursor still references a name missing from the latest snapshot.
-            await pilot.press(key)
-            assert not entry(app).value and "No current model selection" in output(app)
-            app.render_snapshot()  # Empty table also has no valid target.
-            await pilot.press(key)
-            assert not entry(app).value and pin_service.requests == before
-            app.snapshot = original
-            app.render_snapshot()
-            await pilot.press(key)
-            if key == "p":
-                await pilot.press("1", "h")
-            app.snapshot = dict(original, models=[])
-            await pilot.press("enter")
-            await finish(app, pilot)
-            assert "no longer in the snapshot" in output(app)
-            assert pin_service.requests == before
-    asyncio.run(scenario())
-
-
-def test_quoted_name_roundtrip_and_selection_change_never_retargets(pin_api, pin_service):
-    async def scenario():
-        app = app_for(pin_api, pin_service)
-        async with app.run_test(size=(100, 30)) as pilot:
-            await finish(app, pilot)
-            name = "org/a 'quoted' \"model\"; $(literal)"
-            app.snapshot = dict(app.snapshot, models=[dict(app.snapshot["models"][0], name=name)])
-            app.render_snapshot()
-            before = list(pin_service.requests)
-            await pilot.press("p", "2", "h")
-            args = pin_api["build_parser"]().parse_args(shlex.split(entry(app).value))
-            assert args.model == name and args.duration == 7200
-            app.model_names = ["different model"]  # A later cursor change cannot rewrite the draft.
-            assert pin_api["build_parser"]().parse_args(shlex.split(entry(app).value)).model == name
-            assert pin_service.requests == before
-    asyncio.run(scenario())
-
-
-def test_existing_usage_help_and_quit_keys_work_outside_input(pin_api, pin_service):
-    async def scenario():
-        app = app_for(pin_api, pin_service)
-        async with app.run_test(size=(100, 30)) as pilot:
-            await finish(app, pilot)
-            await pilot.press("u")
-            await finish(app, pilot)
-            assert app.usage_active and app.dashboard.has_class("usage")
-            assert any(path.startswith("/v1/usage?") for method, path in pin_service.requests)
-            await pilot.press("u")
-            await finish(app, pilot)
-            assert not app.usage_active and app.focused.id == "models"
+            await settle(app, pilot)
             await pilot.press("question_mark")
-            for text in ["f prefill", "p prefill", "duration required", "w prefill", "u usage", "q quit"]:
+            assert entry(app).value == ""
+            for text in ["Ctrl+O item menu", "Tab complete", "/copy", "sleep MODEL", "--dry-run"]:
                 assert text in output(app)
-            await pilot.press("q")
+            await pilot.press("w", "a", "k", "e", "space", "question_mark")
+            assert entry(app).value == "wake ?"
+    asyncio.run(scenario())
+
+
+def test_command_history_walks_this_session(snapshot):
+    async def scenario():
+        app, _ = make_app(snapshot)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await settle(app, pilot)
+            for text in ["status", "models"]:
+                entry(app).value = text
+                await pilot.press("enter")
+                await settle(app, pilot)
+            assert app.history == ["status", "models"]
+            await pilot.press("d", "r", "a", "f", "t")
+            await pilot.press("up")
+            assert entry(app).value == "models"
+            await pilot.press("up")
+            assert entry(app).value == "status"
+            await pilot.press("up")
+            assert entry(app).value == "status"  # The oldest entry is the end of the walk.
+            await pilot.press("down")
+            assert entry(app).value == "models"
+            await pilot.press("down")
+            assert entry(app).value == "draft"  # The unsent draft comes back intact.
+    asyncio.run(scenario())
+
+
+def test_tab_completes_commands_models_and_ui_actions(snapshot):
+    async def scenario():
+        app, _ = make_app(snapshot)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("p", "i", "tab")
+            assert entry(app).value == "pin "  # A unique prefix completes in place.
+            await pilot.press("r", "e", "s", "tab")
+            assert entry(app).value == "pin research-model "
+            entry(app).value = ""
+            await pilot.press("r", "e", "tab")
+            assert entry(app).value == "re"  # Ambiguous prefixes only list candidates.
+            assert "registry" in output(app) and "reserve" in output(app)
+            entry(app).value = ""
+            await pilot.press("slash", "q", "tab")
+            assert entry(app).value == "/quit "
+            entry(app).value = ""
+            await pilot.press("z", "z", "tab")
+            assert entry(app).value == "zz" and "No completion" in bottom(app)
+    asyncio.run(scenario())
+
+
+def test_escape_clears_the_line(snapshot):
+    async def scenario():
+        app, _ = make_app(snapshot)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("f", "r", "e", "e")
+            await pilot.press("escape")
+            assert entry(app).value == "" and app.is_running
+    asyncio.run(scenario())
+
+
+def test_ctrl_c_clears_then_exits_on_a_confirmed_second_press(snapshot):
+    async def scenario():
+        app, _ = make_app(snapshot)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("f", "r", "e", "e")
+            await pilot.press("ctrl+c")
+            assert entry(app).value == "" and app.is_running
+            await pilot.press("ctrl+c")
+            assert app.is_running and "Press Ctrl+C again to exit" in bottom(app)
+            # An expired first press is not an exit authorization.
+            app._interrupt_at = time.monotonic() - INTERRUPT_WINDOW - 1
+            await pilot.press("ctrl+c")
+            assert app.is_running and "Press Ctrl+C again to exit" in bottom(app)
+            await pilot.press("ctrl+c")
+            await pilot.pause()
             assert not app.is_running
     asyncio.run(scenario())
 
 
-def test_shortcut_does_not_queue_behind_a_write(pin_api, pin_service):
+def test_ctrl_d_exits_only_on_an_empty_line(snapshot):
     async def scenario():
-        app = app_for(pin_api, pin_service)
-        async with app.run_test(size=(40, 24)) as pilot:
-            await finish(app, pilot)
-            before = list(pin_service.requests)
-            app._write_busy = True
-            try:
-                await pilot.press("f", "p", "w")
-                assert entry(app).value == "" and "already running" in output(app)
-                assert pin_service.requests == before
-            finally:
-                app._write_busy = False
+        app, _ = make_app(snapshot)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("s", "t", "a", "t", "u", "s", "home")
+            await pilot.press("ctrl+d")
+            assert entry(app).value == "tatus" and app.is_running
+            entry(app).value = ""
+            await pilot.press("ctrl+d")
+            await pilot.pause()
+            assert not app.is_running
     asyncio.run(scenario())
 
 
-def test_delayed_prefill_cursor_cannot_replace_typing_or_touch_teardown(pin_api, pin_service):
-    from test_tui_teardown import TeardownApp
-
+def test_shift_keys_move_the_model_selection(snapshot):
     async def scenario():
-        app = app_for(pin_api, pin_service, TeardownApp)
-        queued = []
-        original = app.position_prefill_cursor
-        app.position_prefill_cursor = lambda *args: queued.append(args)
-        async with app.run_test(size=(40, 24)) as pilot:
-            await finish(app, pilot)
-            await pilot.press("p")
-            assert len(queued) == 1
-            field, value, cursor = queued.pop()
-            # User input arrives before a delayed layout callback. It owns the cursor.
-            field.value = "status --json"
-            field.cursor_position = 3
-            original(field, value, cursor)
-            assert field.cursor_position == 3 and field.value == "status --json"
+        app, _ = make_app(snapshot)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await settle(app, pilot)
+            assert app.selected_model() == "default-model"
+            await pilot.press("shift+down")
+            assert app.selected_model() == "research-model"
+            await pilot.press("shift+tab")
+            assert app.selected_model() == "cold-model"
+            await pilot.press("shift+up")
+            assert app.selected_model() == "research-model"
+            assert app.focused is entry(app)
+            for _ in range(6):
+                await pilot.press("shift+up")
+            assert app.selected_model() == "default-model"
+    asyncio.run(scenario())
 
-            async def boundary():
-                original(field, field.value, 0)
-                assert field.cursor_position == 3
-            app.at_teardown = boundary
+
+def test_ctrl_l_clears_the_event_display_without_resetting_the_cursor(snapshot):
+    async def scenario():
+        app, _ = make_app(snapshot)
+        resets = []
+
+        class Reader:
+            def start(self):
+                pass
+
+            def close(self):
+                return True
+
+            def reset_cursor(self):
+                resets.append(True)
+
+            def drain(self):
+                batch, self.events = self.events, []
+                return {"generation": 0, "events": batch, "status": "connected", "dropped": 0}
+
+        reader = Reader()
+        reader.events = []
+        app.event_reader = reader
+        async with app.run_test(size=(100, 30)) as pilot:
+            await settle(app, pilot)
+            reader.events = [{"id": 3, "timestamp": 3, "kind": "sleep", "model": "demo"}]
+            app.update_events()
+            await settle(app, pilot)
+            log = app.query_one("#events", RichLog)
+            assert log.lines and app.event_history
+            await pilot.press("ctrl+l")
+            assert not log.lines
+            assert app.event_history and not resets  # Display only; history/cursor kept.
+            await pilot.press("ctrl+r")
+            assert resets == [True]
+    asyncio.run(scenario())
+
+
+def test_slash_commands_are_ui_actions_with_no_second_parser(snapshot):
+    async def scenario():
+        app, _ = make_app(snapshot)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await settle(app, pilot)
+            for timer in app._ui_timers:
+                timer.pause()  # Command output must not race a background poll.
+            for command, expected in [("/help", "Ctrl+O item menu"),
+                                      ("/usage 90", "/usage accepts 7 or 30"),
+                                      ("/bogus", "Unknown UI command")]:
+                entry(app).value = command
+                await pilot.press("enter")
+                await settle(app, pilot)
+                assert expected in output(app), command
+            entry(app).value = "/usage 30"
+            await pilot.press("enter")
+            await settle(app, pilot)
+            assert app.usage_active and app.usage_args.days == 30
+            assert app.focused is entry(app)
+            entry(app).value = "/refresh"
+            await pilot.press("enter")
+            await settle(app, pilot)
+            assert "Refresh requested" in bottom(app)
+            entry(app).value = "/clear"
+            await pilot.press("enter")
+            await settle(app, pilot)
+            assert output(app) == "Cleared"
+            entry(app).value = "/events"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.screen is not app.dashboard  # The frozen detail view opened.
+            await pilot.press("escape")
+            await pilot.pause()
+            entry(app).value = "/quit"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert not app.is_running
     asyncio.run(scenario())

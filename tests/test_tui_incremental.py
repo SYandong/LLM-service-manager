@@ -1,5 +1,6 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Codex / gpt-5.6-luna
+# Generated-By: Claude Code / claude-fable-5-1
 """Dirty rendering preserves model identity, cursor and event delivery semantics."""
 import asyncio
 import copy
@@ -17,13 +18,13 @@ def test_steady_snapshot_changes_only_changed_cells_and_keeps_selection(snapshot
         app, _ = make_app(snapshot)
         async with app.run_test(size=(100, 30)) as pilot:
             await app.workers.wait_for_complete()
-            await pilot.press("down")
+            await pilot.press("shift+down")
             table = app.query_one("#models", DataTable)
             selected = app.selected_model()
             rows = dict(table.rows)
             gpu_text = str(app.query_one("#gpus").render())
-            assert "60%" in gpu_text and "87/144 GiB" in gpu_text
-            assert "?%" in gpu_text  # Missing observations never become zero usage.
+            assert "GPU0 87/144G" in gpu_text and "llmsvc 77  ext 10" in gpu_text
+            assert "GPU1 ?/?G  llmsvc ?  ext ?" in gpu_text  # Unknown never becomes zero.
             with patch.object(table, "clear", wraps=table.clear) as clear, \
                  patch.object(table, "update_cell", wraps=table.update_cell) as update:
                 for _ in range(3):

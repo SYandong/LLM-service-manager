@@ -7,7 +7,7 @@ pytest.importorskip('textual')
 from textual import events
 import textual.app as textual_app
 from textual.widgets import Button, Input
-from test_tui import make_app, snapshot
+from test_tui import make_app, open_details, snapshot
 
 
 def post_keys(app, keys):
@@ -35,7 +35,7 @@ def test_export_path_edit_keys_keep_order_in_one_batch(snapshot, keys, expected)
         app, client = make_app(snapshot)
         async with app.run_test(size=(100, 30)) as pilot:
             await app.workers.wait_for_complete()
-            await pilot.press('e')
+            await open_details(app, pilot)
             await pilot.pause()
             dialog = app.screen
             field = dialog.query_one('#export-path', Input)
@@ -59,7 +59,7 @@ def test_batched_replacement_then_save_reaches_the_existing_file_guard(snapshot,
         target.write_text('keep')
         async with app.run_test(size=(40, 24)) as pilot:
             await app.workers.wait_for_complete()
-            await pilot.press('e')
+            await open_details(app, pilot)
             await pilot.pause()
             dialog = app.screen
             field = dialog.query_one('#export-path', Input)

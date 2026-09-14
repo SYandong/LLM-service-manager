@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Claude Code / claude-fable-5-1
 """Manual actual-PTY benchmark, synthetic loopback only; not an automatic test.
 
 Run with the installed Textual interpreter:
@@ -45,7 +46,7 @@ def child(args):
     import runpy
     from types import SimpleNamespace
     sys.path.insert(0, str(ROOT))
-    from textual.widgets import DataTable, Input, RichLog
+    from textual.widgets import DataTable, RichLog
     from tui.app import SchedulerApp
     api = SimpleNamespace(**runpy.run_path(str(ROOT/'cli/llm')))
     output = Path(args.output)
@@ -213,14 +214,12 @@ def benchmark(args):
             pump(min(0.05, max(0, args.seconds-(time.monotonic()-started))))
         ended = time.monotonic(); cpu_end = cpu_seconds(process.pid)
         if args.details:
-            os.write(master, b'e')
+            os.write(master, b'/events\r')
             wait_for(lambda: (output/'details-ready').exists())
             os.write(master, b'\x1b')
             for _ in range(5): pump()
-        # Focus the real Input, then measure one key at a time. Match the actual
-        # visible command string in the PTY payload, not an unrelated output byte.
-        os.write(master, b'/')
-        for _ in range(5): pump()
+        # The command line already owns focus. Measure one key at a time and match
+        # the actual visible command string in the PTY payload, not a stray byte.
         os.write(master, b'BENCH')
         ansi = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(?:\x07|\x1b\\)')
         wait_for(lambda: 'BENCH' in ansi.sub('', plain))
@@ -233,10 +232,10 @@ def benchmark(args):
             os.write(master, key.encode())
             wait_for(lambda: visible in ansi.sub('', plain), seconds=2)
             latencies.append((time.monotonic()-tick)*1000)
-        # Tab moves focus out of the Input, then q uses the normal quit binding.
-        os.write(master, b'\t')
+        # Quitting is a UI command now; no printable key leaves the command line.
+        os.write(master, b'\x1b')
         for _ in range(5): pump()
-        os.write(master, b'q')
+        os.write(master, b'/quit\r')
         wait_for(lambda: process.poll() is not None or (output/'child.json').exists())
         process.wait(timeout=5)
         result = json.loads((output/'child.json').read_text())

@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Claude Code / claude-fable-5-1
 """Usage views reconcile with the real read-only backend, without live probes."""
 
 import asyncio
@@ -15,6 +16,17 @@ from test_llm_usage import usage_api, usage_service
 from test_tui import IdleEvents
 
 
+async def enter_usage(app, pilot):
+    """The usage window is a UI command now; no printable key toggles it."""
+    app.query_one("#command", Input).value = "/usage"
+    await pilot.press("enter")
+
+
+async def leave_usage(app, pilot):
+    app.query_one("#command", Input).value = "status"
+    await pilot.press("enter")
+
+
 def app_for(api, service):
     return SchedulerApp(api["SchedulerClient"](service.url, timeout=2),
                         SimpleNamespace(**api), event_reader=IdleEvents())
@@ -27,7 +39,7 @@ def test_usage_toggle_and_windows_match_backend(usage_api, usage_service, size):
         async with app.run_test(size=size) as pilot:
             await app.workers.wait_for_complete()
             await pilot.pause()
-            await pilot.press("u")
+            await enter_usage(app, pilot)
             await app.workers.wait_for_complete()
             await pilot.pause()
             assert app.usage_active and app.screen.has_class("usage")
@@ -42,7 +54,7 @@ def test_usage_toggle_and_windows_match_backend(usage_api, usage_service, size):
             assert app.usage_snapshot["totals"] == {"requests": 3, "input_tokens": 118, "output_tokens": 225}
             text = str(app.query_one("#usage-text", Static).render())
             assert "118" in text and "225" in text and "IP only" in text
-            await pilot.press("u")
+            await leave_usage(app, pilot)
             await app.workers.wait_for_complete()
             assert not app.usage_active
             assert not app.screen.has_class("usage")
@@ -88,7 +100,7 @@ def test_slow_old_window_cannot_replace_latest_selection(usage_api, usage_servic
         usage_service.scheduler._usage = delayed
         async with app.run_test(size=(100, 30)) as pilot:
             await app.workers.wait_for_complete()
-            await pilot.press("u")
+            await enter_usage(app, pilot)
             try:
                 assert await asyncio.to_thread(started.wait, 2)
                 await pilot.click("#usage-30")
@@ -118,10 +130,10 @@ def test_late_usage_result_does_not_switch_back_from_status(usage_api, usage_ser
         usage_service.scheduler._usage = delayed
         async with app.run_test(size=(100, 30)) as pilot:
             await app.workers.wait_for_complete()
-            await pilot.press("u")
+            await enter_usage(app, pilot)
             try:
                 assert await asyncio.to_thread(started.wait, 2)
-                await pilot.press("u")
+                await leave_usage(app, pilot)
                 assert not app.usage_active
             finally:
                 release.set()
@@ -136,7 +148,7 @@ def test_usage_close_ignores_queued_event_timer(usage_api, usage_service):
         app = app_for(usage_api, usage_service)
         async with app.run_test(size=(40, 24)) as pilot:
             await app.workers.wait_for_complete()
-            await pilot.press("u")
+            await enter_usage(app, pilot)
             await app.workers.wait_for_complete()
             await app.query_one("#event-panel").remove()
             app.update_events()  # Simulate a callback already queued at teardown.

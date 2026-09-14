@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Claude Code / claude-fable-5-1
 """Activity availability and source attribution are independent UI observations."""
 import asyncio
 import copy
@@ -32,7 +33,7 @@ def test_successful_counts_are_kept_when_source_is_unavailable(snapshot, sources
             assert expected in detail
             assert 'from unknown' not in detail and 'not recorded' not in detail
             assert 'activity unavailable' not in detail
-            assert 'Updated' in str(app.query_one('#result', Static).render())
+            assert 'Updated' in str(app.query_one('#event-status', Static).render())
             assert app.snapshot == original
     asyncio.run(scenario())
 
@@ -70,10 +71,10 @@ def test_failed_read_is_partial_and_never_displays_stale_counts(snapshot, code, 
             assert app.selected_model() == 'research-model'
             assert all(table.rows[key] is row for key, row in before.items())
             assert table.get_cell('research-model', '10m').plain == '?'
-            assert table.get_cell('research-model', 'FROM').plain == '?'
-            result = str(app.query_one('#result', Static).render())
+            assert table.get_cell('research-model', 'USED').plain == '?'
+            result = str(app.query_one('#event-status', Static).render())
             detail = str(app.query_one('#details', Static).render())
-            assert result.startswith('Partial update') and 'activity unavailable' in result
+            assert 'Partial update' in result and 'activity unavailable' in result
             assert reason in result and reason in detail
             assert 'Updated' not in result and 'SECRET' not in result + detail
             assert 'ValueError' not in result + detail
