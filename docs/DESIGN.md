@@ -479,10 +479,24 @@ usage（客户端可请求 `stream_options.include_usage`）；缺少返回或�
 | `POST /v1/reserve` | `{gpu, size_gb, until, by}` → `{id, gpu, size_gb, until, by, evacuation:{status, stopped, skipped, error?}}`，持久化与清退结果见 §4.4 |
 | `DELETE /v1/reserve/{id}` | 幂等移除意图 → `{id, by}`；不唤醒模型，取消未提交的清退步骤（§4.4） |
 | `POST /v1/wake/{model}` | |
+| `POST /v1/sleep/{model}` | awake → sleeping；已 sleeping 为 ready 无操作，stopped 回报 `model_not_resident` |
+| `POST /v1/stop/{model}` | awake 或 sleeping → stopped；默认模型回报 `default_model`，已 stopped 为 ready 无操作 |
+| `POST /v1/preload/{model}` | stopped → 冷启动后立即 sleep；权重已驻留时 ready 且 `already_resident: true` |
 | `GET /v1/models` | 临时登记元数据与提交阻塞原因；见下方只读列表/预览约定 |
 | `GET /v1/registry` | 只读队列及持久化恢复诊断；不验证或清除恢复屏障 |
 | `POST /v1/models` `DELETE /v1/models/{name}` | 临时模型登记，走安静时刻协议（§3） |
 | `GET /v1/usage?days=7&by=container` | 按来源汇总 |
+
+`sleep` / `stop` / `preload` 这三个按模型动作与 `wake` 同路：空请求体，受 `model_actions_enabled` 与只读开关约束，
+决策与执行持有同一把全局锁，观测等待时通过条件变量释放它。返回
+`{model, status, error, elapsed_seconds, state}`，`status` 取 `ready` / `blocked` / `failed` / `timeout` / `partial`，
+`state` 是观测到的最终态，未知时为 `null`。三者都先过 §4 的保护规则表：有在途请求或被 pin 的模型既不可睡也不可停，
+默认模型可睡但永不 stop。`sleep` 还要过 §4.3 的内存准入；放不下时直接回报 `memory_budget`，
+**不会**为了一个显式请求去 stop 别的 sleeping 模型。`preload` 的目标是权重驻留内存但不占显存：
+stopped 先走 `wake` 冷启动，成功后立即执行上面的 sleep；awake 或 sleeping 时直接 ready 并带 `already_resident: true`，
+不会把在用的模型睡掉。提交不等于状态转移：只有连续两轮更新的观测确认目标态才算 `ready`，
+预算仍只在确认资源退出后释放（§4.2）。事件为 `sleep_requested` / `sleep_result`、`stop_requested` / `stop_result`、
+`preload_requested` / `preload_result`。`?dry_run=1` 只走策略函数，返回 `{would, blocked_by}`，不执行也不持久化。
 
 
 ### 已配置的目录提交能力（#157）
@@ -627,7 +641,7 @@ fsync 失败、恢复 marker 再次失败，都保持不可操作的恢复状态
 
 ## 6. CLI 与 TUI
 
-`cli/llm` 是单文件、仅标准库，用户复制到自己容器即可。子命令：`status` `top` `free` `wake` `pin` `unpin` `reserve` `add` `rm` `usage`。
+`cli/llm` 是单文件、仅标准库，用户复制到自己容器即可。子命令：`status` `top` `free` `wake` `sleep` `stop` `preload` `pin` `unpin` `reserve` `add` `rm` `usage`。
 
 `llm status` 一屏：
 

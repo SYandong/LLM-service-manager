@@ -1,6 +1,6 @@
 # CLI 使用说明
 
-`cli/llm` 是 Python 3.10+ 标准库脚本。只复制这一个文件即可运行，无需安装仓库、`rich` 或 `textual`。提供只读 `status`、`usage`、pin/unpin 记录、free/wake、reserve 预览与结果客户端和可选全屏面板；所有请求都发给配置的 scheduler。
+`cli/llm` 是 Python 3.10+ 标准库脚本。只复制这一个文件即可运行，无需安装仓库、`rich` 或 `textual`。提供只读 `status`、`usage`、pin/unpin 记录、free/wake、按模型的 sleep/stop/preload、reserve 预览与结果客户端和可选全屏面板；所有请求都发给配置的 scheduler。
 
 ```sh
 python3 llm --help
@@ -141,6 +141,33 @@ URL、PID、错误文本、百分比或 ETA，也不代表 ready、daemon 已停
 ready/partial/failed/timeout 仍只取原始 wake 回执。`--json` 保持只在 stdout
 输出机器可读回执，进度提示不写入 stdout。真实 sleeping-wake <3 秒与显存释放实测仍需 ops/integration
 验收；命令发布不代表生产动作获准。
+
+## Sleep / stop / preload
+
+```sh
+LLM_URL=http://scheduler:8011 python3 llm sleep 'org/model name'
+LLM_URL=http://scheduler:8011 python3 llm stop 'org/model name' --dry-run
+LLM_URL=http://scheduler:8011 python3 llm preload --wait 1200 -- '-model'
+```
+
+这三个子命令按模型名操作，参数与 `wake` 一致（`--wait`、`--dry-run`、`--json`），同样只适用于部署方明确允许
+（非只读且 `model_actions_enabled`）的服务；`read_only` / `operation_not_enabled` 是失败，返回非零退出码。
+
+| 子命令 | 做什么 | 默认 `--wait` |
+|---|---|---|
+| `sleep MODEL` | awake → sleeping：显存还给别人，权重留在宿主内存里，下次请求几秒内醒来 | 150 |
+| `stop MODEL` | awake 或 sleeping → stopped：显存与内存都还掉，下次请求付冷启动代价 | 150 |
+| `preload MODEL` | 让权重驻留内存但不占显存：stopped 先冷启动再立即 sleep | 960 |
+
+- 输出一行状态加一行观测结果：`Observed state` 是服务器**实测**到的最终态，未知时显示 `unknown`；不以请求已提交
+  代替状态转移。`preload` 另外显示 `Weights already resident`，`yes` 表示该模型本来就 awake 或 sleeping，
+  命令没有动它——在用的模型不会为了 preload 被睡掉。
+- 只有 `ready` 返回退出码 0；`blocked`、`failed`、`partial`、`timeout` 返回 1 并保留 `Error:` 行。常见阻塞原因：
+  `in_flight`（有在途请求）、`pinned_until`（被 pin）、`default_model`（默认模型永不 stop）、
+  `model_not_resident`（对 stopped 模型 sleep）、`memory_budget`（常驻内存预算或宿主可用内存下限不允许，
+  服务器不会为此停掉别的模型）、`operation_in_progress`（同一模型已有动作在跑）。
+- `--dry-run` 显示 `would` / `blocked_by`，纯策略，不执行、不持久化；阻塞预览返回退出码 1。
+- 模型名按 URL 编码放进路径，请求体为空；以 `-` 开头的名称写成 `stop -- '-model'`。
 
 ## Reserve
 
@@ -329,3 +356,4 @@ Reserve 测试直接请求当前 SchedulerHTTPServer 的预览/默认只读 405 
 
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
+<!-- Generated-By: Claude Code / claude-fable-5-1 -->

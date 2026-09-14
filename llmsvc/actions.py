@@ -1,5 +1,6 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Codex / gpt-5.6-luna
+# Generated-By: Claude Code / claude-fable-5-1
 """Guarded single-action dispatch; no live transport or HTTP mount is defaulted.
 
 Submission is not a confirmed state transition or measured resource release.
@@ -884,6 +885,215 @@ class ModelActionController:
                     if faults is not None:
                         faults.waking.discard(name)
                 self.scheduler.emit("wake_result", model=name, detail={"by": by, **result})
+                self.scheduler.changed.notify_all()
+        return result
+
+    def _action_exclusions(self, snapshot):
+        """Controller-local eligibility guards; never a substitute for a real pin."""
+        protected = {}
+        for model in snapshot.models:
+            if model.name not in getattr(self.transport, "active_models", self.transport.models):
+                protected[model.name] = "unmanaged_model"
+            elif model.unit not in (None, self.transport.unit_for_model(model.name)):
+                protected[model.name] = "configured_unit_mismatch"
+            elif self._fault_pending(model.name):
+                protected[model.name] = "fault_recovery_pending"
+            elif self._recovery_pending(model.name):
+                protected[model.name] = "sleeping_recovery_pending"
+            elif model.name in self.pending:
+                protected[model.name] = "operation_in_progress"
+        return protected
+
+    def _observed_state(self, snapshot, name):
+        models = [model for model in snapshot.models if model.name == name]
+        return models[0].state if self._fresh(snapshot) and len(models) == 1 else None
+
+    def plan_model_action(self, snapshot, operation, name):
+        """Pure policy preview for sleep/stop/preload; no dispatch or persistence."""
+        from llmsvc.policy.common import Projection
+        if operation not in ("sleep", "stop", "preload"):
+            raise ValueError("unsupported model action")
+
+        def blocked(reason):
+            return {"would": [], "blocked_by": [{"model": name, "reason": reason}]}
+
+        if not self._fresh(snapshot):
+            return blocked("unknown_or_stale_snapshot")
+        try:
+            model = self._model(snapshot, name)
+            if name in self.pending:
+                raise ActionDispatchError("operation_in_progress")
+            projection = Projection(snapshot, self.settings, exclusions=self._action_exclusions(snapshot))
+        except ActionDispatchError as exc:
+            return blocked(exc.reason)
+        if operation == "preload":
+            if model.state in ("awake", "sleeping"):
+                return {"would": [], "blocked_by": []}  # Weights already resident.
+            if model.state != "stopped":
+                return blocked("unknown_model_state")
+            try:
+                self.wake_model(snapshot, name)
+            except ActionDispatchError as exc:
+                return blocked(exc.reason)
+            # The sleep step is replanned against a fresh snapshot after the
+            # cold start; this preview is not an admission for it.
+            return {"would": [asdict(Action("wake", name, "user_preload", model.gpu)),
+                              asdict(Action("sleep", name, "user_preload", model.gpu))], "blocked_by": []}
+        if model.state == ("sleeping" if operation == "sleep" else "stopped"):
+            return {"would": [], "blocked_by": []}
+        if operation == "stop":
+            if model.state not in ("awake", "sleeping"):
+                return blocked("unknown_model_state")
+            reason = projection.protection(model, stop=True)
+            return blocked(reason) if reason else {
+                "would": [asdict(Action("stop", name, "user_stop", model.gpu))], "blocked_by": []}
+        if model.state == "stopped":
+            return blocked("model_not_resident")
+        if model.state != "awake":
+            return blocked("unknown_model_state")
+        projection.sleep(model, "user_sleep", reclaim=False)
+        planned = [action for action in projection.actions if action.kind == "sleep" and action.model == name]
+        if planned:
+            return {"would": [asdict(action) for action in planned], "blocked_by": []}
+        # An explicit request never stops some other sleeping model for room;
+        # the admission fallback to a direct stop is not this operation.
+        blockers = [asdict(item) for item in projection.blockers if item.model == name]
+        return {"would": [], "blocked_by": blockers or [{"model": name, "reason": "memory_budget"}]}
+
+    def _model_action(self, kind, name, *, by, started, deadline):
+        """Dispatch one explicit sleep/stop and confirm the observed final state.
+
+        Nothing here releases lease or memory accounting: a submitted action is
+        not a measured release, and the reconciler owns any budget release after
+        a confirmed exit.
+        """
+        target = "sleeping" if kind == "sleep" else "stopped"
+        result = {"model": name, "status": "blocked", "error": None, "elapsed_seconds": 0.0, "state": None}
+        owned = False
+        action = None
+        dispatch_error = None
+        try:
+            self._enabled()
+            self._refresh(deadline)
+            with self._locked(deadline):
+                self._enabled()
+                snapshot = self._snapshot()
+                if not self._fresh(snapshot):
+                    raise ActionDispatchError("unknown_or_stale_snapshot")
+                model = self._model(snapshot, name)
+                result["state"] = model.state
+                if name in self.pending:
+                    raise ActionDispatchError("operation_in_progress")
+                if model.state == target:
+                    result.update(status="ready")
+                    return result
+                plan = self.plan_model_action(snapshot, kind, name)
+                if not plan["would"]:
+                    raise ActionDispatchError(plan["blocked_by"][0]["reason"] if plan["blocked_by"]
+                                              else "no_action_planned")
+                step = plan["would"][0]
+                action = Action(kind, name, step["reason"], step["gpu"])
+                self.pending.add(name)
+                owned = True
+                self.scheduler.emit(kind + "_requested", model=name, detail={"by": by, "state": model.state})
+                try:
+                    self.dispatcher.execute(action, dry_run=False, deadline=deadline)
+                except ActionDispatchError as exc:
+                    if not exc.attempted:
+                        raise
+                    dispatch_error = exc  # A failed request may still have taken effect.
+            # Observation runs without the action lock and requires two newer
+            # rounds; an acknowledgement alone is never a confirmed transition.
+            observed, applied = self._wait_effect(
+                action, min(deadline, self.monotonic() + self.scheduler.config.action_observe_seconds))
+            state = self._observed_state(observed, name)
+            if state is not None:
+                result["state"] = state
+            if applied:
+                result.update(status="partial" if dispatch_error is not None else "ready",
+                              error=dispatch_error.reason if dispatch_error is not None else None)
+            elif dispatch_error is not None:
+                result.update(status="failed", error=dispatch_error.reason)
+            else:
+                result.update(status="timeout" if self.monotonic() >= deadline else "partial",
+                              error="effect_not_confirmed")
+        except ActionDispatchError as exc:
+            result.update(status="timeout" if exc.reason == "deadline_exceeded" else "blocked", error=exc.reason)
+        finally:
+            result["elapsed_seconds"] = max(0.0, self.monotonic() - started)
+            with self.scheduler.changed:
+                if owned:
+                    self.pending.discard(name)
+                self.scheduler.emit(kind + "_result", model=name, detail={"by": by, **result})
+                self.scheduler.changed.notify_all()
+        return result
+
+    def sleep_model(self, name, *, by, dry_run=False):
+        """awake → sleeping for one explicit request (DESIGN §4.1 protection)."""
+        if dry_run:
+            return self.scheduler.preview("sleep", {"model": name})
+        started = self.monotonic()
+        return self._model_action("sleep", name, by=by, started=started,
+                                  deadline=started + self.scheduler.config.free_timeout_seconds)
+
+    def stop_model(self, name, *, by, dry_run=False):
+        """awake/sleeping → stopped for one explicit request (DESIGN §4.3)."""
+        if dry_run:
+            return self.scheduler.preview("stop", {"model": name})
+        started = self.monotonic()
+        return self._model_action("stop", name, by=by, started=started,
+                                  deadline=started + self.scheduler.config.free_timeout_seconds)
+
+    def preload(self, name, *, by, dry_run=False):
+        """Resident weights without VRAM: cold start, then sleep the new daemon."""
+        if dry_run:
+            return self.scheduler.preview("preload", {"model": name})
+        started = self.monotonic()
+        wake_deadline = started + self.scheduler.config.wake_timeout_seconds
+        deadline = wake_deadline + self.scheduler.config.action_observe_seconds
+        result = {"model": name, "status": "blocked", "error": None, "elapsed_seconds": 0.0,
+                  "state": None, "already_resident": False}
+        try:
+            self._enabled()
+            self._refresh(deadline)
+            with self._locked(deadline):
+                self._enabled()
+                snapshot = self._snapshot()
+                if not self._fresh(snapshot):
+                    raise ActionDispatchError("unknown_or_stale_snapshot")
+                model = self._model(snapshot, name)
+                result["state"] = model.state
+                if name in self.pending:
+                    raise ActionDispatchError("operation_in_progress")
+                if model.state in ("awake", "sleeping"):
+                    # Weights are already resident; an in-use model is never put
+                    # to sleep to satisfy a preload.
+                    result.update(status="ready", already_resident=True)
+                    return result
+                if model.state != "stopped":
+                    raise ActionDispatchError("unknown_model_state")
+                self.wake_model(snapshot, name)
+                self.scheduler.emit("preload_requested", model=name, detail={"by": by, "state": model.state})
+            # The wake and the sleep each take self.pending in turn and revalidate
+            # under the lock; neither step reuses the admission checked above.
+            woken = self.wake(name, by=by, _deadline=wake_deadline)
+            if woken["status"] != "ready":
+                state = self._observed_state(self._snapshot(), name)
+                if state is not None:
+                    result["state"] = state
+                result.update(status=woken["status"], error=woken.get("error") or "wake_not_ready")
+                return result
+            slept = self._model_action("sleep", name, by=by, started=self.monotonic(), deadline=deadline)
+            # The cold start already happened, so an unfinished sleep is partial
+            # progress rather than a request that changed nothing.
+            result.update(status=slept["status"] if slept["status"] in ("ready", "timeout") else "partial",
+                          error=slept["error"], state=slept["state"])
+        except ActionDispatchError as exc:
+            result.update(status="timeout" if exc.reason == "deadline_exceeded" else "blocked", error=exc.reason)
+        finally:
+            result["elapsed_seconds"] = max(0.0, self.monotonic() - started)
+            with self.scheduler.changed:
+                self.scheduler.emit("preload_result", model=name, detail={"by": by, **result})
                 self.scheduler.changed.notify_all()
         return result
 
