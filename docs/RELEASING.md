@@ -21,9 +21,15 @@ The initial series uses GitHub tags `v0.1.0-alpha.N` and Python distribution
 versions `0.1.0aN`. Advance N only for a new immutable release. The first alpha
 covers the read-only scheduler/CLI/TUI evaluation path. Later alphas describe
 newly included behavior and remaining acceptance without implying completion.
-The first stable `v0.1.0` requires the planned product and environment acceptance
-through M6, including bounded validation and deployment/retirement gates.
 An alpha does not close incomplete milestone issues.
+
+Stable releases use tags `vX.Y.Z` with Python versions `X.Y.Z` (no suffix).
+The publisher orders every alpha before every stable tag, requires each new
+release to advance the published series, and rejects a further alpha once a
+stable tag exists. Stable releases are published without the prerelease flag
+and become the repository's latest release. The same guard (release PR title,
+version literals, changelog heading, Fable marker, CI, resolved threads and
+cadence or a recorded exception) applies to both series.
 
 Per the user's #108 instruction, validation uses bounded minutes-scale checks
 and deterministic regression/replay rather than mandatory day/week soak waits.
@@ -85,7 +91,7 @@ conditions remain; authorization is not evidence that they hold.
 `.github/workflows/release.yml` runs after **successful `ci` push runs on this
 repository's main branch**. It never publishes for PR/fork events, tag pushes or
 ordinary feature merges. The publisher re-fetches the CI run and checks the
-unique merged `chore(release): v0.1.0-alpha.N` PR, exact final-head Fable marker
+unique merged `chore(release): <tag>` PR (`v0.1.0-alpha.N` or `vX.Y.Z`), exact final-head Fable marker
 and reviewer identity, successful head CI, resolved review threads, identical
 merge/head trees, version literals and changelog. Checkout credentials are not
 persisted. One concurrency group serializes publication; the workflow uses only
@@ -136,7 +142,7 @@ or conflicting draft fails closed: restore missing bytes from the retained build
 artifact after inspection, then rerun. Never overwrite existing uploaded bytes
 with a fresh build or delete a conflicting tag to make the job green.
 
-The host consumer polls published prereleases, not GitHub Actions events; releases
+The host consumer polls published releases (prerelease or stable), not GitHub Actions events; releases
 created with `GITHUB_TOKEN` need not trigger another workflow. It must ignore
 drafts, verify the manifest/tag/asset contract and run its staging, fresh use check,
 health and rollback sequence. A published tag is not automatic permission for
