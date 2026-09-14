@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import ipaddress
 import json
 import math
 import re
@@ -42,6 +43,20 @@ class ModelPathInfo:
     path: str
     config: Mapping[str, Any]
     weight_files: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ImportOverrides:
+    """Whitelisted overrides for a cloned base block; never a raw command.
+
+    Every field still passes the existing shell-token ban and command shape
+    checks. Anything outside this shape is rejected before an edit is planned.
+    """
+
+    util: float | None = None
+    max_model_len: int | None = None
+    aliases: tuple[str, ...] = ()
+    weights_gb: float | None = None
 
 
 @dataclass(frozen=True)
@@ -133,19 +148,25 @@ def add_full_weight_model(
     created_at: float,
     model_config_max_bytes: int = DEFAULT_MODEL_CONFIG_MAX_BYTES,
     weight_index_max_bytes: int = DEFAULT_WEIGHT_INDEX_MAX_BYTES,
+    overrides: ImportOverrides | None = None,
 ) -> RegistryAddResult:
     """Return detached config and temporary records with one full-weight model added."""
     name = validate_safe_model_name(name)
     base_model = validate_safe_model_name(base_model)
     created_at = _finite_float(created_at, "created_at")
+    overrides = _validate_overrides(overrides)
     path_info = validate_full_weight_model_dir(model_path, shared_roots,
         model_config_max_bytes=model_config_max_bytes, weight_index_max_bytes=weight_index_max_bytes)
 
     new_config = copy.deepcopy(dict(config))
     new_records = copy.deepcopy({key: dict(value) for key, value in temporary_records.items()})
     models = _models_mapping(new_config)
-    if name in _reserved_model_ids(new_config, new_records):
+    reserved = _reserved_model_ids(new_config, new_records)
+    if name in reserved:
         raise RegistryError("model name already exists")
+    for alias in overrides.aliases:
+        if alias == name or alias in reserved:
+            raise RegistryError("model alias already exists: " + alias)
     if base_model in new_records:
         raise RegistryError("base model must be a permanent llama-swap model")
     if base_model not in models:
@@ -156,7 +177,8 @@ def add_full_weight_model(
         raise RegistryError("base model config block must be a mapping")
 
     daemon_port = _choose_daemon_port(new_config, new_records, daemon_port_range, reserved_ports)
-    new_block = _clone_model_block(base_model, name, base_block, path_info.path, daemon_port)
+    new_block = _clone_model_block(base_model, name, base_block, path_info.path, daemon_port,
+                                   overrides=overrides)
     models[name] = new_block
     groups = _append_group_membership(new_config, base_model, name)
 
@@ -169,6 +191,13 @@ def add_full_weight_model(
         "daemon_port": daemon_port,
         "groups": groups,
     }
+    util = overrides.util if overrides.util is not None else _effective_util(new_block)
+    if util is not None:
+        record["util"] = float(_format_util(util))
+    if overrides.weights_gb is not None:
+        record["weights_gb"] = overrides.weights_gb
+    if overrides.aliases:
+        record["aliases"] = list(overrides.aliases)
     new_records[name] = copy.deepcopy(record)
     return RegistryAddResult(config=new_config, records=new_records, record=record)
 
@@ -249,7 +278,9 @@ def _models_mapping(config: dict[str, Any]) -> dict[str, Any]:
     return models
 
 
-def _clone_model_block(base_model: str, name: str, base_block: dict[str, Any], model_path: str, daemon_port: int) -> dict[str, Any]:
+def _clone_model_block(base_model: str, name: str, base_block: dict[str, Any], model_path: str,
+                       daemon_port: int, *, overrides: ImportOverrides | None = None) -> dict[str, Any]:
+    overrides = _validate_overrides(overrides)
     block = copy.deepcopy(base_block)
     block.pop("aliases", None)
     block.pop("alias", None)
@@ -267,8 +298,10 @@ def _clone_model_block(base_model: str, name: str, base_block: dict[str, Any], m
         raise RegistryError("cmd and cmdStop must use the same upstream daemon port")
     block["cmd"] = _same_shape_command(
         base_block["cmd"],
-        _transform_cmd(cmd_argv, base_model, name, model_path, daemon_port),
+        _transform_cmd(cmd_argv, base_model, name, model_path, daemon_port, overrides=overrides, block=block),
     )
+    if overrides.aliases:
+        block["aliases"] = list(overrides.aliases)
     block["cmdStop"] = _same_shape_command(
         base_block["cmdStop"],
         _transform_cmd_stop(stop_argv, daemon_port),
@@ -296,7 +329,9 @@ def _same_shape_command(original: Any, argv: Sequence[str]) -> Any:
     return shlex.join(argv)
 
 
-def _transform_cmd(argv: list[str], base_model: str, name: str, model_path: str, daemon_port: int) -> list[str]:
+def _transform_cmd(argv: list[str], base_model: str, name: str, model_path: str, daemon_port: int,
+                   *, overrides: ImportOverrides | None = None,
+                   block: dict[str, Any] | None = None) -> list[str]:
     delimiters = [index for index, token in enumerate(argv) if token == "--"]
     if len(delimiters) != 2 or len(argv) < 2 or argv[1] != "serve":
         raise RegistryError("unsupported wrapper command template")
@@ -326,7 +361,124 @@ def _transform_cmd(argv: list[str], base_model: str, name: str, model_path: str,
 
     _replace_or_append_option(result, "--served-model-name", name, start=vllm_start)
     _rewrite_speculative_config(result, old_model_path, model_path, start=vllm_start)
+    overrides = _validate_overrides(overrides)
+    if overrides.max_model_len is not None:
+        _replace_or_append_option(result, "--max-model-len", str(overrides.max_model_len), start=vllm_start)
+    if overrides.util is not None:
+        _apply_util_override(result, block, delimiters[0] + 2, vllm_start, _format_util(overrides.util))
     return result
+
+
+def _validate_overrides(overrides: ImportOverrides | None) -> ImportOverrides:
+    """Accept only the whitelisted override shape; never a caller-built command."""
+    if overrides is None:
+        return ImportOverrides()
+    if not isinstance(overrides, ImportOverrides):
+        raise RegistryError("model overrides must use the supported import shape")
+    if overrides.util is not None:
+        util = _finite_float(overrides.util, "util")
+        if not 0 < util <= 1:
+            raise RegistryError("util must be greater than 0 and at most 1")
+    if overrides.max_model_len is not None and (
+            type(overrides.max_model_len) is not int or overrides.max_model_len < 1):
+        raise RegistryError("max_model_len must be a positive integer")
+    if overrides.weights_gb is not None:
+        if _finite_float(overrides.weights_gb, "weights_gb") <= 0:
+            raise RegistryError("weights_gb must be a finite positive number")
+    aliases = tuple(validate_safe_model_name(alias) for alias in overrides.aliases)
+    if len(set(aliases)) != len(aliases):
+        raise RegistryError("model aliases must be distinct")
+    return overrides
+
+
+def _effective_util(block: Mapping[str, Any]) -> float | None:
+    """Read the cloned block's own utilization share, or None when unknown.
+
+    Only the block ``util`` macro and ``--gpu-memory-utilization`` count, and
+    they must agree. A disagreement or an unresolved macro stays unknown rather
+    than becoming a guessed budget.
+    """
+    values: list[Any] = []
+    macros = block.get("macros")
+    if isinstance(macros, Mapping) and "util" in macros:
+        values.append(macros["util"])
+    try:
+        argv = _command_argv(block.get("cmd"))
+    except RegistryError:
+        argv = []
+    for index, token in enumerate(argv):
+        if token == "--gpu-memory-utilization" and index + 1 < len(argv):
+            values.append(argv[index + 1])
+        elif token.startswith("--gpu-memory-utilization="):
+            values.append(token.split("=", 1)[1])
+    parsed = set()
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number) and 0 < number <= 1:
+            parsed.add(number)
+    return parsed.pop() if len(parsed) == 1 else None
+
+
+def _format_util(value: float) -> str:
+    """Render a stable utilization literal that round-trips back to a float."""
+    text = ("%.6f" % _finite_float(value, "util")).rstrip("0")
+    return text + "0" if text.endswith(".") else text
+
+
+def _util_positions(argv: Sequence[str], launch_index: int, vllm_start: int) -> list[tuple[int, str]]:
+    """Locate the launcher share and every vLLM utilization option value."""
+    if not 0 < launch_index < len(argv):
+        raise RegistryError("launcher command has no utilization argument")
+    positions = [(launch_index, "")]
+    for index in range(vllm_start, len(argv)):
+        token = argv[index]
+        if token == "--gpu-memory-utilization":
+            if index + 1 >= len(argv):
+                raise RegistryError("--gpu-memory-utilization requires a value")
+            positions.append((index + 1, ""))
+        elif token.startswith("--gpu-memory-utilization="):
+            positions.append((index, "--gpu-memory-utilization="))
+    return positions
+
+
+def _apply_util_override(argv: list[str], block: dict[str, Any] | None, launch_index: int,
+                         vllm_start: int, util_text: str) -> None:
+    """Rewrite the launcher share, the vLLM option and the block util macro.
+
+    A block ``util`` macro covers every expansion of the same value, including
+    one hidden inside another macro, so it may stand alone. Literal commands
+    must instead spell out ``--gpu-memory-utilization``: changing only the
+    launcher share would move the accounting without moving the allocation.
+    """
+    positions = _util_positions(argv, launch_index, vllm_start)
+    macros = block.get("macros") if isinstance(block, dict) else None
+    macro = (isinstance(macros, Mapping) and "util" in macros) or any(
+        argv[index][len(prefix):] == "${util}" for index, prefix in positions)
+    if len(positions) < 2 and not macro:
+        raise RegistryError("base command has no --gpu-memory-utilization or ${util} macro to override")
+    literals = set()
+    for index, prefix in positions:
+        value = argv[index][len(prefix):]
+        if "${" in value or "$(" in value:
+            if value != "${util}":
+                raise RegistryError("base utilization must be a literal value or the ${util} macro")
+        else:
+            literals.add(value)
+    if len(literals) > 1:
+        raise RegistryError("base command utilization values disagree")
+    for index, prefix in positions:
+        if "${" not in argv[index][len(prefix):]:
+            argv[index] = prefix + util_text
+    if macro:
+        if not isinstance(block, dict):
+            raise RegistryError("util macro override requires the model config block")
+        target = block.setdefault("macros", {})
+        if not isinstance(target, dict):
+            raise RegistryError("model macros must be a mapping")
+        target["util"] = util_text
 
 
 def _transform_cmd_stop(argv: list[str], daemon_port: int) -> list[str]:
@@ -721,6 +873,56 @@ def _validate_port(value: Any, label: str) -> int:
     return value
 
 
+def generated_catalog_profile(record: Mapping[str, Any], *, gpu_total_gb: float,
+                              host: str = "127.0.0.1") -> dict[str, Any]:
+    """Derive the collector/catalog profile of one imported temporary model.
+
+    The port comes from the saved record, so the profile cannot disagree with
+    the configuration it describes. ``budget_gb`` is the configured share of an
+    observed card, not a measured allocation or a placement guarantee.
+    """
+    profile = catalog_profile_identity(record, host=host)
+    total = _finite_float(gpu_total_gb, "gpu_total_gb")
+    if total <= 0:
+        raise RegistryError("gpu_total_gb must be a finite positive number")
+    return {**profile, "budget_gb": profile["util"] * total}
+
+
+def catalog_profile_identity(record: Mapping[str, Any], *, host: str = "127.0.0.1") -> dict[str, Any]:
+    """Return the record-derived profile fields that need no GPU observation."""
+    name = validate_safe_model_name(record.get("name"))
+    port = _validate_port(record.get("daemon_port"), "daemon_port")
+    util = _finite_float(record.get("util"), "record util")
+    weights_gb = _finite_float(record.get("weights_gb"), "record weights_gb")
+    if not 0 < util <= 1:
+        raise RegistryError("record util must be greater than 0 and at most 1")
+    if weights_gb <= 0:
+        raise RegistryError("record weights_gb must be a finite positive number")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise RegistryError("catalog profile host must be a literal IP address") from exc
+    literal = f"[{address}]" if address.version == 6 else str(address)
+    return {"unit": f"vllm-{name}.service", "daemon_url": f"http://{literal}:{port}",
+            "port": port, "util": util, "weights_gb": weights_gb, "is_default": False}
+
+
+def cross_check_catalog_profile(profile: Mapping[str, Any], record: Mapping[str, Any],
+                                *, host: str = "127.0.0.1") -> None:
+    """Reject a configured profile that disagrees with the imported descriptor."""
+    expected = catalog_profile_identity(record, host=host)
+    for key in ("unit", "daemon_url", "port", "is_default"):
+        if profile.get(key) != expected[key]:
+            raise RegistryError("configured catalog profile disagrees on " + key
+                                + " for " + str(record.get("name")))
+    for key in ("util", "weights_gb"):
+        value = profile.get(key)
+        if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+                or abs(float(value) - expected[key]) > 1e-6 * max(1.0, abs(expected[key]))):
+            raise RegistryError("configured catalog profile disagrees on " + key
+                                + " for " + str(record.get("name")))
+
+
 def _finite_float(value: Any, label: str) -> float:
     try:
         result = float(value)
@@ -1013,10 +1215,15 @@ class ModelRegistry:
                  now: Callable[[], float] = time.time,
                  model_config_max_bytes: int = DEFAULT_MODEL_CONFIG_MAX_BYTES,
                  weight_index_max_bytes: int = DEFAULT_WEIGHT_INDEX_MAX_BYTES,
-                 submit_change: Callable[..., dict] | None = None):
+                 submit_change: Callable[..., dict] | None = None,
+                 discover: Any | None = None):
         if submit_change is not None and not callable(submit_change):
             raise ValueError("submit_change must be callable")
+        if discover is not None and not (callable(getattr(discover, "candidates", None))
+                                         and callable(getattr(discover, "resolve", None))):
+            raise ValueError("discover must expose candidates() and resolve()")
         self.submit_change = submit_change
+        self.discover = discover
         self.queue, self.shared_roots, self.daemon_port_range = queue, tuple(shared_roots), daemon_port_range
         self.reserved_ports, self.stop_model, self.unit_absent, self.now = reserved_ports, stop_model, unit_absent, now
         self.model_config_max_bytes = _source_byte_limit(model_config_max_bytes, "model_config_max_bytes")
@@ -1093,12 +1300,33 @@ class ModelRegistry:
         result = self._add(body, dry_run=True, report=report)
         return {**result, **report, "port_reserved": False, "config_written": False}
 
+    def discovered(self, configured_names: Sequence[str] = ()) -> list[dict]:
+        """Read-only discovery rows; an empty list when discovery is unconfigured."""
+        if self.discover is None:
+            return []
+        return [candidate.to_dict() for candidate in self.discover.candidates(configured_names)]
+
+    def _import(self, target: Any) -> tuple[str, str, str, ImportOverrides]:
+        """Resolve one discovered descriptor; overrides never come from the client."""
+        if not isinstance(target, str) or not target:
+            raise RegistryError("import requires the discovered model name")
+        if self.discover is None:
+            raise RegistryError("model discovery is not configured")
+        with self.queue.action_lock:
+            configured = tuple(self._decode(self.queue._read()[0])[0]["models"])
+        candidate = self.discover.resolve(target, configured)
+        return candidate.name, candidate.path, candidate.base, candidate.overrides
+
     def _add(self, body: Mapping[str, Any], *, dry_run: bool, report: dict | None = None) -> dict:
         if "lora" in body:
             raise RegistryError("LoRA registration is disabled pending issue #21 measurements")
-        if set(body) != {"name", "path", "base"} or not all(isinstance(v, str) and v for v in body.values()):
-            raise RegistryError("add requires name, path, and base strings")
-        name, path, base = body["name"], body["path"], body["base"]
+        overrides = ImportOverrides()
+        if set(body) == {"import"}:
+            name, path, base, overrides = self._import(body["import"])
+        elif set(body) == {"name", "path", "base"} and all(isinstance(v, str) and v for v in body.values()):
+            name, path, base = body["name"], body["path"], body["base"]
+        else:
+            raise RegistryError("add requires name, path and base strings, or an import name")
         created_at = self.now()
         def transform(data: bytes) -> bytes:
             config, records = self._decode(data)
@@ -1106,7 +1334,8 @@ class ModelRegistry:
                                            shared_roots=self.shared_roots, daemon_port_range=self.daemon_port_range,
                                            reserved_ports=self.reserved_ports(), created_at=created_at,
                                            model_config_max_bytes=self.model_config_max_bytes,
-                                           weight_index_max_bytes=self.weight_index_max_bytes)
+                                           weight_index_max_bytes=self.weight_index_max_bytes,
+                                           overrides=overrides)
             candidate = self._encode(data, result.config, result.records)
             if report is not None:
                 macros = result.config["models"][name].get("macros")

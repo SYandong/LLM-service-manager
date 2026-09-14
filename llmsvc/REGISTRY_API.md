@@ -32,7 +32,7 @@ for an unresponsive regular filesystem.
 `GET /v1/models` (no query) returns:
 
 ```json
-{"records": {}, "writes_enabled": false,
+{"records": {}, "discovered": [], "writes_enabled": false,
  "blocked_by": [{"reason": "registry_writes_disabled"},
                 {"reason": "inflight_stream_unknown"}]}
 ```
@@ -53,6 +53,51 @@ is model-level eligibility, not global reload readiness. The action lock
 serializes daemon operations; separate registry reads do not promise an atomic
 view of external filesystem writers. `inventory.config_sha256` describes that
 inventory read, not proof of data-plane adoption.
+
+The additive `discovered` field lists one row per direct subdirectory of a
+configured shared root that contains a readable `llmsvc.json`:
+
+```json
+{"name": "foo-7b", "path": "/srv/models/Foo-7B", "base": "qwen3-32b",
+ "util": 0.45, "weights_gb": 14.5, "status": "importable", "reason": null}
+```
+
+`status` is `importable`, `imported` (the name is already a configured model)
+or `invalid` (with a `reason`). Discovery is not admission: a row only means a
+descriptor parsed, never that the model is registered, admitted or adopted.
+Directories without `llmsvc.json` are not listed; symlinked entries, unreadable
+roots and rejected descriptors are listed as `invalid` without being followed.
+The scan reads one level per root, at most 200 rows sorted by name, bounds each
+descriptor by `model_config_max_bytes` through the same no-follow, nonblocking
+regular-file reader, and is cached until a directory or descriptor mtime
+changes. It allocates no port, creates no job and writes no file. An
+unconfigured discovery source returns `[]`, not an error.
+
+`POST /v1/models?dry_run=1` also accepts `{"import": "<discovered name>"}`. The
+scheduler re-reads that directory's own descriptor and derives name, path, base
+and the whitelisted overrides itself; a client cannot supply them. Mixing
+`import` with any other key is rejected. Supported descriptor keys are `base`
+(required), `name`, `util`, `max_model_len`, `aliases` and `weights_gb`;
+`is_default`, any command/argv/shell fragment and every unknown key return
+HTTP400 with the offending field. Overrides rewrite only the cloned block: the
+`util` macro plus the launcher share and `--gpu-memory-utilization`, the
+`--max-model-len` value, and the block's aliases. A literal base command
+without `--gpu-memory-utilization` and without a `util` macro is rejected
+rather than given a launcher share that vLLM would not honour. The remaining
+path, weight, name, alias, base and port checks are unchanged, and a missing,
+already configured or invalid candidate returns HTTP400 with its reason.
+`weights_gb` defaults to the deduplicated size of the files named by
+`*.safetensors.index.json`, or of the directory's `*.safetensors` when there is
+no index; those are file sizes, not a measured GPU allocation.
+
+A model imported this way needs no hand-written `catalog_profiles` entry. Its
+collector/catalog profile is derived from the saved record: `unit` and
+`daemon_url` from the allocated daemon port, `util`/`weights_gb` from the
+descriptor, `is_default: false`, and `budget_gb` = `util` times the smallest
+known GPU `total_gb` in the latest fresh snapshot. A stale snapshot or unknown
+card size blocks the import with that reason instead of guessing a capacity. A
+configured profile still wins, but must agree with the record on unit,
+daemon_url, port, is_default, util and weights_gb, or the request is rejected.
 
 `POST /v1/models?dry_run=1` accepts `{name,path,base}`. The existing registry
 checks full-weight paths within shared roots, name/alias collisions, permanent
@@ -107,3 +152,4 @@ CPU loopback tests do not establish live latency or long-term stability, which
 remain NOT MEASURED. No production routing/TTL/reaper/reload authority follows.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+<!-- Generated-By: Claude Code / claude-fable-5-1 -->

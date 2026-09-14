@@ -532,6 +532,9 @@ class Scheduler:
         if self.registry is None:
             raise IntentWriteError(503, "registry_not_configured")
         try:
+            if method == "GET" and path == "/v1/models" and self.registry.discover is not None:
+                # Warm the bounded read-only scan before serializing on the lock.
+                self.registry.discover.scan()
             with self.action_lock:
                 writable = self.catalog is not None and self.catalog.can_submit()
                 if method != "GET" and not dry_run:
@@ -548,6 +551,8 @@ class Scheduler:
                     records = inventory.pop("records")
                     result = {"records": records, "writes_enabled": writable,
                               "inventory": inventory,
+                              "discovered": self.registry.discovered(
+                                  [row["name"] for row in inventory["models"]]),
                               "blocked_by": self.registry_blockers()}
                 elif method == "GET" and path == "/v1/registry":
                     result = {"queue": self.registry.queue_snapshot(), "writes_enabled": writable,
