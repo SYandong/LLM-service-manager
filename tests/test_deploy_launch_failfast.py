@@ -50,3 +50,32 @@ def test_kill_failure_is_logged_not_raised(tmp_path, monkeypatch):
 
     monkeypatch.setattr(launcher.os, "kill", refuse)
     assert launcher.main(argv(config_path)) == 75
+
+
+def test_lock_timeout_and_dry_run_do_not_signal(tmp_path, monkeypatch):
+    launcher = load_launcher()
+    config_path = write_config(tmp_path)
+    kills = []
+    monkeypatch.setattr(launcher, "parent_command_name", lambda pid: "vllm-wrapper")
+    monkeypatch.setattr(launcher.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+    monkeypatch.setattr(launcher, "request_json", rejected_placement())
+    assert launcher.main(["0.9", "vllm-qwen", "--dry-run", "--config", str(config_path), "--", "vllm", "serve", "m"]) == 75
+    assert kills == []
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def timed_out(config, model, dry_run):
+        raise launcher.LaunchError(f"timed out waiting for model lock {model}", 75)
+        yield
+
+    monkeypatch.setattr(launcher, "model_lock", timed_out)
+    assert launcher.main(argv(config_path)) == 75
+    assert kills == []
+
+
+def test_non_boolean_fail_fast_setting_is_rejected(tmp_path, monkeypatch):
+    launcher = load_launcher()
+    config_path = write_config(tmp_path, terminate_wrapper_on_placement_failure="false")
+    monkeypatch.setattr(launcher, "request_json", rejected_placement())
+    assert launcher.main(argv(config_path)) == 64

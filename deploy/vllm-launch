@@ -96,9 +96,12 @@ class Placement:
 
 
 class LaunchError(RuntimeError):
-    def __init__(self, message: str, exit_code: int = 1) -> None:
+    def __init__(self, message: str, exit_code: int = 1, *, placement_rejected: bool = False) -> None:
         super().__init__(message)
         self.exit_code = exit_code
+        # Only a scheduler placement refusal justifies terminating the waiting
+        # wrapper; lock timeouts and preexisting units keep the normal path.
+        self.placement_rejected = placement_rejected
 
 
 def log(event: str, **fields: Any) -> None:
@@ -145,6 +148,8 @@ def validate_config(config: dict[str, Any]) -> None:
     poll = float(config["health_poll_seconds"])
     if not math.isfinite(poll) or poll < 0:
         raise LaunchError("health_poll_seconds must be a non-negative finite number", 64)
+    if type(config.get("terminate_wrapper_on_placement_failure", True)) is not bool:
+        raise LaunchError("terminate_wrapper_on_placement_failure must be a boolean", 64)
 
 
 def parse_args(argv: list[str]) -> LaunchArgs:
@@ -269,10 +274,10 @@ def request_placement(
         return None
     if status == 409:
         log("place_conflict", status=status, response=body)
-        raise LaunchError("scheduler rejected placement with 409", 75)
+        raise LaunchError("scheduler rejected placement with 409", 75, placement_rejected=True)
     if status >= 400:
         log("place_failed", status=status, response=body)
-        raise LaunchError(f"scheduler placement failed with HTTP {status}", 75)
+        raise LaunchError(f"scheduler placement failed with HTTP {status}", 75, placement_rejected=True)
     gpu = body.get("gpu")
     lease_id = body.get("lease_id")
     if type(gpu) is not int or gpu < 0 or not isinstance(lease_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", lease_id):
@@ -486,7 +491,7 @@ def parent_command_name(pid: int) -> str:
 
 def fail_fast_wrapper(config: dict[str, Any]) -> bool:
     """Terminate a waiting vllm-wrapper parent so llama-swap fails the request now."""
-    if not config.get("terminate_wrapper_on_placement_failure", True):
+    if config.get("terminate_wrapper_on_placement_failure", True) is not True:
         return False
     ppid = os.getppid()
     if parent_command_name(ppid) != "vllm-wrapper":
@@ -504,8 +509,10 @@ def _main(argv: list[str] | None = None) -> int:
     global COMMAND_TIMEOUT_SECONDS
     argv = sys.argv[1:] if argv is None else argv
     config: dict[str, Any] = DEFAULT_CONFIG
+    args_dry_run = False
     try:
         args = parse_args(argv)
+        args_dry_run = args.dry_run
         call = _CALL.get()
         config = copy.deepcopy(call["config"]) if call is not None and call["config"] is not None else load_config(args.config_path)
         validate_config(config)
@@ -549,7 +556,7 @@ def _main(argv: list[str] | None = None) -> int:
             return monitor_startup(config, args, placement)
     except LaunchError as exc:
         log("launch_error", error=str(exc), exit_code=exc.exit_code)
-        if exc.exit_code == 75:
+        if exc.placement_rejected and not args_dry_run:
             fail_fast_wrapper(config)
         return exc.exit_code
     except (ValueError, TypeError, KeyError) as exc:
