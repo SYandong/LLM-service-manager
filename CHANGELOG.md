@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Scheduling
+
+- The reload gate no longer reports `activity_unknown` for a model that is `stopped` with an
+  inactive unit. Retained catalog metadata (a model unregistered through `/srv/models`) has no
+  event-relay entry, so its in-flight count is unknown by construction; that left every later
+  catalog transaction blocked behind the retained entry it was supposed to retire. A stopped
+  model without a process cannot have requests in flight.
+
 ## 1.1.5 — 2026-09-15
 
 Stable patch release; Python distribution `1.1.5`. It carries one merged PR,

@@ -52,7 +52,9 @@ def reload_blockers(snapshot: StateSnapshot, now: float, max_age: float = 30) ->
     awake = sleeping = 0.0
     for model in snapshot.models:
         item = activity.get(model.name)
-        if item is None or not _number(item.in_flight) or item.in_flight < 0:
+        if model.state == "stopped" and model.unit_active is False:
+            pass  # no process, no relay entry (retained catalog metadata): nothing can be in flight
+        elif item is None or not _number(item.in_flight) or item.in_flight < 0:
             blockers.append({"model": model.name, "reason": "activity_unknown"})
         elif item.in_flight:
             blockers.append({"model": model.name, "reason": "in_flight"})
