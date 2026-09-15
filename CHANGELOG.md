@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 — 2026-09-16
+
+Minor release; Python distribution `1.4.0`. Two merged PRs, both implemented by
+OpenCode workers from written specifications and reviewed by Claude: a per-user /
+per-model / per-day usage report attributed by the `client_ip` a patched llama-swap
+records (#276), and the redesigned `llm usage` command and TUI usage view that
+render it (#277). Below the normal five-PR cadence, so the reviewed release PR
+records `Release-Exception: #256` for the user-authorized delivery.
 
 ### Usage
 
