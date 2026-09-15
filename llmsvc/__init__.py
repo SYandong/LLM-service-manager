@@ -3,4 +3,4 @@
 # Generated-By: OpenCode / deepseek-v4.1-flash
 """The llama-swap control plane; independent of the frozen legacy proxy."""
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
