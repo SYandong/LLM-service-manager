@@ -19,6 +19,7 @@ import re
 import shutil
 import socket
 import sys
+import textwrap
 import threading
 import time
 from types import SimpleNamespace
@@ -530,6 +531,25 @@ def wrap_line(line, width):
     return lines
 
 
+def wrap_prose(line, width):
+    """Wrap prose on spaces; only a single over-long token is hard-wrapped."""
+    line = clean_text(line)
+    if width <= 0:
+        return [""]
+    if cell_width(line) <= width:
+        return [line]
+    parts = textwrap.wrap(line, width, break_long_words=False, break_on_hyphens=False)
+    if not parts:
+        return [""]
+    result = []
+    for part in parts:
+        if cell_width(part) > width:
+            result.extend(wrap_line(part, width))
+        else:
+            result.append(part)
+    return result
+
+
 def format_status(snapshot, width=100, now=None):
     width = max(1, width)
     if now is None:
@@ -785,45 +805,51 @@ def usage_table(result, width, breakdown):
     by, other = result["by"], USAGE_OTHER[result["by"]]
     rows, totals = result["rows"], result["totals"]
     labels = [cell_width(clean_text(row[by])) for row in rows] or [0]
+    if breakdown:
+        labels += [cell_width("  └ " + clean_text(item[other]))
+                   for row in rows for item in row["breakdown"]]
     label_width = min(24, max(4, max(labels)))
     widths = usage_column_widths(result)
     models_header = "USERS" if by == "model" else "MODELS"
     active = {key for key, _ in USAGE_NUMERIC_COLUMNS}
     if by == "day":
         active.discard("last")
-    include_models = width >= 100
+    include_models = True
 
     def used_width():
         return label_width + sum(2 + widths[key] for key, _ in USAGE_NUMERIC_COLUMNS if key in active)
 
     while True:
-        if include_models:
-            remaining = width - used_width() - 2
-            if remaining >= 12:
-                break
-            include_models = False
-            continue
-        if used_width() <= width or not any(key in active for key in ("avg", "last", "errors")):
+        fits = used_width() <= width and (not include_models or width - used_width() - 2 >= 12)
+        if fits:
             break
-        for key in ("avg", "last", "errors"):
-            if key in active:
-                active.discard(key)
-                break
+        if "avg" in active:
+            active.discard("avg")
+        elif "last" in active:
+            active.discard("last")
+        elif include_models:
+            include_models = False
+        elif "errors" in active:
+            active.discard("errors")
+        else:
+            break
     models_width = width - used_width() - 2 if include_models else 0
 
-    def numeric_cells(row, *, skip_extra=False):
+    def numeric_cells(row, *, skip_extra=False, blank_last=False):
         cells = []
         for key, _ in USAGE_NUMERIC_COLUMNS:
             if key not in active:
                 continue
             if skip_extra and key in ("avg", "last"):
                 cells.append(" " * widths[key])
+            elif blank_last and key == "last":
+                cells.append(" " * widths[key])
             else:
                 cells.append(usage_row_columns(result, row)[key].rjust(widths[key]))
         return cells
 
-    def render(label, row, *, skip_extra=False, model_cell=None):
-        cells = [fit(label, label_width), *numeric_cells(row, skip_extra=skip_extra)]
+    def render(label, row, *, skip_extra=False, model_cell=None, blank_last=False):
+        cells = [fit(label, label_width), *numeric_cells(row, skip_extra=skip_extra, blank_last=blank_last)]
         if include_models and not skip_extra:
             cells.append(usage_truncate(model_cell or "", models_width))
         return "  ".join(cells).rstrip()
@@ -841,7 +867,7 @@ def usage_table(result, width, breakdown):
         if breakdown:
             for item in row["breakdown"]:
                 lines.append(render("  └ " + item[other], item, skip_extra=True))
-    lines.append(render("TOTAL", totals))
+    lines.append(render("TOTAL", totals, blank_last=True))
     if not rows:
         lines.append("No requests in this window (source available)")
     return lines
@@ -907,21 +933,23 @@ def format_usage(result, width=100, breakdown=False):
     by = result["by"]
     window = "day" if result["days"] == 1 else "days"
     if not result["known"]:
-        lines = ["Usage: last %s %s by %s" % (result["days"], window, by),
+        prose = ["Usage: last %s %s by %s" % (result["days"], window, by),
                  "Unavailable: " + clean_text(result.get("error") or "source unavailable"),
                  "Requests ?  Tokens ?"]
-        return "\n".join(part for line in lines for part in wrap_line(line, width))
+        return "\n".join(part for line in prose for part in wrap_prose(line, width))
     zone_name, zone = usage_zone(result.get("timezone"))
-    lines = ["Usage · last %s %s · %s → %s (%s)" % (
+    prose = ["Usage · last %s %s · %s → %s (%s)" % (
         result["days"], window, usage_time(result.get("since"), zone),
         usage_time(result.get("until"), zone), zone_name),
         usage_totals_line(result["totals"])]
     if width < 60:
-        lines.extend(usage_stacked(result, breakdown))
+        body = usage_stacked(result, breakdown)
     else:
-        lines.extend(usage_table(result, width, breakdown))
-    lines.extend(usage_footnotes(result))
-    return "\n".join(part for line in lines for part in wrap_line(line, width))
+        body = usage_table(result, width, breakdown)
+    output = [part for line in prose for part in wrap_prose(line, width)]
+    output += [part for line in body for part in wrap_line(line, width)]
+    output += [part for line in usage_footnotes(result) for part in wrap_prose(line, width)]
+    return "\n".join(output)
 
 
 PIN_COMPATIBILITY_LABEL = "llm-client"

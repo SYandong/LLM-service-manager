@@ -109,7 +109,7 @@ host = requests from the host machine; unattributed = recorded before source tra
 
 - 第一行是窗口；`since` / `until` 按响应里的 `timezone` 显示，时区无法加载时回退到 UTC 并标注 `UTC`。第二行是总计；为零时不显示 `errors` 与 `without token counts` 段。上例是合成数据，**不是服务器实测**。
 - `REQUESTS / ERRORS / INPUT / OUTPUT / TOTAL` 是窗口内已记录请求数、HTTP ≥ 400 或带错误消息的请求数、输入/输出/总 token。`AVG TIME` 是 `duration_ms / requests`（`350ms`、`1.9s`、`2m 05s`），`LAST SEEN` 相对 `until`（`just now`、`2m ago`、`1h ago`、`3d ago`，空值为 `—`）。
-- `MODELS` 列（按 model 分组时是 `USERS`）按后端顺序显示该行的下级占比 `name 88% · name 12%`，超出剩余宽度用 `…` 截断；剩余不足 12 列时整列省略。宽度小于 100 先去掉该列，再依次去掉 `AVG TIME`、`LAST SEEN`、`ERRORS`；小于 60 列改为每条一行（`label (kind)` 加 `Requests:` / `Tokens: in / out / total` / `Errors:`）的堆叠形式。表格行永不换行。
+- `MODELS` 列（按 model 分组时是 `USERS`）按后端顺序显示该行的下级占比 `name 88% · name 12%`，超出剩余宽度用 `…` 截断；该列需要至少 12 列剩余宽度，不足时整列省略。表格放不下时按 `AVG TIME` → `LAST SEEN` → `MODELS`/`USERS` → `ERRORS` 的顺序去掉，`MODELS`/`USERS` 始终优先于 `ERRORS` 保留；小于 60 列改为每条一行（`label (kind)` 加 `Requests:` / `Tokens: in / out / total` / `Errors:`）的堆叠形式。表格行永不换行。
 - `--by day` 的行按后端交付的最旧到最新显示，首列是 `DAY`，没有 `LAST SEEN`；`--breakdown` 的下级行缩进为 `  └ <model 或 user>`，只保留数值列。排序完全来自后端，客户端不重排。
 - 按 user 分组时 `kind` 说明来源：`container` 是用户 LXD 容器名；`host` 是宿主机自身；`ip` 的标签是 `ip:<addr>`，表示有直接连接地址但没有容器映射；`unattributed` 是来源跟踪启用前记录的旧数据。出现哪些就在脚注里解释哪些。
 - 后端返回不可用响应（503、`known: false`）时显示原因与 `?`；`--json` 保留 null 总量，退出码为 1。活动库可读且窗口内没有记录时返回零请求和零 token；这不证明所有流量都已被采集。连接或协议错误沿用前述非零退出码与 stderr 说明。

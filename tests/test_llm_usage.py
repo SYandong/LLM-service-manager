@@ -238,7 +238,7 @@ def test_breakdown_subrows(usage_api, usage_service):
 @pytest.mark.parametrize("width,model,avg,last,errors,stacked", [
     (120, True, True, True, True, False),
     (100, True, True, True, True, False),
-    (80, False, True, True, True, False),
+    (80, True, False, False, True, False),
     (60, False, False, False, True, False),
     (50, False, False, False, False, True),
 ])
@@ -251,6 +251,61 @@ def test_responsive_widths(usage_api, usage_service, width, model, avg, last, er
     assert ("ERRORS" in text) is errors
     assert ("host (host)" in text) is stacked
     assert all(usage_api["cell_width"](line) <= width for line in text.splitlines())
+
+
+def test_responsive_width_keeps_models_with_large_counts(usage_api):
+    rows = []
+    for user, requests, errors, in_tok, out_tok, last_offset in (
+        ("container-team-alpha-0001", 12345678, 5, 87654321, 12345678, 120),
+        ("container-team-beta-00022", 23456789, 0, 76543210, 23456789, 3600),
+        ("container-team-gamma-333", 34567890, 1, 65432109, 34567890, 7200),
+    ):
+        row = counts(requests, errors, in_tok, out_tok, 0, requests * 80)
+        row.update({"user": user, "kind": "container", "first_seen": UNTIL - 8 * 86400,
+                    "last_seen": UNTIL - last_offset})
+        item = counts(requests, errors, in_tok, out_tok, 0, requests * 80)
+        item.update({"model": "model-" + user[-4:], "kind": "model"})
+        row["breakdown"] = [item]
+        rows.append(row)
+    totals = counts()
+    for row in rows:
+        accumulate(totals, row)
+    result = {"days": 7, "by": "user", "since": UNTIL - 7 * 86400, "until": UNTIL,
+              "known": True, "error": None, "timezone": "UTC",
+              "attribution": {"mode": "client_ip", "map_source": "config",
+                              "map_updated_at": UNTIL, "mapped_ips": 1},
+              "rows": rows, "totals": totals}
+    text = usage_api["format_usage"](result, width=100)
+    assert "MODELS" in text
+    assert "AVG TIME" not in text
+    assert "LAST SEEN" not in text
+    assert all(usage_api["cell_width"](line) <= 100 for line in text.splitlines())
+
+
+def test_breakdown_label_width_covers_subrows(usage_api, usage_service):
+    args, result = execute(usage_api, usage_service, ["--days", "7", "--by", "user", "--breakdown"])
+    text = usage_api["format_result"](args, result, width=200)
+    assert "  └ qwen2.5-7b-instruct" in text
+    without = usage_api["format_usage"](result, width=200)
+    assert "└" not in without
+    header = next(line for line in without.splitlines() if line.startswith("USER"))
+    assert header.index("REQUESTS") == 14
+
+
+def test_footnote_wraps_on_spaces(usage_api, usage_service):
+    _, result = execute(usage_api, usage_service, ["--days", "7", "--by", "user"])
+    text = usage_api["format_usage"](result, width=30)
+    assert "counts (streaming without" in text
+    assert all(usage_api["cell_width"](line) <= 30 for line in text.splitlines())
+
+
+def test_total_row_has_blank_last_seen(usage_api, usage_service):
+    _, result = execute(usage_api, usage_service, ["--days", "7", "--by", "user"])
+    text = usage_api["format_usage"](result, width=120)
+    total = next(line for line in text.splitlines() if line.startswith("TOTAL"))
+    assert "LAST SEEN" in text
+    assert "—" not in total
+    assert "2.5s" in total
 
 
 def test_by_day_uses_day_label_and_drops_last_seen(usage_api, usage_service):
