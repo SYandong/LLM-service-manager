@@ -76,78 +76,33 @@ def assert_readonly(mounted, before):
     assert not mounted.registry._removals and mounted.calls == [] and mounted.units == set()
 
 
-def test_list_and_real_add_remove_preview_keep_unknown_quiet_blocked(mounted):
+def test_list_keeps_unknown_quiet_blocked_and_writes_are_removed(mounted):
     before = mounted.files(), mounted.scheduler.events_since(0)
     status, listed = request(mounted.address, "GET", "/v1/models")
     assert status == 200 and listed["records"] == mounted.records and listed["writes_enabled"] is False
     assert {b["reason"] for b in listed["blocked_by"]} >= {"registry_writes_disabled", "inflight_stream_unknown"}
-    status, added = request(mounted.address, "POST", "/v1/models?dry_run=1",
-                            {"name": "candidate", "path": str(mounted.weights), "base": "base"})
-    assert status == 200 and added["would"] == [{"kind": "add_model", "model": "candidate", "base": "base"}]
-    status, removed = request(mounted.address, "DELETE", "/v1/models/saved?dry_run=1")
-    assert status == 200 and removed["would"][0]["kind"] == "remove_model"
-    for result in (added, removed):
-        assert result["dry_run"] is True and result["config_committed"] is False and "id" not in result
-        assert any(b["reason"] == "inflight_stream_unknown" for b in result["blocked_by"])
+    assert request(mounted.address, "POST", "/v1/models?dry_run=1",
+                   {"name": "candidate", "path": str(mounted.weights), "base": "base"}) == (
+        405, {"error": "registry_writes_removed"})
+    assert request(mounted.address, "DELETE", "/v1/models/saved?dry_run=1") == (
+        405, {"error": "registry_writes_removed"})
     assert_readonly(mounted, before)
 
 
 @pytest.mark.parametrize("readonly", [True, False])
 @pytest.mark.parametrize("method,path,body", [("POST", "/v1/models", {}), ("DELETE", "/v1/models/saved", None)])
-def test_actual_writes_stay_rejected_even_with_writable_intents(mounted, readonly, method, path, body):
+def test_actual_writes_report_the_removed_surface(mounted, readonly, method, path, body):
     mounted.scheduler.config = replace(mounted.scheduler.config, read_only=readonly,
         state_db_path=str(mounted.path.parent / "unused.sqlite"))
     before = mounted.files(), mounted.scheduler.events_since(0)
     status, result = request(mounted.address, method, path, body)
-    assert status == 405 and result["error"] == ("read_only" if readonly else "operation_not_enabled")
-    assert_readonly(mounted, before)
-
-
-@pytest.mark.parametrize("change", ["duplicate", "outside", "symlink-outside", "no-weights", "bad-name", "missing-base", "lora"])
-def test_registry_validation_is_used_before_preview_success(mounted, tmp_path, change):
-    body = {"name": "candidate", "path": str(mounted.weights), "base": "base"}
-    if change == "duplicate":
-        body["name"] = "saved"
-    elif change in ("outside", "symlink-outside"):
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        (outside / "config.json").write_text("{}")
-        (outside / "model.safetensors").write_bytes(b"fixture")
-        if change == "symlink-outside":
-            link = mounted.weights.parent / "escape"
-            link.symlink_to(outside, target_is_directory=True)
-            body["path"] = str(link)
-        else:
-            body["path"] = str(outside)
-    elif change == "no-weights":
-        empty = mounted.weights.parent / "empty"
-        empty.mkdir()
-        (empty / "config.json").write_text("{}")
-        body["path"] = str(empty)
-    elif change == "bad-name":
-        body["name"] = "../escape"
-    elif change == "missing-base":
-        body["base"] = "missing"
-    else:
-        body["lora"] = True
-    before = mounted.files(), mounted.scheduler.events_since(0)
-    status, result = request(mounted.address, "POST", "/v1/models?dry_run=1", body)
-    assert status == 400 and result["error"] == "registry_invalid_request" and result["message"]
-    assert_readonly(mounted, before)
-
-
-def test_existing_core_and_reserved_ports_are_not_proposed(mounted):
-    # Base8101, saved8102, scheduler8103 and explicit8104 fill this range.
-    mounted.registry.daemon_port_range = (8101, 8104)
-    before = mounted.files(), mounted.scheduler.events_since(0)
-    status, result = request(mounted.address, "POST", "/v1/models?dry_run=1",
-                            {"name": "new", "path": str(mounted.weights), "base": "base"})
-    assert status == 400 and "port" in result["message"]
+    assert status == 405 and result == {"error": "registry_writes_removed"}
     assert_readonly(mounted, before)
 
 
 @pytest.mark.parametrize("protection", ["permanent", "pin", "default", "inflight", "unknown"])
-def test_delete_preserves_existing_protection_checks(mounted, protection):
+def test_remove_preserves_existing_protection_checks(mounted, protection):
+    from llmsvc.registry import RegistryError
     state = mounted.state[0]
     name = "saved"
     if protection == "permanent":
@@ -163,28 +118,31 @@ def test_delete_preserves_existing_protection_checks(mounted, protection):
     mounted.state[0] = state
     mounted.scheduler.sample_once()
     before = mounted.files(), mounted.scheduler.events_since(0)
-    status, result = request(mounted.address, "DELETE", "/v1/models/"+name+"?dry_run=1")
-    assert status == 400 and result["error"] == "registry_invalid_request"
+    with pytest.raises(RegistryError):
+        mounted.registry.remove(name)
     assert_readonly(mounted, before)
 
 
-def test_pending_transaction_is_listed_as_blocked_and_preview_cannot_bypass_it(mounted):
+def test_pending_transaction_is_listed_and_write_still_removed(mounted):
     mounted.registry.queue.marker.write_text("fixture interrupted transaction")
     before = mounted.files(), mounted.scheduler.events_since(0)
     status, listed = request(mounted.address, "GET", "/v1/models")
     assert status == 200 and any(b["reason"] == "registry_reconciliation_required" for b in listed["blocked_by"])
-    status, result = request(mounted.address, "POST", "/v1/models?dry_run=1",
-                            {"name": "new", "path": str(mounted.weights), "base": "base"})
-    assert status == 409 and result["error"] == "registry_reconciliation_required"
+    assert request(mounted.address, "POST", "/v1/models?dry_run=1",
+                   {"name": "new", "path": str(mounted.weights), "base": "base"}) == (
+        405, {"error": "registry_writes_removed"})
     assert_readonly(mounted, before)
 
 
-@pytest.mark.parametrize("method,path,body", [("GET", "/v1/models?x=1", None),
-    ("POST", "/v1/models?dry_run=0", {}), ("POST", "/v1/models?dry_run=1", []),
-    ("DELETE", "/v1/models/saved?dry_run=1", {}), ("DELETE", "/v1/models/%2e%2e?dry_run=1", None)])
-def test_malformed_requests_fail_without_mutation(mounted, method, path, body):
+@pytest.mark.parametrize("method,path,body,expected", [
+    ("GET", "/v1/models?x=1", None, 400),
+    ("POST", "/v1/models?dry_run=0", {}, 400),
+    ("POST", "/v1/models?dry_run=1", [], 405),
+    ("DELETE", "/v1/models/saved?dry_run=1", {}, 400),
+    ("DELETE", "/v1/models/%2e%2e?dry_run=1", None, 405)])
+def test_malformed_requests_fail_without_mutation(mounted, method, path, body, expected):
     before = mounted.files(), mounted.scheduler.events_since(0)
-    assert request(mounted.address, method, path, body)[0] == 400
+    assert request(mounted.address, method, path, body)[0] == expected
     assert_readonly(mounted, before)
 
 
@@ -235,15 +193,11 @@ def test_entrypoint_mounts_registry_without_a_reload_worker(mounted, monkeypatch
     assert mounted.files() == before
 
 
-def test_configured_collector_daemon_port_is_reserved_in_preview(mounted):
+def test_configured_collector_daemon_port_is_reserved(mounted):
     mounted.scheduler.config = replace(mounted.scheduler.config, collectors={"models": {"local": {"port": 8105}}})
     registry = build_registry(mounted.scheduler.config, mounted.scheduler)
-    registry.daemon_port_range = (8101, 8105)
-    mounted.scheduler.registry = registry
-    status, result = request(mounted.address, "POST", "/v1/models?dry_run=1",
-                            {"name": "new", "path": str(mounted.weights), "base": "base"})
-    assert status == 400 and "port" in result["message"]
-    assert not registry.queue._pending and not registry.queue._jobs
+    assert 8105 in registry.reserved_ports()
+    assert mounted.scheduler.config.listen_port in registry.reserved_ports()
 
 
 def test_oversized_registry_body_uses_existing_http_limit(mounted):
@@ -269,8 +223,7 @@ def test_deeply_nested_source_is_an_explicit_unavailable_response(mounted):
     assert_readonly(mounted, before)
 
 
-@pytest.mark.parametrize("operation", ["models", "add", "rm"])
-def test_copied_stdlib_cli_uses_actual_mounted_registry_without_effects(mounted, tmp_path, operation):
+def test_copied_stdlib_cli_uses_actual_mounted_registry_without_effects(mounted, tmp_path):
     import os
     import shutil
     import subprocess
@@ -280,20 +233,14 @@ def test_copied_stdlib_cli_uses_actual_mounted_registry_without_effects(mounted,
     outside.mkdir()
     executable = outside / "llm"
     shutil.copyfile(Path(__file__).resolve().parents[1] / "cli" / "llm", executable)
-    words = {"models": ["models", "--json"],
-             "add": ["add", str(mounted.weights), "--name", "new", "--base", "base", "--dry-run", "--json"],
-             "rm": ["rm", "saved", "--dry-run", "--json"]}[operation]
     before = mounted.files(), mounted.scheduler.events_since(0)
     run = subprocess.run([sys.executable, "-I", "-S", str(executable), "--url",
-                          "http://127.0.0.1:"+str(mounted.address[1]), *words],
+                          "http://127.0.0.1:"+str(mounted.address[1]), "models", "--json"],
                          cwd=outside, env={**os.environ, "XDG_CONFIG_HOME": str(outside / "config")},
                          capture_output=True, text=True, timeout=5)
-    assert run.returncode == (0 if operation == "models" else 1), (run.stdout, run.stderr)
+    assert run.returncode == 0, (run.stdout, run.stderr)
     body = json.loads(run.stdout)
-    if operation == "models":
-        assert body["records"] == mounted.records and body["writes_enabled"] is False
-    else:
-        assert body["would"] and body["config_committed"] is False and body["dry_run"] is True
+    assert body["records"] == mounted.records and body["writes_enabled"] is False
     assert any(b["reason"] == "inflight_stream_unknown" for b in body["blocked_by"])
     assert_readonly(mounted, before)
 
@@ -306,25 +253,32 @@ def test_registry_config_rejects_invalid_or_unlimited_source_caps(key, value):
             "shared_roots": ["/tmp/models"], "daemon_port_range": [19002, 19003], key: value})
 
 
-@pytest.mark.parametrize("key", ["config_max_bytes", "model_config_max_bytes", "weight_index_max_bytes"])
-def test_configured_source_cap_reaches_actual_http_preview(key, mounted):
-    target = mounted.path if key == "config_max_bytes" else mounted.weights / "config.json"
-    if key == "weight_index_max_bytes":
-        target = mounted.weights / "model.safetensors.index.json"
-        target.write_text('{"weight_map":{"layer":"model.safetensors"}}')
+def test_configured_source_cap_reaches_actual_http_read(mounted):
+    target = mounted.path
     before = mounted.files(), mounted.scheduler.events_since(0)
-    body = {"name": "new", "path": str(mounted.weights), "base": "base"}
-    for cap, expected in [(target.stat().st_size, 200), (target.stat().st_size - 1, 503 if key == "config_max_bytes" else 400)]:
-        config = replace(mounted.scheduler.config, registry={**mounted.scheduler.config.registry, key: cap})
+    for cap, expected in [(target.stat().st_size, 200), (target.stat().st_size - 1, 503)]:
+        config = replace(mounted.scheduler.config, registry={**mounted.scheduler.config.registry, "config_max_bytes": cap})
         mounted.scheduler.config = config
         mounted.registry = mounted.scheduler.registry = build_registry(config, mounted.scheduler)
-        status, result = request(mounted.address, "POST", "/v1/models?dry_run=1", body)
+        status, result = request(mounted.address, "GET", "/v1/models")
         assert status == expected, result
-        if expected == 200:
-            assert result["config_committed"] is False and result["would"]
-        else:
-            assert result["error"] == ("registry_unavailable" if key == "config_max_bytes" else "registry_invalid_request")
+        if expected == 503:
+            assert result == {"error": "registry_unavailable"}
         assert_readonly(mounted, before)
+
+
+@pytest.mark.parametrize("key", ["model_config_max_bytes", "weight_index_max_bytes"])
+def test_configured_metadata_cap_reaches_registry_add(mounted, key):
+    from llmsvc.registry import RegistryError
+    target = mounted.weights / ("config.json" if key == "model_config_max_bytes"
+                                else "model.safetensors.index.json")
+    if key == "weight_index_max_bytes":
+        target.write_text('{"weight_map":{"layer":"model.safetensors"}}')
+    config = replace(mounted.scheduler.config,
+                     registry={**mounted.scheduler.config.registry, key: target.stat().st_size - 1})
+    registry = build_registry(config, mounted.scheduler)
+    with pytest.raises(RegistryError):
+        registry.add({"name": "new", "path": str(mounted.weights), "base": "base"})
 
 
 def test_configured_maintenance_timeout_reaches_registry_queue(mounted):
@@ -341,5 +295,5 @@ def test_unreadable_list_source_with_pending_marker_is_still_503(mounted):
     before = mounted.files(), mounted.scheduler.events_since(0)
     assert request(mounted.address, "GET", "/v1/models") == (503, {"error": "registry_unavailable"})
     assert request(mounted.address, "POST", "/v1/models?dry_run=1",
-                   {"name": "new", "path": str(mounted.weights), "base": "base"}) == (409, {"error": "registry_reconciliation_required"})
+                   {"name": "new", "path": str(mounted.weights), "base": "base"}) == (405, {"error": "registry_writes_removed"})
     assert_readonly(mounted, before)

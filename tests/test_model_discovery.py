@@ -4,7 +4,6 @@
 import json
 import os
 import shlex
-from pathlib import Path
 
 import pytest
 
@@ -63,15 +62,15 @@ def test_only_directories_with_a_descriptor_are_listed_and_sorted(root):
     (root / "loose.txt").write_text("ignored")
     rows = [item.to_dict() for item in ModelDiscovery([root]).candidates()]
     assert [row["name"] for row in rows] == ["alpha", "zeta-7b"]
-    assert all(row["status"] == "importable" and row["reason"] is None for row in rows)
+    assert all(row["status"] == "pending" and row["reason"] is None for row in rows)
     assert rows[0]["path"] == str(root / "Alpha") and rows[0]["base"] == "base-model"
 
 
-def test_configured_names_mark_imported_without_a_second_scan(root):
+def test_configured_names_mark_configured_without_a_second_scan(root):
     weights(root / "already", descriptor={"base": "base-model"})
     discovery = ModelDiscovery([root])
-    assert [item.status for item in discovery.candidates(["already"])] == ["imported"]
-    assert [item.status for item in discovery.candidates([])] == ["importable"]
+    assert [item.status for item in discovery.candidates(["already"])] == ["configured"]
+    assert [item.status for item in discovery.candidates([])] == ["pending"]
 
 
 def test_symlinked_and_unreadable_entries_are_rejected_not_followed(root, tmp_path):

@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Validated scheduler configuration, independent of the legacy proxy config."""
 
 import ipaddress
@@ -58,6 +59,8 @@ class SchedulerConfig:
     lease_timeout_seconds: float = 900.0
     lease_probe_seconds: float = 1.0
     model_actions_enabled: bool = False
+    model_reconcile_enabled: bool = True
+    model_reconcile_interval_seconds: float = 30.0
     automation_enabled: bool = False
     automation_interval_seconds: float = 15.0
     automation_cycle_timeout_seconds: float = 120.0
@@ -104,6 +107,7 @@ class SchedulerConfig:
                      "memory_budget_gb", "host_min_available_gb",
                      "max_snapshot_age_seconds", "free_timeout_seconds", "reserve_timeout_seconds", "wake_timeout_seconds",
                      "action_observe_seconds", "action_poll_seconds", "placement_wait_seconds",
+                     "model_reconcile_interval_seconds",
                      "lease_timeout_seconds", "lease_probe_seconds", "data_plane_event_interval_seconds",
                      "data_plane_event_timeout_seconds", "data_plane_event_reconnect_seconds",
                      "automation_interval_seconds", "automation_cycle_timeout_seconds", "automation_idle_seconds",
@@ -163,6 +167,10 @@ class SchedulerConfig:
             raise ValueError("placement_enabled must be a boolean")
         if type(self.model_actions_enabled) is not bool:
             raise ValueError("model_actions_enabled must be a boolean")
+        if type(self.model_reconcile_enabled) is not bool:
+            raise ValueError("model_reconcile_enabled must be a boolean")
+        if self.model_reconcile_interval_seconds > 3600:
+            raise ValueError("model_reconcile_interval_seconds must be at most 3600")
         if self.catalog_mode not in ("hot_reload", "maintenance"):
             raise ValueError("catalog_mode must be hot_reload or maintenance")
         if not isinstance(self.catalog_profiles, dict) or not all(isinstance(v, dict) for v in self.catalog_profiles.values()):

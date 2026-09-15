@@ -55,13 +55,10 @@ def registry(tmp_path):
     return api, queue, weights, state, clock, calls, units, drain
 
 
-def test_add_dry_run_then_apply_persists_records_and_groups(registry):
+def test_add_then_apply_persists_records_and_groups(registry):
     api, queue, weights, state, _, calls, _, drain = registry
-    initial = queue.path.read_bytes()
     payload = {'name': 'fine', 'path': str(weights), 'base': 'base'}
-    assert api.handle('POST', '/v1/models', payload, dry_run=True)['would']
-    assert queue.path.read_bytes() == initial and calls == []
-    job = api.handle('POST', '/v1/models', payload)
+    job = api.add(payload)
     assert job['status'] == 'queued'
     assert api.records() == {}
     assert drain()['status'] == 'applied'
@@ -110,35 +107,6 @@ def test_two_queued_adds_reserve_different_ports(registry):
     assert drain()['status'] == 'applied'
     assert drain()['status'] == 'applied'
     assert {r['daemon_port'] for r in api.records().values()} == {8102, 8103}
-
-
-def test_expiry_rechecks_activity_before_apply(registry):
-    api, queue, weights, state, clock, _, _, drain = registry
-    api.add({'name': 'fine', 'path': str(weights), 'base': 'base'})
-    drain()
-    state[0] = replace(state[0], models=state[0].models + (ModelState('fine', state='stopped'),),
-                       activity=state[0].activity + (Activity('fine', last_request_at=1000, in_flight=0),))
-    clock[0] += 8 * 86400
-    assert len(api.expire()) == 1
-    state[0] = replace(state[0], activity=(state[0].activity[0], Activity('fine', last_request_at=clock[0], in_flight=0)))
-    result = drain()
-    assert result['status'] == 'queued'
-    assert any(item['reason'] == 'recent_activity' for item in result['blocked_by'])
-    assert 'fine' in api.records()
-
-
-def test_known_unused_model_expires_but_missing_history_does_not(registry):
-    api, queue, weights, state, clock, _, _, drain = registry
-    api.add({'name': 'fine', 'path': str(weights), 'base': 'base'})
-    drain()
-    state[0] = replace(state[0], models=state[0].models + (ModelState('fine', state='stopped'),),
-                       activity=state[0].activity + (Activity('fine', in_flight=0),))
-    clock[0] += 8 * 86400
-    assert api.expire() == []
-    state[0] = replace(state[0], activity=(state[0].activity[0], Activity('fine', in_flight=0,
-                                                requests_last_hour=0, requests_last_10m=0)))
-    assert len(api.expire()) == 1
-    assert drain()['status'] == 'applied'
 
 
 def test_nested_filter_alias_collision_and_strip(registry):

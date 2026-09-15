@@ -11,7 +11,6 @@ import pytest
 from llmsvc.registry import (
     RegistryError,
     add_full_weight_model,
-    expired_temporary_models,
     plan_temporary_model_removal,
     remove_temporary_model,
     validate_full_weight_model_dir,
@@ -322,7 +321,6 @@ def test_removal_and_expiry_protect_default_pin_inflight_and_unknown_activity():
         sampled_at=now,
     )
 
-    assert expired_temporary_models(records, snapshot, now=now) == ("old",)
     assert plan_temporary_model_removal("pinned", records, snapshot, now=now).blockers[0].reason == "pinned"
     assert plan_temporary_model_removal("busy", records, snapshot, now=now).blockers[0].reason == "in_flight"
     assert plan_temporary_model_removal("unknown-activity", records, snapshot, now=now).blockers[0].reason == "unknown_activity"

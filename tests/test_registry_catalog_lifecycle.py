@@ -46,8 +46,7 @@ def bridge(catalog, registry):
 
 
 def add_model(c, api, weights):
-    status, job = request(c.address, 'POST', '/v1/models', {'name':'fine', 'path':str(weights), 'base':'base'})
-    assert status == 200, job
+    job = api.add({'name':'fine', 'path':str(weights), 'base':'base'})
     assert job['description'] == {'kind':'add_model', 'model':'fine', 'base':'base'}
     make_quiet(c.q.quiet, c.clock)
     result = c.runtime.process_once()
@@ -73,8 +72,7 @@ def test_real_registry_add_installs_catalog_before_existing_place_confirm(bridge
 def test_real_registry_remove_keeps_late_pin_and_then_retires_admission(bridge):
     c, api, weights, _ = bridge
     add_model(c, api, weights)
-    status, job = request(c.address, 'DELETE', '/v1/models/fine')
-    assert status == 200, job
+    job = api.remove('fine')
     assert job['description']['kind'] == 'remove_model'
     before = c.path.read_bytes(), c.store.catalog_checkpoint()
     c.store.put_pin(Pin('fine', c.clock()+100, 'fixture-owner'))
@@ -92,10 +90,12 @@ def test_real_registry_remove_keeps_late_pin_and_then_retires_admission(bridge):
     assert status == 404 and body['error'] == 'unknown_model'
 
 
-def test_real_registry_preview_never_enters_catalog_or_persists_claim(bridge):
+def test_removed_registry_write_surface_never_enters_catalog(bridge):
     c, api, weights, submitted = bridge
     before = c.path.read_bytes(), c.store.catalog_checkpoint(), len(c.world['collectors']), c.store._db.execute('PRAGMA user_version').fetchone()[0]
-    assert api.preview_add({'name':'fine', 'path':str(weights), 'base':'base'})['would']
+    from llmsvc.registry import RegistryError
+    with pytest.raises(RegistryError, match='directory-driven'):
+        api.handle('POST', '/v1/models', {'name':'fine', 'path':str(weights), 'base':'base'})
     assert submitted == [] and c.world['calls'] == [] and not c.q._pending
     assert before == (c.path.read_bytes(), c.store.catalog_checkpoint(), len(c.world['collectors']), c.store._db.execute('PRAGMA user_version').fetchone()[0])
 

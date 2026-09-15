@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Scheduler entry point: read-only by default, with opt-in pin intent writes."""
 
 import argparse
@@ -263,6 +264,14 @@ def main():
                 logging.getLogger("llmsvc.catalog").info(json.dumps({"kind": "catalog_restored",
                     "catalog_epoch": scheduler.catalog_epoch, "phase": checkpoint["phase"],
                     "fenced": scheduler.catalog_fenced, "mode": config.catalog_mode}))
+        if (config.model_reconcile_enabled and scheduler.registry is not None
+                and scheduler.registry.discover is not None):
+            from llmsvc.reconcile import DirectoryReconciler
+            scheduler.reconciler = DirectoryReconciler(
+                scheduler, scheduler.registry, interval_seconds=config.model_reconcile_interval_seconds,
+                clock=scheduler.monotonic)
+        else:
+            scheduler.reconciler = None
 
     except (OSError, ValueError, TypeError, ImportError, sqlite3.Error) as exc:
         try:

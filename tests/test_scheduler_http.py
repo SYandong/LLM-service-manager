@@ -251,7 +251,6 @@ def test_stopping_http_mutation_matrix_is_fail_closed(tmp_path):
         ("POST", "/v1/place/lease-1/release", None),
         ("POST", "/v1/reserve", {"gpu": 0, "size_gb": 1, "until": until, "by": "fixture"}),
         ("DELETE", "/v1/reserve/reserve-1", None),
-        ("POST", "/v1/models", {}),
     ]
     before_events = scheduler.events_since(0)
     try:
@@ -260,6 +259,9 @@ def test_stopping_http_mutation_matrix_is_fail_closed(tmp_path):
                    for method, path, body in mutations]
         for index, (status, payload) in enumerate(results):
             assert status == 503 and payload["error"] == "scheduler_stopping", (index, status, payload, results)
+        # The removed registry write surface answers before any stopping check.
+        assert request(server.server_address, "POST", "/v1/models", body=json.dumps({})) == (
+            405, {"error": "registry_writes_removed"})
         assert store.active(time.time()) == ((), ())
         assert scheduler.events_since(0) == before_events
         assert transport_calls == []
@@ -294,7 +296,7 @@ def test_direct_controller_admission_guards_reject_stopping_without_mutation(tmp
         with pytest.raises(IntentWriteError, match="scheduler_stopping"):
             with scheduler._reserve_lock(time.monotonic() + 1):
                 pass
-        with pytest.raises(IntentWriteError, match="scheduler_stopping"):
+        with pytest.raises(IntentWriteError, match="registry_writes_removed"):
             scheduler.registry_request("POST", "/v1/models", {}, dry_run=False)
         from llmsvc.bootstrap import BootstrapController
         bootstrap = BootstrapController.__new__(BootstrapController)

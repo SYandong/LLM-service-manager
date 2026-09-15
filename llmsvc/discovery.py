@@ -1,11 +1,12 @@
 # Generated-By: Claude Code / claude-fable-5-1
-"""Read-only discovery of importable model directories under the shared roots.
+# Generated-By: OpenCode / deepseek-v4.1-flash
+"""Read-only discovery of registrable model directories under the shared roots.
 
 Discovery is not admission. A scan reads at most one bounded ``llmsvc.json``
 per one-level subdirectory and stats weight files; it never writes a file,
-allocates a port, touches the llama-swap configuration or starts a unit. Import
-stays an explicit action that re-reads the same descriptor through the existing
-registry validation path.
+allocates a port, touches the llama-swap configuration or starts a unit. The
+directory reconciler re-reads the same descriptor through the existing registry
+validation path when it submits the model.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ class Candidate:
     name: str
     path: str
     base: str | None = None
-    status: str = "importable"
+    status: str = "pending"
     reason: str | None = None
     overrides: ImportOverrides = field(default_factory=ImportOverrides)
 
@@ -177,26 +178,26 @@ class ModelDiscovery:
             return self._candidates
 
     def candidates(self, configured_names: Iterable[str] = ()) -> tuple[Candidate, ...]:
-        """Overlay ``imported`` for names already present in the configuration."""
+        """Overlay ``configured`` for names already present in the configuration."""
         known = {str(name) for name in configured_names}
-        return tuple(replace(item, status="imported", reason=None)
-                     if item.status == "importable" and item.name in known else item
+        return tuple(replace(item, status="configured", reason=None)
+                     if item.status == "pending" and item.name in known else item
                      for item in self.scan())
 
     def resolve(self, name: str, configured_names: Iterable[str] = ()) -> Candidate:
-        """Return one importable candidate or explain why it cannot be imported.
+        """Return one registrable candidate or explain why it cannot be added.
 
         An unusable directory whose displayed name happens to collide never
-        shadows a real candidate, so a listed import stays importable.
+        shadows a real candidate, so a listed candidate stays registrable.
         """
         matches = [item for item in self.candidates(configured_names) if item.name == name]
         for item in matches:
-            if item.status == "importable":
+            if item.status == "pending":
                 return item
         for item in matches:
-            if item.status == "imported":
+            if item.status == "configured":
                 raise RegistryError("model is already configured: " + display_name(name))
-            raise RegistryError("model is not importable: " + str(item.reason))
+            raise RegistryError("model is not registrable: " + str(item.reason))
         raise RegistryError("no discovered model named " + display_name(name)
                             + " with an " + CONFIG_FILENAME + " under the configured shared roots")
 
@@ -251,10 +252,10 @@ class ModelDiscovery:
                                             reason="symlinked directories are not scanned"))
                 continue
             candidate = self._read(name, path)
-            if candidate.status == "importable" and candidate.name in claimed:
+            if candidate.status == "pending" and candidate.name in claimed:
                 candidate = replace(candidate, status="invalid",
                                     reason="another discovered directory already claims this name")
-            if candidate.status == "importable":
+            if candidate.status == "pending":
                 claimed.add(candidate.name)
             candidates.append(candidate)
         candidates.sort(key=lambda item: (item.name, item.path))
@@ -268,7 +269,7 @@ class ModelDiscovery:
             if overrides.weights_gb is None:
                 overrides = replace(overrides, weights_gb=measure_weights_gb(
                     path, self.roots, weight_index_max_bytes=self.weight_index_max_bytes))
-            return Candidate(name, path, base=base, status="importable", overrides=overrides)
+            return Candidate(name, path, base=base, status="pending", overrides=overrides)
         except (RegistryError, OSError, ValueError) as exc:
             return Candidate(display_name(directory_name), path, status="invalid", reason=str(exc))
 

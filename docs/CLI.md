@@ -209,9 +209,9 @@ ID 来自 reserve 回执或 `status --json` 中的 reserves。命令发送 URL �
 
 TUI 使用相同的 `unreserve ID` 命令；确认回复后立即刷新，并移除服务器已不再报告的预约标记。`--dry-run` 保留标记和预约。缺失/空/控制字符 ID 在请求前拒绝，`--json` 保留完整回执。
 
-## 把模型放进共享目录并导入
+## 把模型放进共享目录（自动登记）
 
-放好权重、写一个 `llmsvc.json`，剩下的由 scheduler 完成：
+放好权重、写一个 `llmsvc.json`，剩下的由 scheduler 在空闲时完成：
 
 ```sh
 # 1) 权重放在 registry.shared_roots 之下的一层子目录里（线上是 /srv/models）
@@ -229,14 +229,15 @@ JSON
 
 # 2) 看 scheduler 发现了什么（只读，不写任何配置）
 LLM_URL=http://scheduler:8011 python3 llm models
-
-# 3) 先预览，再导入
-LLM_URL=http://scheduler:8011 python3 llm import foo-7b --dry-run --json
-LLM_URL=http://scheduler:8011 python3 llm import foo-7b
-LLM_URL=http://scheduler:8011 python3 llm import --all --dry-run
 ```
 
-`llmsvc.json` 字段（其余键一律 400 拒绝）：
+三个事实：
+
+- **放进去就登记**。scheduler 在空闲时（零在途请求、无待处理登记事务）把 `pending` 候选提交一次，走与手写模型相同的路径/权重/名称/端口校验与提交队列；被登记的模型记录带 `metadata.llmsvc_registry`。一次登记会触发一次短暂的 llama-swap 维护重启，已醒模型的权重留在 RAM。
+- **删掉 `llmsvc.json`（或整个目录）就注销**。若模型正在运行，scheduler 先把它停止，再注销。只有 scheduler 自己登记过的模型（带 `metadata.llmsvc_registry` 记录）会被自动删除；手写进 llama-swap 配置的模型永远不会被自动删除或修改。
+- **没有命令式写入**。`llm import` / `llm add` / `llm rm` 与 `POST`/`DELETE /v1/models` 都已移除；HTTP 写返回 405 `registry_writes_removed`。
+
+`llmsvc.json` 字段（其余键一律拒绝）：
 
 | 字段 | 必填 | 含义 |
 |---|---|---|
@@ -249,36 +250,25 @@ LLM_URL=http://scheduler:8011 python3 llm import --all --dry-run
 
 明确拒绝：`is_default`（导入的模型永远不是默认模型）、`cmd`/`cmdStop`/`argv`/`command`/`env`/`shell` 等任何自带命令或 shell 片段、以及任何未列出的键。覆写只在克隆出的块上生效，仍然经过既有的 shell-token 禁令与命令形状校验；base 的配置块不被修改。
 
-- **发现是只读的，导入是显式的**。`models` 输出里的 `discovered` 只说明“这个目录有一份可解析的 `llmsvc.json`”，不代表已准入、已登记或 proxy 已采用。没有 `llmsvc.json` 的目录不会被列出；符号链接目录、不可读的 shared root、解析失败的描述文件列为 `invalid` 并带原因；名字已经在 llama-swap 配置里的列为 `imported`。扫描只看每个 shared root 的**一层**子目录，最多列 200 条，按名字排序，`llmsvc.json` 字节数受 `registry.model_config_max_bytes` 限制，结果按目录/描述文件 mtime 缓存。
-- `import NAME` 只发送 `{"import": NAME}`。**覆写不来自客户端**：scheduler 自己重新读取该目录的 `llmsvc.json`，再走与 `add` 完全相同的路径/权重/名称/端口校验与同一条提交队列。`--dry-run` 与 `add` 一样返回 would/plan/blocked_by 且不写配置；被阻塞的预览返回退出码 1。
-- `import --all` 按列出的顺序逐个提交当前可导入的候选，每个候选单独返回一条结果；某一个失败不会掩盖其它结果，任一失败即退出码非零。没有可导入候选时输出说明并返回 0。
-- 导入成功后，该模型的 `collectors.models` 条目与 catalog profile 由 scheduler 从登记记录生成：`unit=vllm-<name>.service`、`daemon_url=http://127.0.0.1:<分配到的端口>`、`util`/`weights_gb` 取自描述文件、`budget_gb = util × 最新快照里最小的已知 GPU total_gb`、`is_default=false`。**没有新鲜快照或 GPU 容量未知时导入被拒绝并说明原因**，不会用猜测的容量记账。手写的 `catalog_profiles` 条目仍然优先，但必须与描述文件一致（unit/daemon_url/port/is_default/util/weights_gb），否则 400 拒绝。
-- 在 native-maintenance 站点上导入会同步维护 profile：scheduler 在候选被适配器校验前，把新模型的 `unit`/`backend_origin`/`process_argv` 行原子写入 `maintenance_command` 里 `--profile` 指向的那份 JSON（提交被拒时撤回，`rm` 的行在事务结清后才删）。`--dry-run` 不写该文件。
-- 老版本 scheduler 不返回 `discovered`；此时 `models` 仍正常工作，`import` 明确报“该 scheduler 不提供发现列表”，不猜测候选。
-- TUI 当前不提供 `import` 子命令，请用 CLI。
+`llm models` 在配置行之后列出共享目录发现：每行 `<status>  <name>  <path>  <reason 或 ->`；没有可列项时打印 `Nothing new under the shared roots`。状态含义：
 
-## 完整权重模型列表与预览
+- `pending`：目录有待登记，scheduler 会在下一个空闲时刻提交（同一候选有退避：首次 60 s，逐次加倍，上限 3600 s）。
+- `configured`：该名字已在 llama-swap 配置里。
+- `invalid`：描述文件不可解析或目录不可用，带原因。
+- `orphaned`：登记记录还在，但 `llmsvc.json` 已被删除/改名为别的模型；scheduler 会停止该模型（若在运行）并注销。
 
-```sh
-LLM_URL=http://scheduler:8011 python3 llm models --json
-LLM_URL=http://scheduler:8011 python3 llm add /shared/weights/ft --name ft --base base --dry-run
-LLM_URL=http://scheduler:8011 python3 llm rm ft --dry-run --json
-```
+扫描只看每个 shared root 的**一层**子目录，最多列 200 条，按名字排序，`llmsvc.json` 字节数受 `registry.model_config_max_bytes` 限制，结果按目录/描述文件 mtime 缓存。
 
-`add <path> --name X --base BASE` 发送 `{name,path,base}`，路径由 scheduler 按其配置的 shared_roots 验证；客户端不在自己的容器里解析、检查或改写路径。只支持完整权重，`--lora` 未开放。`rm NAME` 使用编码后的单次解码路径段、空 DELETE body。服务器继续验证名称、base、端口、路径、临时记录与保护条件；不由 CLI 猜测或放宽。
+- 登记成功后，该模型的 `collectors.models` 条目与 catalog profile 由 scheduler 从登记记录生成：`unit=vllm-<name>.service`、`daemon_url=http://127.0.0.1:<分配到的端口>`、`util`/`weights_gb` 取自描述文件、`budget_gb = util × 最新快照里最小的已知 GPU total_gb`、`is_default=false`。**没有新鲜快照或 GPU 容量未知时登记被拒绝并说明原因**，不会用猜测的容量记账。手写的 `catalog_profiles` 条目仍然优先，但必须与描述文件一致（unit/daemon_url/port/is_default/util/weights_gb），否则拒绝。
+- 在 native-maintenance 站点上登记会同步维护 profile：scheduler 在候选被适配器校验前，把新模型的 `unit`/`backend_origin`/`process_argv` 行原子写入 `maintenance_command` 里 `--profile` 指向的那份 JSON（提交被拒时撤回；注销的行在事务结清后才删）。
+- 老版本 scheduler 不返回 `discovered`；此时 `models` 仍正常工作，只显示配置侧内容。
+- TUI 命令框使用相同的 `models`；`import` / `add` / `rm` 已不是命令，输入它们按未知命令处理。
 
-- 支持 #152 详情的服务还返回 inventory：可包含永久配置模型与临时模型，但 records 仍只含临时记录。CLI/TUI 显示 source=config、temporary 标志、配置 base/port、独立观测的 runtime_state、last-use/idle-expiry 和 model-level removable/protection。未知观测、端口或时间保留 unknown/null；expiry 为 Unix 秒的空闲过期候选，不是已安排的删除。removable 仅表示模型级资格，不代替顶层 quiet/故障/恢复/写禁用等全局阻塞。
-- Add/rm 预览可附加 plan：显示既有 owner 计算的 model/base/daemon_port/util_macro 与 projected/candidate SHA256。端口仅为 pending FIFO 投影下的计划值，未预留；util_macro 是配置，不是实测显存或分配保证。重复预览不会占用端口或写配置；提交前需重新规划。candidate hash 不证明 proxy 已采用、旧 generation 已退出或资源收尾。受保护/无效 rm 仍返回 400，不能因内部预览返回 empty would 而视为成功。
-- 旧服务省略 inventory/plan 时仍按基础字段工作；提供的详情形状无效时明确报协议错误，不猜测缺失值。实际临时 HTTP/复制 CLI/TUI 检查覆盖了 pending FIFO 下的重复计划、未预留端口、过期/保护/unknown 展示和原有 400/409/503/405 边界；配置、队列和事件保持不变。详情不会带候选配置字节或完整命令；`--json` 保留合法返回数据及 null，普通 CLI 与 TUI 另外给出上述边界提示。
-- `models` 读取同一个 scheduler 的 `/v1/models`，返回配置文件中的 **temporary registry records**，不是全部常驻模型发现，也不是当前 proxy 已采用配置的证明。常驻/运行状态看 `status`。输出保留 records、writes_enabled 和 blocked_by；空 records 是可用列表中的空集合，503 unavailable 不会被显示为空集合。
-- 默认入口缺少 catalog 验证能力，模型写操作仍关闭；显式配齐可信 profile/instance/quiet/adoption/settlement/cleanup 能力的 scheduler 可接受既有 add/rm 请求并返回 job。预览返回 would、dry_run=true、config_committed=false 和真实阻塞原因，包括 registry_writes_disabled、unknown quiet 与当前保护/故障条件。合法编辑不表示可提交；预览没有 job ID、排队项、staging、落盘或 model action。阻塞预览返回退出码 1，正常列表读取返回 0。
-- 未配置 registry 返回 503 registry_not_configured；路径/模型等校验失败为 400 registry_invalid_request（保留 message）；配置不可安全读取为 503 registry_unavailable；待核对事务使预览返回 409 registry_reconciliation_required。`--json` 保留结构化错误 body 并返回非零；普通输出与 TUI 同样保留详情。
-- 不带 `--dry-run` 的 add/rm 仍可被服务器以 405 read_only/operation_not_enabled 拒绝；CLI 不启用写操作、不自动切换成预览，也不重试不确定的 POST/DELETE。未知结果先核对状态与事件。
-- 结果呈现支持既有 registry job 的 queued/blocked/applied/failed/timed_out/reconciliation_required 字段，明确分开排队、config_committed 和配置阶段 status；applied 不替代全局 catalog 围栏/采用/结算判断。queued 返回非零并显示“not applied”；不会把 HTTP 200 或文件提交当完整应用。默认入口不会创建这些 job；具备 catalog 提交能力的服务器沿用现有 job 形状，可通过 `registry` 读取状态，没有新增 job 轮询端点。
+`models` 读取同一个 scheduler 的 `/v1/models`，返回配置文件中的 **temporary registry records**，不是全部常驻模型发现，也不是当前 proxy 已采用配置的证明。常驻/运行状态看 `status`。输出保留 records、writes_enabled、blocked_by 与 `reconcile`（`enabled` 表示是否挂载了目录 reconciler，`last` 是它最近一次 `run_once` 的小结果，尚未运行时为 null）。
 
-实际临时 HTTP/配置/完整权重结构夹具已验证单文件 `-I -S` 的列表、add/rm 预览、结构化错误，以及 100×30/窄终端 TUI；所有配置文件、队列、事件和 unit/transport 回调保持不变。权重内容和状态为 CPU 测试夹具，没有冷启动推理或实际 reload。
-
-TUI 输入框使用相同的 `models`、`add`、`rm` 命令。列表结果不会替换运行时模型快照；迟到列表不会覆盖之后的写请求或退出界面。预览/操作回复后照常刷新 state，保留结构化阻塞与提交状态。列表、预览以及 CPU 夹具都不提供可靠 quiet、采用/收尾或生产授权，完整 #19/#20 验收仍继续。
+- 支持 #152 详情的服务还返回 inventory：可包含永久配置模型与临时模型，但 records 仍只含临时记录。CLI/TUI 显示 source=config、temporary 标志、配置 base/port、独立观测的 runtime_state、last-use 和 model-level removable/protection。未知观测、端口或时间保留 unknown/null。removable 仅表示模型级资格，不代替顶层 quiet/故障/恢复/写禁用等全局阻塞。
+- 未配置 registry 返回 503 registry_not_configured；配置不可安全读取返回 503 registry_unavailable；`--json` 保留结构化错误 body 并返回非零；普通输出与 TUI 同样保留详情。
+- 写接口已移除：`POST`/`DELETE /v1/models` 统一返回 405 `registry_writes_removed`，dry-run 与只读模式都不例外。
 
 ### 只读队列与恢复状态
 
@@ -351,13 +341,13 @@ LLM_URL=http://scheduler:8011 python cli/llm
 
 ### 命令与刷新
 
-- 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL`、`unreserve ID`、`models`、`registry`、`add PATH --name X --base BASE`、`rm NAME`、`free`、`wake MODEL`、`sleep MODEL`、`stop MODEL`、`preload MODEL`、`reserve --gpu N --size 80G --for 4h` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。
-- 同一时刻只执行一个写请求（pin/unpin/free/wake/reserve/unreserve/add/rm/sleep/stop/preload），不会把重复提交排队。写请求完成后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态，刷新失败会单独说明，已成功的写入不会因此重试。
+- 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL`、`unreserve ID`、`models`、`registry`、`free`、`wake MODEL`、`sleep MODEL`、`stop MODEL`、`preload MODEL`、`reserve --gpu N --size 80G --for 4h` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。`import` / `add` / `rm` 已不是命令，输入后按未知命令处理。
+- 同一时刻只执行一个写请求（pin/unpin/free/wake/reserve/unreserve/sleep/stop/preload），不会把重复提交排队。写请求完成后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态，刷新失败会单独说明，已成功的写入不会因此重试。
 - 后台轮询只写底栏，不覆盖命令结果；显式 `status` / `status --json` 才写结果区。刷新失败保留上一份快照，并在底栏显示错误和 UTC 时间。
 - 实际 `free --ram` 仍先弹出二次确认窗口，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。
 - usage 视图用 `/usage`、`/usage 30` 进入，`status` 命令或 Status 按钮返回，按同一刷新间隔刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
 - 活动读取失败在底栏显示 `Partial update · activity unavailable` 和受限安全原因（预算、锁、schema、parse 等）；旧版 `ValueError` 或未知原因只显示 `reason unavailable`。该轮活动数值按未知显示，不沿用旧计数；完整当前 snapshot/errors 保留在 `status --json`，不会被人类文案改写。读取成功而来源为 unknown/空时仍保留已读取的计数，不据此推断“未记录来源”、容器身份或数据库读取失败；模型名与 `source unavailable` 的冗余详情行已去掉，诊断保留在底栏与 `status --json`。
-- Reserve 的预览、只读拒绝与实际回执语义见上节；默认入口的模型实际写入仍关闭；具有显式 catalog 提交能力的服务器可以排队 add/rm，queued 不等于 applied 或全局动作可用。不能用本客户端命令启用生产调度。
+- Reserve 的预览、只读拒绝与实际回执语义见上节；模型登记/注销是目录驱动、由 scheduler 自己提交的，客户端没有对应的写命令，queued 不等于 applied 或全局动作可用。不能用本客户端命令启用生产调度。
 
 ### 紧凑界面与真实进度（#168）
 

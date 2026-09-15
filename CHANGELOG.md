@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Models
+
+- Model registration is directory-driven: a model is served iff a one-level
+  subdirectory of a configured shared root contains a valid `llmsvc.json`. The
+  scheduler's `DirectoryReconciler` registers `pending` candidates at the next
+  idle moment and unregisters records whose descriptor was deleted or renamed
+  (stopping a running model first). Hand-written models are never touched.
+- `llm import`, `llm add`, `llm rm` and the HTTP `POST`/`DELETE /v1/models`
+  write endpoints are removed; the write routes now return 405
+  `registry_writes_removed`. `llm models` lists `pending` / `configured` /
+  `invalid` / `orphaned` discovery rows. Discovery statuses were renamed from
+  `importable`/`imported`.
+- New configuration keys `model_reconcile_enabled` (default true) and
+  `model_reconcile_interval_seconds` (default 30, up to 3600) bound the
+  reconciler cadence and its 60 s-doubling backoff (capped at 3600 s).
+- New event kind `model_reconcile` records every submitted action and caught
+  failure; `GET /v1/models` gains a `reconcile: {enabled, last}` field.
+
 ### Scheduling
 
 - A `catalog_mode: maintenance` configuration transaction now has its own

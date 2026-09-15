@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from llmsvc.registry import ModelRegistry
+from llmsvc.registry import ModelRegistry, RegistryError
 from llmsvc.reload import ReloadError
 from llmsvc.state import Activity, ModelState, Pin
 from test_registry_api import registry
@@ -20,12 +20,14 @@ def saved(registry):
     return api, queue, weights, state, clock, calls, units, drain
 
 
-def test_preview_does_not_call_catalog_submission_even_when_injected(registry):
+def test_removed_write_surface_does_not_call_catalog_submission(registry):
     api, queue, weights, _, _, calls, _, _ = saved(registry)
-    api.submit_change = lambda *a, **kw: pytest.fail('preview invoked catalog submission')
+    api.submit_change = lambda *a, **kw: pytest.fail('removed write invoked catalog submission')
     before = queue.path.read_bytes(), queue.queue_snapshot()
-    assert api.preview_add({'name': 'next', 'path': str(weights), 'base': 'base'})['would']
-    assert api.preview_remove('fine')['would']
+    with pytest.raises(RegistryError, match='directory-driven'):
+        api.handle('POST', '/v1/models', {'import': 'next'})
+    with pytest.raises(RegistryError, match='directory-driven'):
+        api.handle('DELETE', '/v1/models/fine', None)
     assert before == (queue.path.read_bytes(), queue.queue_snapshot()) and calls == []
 
 
@@ -65,18 +67,16 @@ def test_remove_passes_late_protection_and_cleanup_to_existing_queue(registry):
     assert queue.get(job['id'])['status'] == 'applied'
 
 
-def test_expiry_and_manual_remove_use_same_submission(registry):
+def test_repeated_manual_remove_uses_same_submission(registry):
     api, queue, _, _, clock, _, _, _ = saved(registry)
     forwarded = []
     def submission(transform, **options):
         forwarded.append(options)
         return queue.enqueue(transform, **options)
     api.submit_change = submission
-    clock[0] += 8 * 86400
-    jobs = api.expire()
-    assert len(jobs) == 1 and len(forwarded) == 1
-    assert forwarded[0]['description']['model'] == 'fine'
-    assert api.remove('fine') == jobs[0] and len(forwarded) == 1
+    job = api.remove('fine')
+    assert len(forwarded) == 1 and forwarded[0]['description']['model'] == 'fine'
+    assert api.remove('fine') == job and len(forwarded) == 1
 
 
 def test_invalid_submission_callback_is_rejected(registry):

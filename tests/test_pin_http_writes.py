@@ -156,10 +156,16 @@ def test_default_readonly_rejects_live_pin_without_calling_store(service, monkey
     assert exc.value.status == 405
 
 
-@pytest.mark.parametrize("route", ["/v1/free", "/v1/wake/model", "/v1/place", "/v1/models"])
+@pytest.mark.parametrize("route", ["/v1/free", "/v1/wake/model", "/v1/place"])
 def test_other_live_actions_remain_disabled(service, route):
     _, address, _, _ = service
     assert request(address, "POST", route, {}) == (405, {"error": "operation_not_enabled"})
+
+
+def test_model_registry_write_surface_is_removed(service):
+    _, address, _, _ = service
+    assert request(address, "POST", "/v1/models", {}) == (405, {"error": "registry_writes_removed"})
+    assert request(address, "DELETE", "/v1/models/base", None) == (405, {"error": "registry_writes_removed"})
 
 
 @pytest.mark.parametrize("changes,status,error", [

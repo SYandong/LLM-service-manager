@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Pure helpers for temporary full-weight model registry updates."""
 
 from __future__ import annotations
@@ -27,7 +28,6 @@ from llmsvc.state import Action, Activity, Blocker, ModelState, StateSnapshot
 SAFE_MODEL_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 DEFAULT_MODEL_CONFIG_MAX_BYTES = 1024 * 1024
 DEFAULT_WEIGHT_INDEX_MAX_BYTES = 8 * 1024 * 1024
-DEFAULT_EXPIRY_SECONDS = 7 * 24 * 60 * 60
 WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt")
 LORA_WEIGHT_NAMES = {"adapter_model.bin", "adapter_model.safetensors"}
 SHELL_TOKENS = {";", "|", "||", "&&", "<", ">", ">>"}
@@ -251,24 +251,6 @@ def remove_temporary_model(
     models.pop(name, None)
     _remove_group_membership(new_config, name)
     return RegistryRemoveResult(config=new_config, records=new_records, record=record, actions=plan.actions)
-
-
-def expired_temporary_models(
-    temporary_records: Mapping[str, Mapping[str, Any]],
-    snapshot: StateSnapshot,
-    *,
-    now: float,
-    max_unused_seconds: float = DEFAULT_EXPIRY_SECONDS,
-) -> tuple[str, ...]:
-    """Return temporary model names that are safe to expire after seven idle days."""
-    expired: list[str] = []
-    for name in sorted(temporary_records):
-        plan = plan_temporary_model_removal(name, temporary_records, snapshot, now=now)
-        if not plan.allowed or plan.last_used_at is None:
-            continue
-        if now - plan.last_used_at >= max_unused_seconds:
-            expired.append(name)
-    return tuple(expired)
 
 
 def _models_mapping(config: dict[str, Any]) -> dict[str, Any]:
@@ -1334,12 +1316,6 @@ class ModelRegistry:
     def add(self, body: Mapping[str, Any], *, dry_run: bool = False) -> dict:
         return self._add(body, dry_run=dry_run)
 
-    def preview_add(self, body: Mapping[str, Any]) -> dict:
-        """Plan against pending FIFO changes; no port reservation or config write."""
-        report: dict = {}
-        result = self._add(body, dry_run=True, report=report)
-        return {**result, **report, "port_reserved": False, "config_written": False}
-
     def discovered(self, configured_names: Sequence[str] = ()) -> list[dict]:
         """Read-only discovery rows; an empty list when discovery is unconfigured."""
         if self.discover is None:
@@ -1357,7 +1333,7 @@ class ModelRegistry:
         candidate = self.discover.resolve(target, configured)
         return candidate.name, candidate.path, candidate.base, candidate.overrides
 
-    def _add(self, body: Mapping[str, Any], *, dry_run: bool, report: dict | None = None) -> dict:
+    def _add(self, body: Mapping[str, Any], *, dry_run: bool) -> dict:
         if "lora" in body:
             raise RegistryError("LoRA registration is disabled pending issue #21 measurements")
         overrides = ImportOverrides()
@@ -1376,34 +1352,13 @@ class ModelRegistry:
                                            model_config_max_bytes=self.model_config_max_bytes,
                                            weight_index_max_bytes=self.weight_index_max_bytes,
                                            overrides=overrides)
-            candidate = self._encode(data, result.config, result.records)
-            if report is not None:
-                macros = result.config["models"][name].get("macros")
-                report.update(model={"name": name, "base": base,
-                                     "daemon_port": result.record["daemon_port"],
-                                     "util_macro": copy.deepcopy(macros.get("util") if isinstance(macros, Mapping) else None)},
-                              projected_base_sha256=hashlib.sha256(data).hexdigest(),
-                              candidate_sha256=hashlib.sha256(candidate).hexdigest(), blocked_by=[])
-            return candidate
+            return self._encode(data, result.config, result.records)
         return self._enqueue(transform, description={"kind": "add_model", "model": name, "base": base}, dry_run=dry_run)
 
-    def remove(self, name: str, *, dry_run: bool = False, require_expired: bool = False) -> dict:
-        return self._remove(name, dry_run=dry_run, require_expired=require_expired)
+    def remove(self, name: str, *, dry_run: bool = False) -> dict:
+        return self._remove(name, dry_run=dry_run)
 
-    def preview_remove(self, name: str) -> dict:
-        """Show model-level protection or the projected removal without cleanup."""
-        with self.queue.action_lock:
-            plan = plan_temporary_model_removal(name, self.records(), self.queue.snapshot(), now=self.now(),
-                                                max_snapshot_age_seconds=self.queue.max_snapshot_age)
-            if not plan.allowed:
-                return {"would": [], "blocked_by": [asdict(item) for item in plan.blockers],
-                        "candidate_sha256": None, "projected_base_sha256": None, "config_written": False}
-            report: dict = {}
-            result = self._remove(name, dry_run=True, report=report)
-            return {**result, **report, "config_written": False}
-
-    def _remove(self, name: str, *, dry_run: bool, require_expired: bool = False,
-                report: dict | None = None) -> dict:
+    def _remove(self, name: str, *, dry_run: bool) -> dict:
         validate_safe_model_name(name)
         with self.queue.action_lock:
             existing = self._removals.get(name)
@@ -1413,10 +1368,7 @@ class ModelRegistry:
                 records = self.records()
                 state = self.queue.snapshot()
                 plan = plan_temporary_model_removal(name, records, state, now=self.now())
-                blockers = [asdict(item) for item in plan.blockers]
-                if require_expired and plan.allowed and name not in expired_temporary_models(records, state, now=self.now()):
-                    blockers.append({"model": name, "reason": "recent_activity"})
-                return blockers
+                return [asdict(item) for item in plan.blockers]
             blockers = precheck()
             if blockers:
                 raise RegistryError("model cannot be removed: " + ", ".join(item["reason"] for item in blockers))
@@ -1425,11 +1377,7 @@ class ModelRegistry:
             def transform(data: bytes) -> bytes:
                 config, records = self._decode(data)
                 result = remove_temporary_model(config, records, name=name, snapshot=self.queue.snapshot(), now=self.now())
-                candidate = self._encode(data, result.config, result.records)
-                if report is not None:
-                    report.update(projected_base_sha256=hashlib.sha256(data).hexdigest(),
-                                  candidate_sha256=hashlib.sha256(candidate).hexdigest(), blocked_by=[])
-                return candidate
+                return self._encode(data, result.config, result.records)
             def cleanup(*, deadline: float) -> None:
                 # The routing entry is gone before cleanup. Core must recheck protection
                 # against late data-plane activity before touching the target unit.
@@ -1479,8 +1427,6 @@ class ModelRegistry:
                              "daemon_port": record["daemon_port"] if record is not None else (model.port if model else None),
                              "created_at": record["created_at"] if record is not None else None,
                              "last_used_at": plan.last_used_at,
-                             "expires_at": (plan.last_used_at + DEFAULT_EXPIRY_SECONDS
-                                            if plan.last_used_at is not None else None),
                              "runtime_state": model.state if model else "unknown",
                              "removable": plan.allowed,
                              "blocked_by": [asdict(item) for item in plan.blockers]})
@@ -1492,16 +1438,9 @@ class ModelRegistry:
                 result["records"] = records
             return result
 
-    def expire(self, *, dry_run: bool = False) -> list[dict]:
-        with self.queue.action_lock:
-            names = expired_temporary_models(self.records(), self.queue.snapshot(), now=self.now())
-            return [self.remove(name, dry_run=dry_run, require_expired=True) for name in names]
-
     def handle(self, method: str, path: str, body: Mapping[str, Any], *, dry_run: bool = False) -> dict:
-        if method == "POST" and path == "/v1/models":
-            return self.add(body, dry_run=dry_run)
-        if method == "DELETE" and path.startswith("/v1/models/"):
-            if body:
-                raise RegistryError("remove does not accept a request body")
-            return self.remove(path[len("/v1/models/"):], dry_run=dry_run)
+        if method in ("POST", "DELETE"):
+            raise RegistryError(
+                "model registration is directory-driven; put the weights and an llmsvc.json under a shared root, "
+                "or delete the llmsvc.json to unregister")
         raise RegistryError("unsupported registry endpoint")
