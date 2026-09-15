@@ -74,6 +74,8 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                     self._json(200, self.server.scheduler.registry_request("GET", target.path))
             elif target.path == "/v1/usage":
                 self._usage(target.query)
+            elif target.path == "/v1/usage/report":
+                self._usage_report(target.query)
             elif target.path == "/v1/events":
                 query = parse_qs(target.query, keep_blank_values=True)
                 values = query.get("since", [self.headers.get("Last-Event-ID", "0")])
@@ -104,6 +106,22 @@ class SchedulerHandler(BaseHTTPRequestHandler):
             if not days.isascii() or not days.isdigit():
                 raise ValueError("invalid days")
             result = self.server.scheduler.usage(days=int(days), by=by)
+        except ValueError:
+            self._json(400, {"error": "invalid_usage_query"})
+            return
+        self._json(200 if result["known"] else 503, result)
+
+    def _usage_report(self, raw_query):
+        query = parse_qs(raw_query, keep_blank_values=True)
+        if set(query) - {"days", "by"} or any(len(values) != 1 for values in query.values()):
+            self._json(400, {"error": "invalid_usage_query"})
+            return
+        days = query.get("days", ["7"])[0]
+        by = query.get("by", ["user"])[0]
+        try:
+            if not days.isascii() or not days.isdigit():
+                raise ValueError("invalid days")
+            result = self.server.scheduler.usage_report(days=int(days), by=by)
         except ValueError:
             self._json(400, {"error": "invalid_usage_query"})
             return

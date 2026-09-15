@@ -36,7 +36,8 @@ def make_db(path, schema=SCHEMA):
     return conn
 
 
-def insert_activity(conn, row_id, ts, model, input_tokens=0, output_tokens=0, metadata=None):
+def insert_activity(conn, row_id, ts, model, input_tokens=0, output_tokens=0, metadata=None,
+                    status=200, error_msg=None, duration_ms=10):
     conn.execute(
         """
         INSERT INTO activity (
@@ -44,9 +45,9 @@ def insert_activity(conn, row_id, ts, model, input_tokens=0, output_tokens=0, me
             cache_tokens, draft_tokens, draft_acc_tokens, input_tokens, output_tokens,
             prompt_per_second, tokens_per_second, duration_ms, error_msg, metadata_json
         )
-        VALUES (?, ?, ?, '/v1/chat/completions', 'application/json', 200, 0, 0, 0, ?, ?, 1.0, 2.0, 10, NULL, ?)
+        VALUES (?, ?, ?, '/v1/chat/completions', 'application/json', ?, 0, 0, 0, ?, ?, 1.0, 2.0, ?, ?, ?)
         """,
-        (row_id, ts, model, input_tokens, output_tokens, metadata),
+        (row_id, ts, model, status, input_tokens, output_tokens, duration_ms, error_msg, metadata),
     )
 
 
