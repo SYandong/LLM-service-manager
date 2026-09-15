@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 1.3.1 — 2026-09-16
+
+Patch release; Python distribution `1.3.1`. One merged PR, implemented by an
+OpenCode worker from a written specification and reviewed by Claude: collectors
+built by a catalog publish now read the measured cold starts too (1.3.0 only
+bound the startup collector, so `/v1/state` kept showing no cold-start source
+after the first catalog restore). Below the normal five-PR cadence, so the
+reviewed release PR records `Release-Exception: #256` for the user-authorized
+delivery.
 
 ### Scheduling
 
