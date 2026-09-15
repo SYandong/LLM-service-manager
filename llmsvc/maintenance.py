@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Explicit instance-transition orchestration; ordinary hot reload is separate.
 
 Configured site adapters own native lifecycle effects. This module binds their
@@ -20,6 +21,19 @@ from llmsvc.reload_witness import InstanceIdentity
 
 MAX_ADAPTER_BYTES = 65536
 MAX_CONTEXT_BYTES = 4 * 1024 * 1024
+STDERR_TAIL_BYTES = 512
+
+
+def stderr_tail(buffer, limit: int = STDERR_TAIL_BYTES) -> str:
+    """Last bytes of adapter stderr, safe for one error line.
+
+    Decodes the bounded tail with replacement, drops control characters other
+    than newline/tab and collapses newlines to spaces. Never contains stdin.
+    """
+    raw = bytes(buffer[-limit:]) if buffer else b""
+    text = raw.decode("utf-8", errors="replace")
+    text = "".join(ch for ch in text if ch in "\n\t" or (ord(ch) >= 32 and ord(ch) != 127))
+    return text.replace("\n", " ")
 
 
 class MaintenanceError(ReloadError):
@@ -63,21 +77,33 @@ class CommandBackend:
                 or not os.path.isabs(argv[0])):
             raise ValueError("maintenance_command requires an explicit absolute executable argv")
         self.argv, self.monotonic = tuple(argv), monotonic
+        self.last_failure = None
+
+    def _fail(self, operation, exit_code, buffer, *, message=None, base=None):
+        """Record the failure for callers and return it without stdin/context."""
+        tail = stderr_tail(buffer)
+        self.last_failure = {"operation": operation, "exit_code": exit_code,
+                             "stderr_tail": tail, "at": self.monotonic()}
+        if message is None:
+            message = (f"maintenance adapter failed: operation={operation} exit={exit_code} stderr={tail!r}"
+                       if base is None else
+                       f"{base}: operation={operation} exit={exit_code} stderr={tail!r}")
+        return MaintenanceError(message)
 
     def request(self, operation, context, *, deadline):
         if operation not in {"validate", "inspect", "preflight", "exclude", "stop_old", "observe_old",
                 "start_candidate", "observe_candidate", "resume", "observe_unit", "stop_model",
                 "stop_candidate", "observe_candidate_absent", "start_base", "observe_base",
                 "bootstrap_preflight", "bootstrap_stage", "bootstrap_activate", "bootstrap_observe", "bootstrap_rollback"}:
-            raise MaintenanceError("unsupported maintenance adapter operation")
+            raise self._fail(operation, None, None, message="unsupported maintenance adapter operation")
         remaining = deadline-self.monotonic()
         if not math.isfinite(remaining) or remaining <= 0:
-            raise MaintenanceError("maintenance deadline exceeded")
+            raise self._fail(operation, None, None, base="maintenance deadline exceeded")
         envelope = {"operation": operation, "context": context, "timeout_seconds": remaining}
         request_id = fingerprint(envelope)
         payload = (canonical({**envelope, "request_id": request_id})+"\n").encode()
         if len(payload) > MAX_CONTEXT_BYTES:
-            raise MaintenanceError("maintenance context exceeds limit")
+            raise self._fail(operation, None, None, message="maintenance context exceeds limit")
         process = subprocess.Popen([*self.argv, operation], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, start_new_session=True)
         buffers = {"stdout": bytearray(), "stderr": bytearray()}
@@ -92,7 +118,8 @@ class CommandBackend:
                 while selected.get_map():
                     remaining = deadline-self.monotonic()
                     if remaining <= 0:
-                        raise MaintenanceError("maintenance adapter deadline exceeded")
+                        raise self._fail(operation, process.poll(), buffers["stderr"],
+                                         base="maintenance adapter deadline exceeded")
                     for key, _ in selected.select(min(remaining, .1)):
                         if key.data == "stdin":
                             try:
@@ -108,18 +135,24 @@ class CommandBackend:
                                 continue
                             buffers[key.data].extend(block)
                             if len(buffers[key.data]) > MAX_ADAPTER_BYTES:
-                                raise MaintenanceError("maintenance adapter response exceeds limit")
+                                raise self._fail(operation, process.poll(), buffers["stderr"],
+                                                 base="maintenance adapter response exceeds limit")
                 remaining = deadline-self.monotonic()
-                if remaining <= 0 or process.wait(timeout=remaining) != 0:
-                    raise MaintenanceError("maintenance adapter failed")
+                if remaining <= 0:
+                    raise self._fail(operation, process.poll(), buffers["stderr"],
+                                     base="maintenance adapter deadline exceeded")
+                exit_code = process.wait(timeout=remaining)
+                if exit_code != 0:
+                    raise self._fail(operation, exit_code, buffers["stderr"])
             result = json.loads(buffers["stdout"].decode("utf-8"))
             if (not isinstance(result, dict) or result.get("request_id") != request_id
                     or result.get("transaction_id") != context.get("transaction_id")
                     or self.monotonic() >= deadline):
-                raise MaintenanceError("maintenance adapter response is unbound or late")
+                raise self._fail(operation, exit_code, buffers["stderr"],
+                                 base="maintenance adapter response is unbound or late")
             return result
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
-            raise MaintenanceError("maintenance adapter failed") from exc
+            raise self._fail(operation, process.poll(), buffers["stderr"]) from exc
         finally:
             if process.poll() is None:
                 process.kill()

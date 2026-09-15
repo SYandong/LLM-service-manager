@@ -42,8 +42,17 @@ on stdin: operation, context, remaining timeout and correlated request ID.
 Stdout/stderr allocation and subprocess time are bounded; there is no shell.
 Replies must match the request/transaction, and observation timestamps must be
 inside that request's monotonic interval. Timeout or nonzero exit is not proof
-that an external action was undone. Adapter output/stderr is not copied into
-public error messages.
+that an external action was undone. Adapter stdout is never copied into error
+text.
+
+An adapter failure (nonzero exit, deadline, or an unbound, late or oversized
+response) now reports the operation, the exit code and the last 512 bytes of
+adapter stderr, decoded with replacement and with control characters other than
+newline/tab removed, in the `MaintenanceError` text and in
+`CommandBackend.last_failure`. That same sanitised tail reaches
+`config_change_result.error` through the wrapped `ReloadError` cause chain, so
+the adapter's own reason (for example `native_actor_unattributed`) is visible
+without tracing the scheduler. Stdin and the request context are never included.
 
 The selected `stop_instance` method is an explicit controlled interruption. It
 does not pretend a socket activation or pause API exists. Old process/scope,
@@ -146,3 +155,4 @@ a site adapter can install another image; actual source transition and rollback
 still require the designated deployment owner's reviewed implementation/proofs.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+<!-- Generated-By: OpenCode / deepseek-v4.1-flash -->

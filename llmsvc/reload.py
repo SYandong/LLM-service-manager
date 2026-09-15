@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Fail-closed, serialized quiet-period configuration transactions.
 
 The scheduler supplies its action lock and feeds a continuous inflight stream.
@@ -35,6 +36,35 @@ class ReloadError(RuntimeError):
 
 class ValidationError(ReloadError):
     pass
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _clean_text(value: str) -> str:
+    return _CONTROL_CHARS.sub("", value)
+
+
+def describe(exc: BaseException) -> str:
+    """Render an exception message with a bounded cause/context chain.
+
+    The leading segment is the exception's own message; each nested cause or
+    context (`__cause__` first, else `__context__`) adds `" <- Type: message"`.
+    At most three chain levels are rendered, the whole string is capped at 600
+    characters and control characters are stripped so it is safe in one log line.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and len(parts) <= 3 and id(current) not in seen:
+        seen.add(id(current))
+        message = _clean_text(str(current))
+        if not parts:
+            parts.append(message or type(current).__name__)
+        else:
+            parts.append(f"{type(current).__name__}: {message}")
+        current = current.__cause__ or current.__context__
+    return _clean_text(" <- ".join(parts))[:600]
 
 
 def _number(value: Any) -> bool:
@@ -550,7 +580,7 @@ class ReloadQueue:
                     job.status = "applied"
             except Exception as exc:
                 job.status = "reconciliation_required" if job.config_committed or job.external_effects_started else "failed"
-                job.error = f"{type(exc).__name__}: configuration transaction failed"
+                job.error = f"{type(exc).__name__}: configuration transaction failed: {describe(exc)}"
                 if marker_created and not job.config_committed and not job.external_effects_started:
                     self.marker.unlink(missing_ok=True)
                     self._sync_directory()
