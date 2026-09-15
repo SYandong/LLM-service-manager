@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.1.4 — 2026-09-15
+
+Stable patch release; Python distribution `1.1.4`. It carries one merged PR,
+#261, which fixes the reconciler's remaining preconditions (boolean
+`catalog_pending`, wall-clock snapshot age) and adds a real-object integration
+test; without it v1.1.3's directory-driven registration never acts. That is
+below the normal five-PR cadence, so the reviewed release PR records
+`Release-Exception: #256` for the user-authorized delivery.
 
 ### Models
 
