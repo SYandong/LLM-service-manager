@@ -271,3 +271,47 @@ MainPID=0
         assert any('fault cleanup required' in e for e in s.errors)
     finally:
         c.close()
+
+
+def measured_collector(cold_starts, configured=7):
+    return Collector({'m': {'daemon_url': 'http://daemon', 'weights_gb': 10,
+                            'cold_start_seconds': configured}, 'absent': {}},
+                     swap_url='http://swap', probes=FakeProbes(), cold_starts=cold_starts)
+
+
+def test_measured_cold_start_overrides_the_configured_value():
+    c = measured_collector(lambda: {'m': 42.0})
+    try:
+        s = c.collect()
+        m = next(item for item in s.models if item.name == 'm')
+        assert m.cold_start_seconds == 42.0
+        assert c.cold_start_sources['m'] == 'measured'
+    finally:
+        c.close()
+
+
+def test_configured_cold_start_used_when_no_measurement_exists():
+    c = measured_collector(lambda: {'other': 3.0}, configured=7)
+    try:
+        s = c.collect()
+        m = next(item for item in s.models if item.name == 'm')
+        absent = next(item for item in s.models if item.name == 'absent')
+        assert m.cold_start_seconds == 7
+        assert c.cold_start_sources['m'] == 'configured'
+        assert absent.cold_start_seconds is None and c.cold_start_sources['absent'] is None
+    finally:
+        c.close()
+
+
+def test_cold_starts_callable_failure_is_reported_and_falls_back():
+    def broken():
+        raise OSError('unreadable')
+    c = measured_collector(broken)
+    try:
+        s = c.collect()
+        m = next(item for item in s.models if item.name == 'm')
+        assert m.cold_start_seconds == 7
+        assert c.cold_start_sources['m'] == 'configured'
+        assert 'cold_starts: OSError' in s.errors
+    finally:
+        c.close()

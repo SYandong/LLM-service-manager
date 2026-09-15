@@ -255,6 +255,11 @@ pinned 或有在途请求 → 不可睡、不可驱逐
 
 体积不进 keep_value，只进可行性判断（§4.2）。`cold_start_seconds` 用该模型最近一次实测冷启动时长，没有则用配置里的估计值。回放测试必须包含"同体积、一冷一热"的场景，断言先睡冷的。
 
+**known 与 fallback 的唯一实现**在 `Projection.score`（`llmsvc/policy/common.py`）；放置、free、空闲 TTL、压力与 recovery 规划器都只经它排序，不各自实现规则。两条 fallback：
+
+- **冷启动**：调度器在每次 `status=ready` 且 `cold_start=true` 的唤醒结束时，把实测秒数写入 `IntentStore` 的 `llmsvc_cold_starts(model, seconds, measured_at)` 表（写失败只记 `cold_start_record_failed` 日志，不影响唤醒结果）。采样的 `cold_start_seconds` 优先取该实测值，其次取配置 `cold_start_seconds`；两者都没有时，`Projection.score` 用 `default_cold_start_seconds`（默认 120 秒）。实测或配置值永远优先于默认。
+- **从未使用**：`last_request_at is None` 且两个聚合都是已知零（`requests_last_hour == 0 and requests_last_10m == 0`）时才按 `never_used_idle_seconds`（默认 3600 秒）估算 idle，使一个从未服务的 sleeper 也可以被驱逐。聚合未知（历史查询失败）或 `last_request_at` 未来时间仍按 `unknown_activity` 失败关闭，`keep_value` 仍拒绝的输入保留 `unknown_keep_value`。`GET /v1/state` 的模型行给出 `cold_start_source`（`measured` / `configured` / `null`）以便核对。
+
 ### 4.2 放置（stopped → awake）
 
 记账规则先说清楚，因为它决定了什么算"腾位"：

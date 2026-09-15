@@ -1,5 +1,7 @@
 """Scheduler configuration keys that build the shared PolicySettings."""
 
+# Generated-By: OpenCode / deepseek-v4.1-flash
+
 import pytest
 
 from llmsvc.config import SchedulerConfig, load_config
@@ -54,7 +56,31 @@ def test_maintenance_timeout_rejects_out_of_range_or_boolean(tmp_path, value):
     {"placement_gpus": [0, True]}, {"placement_gpus": (0, 1)}, {"exclusive_gpu": -1}, {"exclusive_gpu": True},
     {"exclusive_gpu": 1.0}, {"placement_fit": "worst_fit"}, {"shared_external_threshold_gb": -1},
     {"shared_external_threshold_gb": float("nan")}, {"shared_external_threshold_gb": True},
+    {"default_cold_start_seconds": 0}, {"default_cold_start_seconds": -1},
+    {"default_cold_start_seconds": 3601}, {"default_cold_start_seconds": float("nan")},
+    {"default_cold_start_seconds": float("inf")}, {"default_cold_start_seconds": True},
+    {"never_used_idle_seconds": -1}, {"never_used_idle_seconds": float("nan")},
+    {"never_used_idle_seconds": float("inf")}, {"never_used_idle_seconds": True},
 ])
 def test_invalid_policy_configuration_is_rejected(kwargs):
     with pytest.raises(ValueError):
         config(**kwargs)
+
+
+def test_keep_value_fallback_keys_flow_into_policy_settings(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("listen_host: 127.0.0.1\nlisten_port: 19001\n"
+                    "default_cold_start_seconds: 90\nnever_used_idle_seconds: 60\n")
+    settings = load_config(str(path)).policy_settings()
+    assert settings.default_cold_start_seconds == 90
+    assert settings.never_used_idle_seconds == 60
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"default_cold_start_seconds": 0}, {"default_cold_start_seconds": 3601},
+    {"default_cold_start_seconds": float("inf")}, {"never_used_idle_seconds": -1},
+    {"never_used_idle_seconds": float("nan")}, {"never_used_idle_seconds": True},
+])
+def test_policy_settings_reject_bad_fallback_values(kwargs):
+    with pytest.raises(ValueError):
+        PolicySettings(**kwargs)

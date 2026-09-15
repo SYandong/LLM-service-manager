@@ -1,6 +1,8 @@
 # Generated-By: Codex / gpt-6-astra
 """Durability and zero-write intent preview checks using disposable databases."""
 
+# Generated-By: OpenCode / deepseek-v4.1-flash
+
 import sqlite3
 import threading
 
@@ -104,4 +106,47 @@ def test_intent_operation_logs_are_structured_and_label_dry_run(tmp_path, caplog
     records = [json.loads(record.message) for record in caplog.records]
     assert [record["dry_run"] for record in records] == [True, False]
     assert all(record["intent"]["kind"] == "pin" for record in records)
+    store.close()
+
+
+def test_cold_starts_round_trip_upsert_and_read_only(tmp_path):
+    path = tmp_path / "state.sqlite"
+    lock = threading.RLock()
+    store = IntentStore(path, action_lock=lock)
+    assert store.cold_starts() == {}
+    store.record_cold_start("model", 12.5, 1000.0)
+    store.record_cold_start("other", 0.0, 1001.0)
+    assert store.cold_starts() == {"model": 12.5, "other": 0.0}
+    store.record_cold_start("model", 9.0, 1002.0)
+    assert store.cold_starts() == {"model": 9.0, "other": 0.0}
+    store.close()
+    reader = IntentStore(path, action_lock=lock, read_only=True)
+    assert reader.cold_starts() == {"model": 9.0, "other": 0.0}
+    with pytest.raises(PermissionError):
+        reader.record_cold_start("model", 1.0, 1003.0)
+    reader.close()
+
+
+@pytest.mark.parametrize("seconds", [float("nan"), float("inf"), -1, True, "1", None])
+def test_record_cold_start_rejects_bad_seconds(tmp_path, seconds):
+    store = IntentStore(tmp_path / "state.sqlite", action_lock=threading.RLock())
+    with pytest.raises(ValueError):
+        store.record_cold_start("model", seconds, 1000.0)
+    assert store.cold_starts() == {}
+    store.close()
+
+
+@pytest.mark.parametrize("measured_at", [float("nan"), float("inf"), True, "1", None])
+def test_record_cold_start_rejects_bad_measured_at(tmp_path, measured_at):
+    store = IntentStore(tmp_path / "state.sqlite", action_lock=threading.RLock())
+    with pytest.raises(ValueError):
+        store.record_cold_start("model", 1.0, measured_at)
+    assert store.cold_starts() == {}
+    store.close()
+
+
+def test_record_cold_start_requires_a_model(tmp_path):
+    store = IntentStore(tmp_path / "state.sqlite", action_lock=threading.RLock())
+    with pytest.raises(ValueError):
+        store.record_cold_start("", 1.0, 1000.0)
     store.close()
