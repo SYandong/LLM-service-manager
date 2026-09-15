@@ -77,7 +77,8 @@ class DirectoryReconciler:
         catalog = scheduler.catalog
         if catalog is None or not catalog.can_submit():
             return "catalog_unavailable"
-        if self.registry.submit_change is not catalog.submit_change:
+        # Bound methods are fresh objects on every access: compare by equality, never identity.
+        if self.registry.submit_change != catalog.submit_change:
             return "catalog_not_connected"
         if scheduler.catalog_fenced:
             return "catalog_reconciliation_required"

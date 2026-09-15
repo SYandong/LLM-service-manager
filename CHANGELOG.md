@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Models
+
+- The directory reconciler compared the registry's `submit_change` callback with
+  the catalog's by identity; bound methods are fresh objects on every access, so
+  every tick reported `catalog_not_connected` and nothing was ever submitted.
+  It now compares by equality, like the scheduler's own check, and the test
+  fake hands out a real bound method so this cannot regress silently.
+
 ## 1.1.2 — 2026-09-15
 
 Stable patch release; Python distribution `1.1.2`. It carries one merged PR,

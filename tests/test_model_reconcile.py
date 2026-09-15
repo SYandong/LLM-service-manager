@@ -77,10 +77,18 @@ class FakeRegistry:
 
 
 class FakeCatalog:
-    def __init__(self, submit_change):
+    """Like CatalogRuntime, submit_change is a *method*: connect_registry hands the
+    registry a bound method, and every later attribute access yields a new bound
+    object, so the reconciler must compare them by equality, never identity."""
+    def __init__(self):
         self.enabled = True
         self.busy = False
-        self.submit_change = submit_change
+
+    def submit_change(self, transform, **options):
+        raise AssertionError("fakes never submit through the catalog")
+
+    def connect_registry(self, registry):
+        registry.submit_change = self.submit_change
 
     def can_submit(self):
         return self.enabled
@@ -124,7 +132,8 @@ class FakeScheduler:
         self.events.append({"kind": kind, "model": model, "detail": detail})
 
     def connect(self, registry):
-        self.catalog = FakeCatalog(registry.submit_change)
+        self.catalog = FakeCatalog()
+        self.catalog.connect_registry(registry)
         return self.catalog
 
 
