@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Scheduling
+
+- A scheduler restart after a fully released catalog transaction (the live
+  configuration is still the released candidate, the receipt is retired, the
+  queue is unfenced) now publishes that generation without fencing placement.
+  Previously every restart after an add/remove transaction stopped on
+  `catalog_reconciliation_required`, and the explicit re-proof could not pass
+  because post-release maintenance-profile retirement changes the adapter's
+  scope hash (2026-09-15 site incident). A released checkpoint whose
+  configuration was edited afterwards still fences as before.
+
 ## 1.1.4 — 2026-09-15
 
 Stable patch release; Python distribution `1.1.4`. It carries one merged PR,

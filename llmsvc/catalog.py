@@ -81,6 +81,19 @@ class CatalogRuntime:
                 if (record["old_manifest"] != self.manifest or digest(queue._read()[0]) != record["base_sha256"] or queue.fenced):
                     scheduler.catalog_fenced = True
                 return
+            if self._settled_release(record, queue):
+                # A released transaction whose candidate is still the live
+                # configuration and whose receipt is retired has nothing left to
+                # prove: publish its generation and keep actions unfenced. It
+                # could not be re-observed later anyway, because post-release
+                # profile retirement changes the adapter's scope hash.
+                if record["new_manifest"]["sources"] != sources(scheduler.config):
+                    raise ValueError("catalog source settings changed; reconciliation required")
+                bundle = self._construct(record["new_manifest"])
+                with scheduler.action_lock:
+                    self._publish(record["new_manifest"], record["new_epoch"], bundle)
+                self.retire()
+                return
             if record["phase"] == "aborted":
                 record = record["previous"]
             scheduler.catalog_fenced = True
@@ -98,6 +111,22 @@ class CatalogRuntime:
             with scheduler.action_lock:
                 self._publish(manifest, epoch, bundle)
             self.retire()
+
+    @staticmethod
+    def _settled_release(record, queue):
+        """True when a checkpoint is released end to end and nothing is left to reconcile.
+
+        Released phase with no backup, an unfenced queue, no pending receipt on
+        disk, and the live configuration still byte-identical to the candidate.
+        """
+        if record is None or record["phase"] != "released" or record.get("previous") is not None:
+            return False
+        if queue.fenced or queue.marker.exists():
+            return False
+        try:
+            return digest(queue._read()[0]) == record["candidate_sha256"]
+        except Exception:
+            return False
 
     def can_submit(self):
         s = self.scheduler
