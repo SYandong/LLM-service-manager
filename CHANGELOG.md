@@ -12,6 +12,18 @@
   aggregates) is scored with `never_used_idle_seconds`, while unknown history
   still blocks with `unknown_activity`.
 
+### Operations
+
+- Maintenance adapter failures now include the operation, exit code and a bounded, sanitised
+  stderr tail in the `MaintenanceError` text, in `CommandBackend.last_failure`, and in
+  `config_change_result.error`, so the adapter's own reason is visible without `strace`.
+- Failed configuration transactions now carry the exception message and its `__cause__`/
+  `__context__` chain in `job.error`, so the registry queue snapshot and `GET /v1/models`
+  show why the transaction failed.
+- `catalog_cycle_error` and `fault_error` now log the failure message and are rate-limited to
+  at most one line per 60 seconds for the same failure, with a `repeats` count of the suppressed
+  copies instead of thousands of identical lines.
+
 ## 1.2.1 — 2026-09-16
 
 Patch release; Python distribution `1.2.1`. It carries one merged PR, #269:

@@ -18,10 +18,36 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from llmsvc.config import SchedulerConfig
+from llmsvc.reload import describe
 from llmsvc.state import Event, MemoryState, Pin, Reserve, StateSnapshot
 from llmsvc.store import IntentStore, finite_positive, nonempty, validate_pin, validate_reserve
 
 LOG = logging.getLogger("llmsvc.scheduler")
+CYCLE_ERROR_INTERVAL_SECONDS = 60
+
+
+class _RepeatLimiter:
+    """Collapse identical cycle failures to one line per interval.
+
+    The first occurrence of a key logs immediately; later identical keys are
+    suppressed until the interval elapses or the key changes. Every emitted line
+    carries the number of failures suppressed since the previous line.
+    """
+
+    def __init__(self, interval: float, clock: Callable[[], float]):
+        self.interval, self.clock = interval, clock
+        self._key = None
+        self._at = 0.0
+        self._suppressed = 0
+
+    def observe(self, key) -> Optional[int]:
+        now = self.clock()
+        if key == self._key and now - self._at < self.interval:
+            self._suppressed += 1
+            return None
+        repeats = self._suppressed
+        self._key, self._at, self._suppressed = key, now, 0
+        return repeats
 
 
 class IntentWriteError(RuntimeError):
@@ -161,6 +187,10 @@ class Scheduler:
         self.store = store
         self.clock = clock
         self.monotonic = monotonic
+        self._cycle_failures = {
+            "catalog_cycle_error": _RepeatLimiter(CYCLE_ERROR_INTERVAL_SECONDS, lambda: self.monotonic()),
+            "fault_error": _RepeatLimiter(CYCLE_ERROR_INTERVAL_SECONDS, lambda: self.monotonic()),
+        }
         self.action_lock = store.action_lock if store is not None else threading.RLock()
         self.changed = threading.Condition(self.action_lock)
         self._snapshot = self._unknown("not_sampled")
@@ -736,25 +766,42 @@ class Scheduler:
             # Cadence follows completion; a slow cycle never creates a backlog.
             self.stopping.wait(self.config.automation_interval_seconds)
 
+    def _log_cycle_failure(self, kind: str, exc: BaseException) -> None:
+        error_type = type(exc).__name__
+        error = describe(exc)
+        repeats = self._cycle_failures[kind].observe((error_type, error))
+        if repeats is None:
+            return
+        detail = {"error_type": error_type, "error": error, "repeats": repeats}
+        LOG.warning(json.dumps({"kind": kind, **detail}))
+        if kind == "catalog_cycle_error":
+            self.emit(kind, model=None, detail=detail)
+
+    def _fault_cycle(self):
+        try:
+            result = self.faults.run_once()
+            if result.get("status") == "blocked" and "model" not in result:
+                LOG.warning(json.dumps({"kind": "fault_observation_blocked", **result}))
+        except Exception as exc:
+            self._log_cycle_failure("fault_error", exc)
+
     def _run_faults(self):
         while not self.stopping.is_set():
-            try:
-                result = self.faults.run_once()
-                if result.get("status") == "blocked" and "model" not in result:
-                    LOG.warning(json.dumps({"kind": "fault_observation_blocked", **result}))
-            except Exception as exc:
-                LOG.warning(json.dumps({"kind": "fault_error", "error_type": type(exc).__name__}))
+            self._fault_cycle()
             self.stopping.wait(self.config.fault_interval_seconds)
+
+    def _catalog_cycle(self):
+        try:
+            if self.catalog is not None and self.catalog.can_submit():
+                self.catalog.process_once()
+            if self.reconciler is not None and self.catalog is not None and self.catalog.can_submit():
+                self.reconciler.run_once()
+        except Exception as exc:
+            self._log_cycle_failure("catalog_cycle_error", exc)
 
     def _run_catalog(self):
         while not self.stopping.is_set():
-            try:
-                if self.catalog is not None and self.catalog.can_submit():
-                    self.catalog.process_once()
-                if self.reconciler is not None and self.catalog is not None and self.catalog.can_submit():
-                    self.reconciler.run_once()
-            except Exception as exc:
-                LOG.warning(json.dumps({"kind": "catalog_cycle_error", "error_type": type(exc).__name__}))
+            self._catalog_cycle()
             self.stopping.wait(self.config.action_poll_seconds)
 
     def start(self, *, sampling_only=False):
