@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 — 2026-09-16
+
+Minor release; Python distribution `1.2.0`. It carries one merged PR, #267:
+`llmsvc.json` gains the `tool_call_parser`, `reasoning_parser`, `speculative`
+and `max_num_seqs` overrides so a model cloned from a base with MTP speculative
+decoding can drop it, and the collector reports known zero activity for models
+absent from a successful usage-history query so a never-served model can be
+unregistered. That is below the normal five-PR cadence, so the reviewed release
+PR records `Release-Exception: #256` for the user-authorized delivery.
 
 ### Model registration
 
