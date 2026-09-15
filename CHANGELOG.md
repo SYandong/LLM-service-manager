@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### CLI
+
+- Redesigned `llm usage` around `GET /v1/usage/report`: `--days` accepts 1–365 and `--by`
+  selects `user` / `model` / `day`. Output follows Claude Code `/usage` and ccusage: exact
+  integer counts with thousands separators, average request time and relative last-seen,
+  per-row model/user share, `--breakdown` sub-rows, responsive column dropping below 100
+  columns and a stacked form below 60, plus source-kind, untracked-token and attribution
+  footnotes. Invariant checks now cover every count key, row/total sums and breakdown sums.
+- TUI usage view gains `1 day` / `7 days` / `30 days` / `By user` / `By model` / `By day`
+  buttons and `/usage [1|7|30] [user|model|day]`; day buttons keep the grouping and grouping
+  buttons keep the window, and the view reuses the CLI renderer.
+
 ## 1.3.1 — 2026-09-16
 
 Patch release; Python distribution `1.3.1`. One merged PR, implemented by an
