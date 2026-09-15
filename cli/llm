@@ -19,6 +19,7 @@ import re
 import shutil
 import socket
 import sys
+import textwrap
 import threading
 import time
 from types import SimpleNamespace
@@ -26,6 +27,11 @@ import unicodedata
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - stdlib on Python 3.10+, guarded for minimal hosts.
+    ZoneInfo = None
 
 
 class ClientError(Exception):
@@ -525,6 +531,25 @@ def wrap_line(line, width):
     return lines
 
 
+def wrap_prose(line, width):
+    """Wrap prose on spaces; only a single over-long token is hard-wrapped."""
+    line = clean_text(line)
+    if width <= 0:
+        return [""]
+    if cell_width(line) <= width:
+        return [line]
+    parts = textwrap.wrap(line, width, break_long_words=False, break_on_hyphens=False)
+    if not parts:
+        return [""]
+    result = []
+    for part in parts:
+        if cell_width(part) > width:
+            result.extend(wrap_line(part, width))
+        else:
+            result.append(part)
+    return result
+
+
 def format_status(snapshot, width=100, now=None):
     width = max(1, width)
     if now is None:
@@ -602,82 +627,329 @@ def format_status(snapshot, width=100, now=None):
     return "\n".join(part for line in lines for part in wrap_line(line, width))
 
 
-USAGE_COUNTS = ("requests", "input_tokens", "output_tokens")
+USAGE_COUNT_KEYS = ("requests", "errors", "input_tokens", "output_tokens",
+                    "total_tokens", "untracked_requests", "duration_ms")
+USAGE_BY_VALUES = ("user", "model", "day")
+USAGE_OTHER = {"user": "model", "model": "user", "day": "model"}
+USAGE_NUMERIC_COLUMNS = (
+    ("requests", "REQUESTS"),
+    ("errors", "ERRORS"),
+    ("input_tokens", "INPUT"),
+    ("output_tokens", "OUTPUT"),
+    ("total_tokens", "TOTAL"),
+    ("avg", "AVG TIME"),
+    ("last", "LAST SEEN"),
+)
 
 
 def validate_usage(result, *, days=None, by=None):
     """Reject incomplete/inconsistent counts instead of manufacturing a total."""
+    def counts_valid(value, *, nullable=False):
+        if not isinstance(value, dict):
+            raise ValueError
+        if nullable:
+            return all(key in value and value[key] is None for key in USAGE_COUNT_KEYS)
+        return all(type(value.get(key)) is int and value[key] >= 0 for key in USAGE_COUNT_KEYS)
+
     try:
         valid = (type(result.get("known")) is bool and type(result.get("days")) is int
-                 and result["days"] > 0 and result.get("by") in ("container", "ip", "model")
+                 and result["days"] >= 1 and result.get("by") in USAGE_BY_VALUES
                  and isinstance(result.get("rows"), (list, tuple))
                  and isinstance(result.get("totals"), dict))
         if not valid or (days is not None and result["days"] != days) or (by is not None and result["by"] != by):
             raise ValueError
+        grouping, other = result["by"], USAGE_OTHER[result["by"]]
         totals = result["totals"]
         if not result["known"]:
-            if result["rows"] or any(key not in totals or totals[key] is not None for key in USAGE_COUNTS):
+            if result["rows"] or not counts_valid(totals, nullable=True):
                 raise ValueError
             return result
+        if not isinstance(result.get("timezone"), str) or not isinstance(result.get("attribution"), dict):
+            raise ValueError
         for counts in [totals, *result["rows"]]:
-            if any(type(counts.get(key)) is not int or counts[key] < 0 for key in USAGE_COUNTS):
-                raise ValueError
+            counts_valid(counts)
         for row in result["rows"]:
-            if not isinstance(row.get(result["by"]), str) or type(row.get("source_known")) is not bool:
+            if not isinstance(row.get(grouping), str) or not isinstance(row.get("kind"), str):
                 raise ValueError
-        if any(sum(row[key] for row in result["rows"]) != totals[key] for key in USAGE_COUNTS):
+            breakdown = row.get("breakdown")
+            if not isinstance(breakdown, (list, tuple)):
+                raise ValueError
+            for item in breakdown:
+                counts_valid(item)
+                if not isinstance(item.get(other), str) or not isinstance(item.get("kind"), str):
+                    raise ValueError
+            if any(sum(item[key] for item in breakdown) != row[key] for key in USAGE_COUNT_KEYS):
+                raise ValueError
+        if any(sum(row[key] for row in result["rows"]) != totals[key] for key in USAGE_COUNT_KEYS):
             raise ValueError
     except (AttributeError, KeyError, TypeError, ValueError):
         raise ClientError("Invalid usage response: counts, grouping or totals are inconsistent") from None
     return result
 
 
-def usage_attribution(row, by):
-    if by == "model":
-        return "not grouped"
-    if not row["source_known"]:
-        return "unknown"
-    if by == "container" and row[by].startswith("ip:"):
-        return "IP only"
-    return "known"
+def usage_number(value):
+    return "?" if value is None else "{:,}".format(value)
 
 
-def format_usage(result, width=100):
+def usage_duration(duration_ms, requests):
+    if not requests or duration_ms is None:
+        return "—"
+    average = duration_ms / requests
+    if average < 1000:
+        return "%dms" % int(round(average))
+    if average < 60000:
+        return "%.1fs" % (average / 1000)
+    minutes = int(average // 60000)
+    seconds = int(round((average - minutes * 60000) / 1000))
+    if seconds >= 60:
+        minutes, seconds = minutes + 1, seconds - 60
+    return "%dm %02ds" % (minutes, seconds)
+
+
+def usage_age(last_seen, until):
+    if last_seen is None:
+        return "—"
+    delta = max(0, until - last_seen)
+    if delta < 60:
+        return "just now"
+    if delta < 3600:
+        return "%dm ago" % (delta // 60)
+    if delta < 86400:
+        return "%dh ago" % (delta // 3600)
+    return "%dd ago" % (delta // 86400)
+
+
+def usage_truncate(text, width):
+    if width <= 0:
+        return ""
+    if cell_width(text) <= width:
+        return text
+    result = ""
+    for ch in text:
+        if cell_width(result + ch) > width - 1:
+            break
+        result += ch
+    return result + "…"
+
+
+def usage_zone(name):
+    if ZoneInfo is not None and isinstance(name, str) and name:
+        try:
+            return name, ZoneInfo(name)
+        except Exception:
+            pass
+    return "UTC", timezone.utc
+
+
+def usage_time(timestamp, zone):
+    if timestamp is None:
+        return "?"
+    try:
+        return datetime.fromtimestamp(timestamp, zone).strftime("%Y-%m-%d %H:%M")
+    except (ValueError, OverflowError, OSError):
+        return "?"
+
+
+def usage_totals_line(totals):
+    parts = ["%s %s" % (usage_number(totals["requests"]),
+                        "request" if totals["requests"] == 1 else "requests"),
+             "%s input" % usage_number(totals["input_tokens"]),
+             "%s output" % usage_number(totals["output_tokens"]),
+             "%s tokens" % usage_number(totals["total_tokens"])]
+    if totals["errors"]:
+        parts.append("%s %s" % (usage_number(totals["errors"]),
+                                "error" if totals["errors"] == 1 else "errors"))
+    if totals["untracked_requests"]:
+        count = totals["untracked_requests"]
+        parts.append("%s without token %s" % (
+            usage_number(count), "count" if count == 1 else "counts"))
+    return " · ".join(parts)
+
+
+def usage_models_cell(row, other):
+    if row["requests"] <= 0:
+        return ""
+    parts = []
+    for item in row["breakdown"]:
+        percent = int(round(item["requests"] * 100 / row["requests"]))
+        parts.append("%s %d%%" % (clean_text(item[other]), percent))
+    return " · ".join(parts)
+
+
+def usage_row_columns(result, row):
+    """The settled numeric cells for one row, a breakdown item or the totals."""
+    until = result.get("until") or 0
+    return {
+        "requests": usage_number(row["requests"]),
+        "errors": usage_number(row["errors"]),
+        "input_tokens": usage_number(row["input_tokens"]),
+        "output_tokens": usage_number(row["output_tokens"]),
+        "total_tokens": usage_number(row["total_tokens"]),
+        "avg": usage_duration(row["duration_ms"], row["requests"]),
+        "last": usage_age(row.get("last_seen"), until),
+    }
+
+
+def usage_column_widths(result):
+    rows = list(result["rows"]) + [result["totals"]]
+    widths = {}
+    for key, label in USAGE_NUMERIC_COLUMNS:
+        if key == "last" and result["by"] == "day":
+            continue
+        values = [usage_row_columns(result, row)[key] for row in rows]
+        widths[key] = max(len(label), *(len(value) for value in values))
+    return widths
+
+
+def usage_table(result, width, breakdown):
+    by, other = result["by"], USAGE_OTHER[result["by"]]
+    rows, totals = result["rows"], result["totals"]
+    labels = [cell_width(clean_text(row[by])) for row in rows] or [0]
+    if breakdown:
+        labels += [cell_width("  └ " + clean_text(item[other]))
+                   for row in rows for item in row["breakdown"]]
+    label_width = min(24, max(4, max(labels)))
+    widths = usage_column_widths(result)
+    models_header = "USERS" if by == "model" else "MODELS"
+    active = {key for key, _ in USAGE_NUMERIC_COLUMNS}
+    if by == "day":
+        active.discard("last")
+    include_models = True
+
+    def used_width():
+        return label_width + sum(2 + widths[key] for key, _ in USAGE_NUMERIC_COLUMNS if key in active)
+
+    while True:
+        fits = used_width() <= width and (not include_models or width - used_width() - 2 >= 12)
+        if fits:
+            break
+        if "avg" in active:
+            active.discard("avg")
+        elif "last" in active:
+            active.discard("last")
+        elif include_models:
+            include_models = False
+        elif "errors" in active:
+            active.discard("errors")
+        else:
+            break
+    models_width = width - used_width() - 2 if include_models else 0
+
+    def numeric_cells(row, *, skip_extra=False, blank_last=False):
+        cells = []
+        for key, _ in USAGE_NUMERIC_COLUMNS:
+            if key not in active:
+                continue
+            if skip_extra and key in ("avg", "last"):
+                cells.append(" " * widths[key])
+            elif blank_last and key == "last":
+                cells.append(" " * widths[key])
+            else:
+                cells.append(usage_row_columns(result, row)[key].rjust(widths[key]))
+        return cells
+
+    def render(label, row, *, skip_extra=False, model_cell=None, blank_last=False):
+        cells = [fit(label, label_width), *numeric_cells(row, skip_extra=skip_extra, blank_last=blank_last)]
+        if include_models and not skip_extra:
+            cells.append(usage_truncate(model_cell or "", models_width))
+        return "  ".join(cells).rstrip()
+
+    lines = []
+    header_cells = [fit(by.upper(), label_width)]
+    for key, label in USAGE_NUMERIC_COLUMNS:
+        if key in active:
+            header_cells.append(label.rjust(widths[key]))
+    if include_models:
+        header_cells.append(models_header)
+    lines.append("  ".join(header_cells).rstrip())
+    for row in rows:
+        lines.append(render(row[by], row, model_cell=usage_models_cell(row, other)))
+        if breakdown:
+            for item in row["breakdown"]:
+                lines.append(render("  └ " + item[other], item, skip_extra=True))
+    lines.append(render("TOTAL", totals, blank_last=True))
+    if not rows:
+        lines.append("No requests in this window (source available)")
+    return lines
+
+
+def usage_stacked(result, breakdown):
+    by, other = result["by"], USAGE_OTHER[result["by"]]
+    totals = result["totals"]
+    lines = []
+    for row in result["rows"]:
+        lines.append("%s (%s)" % (clean_text(row[by]), clean_text(row["kind"])))
+        lines.append("  Requests: %s" % usage_number(row["requests"]))
+        lines.append("  Tokens: %s in / %s out / %s total" % (
+            usage_number(row["input_tokens"]), usage_number(row["output_tokens"]),
+            usage_number(row["total_tokens"])))
+        lines.append("  Errors: %s" % usage_number(row["errors"]))
+        if breakdown:
+            for item in row["breakdown"]:
+                lines.append("  └ %s: %s requests · %s total tokens" % (
+                    clean_text(item[other]), usage_number(item["requests"]),
+                    usage_number(item["total_tokens"])))
+    if not result["rows"]:
+        lines.append("No requests in this window (source available)")
+    lines.extend(["TOTAL",
+                  "  Requests: %s" % usage_number(totals["requests"]),
+                  "  Tokens: %s in / %s out / %s total" % (
+                      usage_number(totals["input_tokens"]), usage_number(totals["output_tokens"]),
+                      usage_number(totals["total_tokens"])),
+                  "  Errors: %s" % usage_number(totals["errors"])])
+    return lines
+
+
+def usage_footnotes(result):
+    if not result["known"]:
+        return []
+    lines = []
+    kinds = {row["kind"] for row in result["rows"]}
+    legend = []
+    if "host" in kinds:
+        legend.append("host = requests from the host machine")
+    if "unattributed" in kinds:
+        legend.append("unattributed = recorded before source tracking (no client IP)")
+    if "ip" in kinds:
+        legend.append("ip:<addr> = client address without a container mapping")
+    if legend:
+        lines.append("; ".join(legend))
+    untracked = result["totals"]["untracked_requests"]
+    if untracked:
+        lines.append("%s %s no token %s (streaming without stream_options.include_usage); "
+                     "their tokens are not in the totals" % (
+                         usage_number(untracked),
+                         "request has" if untracked == 1 else "requests have",
+                         "count" if untracked == 1 else "counts"))
+    attribution = result.get("attribution") or {}
+    if attribution.get("map_source") == "none" and "ip" in kinds:
+        lines.append("Attribution map: none (all sources shown as ip:…)")
+    return lines
+
+
+def format_usage(result, width=100, breakdown=False):
     validate_usage(result)
     width = max(1, width)
-    lines = ["Usage: last %s days by %s" % (result["days"], result["by"])]
+    by = result["by"]
+    window = "day" if result["days"] == 1 else "days"
     if not result["known"]:
-        lines.extend(["Unavailable: " + clean_text(result.get("error") or "source unavailable"),
-                      "Requests ?  Input tokens ?  Output tokens ?"])
+        prose = ["Usage: last %s %s by %s" % (result["days"], window, by),
+                 "Unavailable: " + clean_text(result.get("error") or "source unavailable"),
+                 "Requests ?  Tokens ?"]
+        return "\n".join(part for line in prose for part in wrap_prose(line, width))
+    zone_name, zone = usage_zone(result.get("timezone"))
+    prose = ["Usage · last %s %s · %s → %s (%s)" % (
+        result["days"], window, usage_time(result.get("since"), zone),
+        usage_time(result.get("until"), zone), zone_name),
+        usage_totals_line(result["totals"])]
+    if width < 60:
+        body = usage_stacked(result, breakdown)
     else:
-        rows, totals, by = result["rows"], result["totals"], result["by"]
-        labels = ("REQUESTS", "INPUT TOKENS", "OUTPUT TOKENS")
-        sizes = [max(len(label), *(len(str(item[key])) for item in [totals, *rows]))
-                 for key, label in zip(USAGE_COUNTS, labels)]
-        source_width = width - sum(sizes) - 11 - 8
-        if source_width >= 12:
-            lines.append("  ".join([fit(by.upper(), source_width),
-                                    *(label.rjust(size) for label, size in zip(labels, sizes)), "ATTRIBUTION"]))
-            for row in rows:
-                lines.append("  ".join([fit(row[by], source_width),
-                                        *(str(row[key]).rjust(size) for key, size in zip(USAGE_COUNTS, sizes)),
-                                        usage_attribution(row, by)]))
-            lines.append("  ".join([fit("TOTAL", source_width),
-                                    *(str(totals[key]).rjust(size) for key, size in zip(USAGE_COUNTS, sizes))]))
-        else:
-            for row in rows:
-                lines.extend(["%s (%s)" % (row[by], usage_attribution(row, by)),
-                              "  Requests: %s" % row["requests"],
-                              "  Input tokens: %s" % row["input_tokens"],
-                              "  Output tokens: %s" % row["output_tokens"]])
-            lines.extend(["TOTAL", "Requests: %s" % totals["requests"],
-                          "Input tokens: %s" % totals["input_tokens"],
-                          "Output tokens: %s" % totals["output_tokens"]])
-        if not rows:
-            lines.append("No requests in this window (source available)")
-        lines.append("Attribution: not grouped by source" if by == "model" else
-                     "Attribution: unknown = origin absent; IP only = container mapping unavailable")
-    return "\n".join(part for line in lines for part in wrap_line(line, width))
+        body = usage_table(result, width, breakdown)
+    output = [part for line in prose for part in wrap_prose(line, width)]
+    output += [part for line in body for part in wrap_line(line, width)]
+    output += [part for line in usage_footnotes(result) for part in wrap_prose(line, width)]
+    return "\n".join(output)
 
 
 PIN_COMPATIBILITY_LABEL = "llm-client"
@@ -694,6 +966,15 @@ def gpu_index(value):
     if not re.fullmatch(r"[0-9]+", value):
         raise argparse.ArgumentTypeError("GPU must be a nonnegative integer")
     return int(value)
+
+
+def usage_days(value):
+    if not re.fullmatch(r"[0-9]+", value):
+        raise argparse.ArgumentTypeError("Days must be an integer between 1 and 365")
+    days = int(value)
+    if not 1 <= days <= 365:
+        raise argparse.ArgumentTypeError("Days must be an integer between 1 and 365")
+    return days
 
 
 def action_timeout(value):
@@ -1141,8 +1422,10 @@ def build_parser(parser_class=argparse.ArgumentParser):
     status = commands.add_parser("status", help="Show GPU, memory and model status")
     status.add_argument("--json", action="store_true", help="Print the complete JSON snapshot")
     usage = commands.add_parser("usage", help="Show request and token usage totals")
-    usage.add_argument("--days", type=int, choices=(7, 30), default=7, help="Usage window (default: 7)")
-    usage.add_argument("--by", choices=("container", "ip", "model"), default="container")
+    usage.add_argument("--days", type=usage_days, default=7, help="Usage window in days, 1-365 (default: 7)")
+    usage.add_argument("--by", choices=("user", "model", "day"), default="user",
+                       help="Group rows by user, model or day (default: user)")
+    usage.add_argument("--breakdown", action="store_true", help="Show each row's per-model or per-user sub-rows")
     usage.add_argument("--json", action="store_true", help="Print the complete usage response")
     for command in ("pin", "unpin"):
         intent = commands.add_parser(command, help="Set pin expiry" if command == "pin" else "Remove a pin record")
@@ -1258,8 +1541,9 @@ def execute_command(args, client, *, now=None):
             result = client.request("DELETE", "/v1/pin/" + quote(args.model, safe="") + query)
         return validate_pin_result(args, result)
     if args.command == "usage":
+        path = "/v1/usage/report?days=%s&by=%s" % (args.days, args.by)
         try:
-            result = client.request("GET", "/v1/usage?days=%s&by=%s" % (args.days, args.by))
+            result = client.request("GET", path)
         except ClientError as exc:
             if exc.status != 503 or not isinstance(exc.payload, dict) or exc.payload.get("known") is not False:
                 raise
@@ -1272,7 +1556,7 @@ def format_result(args, result, width=100):
     if getattr(args, "json", False):
         return json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
     if args.command == "usage":
-        return format_usage(result, width=width)
+        return format_usage(result, width=width, breakdown=getattr(args, "breakdown", False))
     if args.command in ("pin", "unpin"):
         return format_pin_result(args, result)
     if args.command in ("free", "wake", "sleep", "stop", "preload"):

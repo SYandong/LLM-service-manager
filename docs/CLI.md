@@ -83,16 +83,38 @@ WARNING GPU1 probe unavailable
 
 ```sh
 LLM_URL=http://scheduler:8011 python3 llm usage
-LLM_URL=http://scheduler:8011 python3 llm usage --days 30
-LLM_URL=http://scheduler:8011 python3 llm usage --days 7 --by model --json
+LLM_URL=http://scheduler:8011 python3 llm usage --days 30 --by model
+LLM_URL=http://scheduler:8011 python3 llm usage --days 7 --by day --breakdown
+LLM_URL=http://scheduler:8011 python3 llm usage --by model --json
 ```
 
-窗口为最近 7 或 30 天，默认 7 天；分组支持 `container`（默认）、`ip`、`model`。输出活动库在该窗口内已记录的请求数、输入 token、输出 token 的整数总量，保留完整精度。窄屏按分组分行显示，`--json` 保留后端完整响应。TUI 的用量视图使用相同口径。
+`usage` 读取 `/v1/usage/report`。窗口 `--days` 为 1–365，默认 7；分组 `--by`
+支持 `user`（默认）、`model`、`day`。`--breakdown` 在每个分组行后追加下级明细
+（按 user 或 day 分组时是 model，按 model 分组时是 user）；`--json` 输出后端
+完整响应。所有计数都是精确整数，只在显示时加千位分隔符，不做 k/M 四舍五入。
 
-- 总量已知但历史来源缺失时，`unknown` 分组保留这些请求与 token，归属列明确标记未知。
-- `IP only` 表示有来源 IP、没有容器映射；不会推测容器名。按 model 分组时，归属信息标为未按来源分组。
-- 后端返回不可用响应（503、`known: false`）时显示原因与 `?`；`--json` 保留 null 总量，退出码为 1。活动库可读且窗口内没有记录时，返回零请求和零 token；这不证明所有流量都已被采集。连接或协议错误沿用前述非零退出码与 stderr 说明。
-- 客户端核对行计数与总计一致，并拒绝缺失、负数、非整数或窗口不匹配的响应。
+```text
+Usage · last 7 days · 2026-09-09 04:40 → 2026-09-16 04:40 (Asia/Shanghai)
+2,185 requests · 561,219 input · 39,096 output · 600,315 tokens · 3 errors · 12 without token counts
+
+USER            REQUESTS  ERRORS      INPUT     OUTPUT      TOTAL  AVG TIME  LAST SEEN  MODELS
+host               1,204       0    402,110     20,301    422,411      3.1s     2m ago  gemma-4-26b-a4b-nvfp4 88% · qwen3.8-27b 12%
+yandong              900       3    150,000     18,000    168,000      1.9s     1h ago  gemma-4-31b-it-nvfp4 100%
+unattributed          81       0      9,109        795      9,904      0.8s     3d ago  qwen3-coder-30b 60% · qwen2.5-7b-instruct 40%
+TOTAL              2,185       3    561,219     39,096    600,315      2.6s
+
+host = requests from the host machine; unattributed = recorded before source tracking (no client IP)
+12 requests have no token counts (streaming without stream_options.include_usage); their tokens are not in the totals
+```
+
+- 第一行是窗口；`since` / `until` 按响应里的 `timezone` 显示，时区无法加载时回退到 UTC 并标注 `UTC`。第二行是总计；为零时不显示 `errors` 与 `without token counts` 段。上例是合成数据，**不是服务器实测**。
+- `REQUESTS / ERRORS / INPUT / OUTPUT / TOTAL` 是窗口内已记录请求数、HTTP ≥ 400 或带错误消息的请求数、输入/输出/总 token。`AVG TIME` 是 `duration_ms / requests`（`350ms`、`1.9s`、`2m 05s`），`LAST SEEN` 相对 `until`（`just now`、`2m ago`、`1h ago`、`3d ago`，空值为 `—`）。
+- `MODELS` 列（按 model 分组时是 `USERS`）按后端顺序显示该行的下级占比 `name 88% · name 12%`，超出剩余宽度用 `…` 截断；该列需要至少 12 列剩余宽度，不足时整列省略。表格放不下时按 `AVG TIME` → `LAST SEEN` → `MODELS`/`USERS` → `ERRORS` 的顺序去掉，`MODELS`/`USERS` 始终优先于 `ERRORS` 保留；小于 60 列改为每条一行（`label (kind)` 加 `Requests:` / `Tokens: in / out / total` / `Errors:`）的堆叠形式。表格行永不换行。
+- `--by day` 的行按后端交付的最旧到最新显示，首列是 `DAY`，没有 `LAST SEEN`；`--breakdown` 的下级行缩进为 `  └ <model 或 user>`，只保留数值列。排序完全来自后端，客户端不重排。
+- 按 user 分组时 `kind` 说明来源：`container` 是用户 LXD 容器名；`host` 是宿主机自身；`ip` 的标签是 `ip:<addr>`，表示有直接连接地址但没有容器映射；`unattributed` 是来源跟踪启用前记录的旧数据。出现哪些就在脚注里解释哪些。
+- 后端返回不可用响应（503、`known: false`）时显示原因与 `?`；`--json` 保留 null 总量，退出码为 1。活动库可读且窗口内没有记录时返回零请求和零 token；这不证明所有流量都已被采集。连接或协议错误沿用前述非零退出码与 stderr 说明。
+- 客户端逐条核对：所有计数值是非负整数（未知时全为 null），每个键满足 `sum(rows[k]) == totals[k]` 与 `sum(breakdown[k]) == row[k]`，并核对 `days` / `by` 与请求一致；不满足即报 `Invalid usage response`。
+- 来源映射 `attribution.map_source` 为 `none` 且存在 `ip` 分组时，脚注提示 `Attribution map: none (all sources shown as ip:…)`。
 
 ### 流式 token 的记录范围
 
@@ -109,15 +131,15 @@ LLM_URL=http://scheduler:8011 python3 llm usage --days 7 --by model --json
 
 这是推理客户端的请求选项，不是 `llm usage` 的参数。按 [Chat Completions 流式用量协议](https://developers.openai.com/api/reference/resources/chat)，用量位于末尾的额外 chunk；中断或取消可能使该 chunk 无法送达。是否支持并记录该字段取决于实际后端与采集路径，设置选项也不保证记录完整。
 
-- `known: true` 表示窗口内已有记录可被有效读取和汇总，不表示所有请求或 token 都已捕获。未返回流式 usage 等情况可能由生产者记为数值 `0`；CLI 会保留这个已记录的零，不能据此断言实际没有消耗 token，也不会从请求文本估算补齐。
-- 数值 `0` 与缺列、`null` 或无效 token 值不同。后几种情况以及读取失败会使统计不可用；客户端不会把未知改成零，也不会显示旧总计冒充本次结果。
+- 成功返回但没有可用 token 计数的流式请求会记为 `untracked_requests`，其 token 按数值 `0` 记录。CLI 用 `without token counts` 脚注单独说明这些请求，`total_tokens` 等总计里不包含它们的真实消耗；不能据此断言实际没有消耗 token，也不会从请求文本估算补齐。
+- `known: true` 表示窗口内已有记录可被有效读取和汇总，不表示所有请求或 token 都已捕获。数值 `0` 与缺列、`null` 或无效 token 值不同；后几种情况以及读取失败会使统计不可用，客户端不会把未知改成零，也不会显示旧总计冒充本次结果。
 - 未覆盖的请求路径、落库失败或已不在活动库中的记录不会出现在汇总里。请求数和 token 总计仅描述已记录范围，不是全量流量证明或精确计费账单。
 
 ### 来源标签的边界
 
-原生 `src` 与模型、状态和 token 位于同一活动记录时，可用于连接来源归组；是否已有这些记录取决于实际安装的生产者与请求路径。容器标签还要求运维核实直接连接方 IP 与容器的映射在相应记录窗口内有效。`source_ip`、`source_container` 和分组标签不代表经过认证的个人身份；地址重分配后的当前映射也不能证明历史归属。
+记录中的来源标签由后端按 `client_ip`（直接连接方地址）归类；是否已有这些记录取决于实际安装的生产者与请求路径。容器标签还要求运维核实直接连接方 IP 与容器的映射在相应记录窗口内有效。`client_ip`、容器标签和分组名称不代表经过认证的个人身份；地址重分配后的当前映射也不能证明历史归属。
 
-如果代理把多个客户端汇成自己的连接地址，该记录至多表明代理这个直接连接方，原始容器仍未知。不要把代理地址映射成某个客户端容器，或用可伪造的转发头、相近时间的日志来补写身份。未映射的有效 IP 可显示为 `IP only`；缺失或无效来源保留 `unknown`，已有请求和 token 不因此丢失。来源未知与活动库读取失败分别呈现，不应互相替代。
+如果代理把多个客户端汇成自己的连接地址，该记录至多表明代理这个直接连接方，原始容器仍未知。不要把代理地址映射成某个客户端容器，或用可伪造的转发头、相近时间的日志来补写身份。未映射的有效地址显示为 `ip:<addr>` 分组；缺失来源保留为 `unattributed`，已有请求和 token 不因此丢失。来源未知与活动库读取失败分别呈现，不应互相替代。
 
 ## Pin / unpin 记录
 
@@ -329,7 +351,7 @@ LLM_URL=http://scheduler:8011 python cli/llm
 | Ctrl+R | 确认 daemon 已重启后重置事件游标 |
 | `?` | 仅在输入为空时显示帮助，否则就是普通字符 |
 
-旧的可打印快捷键 `f` / `p` / `w` / `u` / `r` / `q` / `e` 已删除，它们现在都是普通输入字符。对应功能改为界面命令：`/help`、`/quit`、`/usage [7|30]`、`/events`、`/clear`、`/copy [MODEL|gpu N|events]`、`/refresh`。**`/` 开头的是界面动作，不是模型命令**：TUI 不维护第二套命令语义，其余输入一律交给 `cli/llm` 的解析器与执行函数。
+旧的可打印快捷键 `f` / `p` / `w` / `u` / `r` / `q` / `e` 已删除，它们现在都是普通输入字符。对应功能改为界面命令：`/help`、`/quit`、`/usage [1|7|30] [user|model|day]`、`/events`、`/clear`、`/copy [MODEL|gpu N|events]`、`/refresh`。**`/` 开头的是界面动作，不是模型命令**：TUI 不维护第二套命令语义，其余输入一律交给 `cli/llm` 的解析器与执行函数。
 
 命令行始终持有焦点：模型表、事件面板、GPU 行、结果区、滚动区和按钮都不可聚焦，鼠标点击处理完后焦点仍在输入框，点击面板不会打断正在输入的命令。
 
@@ -359,7 +381,7 @@ LLM_URL=http://scheduler:8011 python cli/llm
 - 同一时刻只执行一个写请求（pin/unpin/free/wake/reserve/unreserve/sleep/stop/preload），不会把重复提交排队。写请求完成后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态，刷新失败会单独说明，已成功的写入不会因此重试。
 - 后台轮询只写底栏，不覆盖命令结果；显式 `status` / `status --json` 才写结果区。刷新失败保留上一份快照，并在底栏显示错误和 UTC 时间。
 - 实际 `free --ram` 仍先弹出二次确认窗口，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。
-- usage 视图用 `/usage`、`/usage 30` 进入，`status` 命令或 Status 按钮返回，按同一刷新间隔刷新当前窗口；快速切换窗口时只排队读取最新选择，迟到结果不会覆盖新窗口。未知来源与不可用数据源的显示规则和 CLI 相同。
+- usage 视图用 `/usage`、`/usage 30`、`/usage 30 model` 或 `/usage model 30` 进入（窗口与分组可任意顺序，默认 7 天与 user），按钮行是 `1 day` / `7 days` / `30 days` / `By user` / `By model` / `By day` / `Status`：天数按钮只换窗口、分组按钮只换分组，`status` 命令或 Status 按钮返回。按同一刷新间隔刷新当前选择；快速切换时只排队读取最新选择，迟到结果不会覆盖新窗口。渲染直接复用 CLI 的 `format_usage`，因此列、响应式收窄、脚注与不可用显示规则和 CLI 完全相同。
 - 活动读取失败在底栏显示 `Partial update · activity unavailable` 和受限安全原因（预算、锁、schema、parse 等）；旧版 `ValueError` 或未知原因只显示 `reason unavailable`。该轮活动数值按未知显示，不沿用旧计数；完整当前 snapshot/errors 保留在 `status --json`，不会被人类文案改写。读取成功而来源为 unknown/空时仍保留已读取的计数，不据此推断“未记录来源”、容器身份或数据库读取失败；模型名与 `source unavailable` 的冗余详情行已去掉，诊断保留在底栏与 `status --json`。
 - Reserve 的预览、只读拒绝与实际回执语义见上节；模型登记/注销是目录驱动、由 scheduler 自己提交的，客户端没有对应的写命令，queued 不等于 applied 或全局动作可用。不能用本客户端命令启用生产调度。
 
@@ -460,7 +482,7 @@ Python 3.10.12 / Textual 8.2.8 下 60 秒单核 CPU 0.23%、按键输出重绘14
 
 SSE 解码按 [事件流格式](https://html.spec.whatwg.org/dev/server-sent-events.html#the-event-stream-format) 处理 UTF-8、BOM、注释、换行和空行提交，并按 scheduler 契约要求每个事件带匹配的数字 ID 与 JSON 记录。单行和单帧上限分别为 64 KiB、256 KiB；不完整尾帧不会提交游标。loopback 测试覆盖重连、明确重启后归零与退出清理。
 
-Usage 测试使用临时 SQLite、实际 `ActivityReader` / `build_usage` 和 scheduler HTTP 服务，核对 CLI/TUI 显示与后端计数，并确认数据库字节不变。独立的历史线上对账证据保存在 [telemetry/live-final.json](../tests/fixtures/telemetry/live-final.json)：该快照记录的 31,605 请求、40,480,504 输入 token、4,847,906 输出 token 与当时的数据面 metrics 总数一致。这是 telemetry 的采样时刻证据；当前客户端测试证明显示与后端协议一致，完整 #25 的集成与来源对账验收仍需相应实机证据。
+Usage 测试用一个只回答 `/v1/usage/report` 的 loopback 假服务器和合成数据集核对 CLI/TUI 的列、脚注、响应式收窄与计数守恒，不依赖并行实现的新后端；`--json` 保真、503 未知、非法窗口和响应不变式拒绝都在其中。独立的历史线上对账证据保存在 [telemetry/live-final.json](../tests/fixtures/telemetry/live-final.json)：该快照记录的 31,605 请求、40,480,504 输入 token、4,847,906 输出 token 与当时的数据面 metrics 总数一致。这是 telemetry 的采样时刻证据；当前客户端测试证明显示与后端协议一致，完整 #25 的集成与来源对账验收仍需相应实机证据。
 
 Pin/unpin 测试仅使用明确 opt-in 的临时 SQLite/loopback scheduler。覆盖伪造兼容标签后的权威 owner、编码模型名、空 DELETE body、写入陷阱下的零写入 dry-run，以及成功后的即时刷新与迟到响应。没有调用生产接口、模型执行器或 GPU；完整 #11/#24 验收保留在相应后续事项中。
 

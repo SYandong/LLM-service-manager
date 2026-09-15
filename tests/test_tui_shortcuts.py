@@ -10,9 +10,11 @@ import pytest
 
 pytest.importorskip("textual")
 
-from textual.widgets import DataTable, Input, RichLog, Static
+from textual.widgets import RichLog, Static
 from tui.app import INTERRUPT_WINDOW
 from test_tui import make_app, snapshot
+
+__all__ = ["snapshot"]
 
 
 def entry(app):
@@ -217,7 +219,7 @@ def test_slash_commands_are_ui_actions_with_no_second_parser(snapshot):
             for timer in app._ui_timers:
                 timer.pause()  # Command output must not race a background poll.
             for command, expected in [("/help", "Ctrl+O item menu"),
-                                      ("/usage 90", "/usage accepts 7 or 30"),
+                                      ("/usage 90", "/usage accepts 1|7|30 and user|model|day"),
                                       ("/bogus", "Unknown UI command")]:
                 entry(app).value = command
                 await pilot.press("enter")

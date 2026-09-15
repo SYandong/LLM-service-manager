@@ -417,8 +417,12 @@ class SchedulerApp(App):
                 yield EventLog(id="events", max_lines=500, min_width=1, wrap=True, markup=False, highlight=False)
         with Vertical(id="usage-view"):
             with Horizontal(id="usage-controls"):
+                yield Button("1 day", id="usage-1")
                 yield Button("7 days", id="usage-7")
                 yield Button("30 days", id="usage-30")
+                yield Button("By user", id="usage-user")
+                yield Button("By model", id="usage-model")
+                yield Button("By day", id="usage-day")
                 yield Button("Status", id="usage-status")
             with VerticalScroll(id="usage-scroll"):
                 yield Static("Loading usage…", id="usage-text", markup=False)
@@ -848,9 +852,15 @@ class SchedulerApp(App):
             self.action_event_details()
         elif event.button.id == "usage-status":
             self.show_status()
-        elif event.button.id in ("usage-7", "usage-30"):
+        elif event.button.id in ("usage-1", "usage-7", "usage-30"):
             days = event.button.id.removeprefix("usage-")
-            args = self.api.build_parser(UIParser).parse_args(["usage", "--days", days, "--by", self.usage_args.by])
+            args = self.api.build_parser(UIParser).parse_args(
+                ["usage", "--days", days, "--by", self.usage_args.by])
+            self.show_usage(args)
+        elif event.button.id in ("usage-user", "usage-model", "usage-day"):
+            by = event.button.id.removeprefix("usage-")
+            args = self.api.build_parser(UIParser).parse_args(
+                ["usage", "--days", str(self.usage_args.days), "--by", by])
             self.show_usage(args)
         self.focus_composer()
 
@@ -1279,9 +1289,9 @@ class SchedulerApp(App):
             "Esc close menu or clear input · Ctrl+C clear then exit · Ctrl+D exit · "
             "click a row for its menu, a GPU line or an event line to copy it · "
             "menu Copy endpoint copies the configured api_url / LLM_API_URL · "
-            "/help /quit /usage [7|30] /events /clear /refresh /copy [MODEL|gpu N|events] "
+            "/help /quit /usage [1|7|30] [user|model|day] /events /clear /refresh /copy [MODEL|gpu N|events] "
             "/queue /cancel ID|MODEL · "
-            "commands use the llm CLI: status · usage --days 7|30 · wake MODEL · sleep MODEL · "
+            "commands use the llm CLI: status · usage --days N [--by user|model|day] · wake MODEL · sleep MODEL · "
             "stop MODEL · preload MODEL · free [--gpu N] [--need 80G] [--ram] · pin MODEL --for 8h · "
             "unpin MODEL · reserve --gpu N --size 80G --for 4h · unreserve ID · models · registry · "
             "add PATH --name X --base BASE · rm NAME · all operations accept --dry-run")
@@ -1869,12 +1879,20 @@ class SchedulerApp(App):
         elif name == "/events":
             self.action_event_details()
         elif name == "/usage":
-            days = rest[0] if rest else "7"
-            if days not in ("7", "30"):
-                self.show_result("/usage accepts 7 or 30")
+            days, by = "7", "user"
+            for token in rest:
+                if token in ("1", "7", "30"):
+                    days = token
+                elif token in ("user", "model", "day"):
+                    by = token
+                else:
+                    by = None
+                    break
+            if by is None:
+                self.show_result("/usage accepts 1|7|30 and user|model|day")
                 return
             self.show_usage(self.api.build_parser(UIParser).parse_args(
-                ["usage", "--days", days, "--by", self.usage_args.by]))
+                ["usage", "--days", days, "--by", by]))
         elif name == "/queue":
             self.show_result(self.queue_text())
         elif name == "/cancel":
