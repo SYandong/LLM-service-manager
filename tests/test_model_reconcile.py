@@ -95,8 +95,9 @@ class FakeCatalog:
 
 
 class FakeStore:
+    """Like IntentStore, catalog_pending() answers with a boolean."""
     def __init__(self):
-        self.pending = None
+        self.pending = False
 
     def catalog_pending(self):
         return self.pending
@@ -124,6 +125,8 @@ class FakeScheduler:
         self.model_actions = actions
         self.store = FakeStore()
         self.events = []
+        # Wall clock, as Scheduler.clock; the reconciler's own clock is monotonic.
+        self.clock = lambda: 1000.0
 
     def snapshot(self):
         return self._snapshot
@@ -323,7 +326,7 @@ def test_descriptor_that_now_names_another_model_is_an_orphan(tmp_path):
     directory = tmp_path / "renamed"
     directory.mkdir()
     (directory / "llmsvc.json").write_text('{"base": "base", "name": "new-name"}')
-    snap = snapshot([ModelState("old-name", state="stopped")], sampled_at=1031.0)
+    snap = snapshot([ModelState("old-name", state="stopped")], sampled_at=1000.0)
     world = build(rows=[row("new-name", status="pending", path=str(directory))],
                   records={"old-name": record("old-name", str(directory))}, snap=snap)
     # The pending new name is registered first; the old record is unregistered on a later tick.
@@ -340,3 +343,21 @@ def test_shared_roots_are_scanned_at_most_once_per_interval():
     assert world.reconciler.run_once()["reason"] == "interval"
     world.clock.advance(30)
     assert world.reconciler.run_once() == {"action": None, "model": None, "reason": None}
+
+
+def test_snapshot_freshness_uses_the_scheduler_wall_clock(tmp_path):
+    """The reconciler's clock is monotonic; sampled_at is wall time (Scheduler.clock)."""
+    directory = tmp_path / "gone"
+    directory.mkdir()
+    world = build(records={"gone": record("gone", str(directory))},
+                  snap=snapshot([ModelState("gone", state="stopped")], sampled_at=5000.0))
+    world.scheduler.clock = lambda: 5010.0  # fresh by wall clock, hopelessly stale by monotonic 1000
+    assert world.reconciler.run_once() == {"action": "remove", "model": "gone", "reason": None}
+
+
+def test_catalog_pending_boolean_blocks_only_when_true():
+    world = build(rows=[row("cand")])
+    world.scheduler.store.pending = True
+    assert world.reconciler.run_once()["reason"] == "catalog_pending"
+    world.scheduler.store.pending = False
+    assert world.reconciler.run_once()["action"] == "add"
