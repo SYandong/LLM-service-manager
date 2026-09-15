@@ -532,3 +532,27 @@ def test_retained_reactivation_requires_fresh_absence_before_publication(catalog
     assert result["status"]=="reconciliation_required" and result["config_committed"] is True
     assert c.s.catalog_fenced and c.store.catalog_checkpoint()["phase"]=="claimed"
     assert "base" not in c.runtime.manifest["active"] and "base" in c.runtime.manifest["retained"]
+
+
+def test_settled_release_does_not_fence_a_restart(catalog):
+    """A released transaction whose candidate is still the live configuration and
+    whose receipt is retired is fully settled: a restart publishes its generation
+    without fencing placement (2026-09-15 site incident: every restart after an
+    add/remove transaction left the scheduler stuck on catalog_reconciliation_required)."""
+    c=catalog;result,_=install(c)
+    assert result["status"]=="applied" and c.store.catalog_checkpoint()["phase"]=="released"
+    epoch=c.runtime.epoch
+    assert not c.q.marker.exists()
+    c.store.close()
+    c.store=IntentStore(c.cfg.state_db_path,action_lock=c.s.action_lock)
+    c.s.store=c.store
+    restored=CatalogRuntime(c.s,c.q,verifier=c.verify,collector_factory=c.collector_factory,
+        relay_factory=lambda config:None,transport_factory=c.transport_factory)
+    assert not c.s.catalog_fenced and restored.epoch==epoch and restored.pending is None
+    assert "new" in c.s.collect.models and not c.store.catalog_pending()
+    c.s.check_catalog()
+    # The same checkpoint with a changed live configuration is not settled and still fences.
+    c.q.path.write_bytes(c.q.path.read_bytes()+b"# edited after release\n")
+    refenced=CatalogRuntime(c.s,c.q,verifier=c.verify,collector_factory=c.collector_factory,
+        relay_factory=lambda config:None,transport_factory=c.transport_factory)
+    assert c.s.catalog_fenced and refenced.pending is not None
