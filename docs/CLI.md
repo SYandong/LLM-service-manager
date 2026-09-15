@@ -247,6 +247,10 @@ LLM_URL=http://scheduler:8011 python3 llm models
 | `max_model_len` | 否 | 正整数；覆写 `--max-model-len` |
 | `aliases` | 否 | 字符串数组（≤16）；走既有保留名/别名冲突校验 |
 | `weights_gb` | 否 | 正数；缺省时由 scheduler 从 `*.safetensors.index.json` 的 `weight_map` 去重求和，没有 index 则求和目录下的 `*.safetensors` |
+| `tool_call_parser` | 否 | vLLM 解析器名（如 `qwen3_coder`、`hermes`）；覆写 `--tool-call-parser`，并保证 `--enable-auto-tool-choice` 存在 |
+| `reasoning_parser` | 否 | vLLM 推理解析器名（如 `qwen3`）；覆写 `--reasoning-parser` |
+| `speculative` | 否 | `false` 时去掉从 base 继承的 `--speculative-config`（base 带 MTP 而你的权重没有 MTP 头时必需）；`true`/缺省沿用 base |
+| `max_num_seqs` | 否 | 1–4096 的整数；覆写 `--max-num-seqs`（并发上限） |
 
 明确拒绝：`is_default`（导入的模型永远不是默认模型）、`cmd`/`cmdStop`/`argv`/`command`/`env`/`shell` 等任何自带命令或 shell 片段、以及任何未列出的键。覆写只在克隆出的块上生效，仍然经过既有的 shell-token 禁令与命令形状校验；base 的配置块不被修改。
 

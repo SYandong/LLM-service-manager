@@ -57,6 +57,10 @@ class ImportOverrides:
     max_model_len: int | None = None
     aliases: tuple[str, ...] = ()
     weights_gb: float | None = None
+    tool_call_parser: str | None = None
+    reasoning_parser: str | None = None
+    speculative: bool | None = None
+    max_num_seqs: int | None = None
 
 
 @dataclass(frozen=True)
@@ -351,6 +355,16 @@ def _transform_cmd(argv: list[str], base_model: str, name: str, model_path: str,
     overrides = _validate_overrides(overrides)
     if overrides.max_model_len is not None:
         _replace_or_append_option(result, "--max-model-len", str(overrides.max_model_len), start=vllm_start)
+    if overrides.max_num_seqs is not None:
+        _replace_or_append_option(result, "--max-num-seqs", str(overrides.max_num_seqs), start=vllm_start)
+    if overrides.tool_call_parser is not None:
+        _replace_or_append_option(result, "--tool-call-parser", overrides.tool_call_parser, start=vllm_start)
+        if "--enable-auto-tool-choice" not in result[vllm_start:]:
+            result.append("--enable-auto-tool-choice")
+    if overrides.reasoning_parser is not None:
+        _replace_or_append_option(result, "--reasoning-parser", overrides.reasoning_parser, start=vllm_start)
+    if overrides.speculative is False:
+        _remove_option(result, "--speculative-config", start=vllm_start)
     if overrides.util is not None:
         _apply_util_override(result, block, delimiters[0] + 2, vllm_start, _format_util(overrides.util))
     return result
@@ -375,7 +389,20 @@ def _validate_overrides(overrides: ImportOverrides | None) -> ImportOverrides:
     aliases = tuple(validate_safe_model_name(alias) for alias in overrides.aliases)
     if len(set(aliases)) != len(aliases):
         raise RegistryError("model aliases must be distinct")
+    for label, value in (("tool_call_parser", overrides.tool_call_parser),
+                         ("reasoning_parser", overrides.reasoning_parser)):
+        if value is not None and (not isinstance(value, str) or not _PARSER_NAME.fullmatch(value)):
+            raise RegistryError(f"{label} must be a plain vLLM parser name (letters, digits, _ . -)")
+    if overrides.speculative is not None and type(overrides.speculative) is not bool:
+        raise RegistryError("speculative must be true or false")
+    if overrides.max_num_seqs is not None and (
+            type(overrides.max_num_seqs) is not int or not 1 <= overrides.max_num_seqs <= MAX_NUM_SEQS):
+        raise RegistryError("max_num_seqs must be an integer between 1 and %d" % MAX_NUM_SEQS)
     return overrides
+
+
+_PARSER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+MAX_NUM_SEQS = 4096
 
 
 def _effective_util(block: Mapping[str, Any]) -> float | None:
@@ -623,6 +650,21 @@ def _replace_or_append_option(argv: list[str], option: str, value: str, *, start
             argv[index] = f"{option}={value}"
             return
     argv.extend([option, value])
+
+
+def _remove_option(argv: list[str], option: str, *, start: int) -> None:
+    """Drop every ``option VALUE`` / ``option=VALUE`` occurrence after ``start``."""
+    index = start
+    while index < len(argv):
+        token = argv[index]
+        if token == option:
+            if index + 1 >= len(argv):
+                raise RegistryError(f"{option} requires a value")
+            del argv[index:index + 2]
+        elif token.startswith(f"{option}="):
+            del argv[index]
+        else:
+            index += 1
 
 
 def _rewrite_speculative_config(argv: list[str], old_model_path: str, new_model_path: str, *, start: int) -> None:
