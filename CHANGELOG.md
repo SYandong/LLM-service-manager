@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Scheduling
+
+- Catalog-built collectors now read the measured cold starts too (v1.3.0 only bound the startup collector).
+
 ## 1.3.0 — 2026-09-16
 
 Minor release; Python distribution `1.3.0`. Two merged PRs, both implemented by

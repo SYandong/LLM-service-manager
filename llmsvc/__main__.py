@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from llmsvc import __version__
 from llmsvc.actions import AutomaticPolicyController, ManagedModelTransport, ModelActionController
+from llmsvc.collectors import bind_cold_starts
 from llmsvc.config import load_config
 from llmsvc.leases import PlacementController
 from llmsvc.scheduler import Scheduler
@@ -244,8 +245,7 @@ def main():
             store = IntentStore(config.state_db_path, action_lock=threading.RLock(), read_only=config.read_only)
         # The store is opened after the telemetry adapter; bind the measured
         # cold-start source once it exists so the collector can read the table.
-        if collector is not None and store is not None:
-            collector.cold_starts = store.cold_starts
+        bind_cold_starts(collector, store)
         scheduler = Scheduler(config, collect=collector, store=store, usage=build_usage(collector), event_relay=event_relay)
         scheduler.registry = build_registry(config, scheduler)
         settings = config.policy_settings()
