@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Scheduling
+
+- A `catalog_mode: maintenance` configuration transaction now has its own
+  deadline: `maintenance_timeout_seconds` (default 300 s, finite, up to 900 s)
+  bounds every maintenance effect and observation, including operator recovery,
+  rollback and restore. It previously shared the HTTP request timeout
+  (`operation_timeout`, at most 60 s and 10 s on the site), so a slow model
+  sleep plus proxy shutdown could leave the transaction `reconciliation_required`
+  and make rollback fail in its observation stage. Ordinary hot reloads,
+  adapter preflight and validation keep the old bound.
+
 ## 1.1.1 — 2026-09-15
 
 Stable patch release; Python distribution `1.1.1`. It carries the merged

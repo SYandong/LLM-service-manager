@@ -34,6 +34,21 @@ def test_exclusive_gpu_can_move_with_the_pool():
     assert settings.exclusive_gpu == 2 and settings.placement_gpus == (2, 3)
 
 
+def test_maintenance_timeout_defaults_and_accepts_bounded_yaml(tmp_path):
+    assert config().maintenance_timeout_seconds == 300.0
+    path = tmp_path / "config.yaml"
+    path.write_text("listen_host: 127.0.0.1\nlisten_port: 19001\nmaintenance_timeout_seconds: 120\n")
+    assert load_config(str(path)).maintenance_timeout_seconds == 120
+
+
+@pytest.mark.parametrize("value", ["1200", "true", "0", "-1", "nan", "900.5"])
+def test_maintenance_timeout_rejects_out_of_range_or_boolean(tmp_path, value):
+    path = tmp_path / "config.yaml"
+    path.write_text(f"listen_host: 127.0.0.1\nlisten_port: 19001\nmaintenance_timeout_seconds: {value}\n")
+    with pytest.raises(ValueError):
+        load_config(str(path))
+
+
 @pytest.mark.parametrize("kwargs", [
     {"placement_gpus": []}, {"placement_gpus": [0, 0]}, {"placement_gpus": [1]}, {"placement_gpus": [0, "1"]},
     {"placement_gpus": [0, True]}, {"placement_gpus": (0, 1)}, {"exclusive_gpu": -1}, {"exclusive_gpu": True},

@@ -94,6 +94,7 @@ def build_registry(config, scheduler):
         log=lambda event: logging.getLogger("llmsvc.registry").info(json.dumps(event, allow_nan=False)),
         wall_clock=scheduler.clock, max_snapshot_age=config.max_snapshot_age_seconds,
         operation_timeout=min(config.request_timeout_seconds, 60),
+        maintenance_timeout=config.maintenance_timeout_seconds,
         **{key: config.registry[key] for key in ("config_max_bytes",) if key in config.registry})
     limits = {key: config.registry[key] for key in
               ("model_config_max_bytes", "weight_index_max_bytes") if key in config.registry}

@@ -27,6 +27,7 @@ class SchedulerConfig:
     event_history_size: int = 1000
     event_heartbeat_seconds: float = 15.0
     request_timeout_seconds: float = 10.0
+    maintenance_timeout_seconds: float = 300.0
     memory_budget_gb: float = 200.0
     host_min_available_gb: float = 150.0
     read_only: bool = True
@@ -99,7 +100,8 @@ class SchedulerConfig:
         if type(self.event_history_size) is not int or self.event_history_size < 1:
             raise ValueError("event_history_size must be a positive integer")
         for name in ("sample_interval_seconds", "event_heartbeat_seconds",
-                     "request_timeout_seconds", "memory_budget_gb", "host_min_available_gb",
+                     "request_timeout_seconds", "maintenance_timeout_seconds",
+                     "memory_budget_gb", "host_min_available_gb",
                      "max_snapshot_age_seconds", "free_timeout_seconds", "reserve_timeout_seconds", "wake_timeout_seconds",
                      "action_observe_seconds", "action_poll_seconds", "placement_wait_seconds",
                      "lease_timeout_seconds", "lease_probe_seconds", "data_plane_event_interval_seconds",
@@ -149,6 +151,8 @@ class SchedulerConfig:
             raise ValueError("sleeping_recovery_enabled must be a boolean")
         if self.sleeping_recovery_timeout_seconds > 900:
             raise ValueError("sleeping_recovery_timeout_seconds must be <=900")
+        if self.maintenance_timeout_seconds > 900:
+            raise ValueError("maintenance_timeout_seconds must be <=900")
         if self.automation_cycle_timeout_seconds > 120:
             raise ValueError("automation_cycle_timeout_seconds must not exceed 120")
         if self.reserve_timeout_seconds > 120:

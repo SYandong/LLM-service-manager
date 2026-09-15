@@ -528,7 +528,7 @@ class MaintenanceController:
     def reconcile(self):
         """Observe/publish/retire only. Never replay an old stop or start."""
         s, runtime = self.scheduler, self.runtime
-        deadline = self.queue.clock()+self.queue.operation_timeout
+        deadline = self.queue.clock()+self.queue.maintenance_timeout
         with s.action_lock:
             self._enabled()
             if runtime.busy:
@@ -779,7 +779,7 @@ class MaintenanceController:
         if dry_run:
             return {"would":[{"kind":"rollback_maintenance"}]}
         s,runtime=self.scheduler,self.runtime
-        deadline=self.queue.clock()+self.queue.operation_timeout
+        deadline=self.queue.clock()+self.queue.maintenance_timeout
         with s.action_lock:
             self._enabled()
             if runtime.busy:

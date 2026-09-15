@@ -818,7 +818,7 @@ class Scheduler:
             try:
                 try:
                     if self._catalog_thread is not None and self._catalog_thread.is_alive():
-                        self._catalog_thread.join(timeout=self.catalog.queue.operation_timeout+self.config.request_timeout_seconds)
+                        self._catalog_thread.join(timeout=max(self.catalog.queue.operation_timeout, self.catalog.queue.maintenance_timeout if self.catalog.transition is not None else 0)+self.config.request_timeout_seconds)
                         if self._catalog_thread.is_alive():
                             raise RuntimeError("catalog worker did not stop")
                     if self._automation_thread is not None and self._automation_thread.is_alive():

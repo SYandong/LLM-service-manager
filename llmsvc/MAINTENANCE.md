@@ -13,6 +13,14 @@ profile completions cannot disagree with existing configured fields. New model
 profiles must pass the existing catalog validation; no weights or budgets are
 inferred as measurements from a name, macro or parent model.
 
+A maintenance transaction has its own deadline, separate from ordinary hot
+reloads. `maintenance_timeout_seconds` (default 300, finite, `0 < x <= 900`)
+bounds every maintenance effect and observation, including recovery, rollback
+and restore; the HTTP request timeout / `operation_timeout` still bounds normal
+hot reloads, adapter preflight and candidate validation. On the site, stopping
+an awake model and the proxy's own shutdown can together exceed a 10 s HTTP
+request budget, so they must not share it.
+
 The normal bootstrap constructs `CommandBackend`, `MaintenanceController`, the
 existing `CatalogRuntime` and its registry callbacks. It does not execute an
 adapter during validation/construction. The ordinary entrypoint remains safe

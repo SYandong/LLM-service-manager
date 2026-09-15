@@ -288,6 +288,7 @@ class ReloadQueue:
                  clock: Callable[[], float] = time.monotonic,
                  wall_clock: Callable[[], float] = time.time, timeout: float = 600,
                  max_snapshot_age: float = 30, operation_timeout: float = 10,
+                 maintenance_timeout: float = 300,
                  config_max_bytes: int = DEFAULT_CONFIG_MAX_BYTES,
                  maintenance_adapter: Any = None):
         if not _number(timeout) or not 0 < timeout <= 600:
@@ -296,7 +297,10 @@ class ReloadQueue:
             raise ValueError("action_lock must be the scheduler threading.RLock")
         if not _number(operation_timeout) or not 0 < operation_timeout <= 60:
             raise ValueError("operation_timeout must be positive and at most 60 seconds")
+        if not _number(maintenance_timeout) or not 0 < maintenance_timeout <= 900:
+            raise ValueError("maintenance_timeout must be positive and at most 900 seconds")
         self.operation_timeout = operation_timeout
+        self.maintenance_timeout = maintenance_timeout
         self.maintenance_adapter = maintenance_adapter
         self.config_max_bytes = _source_byte_limit(config_max_bytes, "config_max_bytes")
         self.path = Path(config_path)
@@ -505,7 +509,8 @@ class ReloadQueue:
                             self.log({"kind": "config_change_timeout", **job.to_dict()})
                         return job.to_dict()
                     started = self.clock()
-                    deadline = min(job.submitted_at + self.timeout, started + self.operation_timeout)
+                    budget = self.maintenance_timeout if job.maintenance is not None else self.operation_timeout
+                    deadline = min(job.submitted_at + self.timeout, started + budget)
                     if job.maintenance is not None:
                         self._check_deadline(deadline)
                         if not self._maintenance_available():

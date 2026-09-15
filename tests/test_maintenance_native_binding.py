@@ -78,7 +78,7 @@ def test_actual_bound_reader_releases_only_after_independent_settlement(bound):
 
 
 def test_native_visibility_does_not_replace_failed_helper_proof(bound):
-    c=bound;c.backend.helper_mode='failed';c.q.operation_timeout=.5;enqueue(c)
+    c=bound;c.backend.helper_mode='failed';c.q.maintenance_timeout=.5;enqueue(c)
     result=c.runtime.process_once()
     assert result['status']=='reconciliation_required'
     assert c.s.catalog_fenced and 'start_candidate' not in c.backend.calls

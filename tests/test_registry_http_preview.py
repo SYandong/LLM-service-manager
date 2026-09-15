@@ -327,6 +327,14 @@ def test_configured_source_cap_reaches_actual_http_preview(key, mounted):
         assert_readonly(mounted, before)
 
 
+def test_configured_maintenance_timeout_reaches_registry_queue(mounted):
+    config = replace(mounted.scheduler.config, maintenance_timeout_seconds=120)
+    mounted.scheduler.config = config
+    registry = build_registry(config, mounted.scheduler)
+    assert registry.queue.maintenance_timeout == 120
+    assert registry.queue.operation_timeout == min(config.request_timeout_seconds, 60)
+
+
 def test_unreadable_list_source_with_pending_marker_is_still_503(mounted):
     mounted.registry.queue.config_max_bytes = 1
     mounted.registry.queue.marker.write_text("pending fixture")
