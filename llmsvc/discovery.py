@@ -310,11 +310,13 @@ def _optional_aliases(value: Any) -> tuple[str, ...]:
     return aliases
 
 
-def _optional_parser(value: Any, label: str) -> str | None:
+def _optional_parser(value: Any, label: str) -> str | bool | None:
     if value is None:
         return None
+    if value is False:
+        return False  # remove the option inherited from the base
     if not isinstance(value, str) or not _PARSER_NAME.fullmatch(value):
-        raise RegistryError(label + " must be a plain vLLM parser name (letters, digits, _ . -)")
+        raise RegistryError(label + " must be a plain vLLM parser name (letters, digits, _ . -) or false")
     return value
 
 
