@@ -1,5 +1,6 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Claude Code / claude-fable-5-1
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Standard-library HTTP state endpoint and bounded-history SSE stream."""
 
 import json
@@ -139,17 +140,15 @@ class SchedulerHandler(BaseHTTPRequestHandler):
             dry_run = "dry_run" in query
             if query and query != {"dry_run": ["1"]}:
                 raise ValueError("expected dry_run=1")
-            if not dry_run and self.server.scheduler.config.read_only:
-                self._read_only()
-                return
             registry_path = None
             if ((self.command == "POST" and target.path == "/v1/models")
                     or (self.command == "DELETE" and target.path.startswith("/v1/models/"))):
-                catalog = self.server.scheduler.catalog
-                if not dry_run and (catalog is None or not catalog.can_submit()):
-                    self._reject_write()
-                    return
+                # Registration is directory-driven. Route through the scheduler
+                # so this removed write surface reports its own 405 shape.
                 registry_path = "/v1/models" if self.command == "POST" else "/v1/models/" + unquote(target.path[len("/v1/models/"):])
+            if registry_path is None and not dry_run and self.server.scheduler.config.read_only:
+                self._read_only()
+                return
             operation = "registry" if registry_path is not None else None
             payload = {}
             action_model = None

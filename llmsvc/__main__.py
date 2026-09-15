@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Scheduler entry point: read-only by default, with opt-in pin intent writes."""
 
 import argparse
@@ -94,6 +95,7 @@ def build_registry(config, scheduler):
         log=lambda event: logging.getLogger("llmsvc.registry").info(json.dumps(event, allow_nan=False)),
         wall_clock=scheduler.clock, max_snapshot_age=config.max_snapshot_age_seconds,
         operation_timeout=min(config.request_timeout_seconds, 60),
+        maintenance_timeout=config.maintenance_timeout_seconds,
         **{key: config.registry[key] for key in ("config_max_bytes",) if key in config.registry})
     limits = {key: config.registry[key] for key in
               ("model_config_max_bytes", "weight_index_max_bytes") if key in config.registry}
@@ -262,6 +264,14 @@ def main():
                 logging.getLogger("llmsvc.catalog").info(json.dumps({"kind": "catalog_restored",
                     "catalog_epoch": scheduler.catalog_epoch, "phase": checkpoint["phase"],
                     "fenced": scheduler.catalog_fenced, "mode": config.catalog_mode}))
+        if (config.model_reconcile_enabled and scheduler.registry is not None
+                and scheduler.registry.discover is not None):
+            from llmsvc.reconcile import DirectoryReconciler
+            scheduler.reconciler = DirectoryReconciler(
+                scheduler, scheduler.registry, interval_seconds=config.model_reconcile_interval_seconds,
+                clock=scheduler.monotonic)
+        else:
+            scheduler.reconciler = None
 
     except (OSError, ValueError, TypeError, ImportError, sqlite3.Error) as exc:
         try:

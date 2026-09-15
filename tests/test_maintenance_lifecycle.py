@@ -245,7 +245,7 @@ def test_delayed_helper_must_finish_before_configuration_replace(maintenance):
 
 
 def test_failed_helper_retains_old_config_and_durable_claim(maintenance):
-    c=maintenance;c.backend.helper_mode='failed';c.q.operation_timeout=.5
+    c=maintenance;c.backend.helper_mode='failed';c.q.maintenance_timeout=.5
     original=c.path.read_bytes();enqueue(c)
     result=c.runtime.process_once()
     assert result['status']=='reconciliation_required' and result['config_committed'] is False
@@ -282,11 +282,11 @@ def test_explicit_rollback_after_failed_start_restores_exact_base_without_ledger
 
 
 def test_rollback_settles_the_started_candidate_before_restoring_base(maintenance):
-    c=maintenance;c.backend.bad_new_identity=True;c.q.operation_timeout=.8
+    c=maintenance;c.backend.bad_new_identity=True;c.q.maintenance_timeout=.8
     original=c.path.read_bytes();enqueue(c)
     result=c.runtime.process_once()
     assert result['status']=='reconciliation_required' and c.backend.new.poll() is None
-    c.backend.bad_new_identity=False;c.q.operation_timeout=5
+    c.backend.bad_new_identity=False;c.q.maintenance_timeout=5
     assert c.controller.rollback()['status']=='rolled_back'
     assert c.backend.new.poll() is not None and c.backend.restored.poll() is None
     assert c.path.read_bytes()==original and c.backend.calls.count('stop_candidate')==1
@@ -294,7 +294,7 @@ def test_rollback_settles_the_started_candidate_before_restoring_base(maintenanc
 
 
 def test_failed_helper_cannot_be_hidden_by_rollback(maintenance):
-    c=maintenance;c.backend.helper_mode='failed';c.q.operation_timeout=.4
+    c=maintenance;c.backend.helper_mode='failed';c.q.maintenance_timeout=.4
     original=c.path.read_bytes();enqueue(c)
     assert c.runtime.process_once()['status']=='reconciliation_required'
     with pytest.raises(MaintenanceError): c.controller.rollback()

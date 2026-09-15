@@ -416,16 +416,9 @@ def registry_catalog(catalog,registry_fixture):
     return c,api,weights
 
 
-def test_copied_cli_submits_real_registry_change_through_catalog_worker(registry_catalog,tmp_path):
-    import subprocess
-    import sys
-    from pathlib import Path
+def test_registry_change_flows_through_catalog_worker(registry_catalog):
     c,api,weights=registry_catalog
-    script=tmp_path/"llm-copy";script.write_bytes(Path("cli/llm").read_bytes())
-    result=subprocess.run([sys.executable,"-I","-S",str(script),"--url","http://%s:%s"%c.address,
-        "add",str(weights),"--name","fine","--base","base","--json"],capture_output=True,text=True,timeout=5)
-    assert result.returncode==1 and not result.stderr  # Existing CLI treats queued as incomplete, not applied.
-    queued=json.loads(result.stdout)
+    queued=api.add({"name":"fine","path":str(weights),"base":"base"})
     assert queued["status"]=="queued" and queued["config_committed"] is False
     assert queued["description"]=={"kind":"add_model","model":"fine","base":"base"}
     installed=threading.Event();emit=c.s.emit
@@ -445,12 +438,11 @@ def test_copied_cli_submits_real_registry_change_through_catalog_worker(registry
 
 def test_registry_remove_keeps_both_late_precheck_and_absent_cleanup(registry_catalog):
     c,api,weights=registry_catalog
-    status,job=request(c.address,"POST","/v1/models",{"name":"fine","path":str(weights),"base":"base"})
-    assert status==200,job
+    api.add({"name":"fine","path":str(weights),"base":"base"})
     make_quiet(c.q.quiet,c.clock);assert c.runtime.process_once()["status"]=="applied"
     c.s.sample_once()
-    status,job=request(c.address,"DELETE","/v1/models/fine")
-    assert status==200,job
+    job=api.remove("fine")
+    assert job["status"]=="queued" and job["description"]["kind"]=="remove_model"
     c.store.put_pin(Pin("fine",20000,"owner"))
     result=c.runtime.process_once()
     assert result["status"]=="queued" and result["blocked_by"]
@@ -463,28 +455,26 @@ def test_registry_remove_keeps_both_late_precheck_and_absent_cleanup(registry_ca
 
 def test_temporary_metadata_port_mismatch_cannot_enter_runtime(registry_catalog):
     c,api,weights=registry_catalog
-    c.runtime.profile_provider=lambda raw: {"base":profile("base",8101),"fine":profile("fine",8103)}
+    c.runtime.profile_provider=lambda raw: {"base":profile("base",21000),"fine":profile("fine",8103)}
     before=c.path.read_bytes()
-    status,body=request(c.address,"POST","/v1/models",{"name":"fine","path":str(weights),"base":"base"})
-    assert status==503 and body["error"]=="registry_unavailable"
+    with pytest.raises(ValueError, match="disagrees"):
+        api.add({"name":"fine","path":str(weights),"base":"base"})
     assert c.path.read_bytes()==before and c.store.catalog_checkpoint() is None and not c.q._pending
 
 
 def test_removed_descriptor_waits_for_fresh_absence_before_port_reuse(registry_catalog):
     c,api,weights=registry_catalog
-    status,_=request(c.address,"POST","/v1/models",{"name":"fine","path":str(weights),"base":"base"})
-    assert status==200
+    api.add({"name":"fine","path":str(weights),"base":"base"})
     make_quiet(c.q.quiet,c.clock);assert c.runtime.process_once()["status"]=="applied"
     c.s.sample_once()
-    assert request(c.address,"DELETE","/v1/models/fine")[0]==200
+    assert api.remove("fine")["status"]=="queued"
     assert c.runtime.process_once()["status"]=="applied"
     assert "fine" in c.s.collect.models and 21001 in api.reserved_ports()
     # Publication clears sample provenance. Only a fresh new-generation sample
     # proves absence; cleanup ACK/lack of a lease alone must not free the slot.
     c.s.sample_once()
     assert 21001 not in api.reserved_ports()
-    status,job=request(c.address,"POST","/v1/models",{"name":"fine","path":str(weights),"base":"base"})
-    assert status==200,job
+    api.add({"name":"fine","path":str(weights),"base":"base"})
     assert c.runtime.process_once()["status"]=="applied"
     assert api.records()["fine"]["daemon_port"]==21001
 

@@ -613,8 +613,7 @@ class SchedulerApp(App):
                 self.show_result(message)
         except Exception as exc:
             if self.is_running:
-                detail = self.api.format_registry_error(exc) if args.command in ("add", "rm") else str(exc)
-                self.show_result("%s request failed: %s" % (args.command, detail))
+                self.show_result("%s request failed: %s" % (args.command, str(exc)))
         finally:
             self._write_busy = False
             self._progress = None
@@ -1834,7 +1833,7 @@ class SchedulerApp(App):
             elif args.command in ("models", "registry"):
                 self.show_models(args)
             elif args.command in ("pin", "unpin", "free", "wake", "reserve", "unreserve",
-                                  "add", "rm", "sleep", "stop", "preload"):
+                                  "sleep", "stop", "preload"):
                 if args.command == "free" and args.ram and not args.dry_run:
                     # RAM reclamation is confirmed BEFORE anything is queued, so a
                     # cancelled confirmation leaves no queue entry behind.

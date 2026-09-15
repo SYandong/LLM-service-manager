@@ -123,15 +123,15 @@ systemd `InvocationID` 相符，且已观察到该实例健康服务，或明确
 | 来源 | 登记方式 | 预算 | 生命周期 |
 |---|---|---|---|
 | 常驻模型 | llama-swap 配置里的固定块 | 每模型 `util` 比例（占一张卡） | 永久 |
-| 临时模型（完整权重 fine-tune） | `llm add <path> --name X --base <常驻模型>`，或把 `llmsvc.json` 放进共享目录后 `llm import NAME` | 继承 base 的配置块与预算，可按 `llmsvc.json` 白名单覆写 | 7 天无人用自动注销 |
-| LoRA 适配器 | `llm add --lora <path> --base <常驻模型>` | 不额外占显存 | 随 base |
+| 目录登记模型（完整权重 fine-tune） | 把权重与 `llmsvc.json` 放进共享目录的一层子目录；scheduler 在空闲时自动登记 | 继承 base 的配置块与预算，可按 `llmsvc.json` 白名单覆写 | 删除 `llmsvc.json`（或目录）即注销；运行中的模型先停止 |
+| LoRA 适配器 | 暂不提供登记入口 | 不额外占显存 | 随 base |
 
-### 发现（只读）与导入（显式）
+### 目录驱动的自动登记
 
-用户把权重放进 `registry.shared_roots` 之下的一层子目录、再写一个 `llmsvc.json`，就完成了登记所需的全部输入。两步严格分开，**发现不等于准入**：
+用户把权重放进 `registry.shared_roots` 之下的一层子目录、再写一个 `llmsvc.json`，就完成了登记所需的全部输入。发现与登记由 scheduler 自动衔接，**发现不等于准入**：
 
-1. **发现**：scheduler 只扫每个 shared root 的一层子目录，读取其中的 `llmsvc.json`。这一步没有副作用——不分配端口、不建 job、不改配置、不起 unit，也不跟随符号链接目录。结果在 `GET /v1/models` 的 `discovered` 里给出 `{name, path, base, util, weights_gb, status, reason}`；`status` 为 `importable` / `imported`（名字已在 llama-swap 配置里）/ `invalid`（带原因）。没有 `llmsvc.json` 的目录不列出。扫描有硬上限（最多 200 条，按名字排序）、描述文件受 `model_config_max_bytes` 约束，并按目录与描述文件 mtime 缓存，避免每次列表都全量重读。
-2. **导入**：`POST /v1/models` 收到 `{"import": NAME}` 时，由 scheduler **重新读取该目录自己的 `llmsvc.json`**，推导出 name/path/base 与覆写项，再走与 `add` 完全相同的校验与提交队列（§3 的安静时刻协议、保护规则、catalog 事务都不变）。覆写永远不来自客户端请求体。
+1. **发现**：scheduler 只扫每个 shared root 的一层子目录，读取其中的 `llmsvc.json`。这一步没有副作用——不分配端口、不建 job、不改配置、不起 unit，也不跟随符号链接目录。结果在 `GET /v1/models` 的 `discovered` 里给出 `{name, path, base, util, weights_gb, status, reason}`；`status` 为 `pending`（待登记）/ `configured`（名字已在 llama-swap 配置里）/ `invalid`（带原因）；登记记录还在、但描述文件消失或改名的列为 `orphaned`。没有 `llmsvc.json` 的目录不列出。扫描有硬上限（最多 200 条，按名字排序）、描述文件受 `model_config_max_bytes` 约束，并按目录与描述文件 mtime 缓存，避免每次列表都全量重读。
+2. **登记与注销**：目录 reconciler 在空闲时刻（零在途请求、无待处理事务）至多提交一个动作。第一个 `pending` 候选经 `registry.add({"import": NAME})` 登记，由 scheduler **重新读取该目录自己的 `llmsvc.json`**，推导出 name/path/base 与覆写项，再走既有校验与提交队列（§3 的安静时刻协议、保护规则、catalog 事务都不变）；覆写永远不来自外部请求体。`orphaned` 记录在状态为 `stopped` 时 `remove`，`awake`/`sleeping` 时先 `stop`。同一候选/记录在失败后按退避重试（首次 60 s，逐次加倍，上限 3600 s）。只有带 `metadata.llmsvc_registry` 的记录会被注销，手写模型永不被动。
 
 `llmsvc.json` 只接受白名单字段：`base`（必填）、`name`、`util`、`max_model_len`、`aliases`、`weights_gb`。`is_default`、任何 `cmd`/`argv`/shell 片段以及未知键一律 400 拒绝并指出字段——描述文件是**参数**，不是命令。覆写只作用在克隆出来的块上：`util` 改写 block 的 `util` 宏、launcher 的份额与 `--gpu-memory-utilization`（三者必须本来就一致）；`max_model_len` 改写 `--max-model-len`；`aliases` 走既有的保留名冲突校验。字面量命令里如果既没有 `--gpu-memory-utilization` 也没有 `util` 宏，util 覆写被拒绝，而不是只改 launcher 份额、让记账与实际分配对不上。`weights_gb` 缺省时由 `*.safetensors.index.json` 的 `weight_map` 去重求和测量，没有 index 则求和目录下的 `*.safetensors`；这是文件大小，不是实测显存。
 
@@ -584,21 +584,25 @@ reconcile、重试或强制清除接口。真实登记提交仍受 §3 完整协
 列表/预览的只读边界，也不要求修改已就绪的前置功能提交。
 
 - `GET /v1/models` 保留 `records/writes_enabled/blocked_by`，增加
-  `inventory`，直接采用 `ModelRegistry.inventory()` 的独立快照。
-  `records` 仍仅列临时记录；`inventory.models` 可列常驻配置名，并明确
-  `source:config` 与 `temporary`。配置存在不代表已采用，过期或缺少运行态
-  观测保持 unknown；idle 到期时间不承诺已执行注销。
-- add/rm 预览保留 `would/dry_run/config_committed/blocked_by`，增加 `plan`，
-  从 `preview_add/preview_remove` 返回的元数据选取 `model`（add）、
-  `projected_base_sha256`、`candidate_sha256`、`port_reserved:false`
-  （适用时）及 `config_written:false`；不返回候选全文或命令配置。
-  `util_macro` 是配置值，不是实测内存；计划端口不预留，摘要不证明采用，
-  未来提交须基于当时来源重新计算。
+  `inventory` 与 `reconcile`。`inventory` 直接采用 `ModelRegistry.inventory()`
+  的独立快照：`records` 仍仅列临时记录，`inventory.models` 可列常驻配置名，
+  并明确 `source:config` 与 `temporary`。配置存在不代表已采用，过期或缺少
+  运行态观测保持 unknown。`reconcile` 给出 `{enabled, last}`：`last` 是目录
+  reconciler 最近一次 `run_once` 的小结果（`action`/`model`/`reason`）。
+- 目录驱动登记：`discovered` 在 `pending`/`configured`/`invalid` 之外增加
+  `orphaned` 行。`DirectoryReconciler` 每个空闲 tick 至多提交一个动作——
+  第一个未在退避中的 `pending` 候选经 `registry.add({"import": name})` 登记；
+  描述文件消失或改名的记录，在状态为 `stopped` 时 `remove`，`awake`/`sleeping`
+  时先 `stop`（`by="reconcile"`）。每个动作与捕获的失败都记 `model_reconcile`
+  日志并 emit 同名事件。`run_once` 不向调用方抛出预期失败。
+- HTTP 写接口已移除：`POST /v1/models` 与 `DELETE /v1/models/{name}` 在任何
+  其它检查之前返回 `405 registry_writes_removed`，`dry-run` 与只读/可写模式
+  一视同仁，不建 job、不 staging、不入队。`writes_enabled` 仅表示 catalog
+  提交能力。
 - model 的 `removable` 与局部阻塞不替代全局 `blocked_by`。禁写、quiet
-  未知、内存/保护、故障与恢复标记限制继续显示。内部 protected remove
-  的空动作/阻塞结果在 HTTP 层保持原有 `400` 拒绝语义；marker 预览 `409`、
-  来源不可用 `503`、请求无效 `400`、真实写入 `405` 均不改变。
-- 详情读取/预览不生成 job、不变更队列、意图或记账，不做 native 探测、
+  未知、内存/保护、故障与恢复标记限制继续显示。来源不可用 `503`、请求无效
+  `400`、写接口 `405` 均不改变。
+- 详情读取/登记不生成 job、不变更队列、意图或记账，不做 native 探测、
   worker、验证器、文件提交或模型动作。兼容原基本字段，详情中的未知值
   不补零；§3 的真实提交证明仍是独立要求。
 

@@ -76,14 +76,13 @@ def test_add_then_remove_preserves_admin_bytes(registry, flow_members, newline):
     assert queue.path.read_bytes() == original
 
 
-def test_expiry_uses_local_deletion_and_preserves_comments(registry):
+def test_removal_uses_local_deletion_and_preserves_comments(registry):
     api, queue, weights, state, clock, _, _, drain = registry
     original = admin_config(queue, flow_members=False)
     api.add(add_payload(weights))
     drain()
     add_stopped_state(state, clock)
-    clock[0] += 8 * 86400
-    assert len(api.expire()) == 1
+    api.remove('fine')
     assert drain()['status'] == 'applied'
     assert queue.path.read_bytes() == original
 

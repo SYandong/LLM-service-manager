@@ -288,3 +288,30 @@ def test_missing_binding_after_enqueue_stops_before_external_hook(harness):
     result = queue.process_once()
     assert result['status'] == 'failed' and not result['external_effects_started']
     assert trace == [] and queue.path.read_bytes() == original and not queue.marker.exists()
+
+
+def test_maintenance_timeout_default_and_validation(harness):
+    queue = harness[0]
+    assert queue.maintenance_timeout == 300 and queue.operation_timeout == 10
+    for value in (0, -1, 901, True, float('nan')):
+        with pytest.raises(ValueError):
+            ReloadQueue(queue.path, action_lock=queue.action_lock, quiet=queue.quiet,
+                snapshot=queue.snapshot, validate=queue.validate, notify_reload=queue.notify_reload,
+                log=queue.log, clock=queue.clock, wall_clock=queue.wall_clock,
+                maintenance_timeout=value)
+
+
+def test_maintenance_adapter_deadline_uses_maintenance_timeout(harness):
+    context = setup(harness);queue, _, _, _, _, trace, _ = context
+    assert enqueue(context)['id']
+    assert queue.process_once()['status'] == 'applied'
+    assert {deadline for _, deadline in trace} == {harness[2]() + queue.maintenance_timeout}
+
+
+def test_ordinary_job_deadline_uses_operation_timeout(harness):
+    queue, quiet, clock, calls, _ = harness
+    queue.notify_reload = lambda **kwargs: calls.append(('reload', kwargs['deadline']))
+    queue.enqueue(lambda data:data+b'# ordinary\n', description={})
+    make_quiet(quiet, clock)
+    assert queue.process_once()['status'] == 'applied'
+    assert [value for kind, value in calls if kind == 'reload'] == [clock() + queue.operation_timeout]

@@ -21,7 +21,7 @@
 | M1 只读可观测 | 09-11 | scheduler 只读采集、`/v1/state`、`llm status` | 无，只多一个只读服务 |
 | M2 主动休眠与保护 | 09-14 | `free` `wake` `pin` `reserve`；内存预算取代 2 小时硬停 | reaper 下线；用户可主动释放 |
 | M3 放置与压力调度 | 09-21 | 放置算法、压力驱动 sleep、等待代替失败 | vllm-launch 变薄客户端；不再无效驱逐 |
-| M4 临时模型 | 09-28 | `add` `rm`、安静时刻改配置、LoRA 结论 | fine-tune 模型可自助登记 |
+| M4 临时模型 | 09-28 | 目录驱动登记/注销、安静时刻改配置、LoRA 结论 | fine-tune 模型可自助登记 |
 | M5 全屏 TUI | 10-05 | textual 应用：面板、事件流、命令行 | 无 |
 | M6 收尾 | 10-12 | README、下线 legacy、用量统计 | 旧代理彻底退役 |
 
@@ -61,7 +61,7 @@
 
 ### M4 临时模型
 
-- #19 `llm add / rm`
+- #19 目录驱动的模型登记/注销（共享目录里的 `llmsvc.json`，无 `llm add`/`rm`）
 - #20 安静时刻改配置
 - #21 调研 LoRA 路径
 
@@ -117,7 +117,7 @@
 | telemetry | #4、#5 | `llmsvc/collectors/`、`llmsvc/activity.py`、采集/活动/usage 测试及对应夹具；协作 #25 用量后端、#18 脱敏现场快照。向 core 提供状态与故障信号。 |
 | policy | #15、#16、#18 | `llmsvc/policy/`、策略测试与回放夹具；协作 #9/#11/#12 纯策略和 #14/#17 放置决策。输入 GPU、模型、活动数据，输出动作，不执行 I/O；#16 由 ops 提供短时测量与压力回放证据，#18 由 telemetry 提供现场来源。 |
 | client | #7、#22–#25 | `cli/`、`tui/`、客户端测试和 `docs/CLI.md`；协作 #9–#11/#19 命令。#25 汇总 telemetry 后端、core HTTP 接入和 usage 视图验收；包元数据修改交给 core。 |
-| registry | #19–#21 | `llmsvc/registry.py`、`llmsvc/reload.py`、对应测试及 `docs/LORA.md`；core 接入 HTTP 与全局动作锁，client 提供 add/rm，ops 执行获准的短测。 |
+| registry | #19–#21 | `llmsvc/registry.py`、`llmsvc/reload.py`、`llmsvc/reconcile.py`、对应测试及 `docs/LORA.md`；core 接入 HTTP、全局动作锁与目录 reconciler，client 只提供只读 `models`，ops 执行获准的短测。 |
 | ops | #2、#8、#13、#26–#28 | `deploy/`、部署测试、`docs/OPERATIONS.md`，以及 #26 的 README/发布说明；协作 #11/#12 TTL 与 reaper 切换、#14 薄 launcher、各项现场验收。#2 管理员操作仍由仓库所有者完成。 |
 | integration | #30 | 本路线图的执行记录、依赖协调、review 反馈派发、集成验证与合并；不代改其他任务拥有的模块。 |
 

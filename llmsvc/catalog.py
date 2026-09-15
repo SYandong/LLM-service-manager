@@ -512,7 +512,8 @@ class CatalogRuntime:
                 self._check_reactivation(manifest)
                 if manifest["sources"] != sources(s.config):
                     raise ReloadError("catalog source settings changed")
-                self.deadline = min(job.submitted_at+self.queue.timeout, self.queue.clock()+self.queue.operation_timeout)
+                budget = self.queue.maintenance_timeout if self.transition is not None else self.queue.operation_timeout
+                self.deadline = min(job.submitted_at+self.queue.timeout, self.queue.clock()+budget)
                 self.staged = self._construct(manifest)
                 self.busy = True
                 owned = True
@@ -581,7 +582,8 @@ class CatalogRuntime:
             if checkpoint is not None and self.scheduler.store.maintenance_checkpoint(checkpoint["transaction_id"]) is not None:
                 return self.transition.reconcile()
         s = self.scheduler
-        deadline = self.queue.clock()+self.queue.operation_timeout
+        budget = self.queue.maintenance_timeout if self.transition is not None else self.queue.operation_timeout
+        deadline = self.queue.clock()+budget
         with s.action_lock:
             self._enabled(); self._idle()
             if self.busy:

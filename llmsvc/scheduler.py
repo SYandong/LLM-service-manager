@@ -144,6 +144,7 @@ class Scheduler:
         self.reservation_actions = None
         self.registry = None
         self.catalog = None
+        self.reconciler = None
         self.bootstrap = None
         self.catalog_epoch = "0"*32
         self.catalog_fenced = False
@@ -526,7 +527,6 @@ class Scheduler:
     def registry_blockers(self):
         from llmsvc.reload import reload_blockers
         snapshot = self.snapshot()
-        marker = self.registry.queue.marker
         reconciliation = [{"reason": "registry_reconciliation_required"}] if self.registry.queue.fenced else []
         disabled = [] if self.catalog is not None and self.catalog.can_submit() else [{"reason": "registry_writes_disabled"}]
         return (disabled + reconciliation + self.registry.queue.quiet.blockers()
@@ -536,68 +536,40 @@ class Scheduler:
     def registry_request(self, method, path, body=None, *, dry_run=False):
         from llmsvc.registry import RegistryError
         from llmsvc.reload import ReloadError
-        if method != "GET" and not dry_run:
-            if self.config.read_only or self.catalog is None or not self.catalog.can_submit():
-                raise IntentWriteError(405, "read_only" if self.config.read_only else "operation_not_enabled")
+        if method != "GET":
+            raise IntentWriteError(405, "registry_writes_removed")
         if self.registry is None:
             raise IntentWriteError(503, "registry_not_configured")
         try:
-            if method == "GET" and path == "/v1/models" and self.registry.discover is not None:
+            if path == "/v1/models" and self.registry.discover is not None:
                 # Warm the bounded read-only scan before serializing on the lock.
                 self.registry.discover.scan()
             with self.action_lock:
                 writable = self.catalog is not None and self.catalog.can_submit()
-                if method != "GET" and not dry_run:
-                    self._check_stopping()
-                    if self.catalog_fenced or (self.store and self.store.catalog_pending()):
-                        raise IntentWriteError(409, "registry_reconciliation_required")
-                    if self.registry.submit_change != self.catalog.submit_change:
-                        raise IntentWriteError(503, "catalog_not_connected")
-                    result = self.registry.handle(method, path, body, dry_run=False)
-                    json.dumps(result, allow_nan=False)
-                    return result
-                if method == "GET" and path == "/v1/models":
+                if path == "/v1/models":
                     inventory = self.registry.inventory(include_records=True)
                     records = inventory.pop("records")
+                    rows = self.registry.discovered([row["name"] for row in inventory["models"]])
+                    if self.reconciler is not None:
+                        discovered = self.reconciler.annotate(rows)
+                        reconcile = {"enabled": True, "last": self.reconciler.last}
+                    else:
+                        discovered = rows
+                        reconcile = {"enabled": False, "last": None}
                     result = {"records": records, "writes_enabled": writable,
-                              "inventory": inventory,
-                              "discovered": self.registry.discovered(
-                                  [row["name"] for row in inventory["models"]]),
+                              "inventory": inventory, "discovered": discovered,
+                              "reconcile": reconcile,
                               "blocked_by": self.registry_blockers()}
-                elif method == "GET" and path == "/v1/registry":
+                elif path == "/v1/registry":
                     result = {"queue": self.registry.queue_snapshot(), "writes_enabled": writable,
                               "blocked_by": self.registry_blockers()}
                 else:
-                    if not isinstance(body, dict):
-                        raise RegistryError("registry body must be an object")
-                    if method == "POST" and path == "/v1/models":
-                        preview = self.registry.preview_add(body)
-                    elif method == "DELETE" and path.startswith("/v1/models/"):
-                        if body:
-                            raise RegistryError("remove does not accept a request body")
-                        preview = self.registry.preview_remove(path[len("/v1/models/"):])
-                        if preview["blocked_by"]:
-                            raise RegistryError("model cannot be removed: " + ", ".join(
-                                item["reason"] for item in preview["blocked_by"]))
-                    else:
-                        raise RegistryError("unsupported registry endpoint")
-                    plan = {key: preview[key] for key in ("model", "projected_base_sha256",
-                            "candidate_sha256", "port_reserved", "config_written") if key in preview}
-                    result = {"would": preview["would"], "plan": plan,
-                              "dry_run": True, "config_committed": False,
-                              "blocked_by": self.registry_blockers()}
+                    raise RegistryError("unsupported registry endpoint")
                 json.dumps(result, allow_nan=False)
                 return result
-        except RegistryError as exc:
-            if method == "GET":
-                raise IntentWriteError(503, "registry_unavailable") from exc
-            error = IntentWriteError(400, "registry_invalid_request")
-            error.message = str(exc)
-            raise error from exc
         except ReloadError as exc:
-            marker = self.registry.queue.marker
-            if method != "GET" and self.registry.queue.fenced:
-                raise IntentWriteError(409, "registry_reconciliation_required") from exc
+            raise IntentWriteError(503, "registry_unavailable") from exc
+        except RegistryError as exc:
             raise IntentWriteError(503, "registry_unavailable") from exc
         except (OSError, ValueError, TypeError, KeyError, RecursionError) as exc:
             raise IntentWriteError(503, "registry_unavailable") from exc
@@ -779,6 +751,8 @@ class Scheduler:
             try:
                 if self.catalog is not None and self.catalog.can_submit():
                     self.catalog.process_once()
+                if self.reconciler is not None and self.catalog is not None and self.catalog.can_submit():
+                    self.reconciler.run_once()
             except Exception as exc:
                 LOG.warning(json.dumps({"kind": "catalog_cycle_error", "error_type": type(exc).__name__}))
             self.stopping.wait(self.config.action_poll_seconds)
@@ -818,7 +792,7 @@ class Scheduler:
             try:
                 try:
                     if self._catalog_thread is not None and self._catalog_thread.is_alive():
-                        self._catalog_thread.join(timeout=self.catalog.queue.operation_timeout+self.config.request_timeout_seconds)
+                        self._catalog_thread.join(timeout=max(self.catalog.queue.operation_timeout, self.catalog.queue.maintenance_timeout if self.catalog.transition is not None else 0)+self.config.request_timeout_seconds)
                         if self._catalog_thread.is_alive():
                             raise RuntimeError("catalog worker did not stop")
                     if self._automation_thread is not None and self._automation_thread.is_alive():

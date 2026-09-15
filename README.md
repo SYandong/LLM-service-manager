@@ -146,12 +146,12 @@ free/reserve 默认客户端等待 150 秒，wake 为 930 秒，可用 `--wait` 
 客户端不切换服务端开关，也不绕过 `read_only` / `operation_not_enabled`。
 `unreserve ID [--dry-run]` 通过现有 DELETE API 幂等解除预约，TUI 使用同一命令；
 它不唤醒模型，丢失响应时不自动重试。配置过 registry 的 scheduler 还支持
-`models`（临时登记记录及配置 inventory）、`registry`（只读队列/恢复状态）以及 `add PATH --name NAME --base BASE --dry-run` /
-`rm NAME --dry-run`。PATH 必须位于服务可读且允许的共享目录；预览不登记模型、
-不预留端口，合法编辑仍可能因全局条件而不可提交。默认入口不配置完整可信
-目录提交能力，实际 add/rm 仍返回 405；明确接入全部能力后返回 queued 也不等于
-已经采用配置。`registry` 只读展示已知 job 与恢复状态，未知值保持 null；它不启动 worker、
-提交证明、reconcile 或清除 fence。inventory 与预览计划不证明运行时已经采纳配置。
+`models`（临时登记记录、配置 inventory 与共享目录发现）和 `registry`（只读队列/恢复状态）。
+登记是目录驱动的：把权重与 `llmsvc.json` 放进共享 root 的一层子目录，scheduler
+在空闲时自动登记；删除 `llmsvc.json` 即注销（运行中的模型先停止）。没有
+`llm import` / `llm add` / `llm rm`，HTTP `POST`/`DELETE /v1/models` 返回 405
+`registry_writes_removed`。`registry` 只读展示已知 job 与恢复状态，未知值保持 null；
+它不启动 worker、提交证明、reconcile 或清除 fence。inventory 与发现不证明运行时已经采纳配置。
 
 活动读取失败会显示 partial update 及脱敏原因；失败计数保持未知，成功读取
 但来源未知不等于没有请求。SSE 静默不再按连接超时反复重连，但也不证明源健康
@@ -206,7 +206,7 @@ python3 -m llmsvc --config deploy/scheduler.example.yaml --check-config
 | 并发与冷启动 | [concurrencyLimit 准备](deploy/CONCURRENCY.md)、[薄 launcher](deploy/LAUNCHER.md)。32 客户端实测采用固定 llama-swap 加 fake backend；不是所有 vLLM 模型的容量保证。 |
 | TTL/reaper 与生产回滚 | [转换顺序](docs/OPERATIONS.md)及 [DESIGN §7](docs/DESIGN.md#7-部署与验证)。保留完整旧配置/脚本，不并行启用冲突策略；TTL 为零时只停 scheduler 会失去 idle sleep。 |
 | 故障恢复与账本 | [FAULTS](llmsvc/FAULTS.md)、[运维恢复限制](docs/OPERATIONS.md#fault-fences-and-ledger-rollback-130)。默认关闭，真实首 claim 才原子迁移 v2→v3；只读/dry-run 不迁移，旧 v2 程序拒绝 v3。 |
-| 新模型、LoRA 与 reload | [登记/LoRA 现状](docs/LORA.md)及 [DESIGN](docs/DESIGN.md)。准备服务可见权重、唯一模型名/端口、预算和完整配置候选，交管理员审核；配置过 registry 时可用 CLI/HTTP 列表及 add/rm 预览，真实登记提交仍未开放。 |
+| 新模型、LoRA 与 reload | [登记/LoRA 现状](docs/LORA.md)及 [DESIGN](docs/DESIGN.md)。把服务可见权重与 `llmsvc.json` 放进共享目录，scheduler 在空闲时自动登记；删除描述文件即注销。配置过 registry 时可用 CLI `models` 查看发现与登记记录。LoRA 与真实写入仍未开放。 |
 
 启用故障检测前还需验证实际采样约 1 Hz 与严格证据时间界限（含轮次小于
 2 秒）；默认 15 秒采样不能证明 10 秒谓词，配置目标不能替代实测。

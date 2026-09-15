@@ -1,18 +1,18 @@
 # Generated-By: Codex / gpt-6-astra
-"""Bounded source reads through the real core preview mount (temporary files only)."""
+# Generated-By: OpenCode / deepseek-v4.1-flash
+"""Bounded source reads through the real registry (temporary files only)."""
 
 import os
 
 import pytest
 
-from llmsvc.registry import ModelRegistry, validate_full_weight_model_dir
+from llmsvc.registry import ModelRegistry, RegistryError, validate_full_weight_model_dir
 from llmsvc.reload import MAX_SOURCE_BYTES, ReloadError, ReloadQueue, _read_regular_file
 from test_registry_http_preview import assert_readonly, mounted, registry_fixture, request
 
 
-def preview(mounted):
-    return request(mounted.address, "POST", "/v1/models?dry_run=1",
-                   {"name": "candidate", "path": str(mounted.weights), "base": "base"})
+def add(mounted, name="candidate"):
+    return mounted.registry.add({"name": name, "path": str(mounted.weights), "base": "base"}, dry_run=True)
 
 
 @pytest.mark.parametrize("bad", [True, False, 0, -1, 1.5, float("inf"), None, "1024", MAX_SOURCE_BYTES + 1])
@@ -28,19 +28,20 @@ def test_constructor_caps_cannot_disable_bounds(registry_fixture, bad):
                           daemon_port_range=registry.daemon_port_range, **{field: bad})
 
 
-def test_config_exact_limit_then_one_byte_over_is_503_for_list_and_preview(mounted):
+def test_config_exact_limit_then_one_byte_over_fails_for_list_and_add(mounted):
     before = mounted.files(), mounted.scheduler.events_since(0)
     mounted.registry.queue.config_max_bytes = mounted.path.stat().st_size
     assert request(mounted.address, "GET", "/v1/models")[0] == 200
-    assert preview(mounted)[0] == 200
+    assert add(mounted)["would"]
     mounted.registry.queue.config_max_bytes -= 1
     assert request(mounted.address, "GET", "/v1/models") == (503, {"error": "registry_unavailable"})
-    assert preview(mounted) == (503, {"error": "registry_unavailable"})
+    with pytest.raises(ReloadError):
+        add(mounted)
     assert_readonly(mounted, before)
 
 
 @pytest.mark.parametrize("kind", ["config", "index"])
-def test_metadata_exact_limit_then_one_byte_over_is_request_400(mounted, kind):
+def test_metadata_exact_limit_then_one_byte_over_is_rejected(mounted, kind):
     if kind == "config":
         target = mounted.weights / "config.json"
         field = "model_config_max_bytes"
@@ -50,11 +51,10 @@ def test_metadata_exact_limit_then_one_byte_over_is_request_400(mounted, kind):
         field = "weight_index_max_bytes"
     setattr(mounted.registry, field, target.stat().st_size)
     before = mounted.files(), mounted.scheduler.events_since(0)
-    assert preview(mounted)[0] == 200
+    assert add(mounted)["would"]
     setattr(mounted.registry, field, target.stat().st_size - 1)
-    status, body = preview(mounted)
-    assert status == 400 and body["error"] == "registry_invalid_request"
-    assert "oversized" in body["message"]
+    with pytest.raises(RegistryError, match="oversized"):
+        add(mounted)
     assert_readonly(mounted, before)
 
 
@@ -88,7 +88,8 @@ def test_unsafe_config_sources_fail_without_blocking_or_writing(mounted, monkeyp
     # The standard files() helper follows parent symlinks; avoid it in that case.
     before = None if kind == "parent-symlink" else (mounted.files(), mounted.scheduler.events_since(0))
     assert request(mounted.address, "GET", "/v1/models") == (503, {"error": "registry_unavailable"})
-    assert preview(mounted) == (503, {"error": "registry_unavailable"})
+    with pytest.raises((ReloadError, RegistryError, OSError)):
+        add(mounted)
     if before is not None:
         assert_readonly(mounted, before)
     else:
@@ -98,7 +99,7 @@ def test_unsafe_config_sources_fail_without_blocking_or_writing(mounted, monkeyp
 
 @pytest.mark.parametrize("filename", ["config.json", "model.safetensors.index.json", "model.safetensors"])
 @pytest.mark.parametrize("kind", ["fifo", "directory"])
-def test_model_special_files_are_rejected_as_request_errors(mounted, monkeypatch, filename, kind):
+def test_model_special_files_are_rejected(mounted, monkeypatch, filename, kind):
     path = mounted.weights / filename
     path.unlink(missing_ok=True)
     if kind == "fifo":
@@ -111,18 +112,18 @@ def test_model_special_files_are_rejected_as_request_errors(mounted, monkeypatch
         return original_open(path, flags, *args, **kwargs)
     monkeypatch.setattr("llmsvc.reload.os.open", checked_open)
     before = mounted.files(), mounted.scheduler.events_since(0)
-    status, body = preview(mounted)
-    assert status == 400 and body["error"] == "registry_invalid_request"
+    with pytest.raises(RegistryError):
+        add(mounted)
     assert_readonly(mounted, before)
 
 
 @pytest.mark.parametrize("content", [b'\xff', b'{"bad":', b'[' * 1500 + b']' * 1500])
 @pytest.mark.parametrize("filename", ["config.json", "model.safetensors.index.json"])
-def test_malformed_model_json_stays_request_400(mounted, filename, content):
+def test_malformed_model_json_is_rejected(mounted, filename, content):
     (mounted.weights / filename).write_bytes(content)
     before = mounted.files(), mounted.scheduler.events_since(0)
-    status, body = preview(mounted)
-    assert status == 400 and body["error"] == "registry_invalid_request"
+    with pytest.raises(RegistryError):
+        add(mounted)
     assert_readonly(mounted, before)
 
 
@@ -141,7 +142,7 @@ def test_confined_model_links_and_large_weights_keep_existing_semantics(mounted)
     info = validate_full_weight_model_dir(model_alias, (shared,))
     assert info.weight_files == ("model.safetensors",)
     assert info.path == str(mounted.weights)
-    assert preview(mounted)[0] == 200
+    assert add(mounted)["would"]
     assert not mounted.registry.queue._jobs and not mounted.registry.queue._pending
 
 
@@ -206,17 +207,15 @@ def test_oversized_source_rejects_before_read(tmp_path, monkeypatch):
         _read_regular_file(path, 8)
 
 
-def test_alias_collision_is_still_rejected_by_actual_http(mounted):
+def test_alias_collision_is_still_rejected(mounted):
     before = mounted.files(), mounted.scheduler.events_since(0)
-    status, body = request(mounted.address, "POST", "/v1/models?dry_run=1",
-                           {"name": "default", "path": str(mounted.weights), "base": "base"})
-    assert status == 400 and body["error"] == "registry_invalid_request"
-    assert "already exists" in body["message"]
+    with pytest.raises(RegistryError, match="already exists"):
+        add(mounted, "default")
     assert_readonly(mounted, before)
 
 
-def test_symlink_loop_is_request_400_and_does_not_read_target(mounted):
+def test_symlink_loop_is_rejected_and_does_not_read_target(mounted):
     (mounted.weights / "loop").symlink_to("loop")
-    status, body = preview(mounted)
-    assert status == 400 and body["error"] == "registry_invalid_request"
+    with pytest.raises(RegistryError):
+        add(mounted)
     assert not mounted.registry.queue._jobs and not mounted.registry.queue._pending

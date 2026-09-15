@@ -8,7 +8,7 @@ import yaml
 
 from llmsvc.__main__ import build_profile_provider
 from llmsvc.discovery import ModelDiscovery
-from llmsvc.registry import ModelRegistry
+from llmsvc.registry import ModelRegistry, RegistryError
 from test_catalog_lifecycle import catalog, profile
 from test_model_import_http import describe
 from test_registry_api import registry
@@ -36,15 +36,13 @@ def imported(catalog, registry):
     return c, api, weights, configured
 
 
-def submit(c, body):
-    status, job = request(c.address, "POST", "/v1/models", body)
-    return status, job
+def submit(api, body):
+    return api.add(body)
 
 
 def test_import_installs_a_generated_profile_and_collector_entry(imported):
     c, api, weights, _ = imported
-    status, job = submit(c, {"import": "candidate"})
-    assert status == 200, job
+    job = submit(api, {"import": "candidate"})
     assert job["description"] == {"kind": "add_model", "model": "candidate", "base": "base"}
     make_quiet(c.q.quiet, c.clock)
     assert c.runtime.process_once()["status"] == "applied"
@@ -57,14 +55,13 @@ def test_import_installs_a_generated_profile_and_collector_entry(imported):
         "util": .4, "weights_gb": 10.0, "budget_gb": 40.0, "is_default": False}
     status, listed = request(c.address, "GET", "/v1/models")
     assert status == 200
-    assert [row["status"] for row in listed["discovered"]] == ["imported"]
+    assert [row["status"] for row in listed["discovered"]] == ["configured"]
 
 
 def test_minimal_descriptor_takes_util_from_base_and_measures_weights(imported):
     c, api, weights, _ = imported
     describe(weights, {"base": "base"})
-    status, job = submit(c, {"import": "candidate"})
-    assert status == 200, job
+    submit(api, {"import": "candidate"})
     make_quiet(c.q.quiet, c.clock)
     assert c.runtime.process_once()["status"] == "applied"
     c.s.sample_once()
@@ -78,8 +75,8 @@ def test_import_blocks_when_no_card_size_is_observed(imported, monkeypatch):
     observed = c.s.snapshot
     monkeypatch.setattr(c.s, "snapshot", lambda: replace(observed(), gpus=()))
     before = c.path.read_bytes()
-    status, result = submit(c, {"import": "candidate"})
-    assert status == 400 and "GPU total memory is unknown" in result["message"]
+    with pytest.raises(RegistryError, match="GPU total memory is unknown"):
+        submit(api, {"import": "candidate"})
     assert api.records() == {} and c.path.read_bytes() == before
 
 
@@ -88,13 +85,13 @@ def test_configured_profile_must_agree_with_the_imported_descriptor(imported):
     c.runtime.profile_provider = build_profile_provider(replace(configured, catalog_profiles={
         "base": profile("base", 21000), "candidate": profile("candidate", 21009)}), c.s)
     before = c.path.read_bytes()
-    status, result = submit(c, {"import": "candidate"})
-    assert status == 400 and "disagrees on" in result["message"]
+    with pytest.raises(RegistryError, match="disagrees on"):
+        submit(api, {"import": "candidate"})
     assert api.records() == {} and c.path.read_bytes() == before
 
 
 def test_model_without_profile_or_descriptor_still_needs_one(imported):
     c, api, weights, configured = imported
     c.runtime.profile_provider = build_profile_provider(replace(configured, catalog_profiles={}), c.s)
-    status, result = submit(c, {"name": "plain", "path": str(weights), "base": "base"})
-    assert status == 400 and "lacks a trusted maintenance profile" in result["message"]
+    with pytest.raises(RegistryError, match="lacks a trusted maintenance profile"):
+        submit(api, {"name": "plain", "path": str(weights), "base": "base"})

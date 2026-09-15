@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Models
+
+- Model registration is directory-driven: a model is served iff a one-level
+  subdirectory of a configured shared root contains a valid `llmsvc.json`. The
+  scheduler's `DirectoryReconciler` registers `pending` candidates at the next
+  idle moment and unregisters records whose descriptor was deleted or renamed
+  (stopping a running model first). Hand-written models are never touched.
+- `llm import`, `llm add`, `llm rm` and the HTTP `POST`/`DELETE /v1/models`
+  write endpoints are removed; the write routes now return 405
+  `registry_writes_removed`. `llm models` lists `pending` / `configured` /
+  `invalid` / `orphaned` discovery rows. Discovery statuses were renamed from
+  `importable`/`imported`.
+- New configuration keys `model_reconcile_enabled` (default true) and
+  `model_reconcile_interval_seconds` (default 30, up to 3600) bound the
+  reconciler cadence and its 60 s-doubling backoff (capped at 3600 s).
+- New event kind `model_reconcile` records every submitted action and caught
+  failure; `GET /v1/models` gains a `reconcile: {enabled, last}` field.
+
+### Scheduling
+
+- A `catalog_mode: maintenance` configuration transaction now has its own
+  deadline: `maintenance_timeout_seconds` (default 300 s, finite, up to 900 s)
+  bounds every maintenance effect and observation, including operator recovery,
+  rollback and restore. It previously shared the HTTP request timeout
+  (`operation_timeout`, at most 60 s and 10 s on the site), so a slow model
+  sleep plus proxy shutdown could leave the transaction `reconciliation_required`
+  and make rollback fail in its observation stage. Ordinary hot reloads,
+  adapter preflight and validation keep the old bound.
+
 ## 1.1.1 — 2026-09-15
 
 Stable patch release; Python distribution `1.1.1`. It carries the merged

@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Validated scheduler configuration, independent of the legacy proxy config."""
 
 import ipaddress
@@ -27,6 +28,7 @@ class SchedulerConfig:
     event_history_size: int = 1000
     event_heartbeat_seconds: float = 15.0
     request_timeout_seconds: float = 10.0
+    maintenance_timeout_seconds: float = 300.0
     memory_budget_gb: float = 200.0
     host_min_available_gb: float = 150.0
     read_only: bool = True
@@ -57,6 +59,8 @@ class SchedulerConfig:
     lease_timeout_seconds: float = 900.0
     lease_probe_seconds: float = 1.0
     model_actions_enabled: bool = False
+    model_reconcile_enabled: bool = True
+    model_reconcile_interval_seconds: float = 30.0
     automation_enabled: bool = False
     automation_interval_seconds: float = 15.0
     automation_cycle_timeout_seconds: float = 120.0
@@ -99,9 +103,11 @@ class SchedulerConfig:
         if type(self.event_history_size) is not int or self.event_history_size < 1:
             raise ValueError("event_history_size must be a positive integer")
         for name in ("sample_interval_seconds", "event_heartbeat_seconds",
-                     "request_timeout_seconds", "memory_budget_gb", "host_min_available_gb",
+                     "request_timeout_seconds", "maintenance_timeout_seconds",
+                     "memory_budget_gb", "host_min_available_gb",
                      "max_snapshot_age_seconds", "free_timeout_seconds", "reserve_timeout_seconds", "wake_timeout_seconds",
                      "action_observe_seconds", "action_poll_seconds", "placement_wait_seconds",
+                     "model_reconcile_interval_seconds",
                      "lease_timeout_seconds", "lease_probe_seconds", "data_plane_event_interval_seconds",
                      "data_plane_event_timeout_seconds", "data_plane_event_reconnect_seconds",
                      "automation_interval_seconds", "automation_cycle_timeout_seconds", "automation_idle_seconds",
@@ -149,6 +155,8 @@ class SchedulerConfig:
             raise ValueError("sleeping_recovery_enabled must be a boolean")
         if self.sleeping_recovery_timeout_seconds > 900:
             raise ValueError("sleeping_recovery_timeout_seconds must be <=900")
+        if self.maintenance_timeout_seconds > 900:
+            raise ValueError("maintenance_timeout_seconds must be <=900")
         if self.automation_cycle_timeout_seconds > 120:
             raise ValueError("automation_cycle_timeout_seconds must not exceed 120")
         if self.reserve_timeout_seconds > 120:
@@ -159,6 +167,10 @@ class SchedulerConfig:
             raise ValueError("placement_enabled must be a boolean")
         if type(self.model_actions_enabled) is not bool:
             raise ValueError("model_actions_enabled must be a boolean")
+        if type(self.model_reconcile_enabled) is not bool:
+            raise ValueError("model_reconcile_enabled must be a boolean")
+        if self.model_reconcile_interval_seconds > 3600:
+            raise ValueError("model_reconcile_interval_seconds must be at most 3600")
         if self.catalog_mode not in ("hot_reload", "maintenance"):
             raise ValueError("catalog_mode must be hot_reload or maintenance")
         if not isinstance(self.catalog_profiles, dict) or not all(isinstance(v, dict) for v in self.catalog_profiles.values()):

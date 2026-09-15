@@ -880,14 +880,6 @@ def result_exit_code(args, result):
         return 0  # Successful inspection is not application/recovery success.
     if args.command == "models":
         return 1 if result.get("known") is False or result.get("error") else 0
-    if args.command in ("add", "rm", "import"):
-        if "imports" in result:
-            return 0 if result["imports"] and all(
-                "error" not in item and result_exit_code(args, item["result"]) == 0
-                for item in result["imports"]) else 1
-        if args.dry_run:
-            return 1 if result.get("blocked_by") else 0
-        return 0 if result["status"] == "applied" else 1
     if args.command == "usage":
         return 0 if result["known"] else 1
     if args.command in ("pin", "unpin", "free", "wake", "sleep", "stop", "preload", "reserve", "unreserve") and args.dry_run:
@@ -930,7 +922,7 @@ def validate_discovered(result):
             for key in ("name", "path"):
                 if not isinstance(row[key], str) or not row[key].strip():
                     raise ValueError
-            if row["status"] not in ("importable", "imported", "invalid"):
+            if row["status"] not in ("pending", "configured", "invalid", "orphaned"):
                 raise ValueError
             for key in ("base", "reason"):
                 if row[key] is not None and not isinstance(row[key], str):
@@ -944,14 +936,6 @@ def validate_discovered(result):
     return rows
 
 
-def importable_names(result):
-    """Return the candidate names an explicit import may submit, in list order."""
-    rows = validate_discovered(result)
-    if rows is None:
-        raise ClientError("This scheduler does not report discovered models; import is unavailable")
-    return [row["name"] for row in rows if row["status"] == "importable"]
-
-
 def validate_registry_details(args, result):
     """Validate optional owner metadata; never synthesize plans or observations."""
     def digest(value, nullable=False):
@@ -963,60 +947,40 @@ def validate_registry_details(args, result):
     def blockers(value):
         return isinstance(value, list) and all(isinstance(item, dict) and isinstance(item.get("reason"), str) for item in value)
 
-    field = "inventory" if args.command == "models" else "plan"
-    if args.command == "models":
-        validate_discovered(result)
-    if field not in result:
-        return  # Older basic list/preview responses remain compatible.
+    if args.command != "models":
+        return
+    validate_discovered(result)
+    if "inventory" not in result:
+        return  # Older basic list responses remain compatible.
     try:
-        detail = result[field]
+        detail = result["inventory"]
         if not isinstance(detail, dict):
             raise ValueError
-        if field == "inventory":
-            if not digest(detail["config_sha256"]) or type(detail["fenced"]) is not bool:
+        if not digest(detail["config_sha256"]) or type(detail["fenced"]) is not bool:
+            raise ValueError
+        if not isinstance(detail["recovery"], dict) or not isinstance(detail["pending_changes"], list):
+            raise ValueError
+        if not all(isinstance(job, dict) for job in detail["pending_changes"]) or not isinstance(detail["models"], list):
+            raise ValueError
+        row_keys = {"name", "source", "temporary", "base", "daemon_port", "created_at", "last_used_at",
+                    "runtime_state", "removable", "blocked_by"}
+        for row in detail["models"]:
+            if not isinstance(row, dict) or set(row) - row_keys:
                 raise ValueError
-            if not isinstance(detail["recovery"], dict) or not isinstance(detail["pending_changes"], list):
+            if not isinstance(row["name"], str) or not row["name"].strip() or row["source"] != "config":
                 raise ValueError
-            if not all(isinstance(job, dict) for job in detail["pending_changes"]) or not isinstance(detail["models"], list):
+            if type(row["temporary"]) is not bool or type(row["removable"]) is not bool:
                 raise ValueError
-            row_keys = {"name", "source", "temporary", "base", "daemon_port", "created_at", "last_used_at",
-                        "expires_at", "runtime_state", "removable", "blocked_by"}
-            for row in detail["models"]:
-                if not isinstance(row, dict) or set(row) - row_keys:
-                    raise ValueError
-                if not isinstance(row["name"], str) or not row["name"].strip() or row["source"] != "config":
-                    raise ValueError
-                if type(row["temporary"]) is not bool or type(row["removable"]) is not bool:
-                    raise ValueError
-                if row["base"] is not None and not isinstance(row["base"], str):
-                    raise ValueError
-                if not port(row["daemon_port"]) or not isinstance(row["runtime_state"], str) or not blockers(row["blocked_by"]):
-                    raise ValueError
-                for key in ("created_at", "last_used_at", "expires_at"):
-                    value = row[key]
-                    if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
-                        raise ValueError
-        else:
-            allowed = {"model", "projected_base_sha256", "candidate_sha256", "port_reserved", "config_written"}
-            if set(detail) - allowed or detail["config_written"] is not False:
+            if row["base"] is not None and not isinstance(row["base"], str):
                 raise ValueError
-            if "port_reserved" in detail and detail["port_reserved"] is not False:
+            if not port(row["daemon_port"]) or not isinstance(row["runtime_state"], str) or not blockers(row["blocked_by"]):
                 raise ValueError
-            if not digest(detail["projected_base_sha256"], True) or not digest(detail["candidate_sha256"], True):
-                raise ValueError
-            if args.command in ("add", "import") and "model" not in detail:
-                raise ValueError
-            if "model" in detail:
-                model = detail["model"]
-                if not isinstance(model, dict) or set(model) != {"name", "base", "daemon_port", "util_macro"}:
-                    raise ValueError
-                if args.command == "import":
-                    if model["name"] != args.model or not isinstance(model["base"], str) or not port(model["daemon_port"]):
-                        raise ValueError
-                elif args.command != "add" or model["name"] != args.name or model["base"] != args.base or not port(model["daemon_port"]):
+            for key in ("created_at", "last_used_at"):
+                value = row[key]
+                if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
                     raise ValueError
     except (KeyError, TypeError, ValueError, OverflowError):
-        raise ClientError("Invalid optional registry %s details; no values inferred" % field) from None
+        raise ClientError("Invalid optional registry inventory details; no values inferred") from None
 
 
 def format_registry_details(args, result):
@@ -1031,36 +995,25 @@ def format_registry_details(args, result):
             lines.append("%s [%s; source=config] base=%s port=%s; observed=%s" % (
                 value(row["name"]), "temporary" if row["temporary"] else "permanent",
                 value(row["base"]), value(row["daemon_port"]), value(row["runtime_state"])))
-            lines.append("  last use=%s; idle expiry=%s (Unix seconds, not scheduled removal)" % (
-                value(row["last_used_at"]), value(row["expires_at"])))
+            lines.append("  last use=%s (Unix seconds)" % value(row["last_used_at"]))
             reasons = ", ".join(item["reason"] for item in row["blocked_by"]) or "none"
             lines.append("  model-level removable=%s; protection=%s" % ("yes" if row["removable"] else "no", reasons))
         lines.append("Pending FIFO changes: %s; fenced=%s; model eligibility is not global commit readiness" % (
             len(inventory["pending_changes"]), "yes" if inventory["fenced"] else "no"))
-    if args.command == "models" and result.get("discovered"):
-        lines.append("Discovered under the shared roots; listing is not admission, import stays explicit")
-        for row in result["discovered"]:
-            lines.append("%s [%s] path=%s base=%s util=%s weights_gb=%s" % (
-                value(row["name"]), row["status"], value(row["path"]), value(row["base"]),
-                value(row["util"]), value(row["weights_gb"])))
-            if row["reason"]:
-                lines.append("  reason: %s" % value(row["reason"]))
-        lines.append("Import an importable candidate with: llm import NAME [--dry-run]")
-    if args.command in ("add", "rm", "import") and args.dry_run and "plan" in result:
-        plan = result["plan"]
-        if "model" in plan:
-            model = plan["model"]
-            lines.append("Planned model %s; base=%s; daemon port=%s (not reserved)" % (
-                value(model["name"]), value(model["base"]), value(model["daemon_port"])))
-            lines.append("util_macro=%s (configured metadata, not measured memory or allocated budget)" % value(model["util_macro"]))
-        lines.append("Projected base SHA256: %s; candidate SHA256: %s" % (
-            value(plan["projected_base_sha256"]), value(plan["candidate_sha256"])))
-        lines.append("Recompute before submission; hashes are not adoption/settlement; config written=no")
+    if args.command == "models":
+        discovered = result.get("discovered")
+        if discovered:
+            lines.append("Shared roots (models are registered automatically when the service is idle)")
+            for row in discovered:
+                lines.append("%s  %s  %s  %s" % (
+                    value(row["status"]), value(row["name"]), value(row["path"]), value(row["reason"]) or "-"))
+        elif discovered is not None:
+            lines.append("Nothing new under the shared roots")
     return "\n".join(clean_text(line) for line in lines)
 
 
 def validate_registry_result(args, result):
-    if args.command == "models" or (args.command in ("add", "rm", "import") and args.dry_run):
+    if args.command == "models":
         validate_registry_details(args, result)
     try:
         if args.command == "registry":
@@ -1076,35 +1029,16 @@ def validate_registry_result(args, result):
                 raise ValueError
             if type(queue["fenced"]) is not bool or not isinstance(queue["recovery"], dict):
                 raise ValueError
-        elif args.command == "models":
+        else:
             if not isinstance(result["records"], dict) or type(result["writes_enabled"]) is not bool:
                 raise ValueError
             if not all(isinstance(name, str) and isinstance(record, dict) for name, record in result["records"].items()):
-                raise ValueError
-        elif args.dry_run:
-            if result["dry_run"] is not True or result["config_committed"] is not False or "id" in result:
-                raise ValueError
-            if not isinstance(result["would"], list):
-                raise ValueError
-            expected = "remove_model" if args.command == "rm" else "add_model"
-            name = args.name if args.command == "add" else args.model
-            for item in result["would"]:
-                if item["kind"] != expected or item["model"] != name:
-                    raise ValueError
-        else:
-            if result["status"] not in ("queued", "blocked", "applied", "failed", "timed_out", "reconciliation_required"):
-                raise ValueError
-            if "config_committed" in result and type(result["config_committed"]) is not bool:
-                raise ValueError
-            if result["status"] == "applied" and result.get("config_committed") is not True:
                 raise ValueError
         blockers = result["blocked_by"]
         if not isinstance(blockers, list) or not all(isinstance(item["reason"], str) for item in blockers):
             raise ValueError
     except (KeyError, TypeError, ValueError):
-        message = ("Invalid registry read response" if args.command in ("models", "registry") else
-                   "Invalid model registry response; check state/events before retrying an uncertain write")
-        raise ClientError(message) from None
+        raise ClientError("Invalid registry read response") from None
     return result
 
 
@@ -1116,32 +1050,11 @@ def format_registry_result(args, result):
         label += "\nGlobal blockers: " + (reasons or "none reported (not a readiness guarantee)")
         label += "\nQueue status is a config-stage projection, not global action readiness"
         label += "\nTimes are process-local monotonic; missing jobs do not prove application"
-    elif args.command == "models":
+    else:
         label = "Temporary model registry (configured file, not active adoption)"
         label += "\nRegistry writes enabled: " + ("yes" if result["writes_enabled"] else "no")
-    elif args.dry_run:
-        label = "Model change preview; nothing queued or applied"
-    else:
-        label = "Model change queued; not applied" if result["status"] == "queued" else "Model change: " + result["status"]
-        committed = result.get("config_committed")
-        label += "\nConfig committed: " + ("yes" if committed is True else "no" if committed is False else "unknown")
     details = format_registry_details(args, result)
     return label + ("\n" + details if details else "") + "\n" + json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
-
-
-def format_import_results(args, result):
-    """Report each submitted import separately; one failure never hides another."""
-    if not result["imports"]:
-        return "No importable candidate under the configured shared roots; nothing submitted"
-    blocks = ["Imported %d discovered candidate(s); each result below is its own submission"
-              % len(result["imports"])]
-    for item in result["imports"]:
-        probe = SimpleNamespace(command="import", dry_run=args.dry_run, model=item["model"], json=False)
-        if "error" in item:
-            blocks.append("%s: %s" % (clean_text(item["model"]), clean_text(item["error"])))
-            continue
-        blocks.append(clean_text(item["model"]) + ":\n" + format_registry_result(probe, item["result"]))
-    return "\n\n".join(blocks)
 
 
 def format_registry_error(error):
@@ -1263,27 +1176,10 @@ def build_parser(parser_class=argparse.ArgumentParser):
     reserve.add_argument("--dry-run", action="store_true", help="Preview without persistence, model actions or ID allocation")
     reserve.add_argument("--json", action="store_true", help="Print the complete receipt and evacuation result")
     reserve.add_argument("--wait", type=action_timeout, default=150, help="HTTP response wait seconds (default:150); does not change server deadline")
-    models = commands.add_parser("models", help="List configured registry models through scheduler")
+    models = commands.add_parser("models", help="List configured models and shared-root discovery through scheduler")
     models.add_argument("--json", action="store_true")
     registry = commands.add_parser("registry", help="Inspect read-only queue/recovery status; never apply or clear a fence")
     registry.add_argument("--json", action="store_true")
-    for name in ("add", "rm"):
-        model = commands.add_parser(name, help="Register full weights" if name == "add" else "Remove a temporary model")
-        if name == "add":
-            model.add_argument("path", type=model_name, help="Full-weight path visible to scheduler; validated there")
-            model.add_argument("--name", required=True, type=model_name)
-            model.add_argument("--base", required=True, type=model_name)
-        else:
-            model.add_argument("model", type=model_name)
-        model.add_argument("--dry-run", action="store_true")
-        model.add_argument("--json", action="store_true")
-    importer = commands.add_parser("import", help="Import a model discovered under the shared roots")
-    importer.add_argument("model", nargs="?", type=model_name,
-                          help="Discovered candidate name, as shown by llm models")
-    importer.add_argument("--all", dest="all_candidates", action="store_true",
-                          help="Import every importable candidate, in listed order")
-    importer.add_argument("--dry-run", action="store_true")
-    importer.add_argument("--json", action="store_true")
     unreserve = commands.add_parser("unreserve", help="Remove a reservation without waking models")
     unreserve.add_argument("id", type=model_name, help="Reservation ID from status/reserve response")
     unreserve.add_argument("--dry-run", action="store_true")
@@ -1304,54 +1200,11 @@ def app_version(parser_class=argparse.ArgumentParser):
     return "unknown"
 
 
-def submit_import(args, client, name):
-    """Submit one server-resolved import; overrides stay in the scheduler."""
-    query = "?dry_run=1" if args.dry_run else ""
-    try:
-        result = client.request("POST", "/v1/models" + query, {"import": name})
-    except ClientError as exc:
-        if exc.status is not None or args.dry_run:
-            raise
-        raise ClientError(str(exc) + "; model change outcome unknown: check state/events; no automatic write retry") from None
-    probe = SimpleNamespace(command="import", dry_run=args.dry_run, model=name)
-    return validate_registry_result(probe, result)
-
-
-def execute_import(args, client):
-    if bool(args.model) == bool(args.all_candidates):
-        raise ClientError("import requires one discovered model name, or --all")
-    if args.model:
-        return submit_import(args, client, args.model)
-    names = importable_names(client.request("GET", "/v1/models"))
-    imports = []
-    for name in names:
-        try:
-            imports.append({"model": name, "result": submit_import(args, client, name)})
-        except ClientError as exc:
-            imports.append({"model": name, "error": str(exc), "payload": exc.payload})
-    return {"imports": imports}
-
-
 def execute_command(args, client, *, now=None):
     if args.command == "registry":
         return validate_registry_result(args, client.request("GET", "/v1/registry"))
     if args.command == "models":
         return validate_registry_result(args, client.request("GET", "/v1/models"))
-    if args.command == "import":
-        return execute_import(args, client)
-    if args.command in ("add", "rm"):
-        query = "?dry_run=1" if args.dry_run else ""
-        try:
-            if args.command == "add":
-                result = client.request("POST", "/v1/models" + query,
-                                        {"name": args.name, "path": args.path, "base": args.base})
-            else:
-                result = client.request("DELETE", "/v1/models/" + quote(args.model, safe="") + query)
-        except ClientError as exc:
-            if exc.status is not None or args.dry_run:
-                raise
-            raise ClientError(str(exc) + "; model change outcome unknown: check state/events; no automatic write retry") from None
-        return validate_registry_result(args, result)
     if args.command == "unreserve":
         path = "/v1/reserve/" + quote(args.id, safe="") + ("?dry_run=1" if args.dry_run else "")
         try:
@@ -1421,9 +1274,7 @@ def format_result(args, result, width=100):
         return format_action_result(args, result)
     if args.command == "reserve":
         return format_reserve_result(args, result)
-    if args.command in ("models", "registry", "add", "rm", "import"):
-        if "imports" in result:
-            return format_import_results(args, result)
+    if args.command in ("models", "registry"):
         return format_registry_result(args, result)
     if args.command == "unreserve":
         if args.dry_run:
@@ -1516,7 +1367,7 @@ def main(argv=None):
             print("TUI: install with pip install 'llmsvc[tui]' and run llm in a terminal.")
         return result_exit_code(args, result)
     except ClientError as exc:
-        if args.command in ("models", "registry", "add", "rm", "import"):
+        if args.command in ("models", "registry"):
             if getattr(args, "json", False) and isinstance(exc.payload, dict):
                 print(json.dumps(exc.payload, ensure_ascii=False, indent=2, allow_nan=False))
             else:
