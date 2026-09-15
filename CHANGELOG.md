@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 1.3.0 — 2026-09-16
+
+Minor release; Python distribution `1.3.0`. Two merged PRs, both implemented by
+an OpenCode worker from written specifications and reviewed by Claude: #271
+makes idle sleeping models evictable (measured cold starts, keep-value
+fallbacks, `default_cold_start_seconds` / `never_used_idle_seconds`), and the
+maintenance/error-detail PR makes catalog and adapter failures diagnosable from
+the journal. Below the normal five-PR cadence, so the reviewed release PR
+records `Release-Exception: #256` for the user-authorized delivery.
 
 ### Scheduling
 
