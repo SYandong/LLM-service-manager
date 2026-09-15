@@ -128,6 +128,21 @@ def test_unknown_safety_fails_closed(change, reason):
     assert reason in [item['reason'] for item in reload_blockers(snapshot(clock, **change), clock())]
 
 
+def test_stopped_model_without_unit_needs_no_activity_record():
+    """A retained (unregistered) model is absent from the event relay, so its in_flight is None;
+    with no process it cannot have requests in flight and must not fence every later transaction."""
+    clock = Clock()
+    base = ModelState('base', state='awake', weights_gb=20, is_default=True)
+    retained = ModelState('gone', state='stopped', unit='vllm-gone.service', unit_active=False)
+    state = snapshot(clock, models=(base, retained), activity=(Activity('base', in_flight=0), Activity('gone', in_flight=None)))
+    assert reload_blockers(state, clock()) == []
+    state = snapshot(clock, models=(base, retained), activity=(Activity('base', in_flight=0),))
+    assert reload_blockers(state, clock()) == []
+    for model in (replace(retained, unit_active=None), replace(retained, unit_active=True), replace(retained, state='awake', weights_gb=1)):
+        state = snapshot(clock, models=(base, model), activity=(Activity('base', in_flight=0),))
+        assert 'activity_unknown' in [item['reason'] for item in reload_blockers(state, clock())]
+
+
 def test_dry_run_no_files_queue_validation_or_reload(harness):
     queue, quiet, clock, calls, logs = harness
     before = {p: p.read_bytes() for p in queue.path.parent.iterdir()}
