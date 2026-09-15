@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.2.1 — 2026-09-16
+
+Patch release; Python distribution `1.2.1`. It carries one merged PR, #269:
+`tool_call_parser` and `reasoning_parser` in `llmsvc.json` accept `false` to
+remove the option inherited from the base, which a non-thinking model cloned
+from a base with a reasoning parser needs. That is below the normal five-PR
+cadence, so the reviewed release PR records `Release-Exception: #256` for the
+user-authorized delivery.
 
 ### Model registration
 
