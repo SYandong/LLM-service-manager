@@ -1,11 +1,13 @@
 # Generated-By: Codex / gpt-6-astra
 """Immutable policy results and local projections; no execution or persistence."""
 
+# Generated-By: OpenCode / deepseek-v4.1-flash
+
 from dataclasses import dataclass, replace
 from math import isfinite
 from typing import Mapping, Optional, Tuple
 
-from llmsvc.state import Action, Activity, Blocker, ModelState, StateSnapshot
+from llmsvc.state import Action, Activity, Blocker, StateSnapshot
 from .ranking import keep_value
 
 
@@ -28,15 +30,25 @@ class PolicySettings:
     # first_fit: lowest index that fits. best_fit: least remaining budget after
     # the fit, lowest index on ties, so large holes stay open for large models.
     placement_fit: str = "first_fit"
+    # keep_value fallbacks: a measured/configured cold start always wins; an
+    # unpopulated activity row is only idle-assumed when its aggregates are
+    # known zero. Unknown history still blocks (fail closed).
+    default_cold_start_seconds: float = 120.0
+    never_used_idle_seconds: float = 3600.0
 
     def __post_init__(self):
         if isinstance(self.exclusive_gpu, bool) or not isinstance(self.exclusive_gpu, int) or self.exclusive_gpu < 0:
             raise ValueError("exclusive_gpu must be a non-negative integer")
         for key, value in vars(self).items():
-            if key in ("exclusive_gpu", "placement_gpus", "placement_fit"):
+            if key in ("exclusive_gpu", "placement_gpus", "placement_fit",
+                       "default_cold_start_seconds", "never_used_idle_seconds"):
                 continue
             if not known_number(value):
                 raise ValueError(f"{key} must be finite and non-negative")
+        if not known_number(self.default_cold_start_seconds) or not 0 < self.default_cold_start_seconds <= 3600:
+            raise ValueError("default_cold_start_seconds must be a finite number in (0, 3600]")
+        if not known_number(self.never_used_idle_seconds):
+            raise ValueError("never_used_idle_seconds must be finite and non-negative")
         if self.placement_gpus is not None:
             pool = self.placement_gpus
             if (not isinstance(pool, tuple) or not pool
@@ -141,10 +153,28 @@ class Projection:
 
     def score(self, model):
         activity = self.activity.get(model.name)
-        if activity is None or not known_number(activity.last_request_at) or activity.last_request_at > self.snapshot.sampled_at:
+        if activity is None:
             raise ValueError("unknown_activity")
+        last = activity.last_request_at
+        count = activity.requests_last_hour
+        if last is None:
+            # Only a model whose history query succeeded and reported a known
+            # zero may be idle-assumed; any missing aggregate stays unknown.
+            if (type(count) is not int or count != 0
+                    or type(activity.requests_last_10m) is not int or activity.requests_last_10m != 0):
+                raise ValueError("unknown_activity")
+            idle = self.settings.never_used_idle_seconds
+        elif not known_number(last) or last > self.snapshot.sampled_at:
+            raise ValueError("unknown_activity")
+        else:
+            if type(count) is not int or count < 0:
+                raise ValueError("unknown_activity")
+            idle = self.snapshot.sampled_at - last
+        cold = model.cold_start_seconds
+        if not known_number(cold):
+            cold = self.settings.default_cold_start_seconds
         try:
-            return keep_value(activity.requests_last_hour, model.cold_start_seconds, self.snapshot.sampled_at - activity.last_request_at)
+            return keep_value(count, cold, idle)
         except ValueError as exc:
             raise ValueError("unknown_keep_value") from exc
 

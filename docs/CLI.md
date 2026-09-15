@@ -56,7 +56,7 @@ MODEL                       STATE    GPU MEM    USED   10m  FROM       PIN (UTC)
 default-model *             sleeping 0   1.6G   25m    0    ctr-a      -
 research-model              awake    0   73G    1m     12   ctr-b      01-15 09:00Z (ctr-b)
 cold-model                  stopped  -   ?G     ?      ?    -          -
-  cold start estimate: 3.5m
+  cold start estimate: 3.5m (configured)
 unknown-model               unknown  -   ?G     ?      ?    -          -
 WARNING GPU1 probe unavailable
 * default model | ? unknown | sampled 01-15 08:00Z | read-only
@@ -65,9 +65,19 @@ WARNING GPU1 probe unavailable
 - 显存与内存单位为 GiB。GPU 三段为实际观测的服务占用、外部占用、空闲量；不会把 sleeping 模型的放置预算当成物理占用。
 - `MEM` 是模型实际驻留显存，`USED` 是相对快照时间的上次请求间隔，`10m` 是最近十分钟请求数，`FROM` 是来源标签。
 - `*` 表示默认模型，`?` 表示探测未知；未知不会被当成零或 stopped。停止模型的冷启动时长来自后端估计或测量。
+- 停止模型下一行的 `cold start estimate` 标出来源：`(measured)` 为调度器实测，`(configured)` 为配置里的估计值，`? (policy default 120s)` 表示两者都缺省、策略用默认冷启动兜底。
 - PIN 显示 UTC 到期时间及设置者；有效 reserve、未完成或 stale 的租约、策略阻塞与采集错误显示在表后。
 - 小于 100 列时收窄模型表，将活动与 pin 详情放在模型下一行；超长标识符以 `~` 标出截断。更窄的输出会折行。`--json` 保留完整字段，适用于脚本与排查长名称。
 - 无参数且 stdout 是 TTY、可选 TUI 可导入时启动全屏面板；否则输出 `status`，末尾提示 `pip install 'llmsvc[tui]'`。非 TTY 不导入或启动 TUI。显式 `status` / `status --json` 不附加提示，便于脚本读取。
+
+### keep_value 兜底配置键
+
+调度器配置里与 `keep_value` 排序相关的两个新键（默认值与 `PolicySettings` 一致）：
+
+| 键 | 默认值 | 含义 |
+|---|---|---|
+| `default_cold_start_seconds` | `120` | 模型既无实测也无配置冷启动时长时，`Projection.score` 使用的估计值；必须为 `(0, 3600]` 内的有限数。 |
+| `never_used_idle_seconds` | `3600` | `last_request_at` 为空且两个聚合都是已知零时假定的空闲秒数；必须为有限非负数。聚合未知仍按 `unknown_activity` 阻塞。 |
 
 ## 用量统计
 

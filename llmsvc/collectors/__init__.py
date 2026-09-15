@@ -1,6 +1,8 @@
 # Generated-By: Codex / gpt-6-astra
 """Bounded observations using the shared state contract."""
 
+# Generated-By: OpenCode / deepseek-v4.1-flash
+
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -21,7 +23,7 @@ class Collector:
 
     def __init__(self, models, *, swap_url, activity_reader=None, probes=None,
                  deadline=1.8, memory_budget_gb=200, host_min_available_gb=150,
-                 max_workers=32):
+                 max_workers=32, cold_starts=None):
         # The scheduler samples every 15 s; nvidia-smi alone can take several
         # seconds on a heavily loaded host, so allow most of one cadence.
         if not 0 < deadline <= 12:
@@ -29,6 +31,8 @@ class Collector:
         self.models = {name: dict(value) for name, value in models.items()}
         self.probes = probes or Probes(swap_url)
         self.activity_reader = activity_reader
+        self.cold_starts = cold_starts
+        self.cold_start_sources = {}
         self.deadline = deadline
         self.memory_budget_gb = memory_budget_gb
         self.host_min_available_gb = host_min_available_gb
@@ -100,6 +104,14 @@ class Collector:
         sampled_at = time.time()
         deadline = started + self.deadline
         errors = []
+        cold_starts = {}
+        if self.cold_starts is not None:
+            try:
+                values = self.cold_starts()
+                cold_starts = dict(values) if values is not None else {}
+            except Exception as exc:
+                errors.append("cold_starts: " + type(exc).__name__)
+        sources = {}
         jobs = {key: getattr(self.probes, key) for key in
                 ("gpus", "processes", "units", "memory", "running", "events")}
         if self.activity_reader:
@@ -149,6 +161,15 @@ class Collector:
             if util is None:
                 util = config.get("util")
             total = next((g.total_gb for g in first.get("gpus", ()) if g.index == gpu), None)
+            configured_cold = config.get("cold_start_seconds")
+            measured_cold = cold_starts.get(name)
+            if measured_cold is not None:
+                cold_seconds, cold_source = measured_cold, "measured"
+            elif configured_cold is not None:
+                cold_seconds, cold_source = configured_cold, "configured"
+            else:
+                cold_seconds, cold_source = None, None
+            sources[name] = cold_source
             models.append(ModelState(
                 name=name, state=state, gpu=gpu, util=util,
                 budget_gb=total * util if total is not None and util is not None else None,
@@ -156,7 +177,7 @@ class Collector:
                 health_ok=health, is_sleeping=sleeping, swap_state=swap_state,
                 port=unit.get("port") if unit and unit.get("port") else config.get("port"),
                 is_default=config.get("is_default", False),
-                cold_start_seconds=config.get("cold_start_seconds")))
+                cold_start_seconds=cold_seconds))
             history = first.get("activity")
             row = history.get(name) if history is not None else None
             if row is None and history is not None:
@@ -179,6 +200,7 @@ class Collector:
             self.memory_budget_gb, self.host_min_available_gb)
         if not self.activity_reader:
             errors.append("activity: not configured")
+        self.cold_start_sources = sources
         return StateSnapshot(sampled_at=sampled_at, gpus=gpus, models=tuple(models),
             activity=tuple(activity), memory=memory, errors=tuple(errors))
 
@@ -212,7 +234,7 @@ class Collector:
         return tuple(output), resident
 
 
-def build_collector(config):
+def build_collector(config, cold_starts=None):
     """Core adapter for the nested ``collectors`` configuration mapping."""
     from llmsvc.activity import ActivityReader
     if not isinstance(config, dict):
@@ -240,4 +262,5 @@ def build_collector(config):
                     **{k: config[k] for k in ("nvidia_smi", "systemctl", "proc_root", "host_meminfo_path") if k in config})
     reader = ActivityReader(config["activity_path"], config.get("ip_containers")) if config.get("activity_path") else None
     return Collector(models, swap_url=config["swap_url"], probes=probes, activity_reader=reader,
+                     cold_starts=cold_starts,
                      **{k: config[k] for k in ("deadline", "memory_budget_gb", "host_min_available_gb") if k in config})

@@ -242,6 +242,10 @@ def main():
                 models=config.collectors.get("models", {}), systemctl=config.collectors.get("systemctl", "systemctl"))
         if config.state_db_path:
             store = IntentStore(config.state_db_path, action_lock=threading.RLock(), read_only=config.read_only)
+        # The store is opened after the telemetry adapter; bind the measured
+        # cold-start source once it exists so the collector can read the table.
+        if collector is not None and store is not None:
+            collector.cold_starts = store.cold_starts
         scheduler = Scheduler(config, collect=collector, store=store, usage=build_usage(collector), event_relay=event_relay)
         scheduler.registry = build_registry(config, scheduler)
         settings = config.policy_settings()

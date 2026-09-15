@@ -53,7 +53,14 @@ class SchedulerHandler(BaseHTTPRequestHandler):
         try:
             target = urlsplit(self.path)
             if target.path == "/v1/state":
-                self._json(200, self.server.scheduler.snapshot().to_dict())
+                payload = self.server.scheduler.snapshot().to_dict()
+                # The collector owns the cold-start provenance; the dataclass
+                # contract stays unchanged, so layer it onto the published rows.
+                sources = getattr(self.server.scheduler.collect, "cold_start_sources", None)
+                if sources is not None:
+                    for row in payload.get("models", []):
+                        row["cold_start_source"] = sources.get(row.get("name"))
+                self._json(200, payload)
             elif target.path == "/v1/models":
                 if target.query:
                     self._json(400, {"error": "invalid_request"})

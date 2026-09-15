@@ -5,6 +5,8 @@ Opening read_only mode and every dry-run method perform zero database writes.
 Expiry is a read filter, so observation never deletes protection records.
 """
 
+# Generated-By: OpenCode / deepseek-v4.1-flash
+
 import json
 import logging
 import math
@@ -72,6 +74,7 @@ class IntentStore:
                     self._db.execute("CREATE TABLE IF NOT EXISTS llmsvc_reserves (id TEXT PRIMARY KEY, gpu INTEGER NOT NULL, size_gb REAL NOT NULL, until REAL NOT NULL, owner TEXT NOT NULL)")
                     self._db.execute("CREATE TABLE IF NOT EXISTS llmsvc_leases (lease_id TEXT PRIMARY KEY, model TEXT NOT NULL, gpu INTEGER NOT NULL, util REAL NOT NULL, expires_at REAL NOT NULL, budget_gb REAL NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','stale','confirmed','released')), unit TEXT NOT NULL)")
                     self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS llmsvc_one_allocation ON llmsvc_leases(model) WHERE status != 'released'")
+                    self._db.execute("CREATE TABLE IF NOT EXISTS llmsvc_cold_starts (model TEXT PRIMARY KEY, seconds REAL NOT NULL, measured_at REAL NOT NULL)")
                     self._db.execute("PRAGMA user_version = " + str(max(version, 2)))
                 self._has_leases = not read_only or version >= 2
                 self._has_faults = version >= 3
@@ -79,6 +82,8 @@ class IntentStore:
                 self._has_catalog = version >= 5
                 self._has_maintenance = version >= 6
                 self._has_bootstrap = version >= 7
+                self._has_cold_starts = self._db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='llmsvc_cold_starts'").fetchone() is not None
                 if self._has_faults:
                     self._db.execute("SELECT lease_id, model, stage, record FROM llmsvc_faults LIMIT 0")
                 if self._has_leases:
@@ -658,6 +663,33 @@ class IntentStore:
                 return None
             row = self._db.execute("SELECT lease_id, model, gpu, util, expires_at, budget_gb, status, unit FROM llmsvc_leases WHERE lease_id = ?", (lease_id,)).fetchone()
             return (Lease(*row[:7]), row[7]) if row else None
+
+    def record_cold_start(self, model: str, seconds: float, measured_at: float) -> None:
+        """Upsert one measured cold-start duration; never invent a value."""
+        nonempty(model, "model")
+        if (isinstance(seconds, bool) or not isinstance(seconds, (int, float))
+                or not math.isfinite(seconds) or seconds < 0):
+            raise ValueError("seconds must be a finite non-negative number")
+        if (isinstance(measured_at, bool) or not isinstance(measured_at, (int, float))
+                or not math.isfinite(measured_at)):
+            raise ValueError("measured_at must be a finite number")
+        with self.action_lock:
+            if self.read_only:
+                raise PermissionError("intent store is read-only")
+            self._bootstrap_guard()
+            with self._db:
+                self._db.execute(
+                    "INSERT INTO llmsvc_cold_starts VALUES (?, ?, ?) "
+                    "ON CONFLICT(model) DO UPDATE SET seconds=excluded.seconds, measured_at=excluded.measured_at",
+                    (model, float(seconds), float(measured_at)))
+
+    def cold_starts(self) -> dict:
+        """Return model -> latest measured cold-start seconds; empty when absent."""
+        with self.action_lock:
+            if not self._has_cold_starts:
+                return {}
+            return {row[0]: row[1] for row in self._db.execute(
+                "SELECT model, seconds FROM llmsvc_cold_starts")}
 
     def create_lease(self, lease, unit, *, dry_run=False, recovery_claim=None):
         nonempty(lease.lease_id, "lease_id")

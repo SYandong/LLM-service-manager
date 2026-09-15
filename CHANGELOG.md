@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Scheduling
+
+- Measured cold starts are now recorded on every ready cold wake in the
+  `llmsvc_cold_starts` table and used for `keep_value` ordering, ahead of the
+  configured estimate and the `default_cold_start_seconds` policy fallback.
+- `Projection.score` gains known-history fallbacks so an idle resident sleeper
+  is evictable: a never-served model (`last_request_at` empty with known-zero
+  aggregates) is scored with `never_used_idle_seconds`, while unknown history
+  still blocks with `unknown_activity`.
+
 ## 1.2.1 — 2026-09-16
 
 Patch release; Python distribution `1.2.1`. It carries one merged PR, #269:
