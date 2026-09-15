@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 1.1.6 — 2026-09-16
+
+Stable patch release; Python distribution `1.1.6`. It carries one merged PR,
+#265: the reload gate no longer treats retained catalog metadata (a model
+unregistered through `/srv/models`, stopped with an inactive unit and no
+event-relay entry) as `activity_unknown`, which had blocked every later catalog
+transaction on the production site. That is below the normal five-PR cadence,
+so the reviewed release PR records `Release-Exception: #256` for the
+user-authorized delivery.
 
 ### Scheduling
 
