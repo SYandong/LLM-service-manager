@@ -1,0 +1,12 @@
+# Generated-By: OpenCode / deepseek-v4.1-flash
+[Unit]
+Description=Refresh the llmsvc LXD container IP/name map every two minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+Persistent=true
+Unit=llmsvc-export-ip-containers.service
+
+[Install]
+WantedBy=timers.target

@@ -308,6 +308,7 @@ class CatalogRuntime:
         transport.catalog_guard = lambda: s.check_catalog(epoch)
         s.config = self._config(manifest)
         s.collect, s._usage = collector, build_usage(collector)
+        s._usage_report = getattr(s._usage, "usage_report", None)
         s.event_bridge = DataPlaneBridge(s, relay, catalog_epoch=epoch) if relay else None
         old_place, old_fault = s.placement, s.faults
         if s.model_actions is not None:

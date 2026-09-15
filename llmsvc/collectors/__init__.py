@@ -250,6 +250,7 @@ def build_collector(config, cold_starts=None):
     if not isinstance(config, dict):
         raise ValueError("collectors must be a mapping")
     allowed = {"models", "swap_url", "activity_path", "ip_containers", "deadline",
+               "ip_containers_path", "host_ips", "usage_timezone",
                "probe_timeout", "nvidia_smi", "systemctl", "proc_root", "host_meminfo_path",
                "memory_budget_gb", "host_min_available_gb"}
     if set(config) - allowed:
@@ -270,7 +271,15 @@ def build_collector(config, cold_starts=None):
         raise ValueError("probe_timeout must be between zero and six seconds")
     probes = Probes(config["swap_url"], timeout=timeout,
                     **{k: config[k] for k in ("nvidia_smi", "systemctl", "proc_root", "host_meminfo_path") if k in config})
-    reader = ActivityReader(config["activity_path"], config.get("ip_containers")) if config.get("activity_path") else None
+    reader = None
+    if config.get("activity_path"):
+        reader = ActivityReader(
+            config["activity_path"],
+            config.get("ip_containers"),
+            ip_containers_path=config.get("ip_containers_path"),
+            host_ips=config.get("host_ips"),
+            timezone=config.get("usage_timezone", "UTC"),
+        )
     return Collector(models, swap_url=config["swap_url"], probes=probes, activity_reader=reader,
                      cold_starts=cold_starts,
                      **{k: config[k] for k in ("deadline", "memory_budget_gb", "host_min_available_gb") if k in config})

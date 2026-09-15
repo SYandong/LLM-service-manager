@@ -1,0 +1,10 @@
+# Generated-By: OpenCode / deepseek-v4.1-flash
+[Unit]
+Description=Export the LXD container IP/name map for llmsvc usage attribution
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/lib/llmsvc/llmsvc-export-ip-containers.sh /var/lib/llmsvc-host-export

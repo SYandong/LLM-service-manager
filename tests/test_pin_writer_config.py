@@ -33,6 +33,30 @@ def test_invalid_source_mappings_rejected(mapping):
         SchedulerConfig("127.0.0.1", 8011, collectors={"ip_containers": mapping})
 
 
+def test_usage_report_collector_keys_are_accepted(tmp_path):
+    config = SchedulerConfig("127.0.0.1", 8011, collectors={
+        "ip_containers_path": str(tmp_path / "ip-containers.json"),
+        "host_ips": ["127.0.0.1", "::1"],
+        "usage_timezone": "Asia/Shanghai",
+    })
+    assert config.collectors["usage_timezone"] == "Asia/Shanghai"
+
+
+@pytest.mark.parametrize("collectors", [
+    {"ip_containers_path": "relative.json"},
+    {"ip_containers_path": 1},
+    {"host_ips": "127.0.0.1"},
+    {"host_ips": ["not-an-ip"]},
+    {"host_ips": [1]},
+    {"usage_timezone": ""},
+    {"usage_timezone": "Not/ARealZone"},
+    {"usage_timezone": 3},
+])
+def test_invalid_usage_report_collector_keys_rejected(collectors):
+    with pytest.raises(ValueError):
+        SchedulerConfig("127.0.0.1", 8011, collectors=collectors)
+
+
 @pytest.mark.parametrize("flags", [["--dry-run", "--once"], ["--once"], ["--check-config"]])
 def test_read_commands_never_create_database_despite_live_config(tmp_path, flags):
     path = tmp_path / "state.sqlite"

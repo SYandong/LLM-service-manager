@@ -1,0 +1,119 @@
+diff -ruN '--exclude=.gocache' '--exclude=.gomodcache' '--exclude=node_modules' '--exclude=ui_dist' llama-swap-src/internal/server/auth.go llama-swap-work/internal/server/auth.go
+--- a/internal/server/auth.go	2026-08-31 02:57:20.000000000 +0800
++++ b/internal/server/auth.go	2026-09-16 04:42:54.423613017 +0800
+@@ -53,6 +53,7 @@
+ 				return
+ 			}
+ 			_ = data
++			_ = swaputil.SetReqData(r.Context(), "client_ip", peerIP(r))
+ 			next.ServeHTTP(w, r)
+ 		})
+ 	}
+diff -ruN '--exclude=.gocache' '--exclude=.gomodcache' '--exclude=node_modules' '--exclude=ui_dist' llama-swap-src/internal/server/auth_test.go llama-swap-work/internal/server/auth_test.go
+--- a/internal/server/auth_test.go	2026-08-31 02:57:20.000000000 +0800
++++ b/internal/server/auth_test.go	2026-09-16 04:43:01.427566535 +0800
+@@ -74,6 +74,35 @@
+ 	})
+ }
+ 
++func TestServer_RequestContextMiddleware_RecordsClientIP(t *testing.T) {
++	cfg := config.Config{
++		Models: map[string]config.ModelConfig{
++			"llama3": {},
++		},
++	}
++	mm := newTestMetricsMonitor(t, nil, 10, 0)
++
++	final := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		copier := newBodyCopier(w)
++		copier.WriteHeader(http.StatusOK)
++		copier.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2}}`))
++		mm.record("llama3", r, copier, 0, nil, nil)
++	})
++
++	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama3"}`))
++	r.Header.Set("Content-Type", "application/json")
++	r.RemoteAddr = "10.86.229.182:5555"
++	CreateRequestContextMiddleware(cfg)(final).ServeHTTP(httptest.NewRecorder(), r)
++
++	entries := metricsEntries(t, mm)
++	if len(entries) != 1 {
++		t.Fatalf("want 1 entry, got %d", len(entries))
++	}
++	if got := entries[0].Metadata["client_ip"]; got != "10.86.229.182" {
++		t.Errorf("client_ip = %q, want %q", got, "10.86.229.182")
++	}
++}
++
+ func TestServer_AuthMiddleware(t *testing.T) {
+ 	final := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		w.WriteHeader(http.StatusOK)
+diff -ruN '--exclude=.gocache' '--exclude=.gomodcache' '--exclude=node_modules' '--exclude=ui_dist' llama-swap-src/internal/server/log.go llama-swap-work/internal/server/log.go
+--- a/internal/server/log.go	2026-08-31 02:57:20.000000000 +0800
++++ b/internal/server/log.go	2026-09-16 04:42:52.571625306 +0800
+@@ -228,6 +228,15 @@
+ 	return r.RemoteAddr
+ }
+ 
++// peerIP returns the socket peer's address for usage attribution. Unlike
++// clientIP, it never consults client-controlled proxy headers.
++func peerIP(r *http.Request) string {
++	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
++		return host
++	}
++	return r.RemoteAddr
++}
++
+ // CreateRequestLogMiddleware returns middleware that records one access-log
+ // line per request to proxylog, in the legacy format:
+ //
+diff -ruN '--exclude=.gocache' '--exclude=.gomodcache' '--exclude=node_modules' '--exclude=ui_dist' llama-swap-src/internal/server/peerip_test.go llama-swap-work/internal/server/peerip_test.go
+--- a/internal/server/peerip_test.go	1970-01-01 07:30:00.000000000 +0730
++++ b/internal/server/peerip_test.go	2026-09-16 04:42:57.119595124 +0800
+@@ -0,0 +1,34 @@
++// Generated-By: OpenCode / deepseek-v4.1-flash
++package server
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++)
++
++func TestServer_PeerIP(t *testing.T) {
++	cases := []struct {
++		name  string
++		setup func(*http.Request)
++		want  string
++	}{
++		{"ipv4 host port", func(r *http.Request) { r.RemoteAddr = "10.0.0.7:4321" }, "10.0.0.7"},
++		{"ipv6 host port", func(r *http.Request) { r.RemoteAddr = "[::1]:80" }, "::1"},
++		{"unparseable address", func(r *http.Request) { r.RemoteAddr = "not-a-host-port" }, "not-a-host-port"},
++		{"x-forwarded-for ignored", func(r *http.Request) {
++			r.RemoteAddr = "10.0.0.7:4321"
++			r.Header.Set("X-Forwarded-For", "1.2.3.4")
++		}, "10.0.0.7"},
++	}
++	for _, c := range cases {
++		t.Run(c.name, func(t *testing.T) {
++			r := httptest.NewRequest(http.MethodGet, "/", nil)
++			r.RemoteAddr = ""
++			c.setup(r)
++			if got := peerIP(r); got != c.want {
++				t.Errorf("peerIP() = %q, want %q", got, c.want)
++			}
++		})
++	}
++}
+diff -ruN '--exclude=.gocache' '--exclude=.gomodcache' '--exclude=node_modules' '--exclude=ui_dist' llama-swap-src/internal/server/profiles_test.go llama-swap-work/internal/server/profiles_test.go
+--- a/internal/server/profiles_test.go	2026-08-31 02:57:20.000000000 +0800
++++ b/internal/server/profiles_test.go	2026-09-16 04:44:13.851085929 +0800
+@@ -114,7 +114,7 @@
+ 
+ 	assert.Equal(t, "variant", received.Model)
+ 	assert.Equal(t, "real", received.ModelID)
+-	assert.Empty(t, received.Metadata)
++	assert.Equal(t, map[string]string{"client_ip": "192.0.2.1"}, received.Metadata)
+ 	assert.Equal(t, "variant", gjson.GetBytes(body, "model").String())
+ 	assert.True(t, gjson.GetBytes(body, "thinking").Bool())
+ 

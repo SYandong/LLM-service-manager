@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Read-only llama-swap activity and usage aggregation."""
 
 from __future__ import annotations
@@ -9,14 +10,29 @@ import os
 import sqlite3
 import time
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from .config import canonical_ip
 
 
 UNKNOWN_SOURCE = "unknown"
+
+# Fixed, ordered counter set shared by report rows, breakdown rows and totals.
+USAGE_REPORT_COUNTS = (
+    "requests",
+    "errors",
+    "input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "untracked_requests",
+    "duration_ms",
+)
+
+DEFAULT_HOST_IPS = ("127.0.0.1", "::1")
 
 _ERROR_MESSAGES = {
     "deadline": "activity read deadline exceeded",
@@ -86,6 +102,10 @@ class ActivityReader:
         path: os.PathLike[str] | str,
         ip_containers: Optional[Mapping[str, str]] = None,
         deadline_ms: int = 80,
+        *,
+        ip_containers_path: Optional[os.PathLike[str] | str] = None,
+        host_ips: Optional[Any] = None,
+        timezone: str = "UTC",
     ) -> None:
         self.path = Path(path)
         self.ip_containers: dict[str, str] = {}
@@ -94,10 +114,27 @@ class ActivityReader:
             if source in self.ip_containers and self.ip_containers[source] != container:
                 raise ValueError("conflicting container mappings for the same IP")
             self.ip_containers[source] = container
+        self.ip_containers_path = None if ip_containers_path is None else Path(ip_containers_path)
+        if host_ips is None:
+            host_ips = DEFAULT_HOST_IPS
+        if isinstance(host_ips, str) or not isinstance(host_ips, (list, tuple, set, frozenset)):
+            raise ValueError("host_ips must be a sequence of IP address strings")
+        self.host_ips = frozenset(canonical_ip(ip) for ip in host_ips)
+        if not isinstance(timezone, str) or not timezone:
+            raise ValueError("timezone must be a nonempty string")
+        try:
+            self._zone = ZoneInfo(timezone)
+        except (KeyError, ValueError, OSError) as exc:
+            raise ValueError("unknown timezone") from exc
+        self.timezone = timezone
         self.deadline_ms = deadline_ms
         self.last_error: Optional[str] = None
         self.last_error_code: Optional[str] = None
         self._deadline_expired = False
+        # The host export is re-read only when the file identity changes.
+        self._ip_map_key: Any = object()
+        self._ip_map_containers: dict[str, str] = {}
+        self._ip_map_generated_at: Optional[int] = None
 
     def _reset_error(self):
         self.last_error = self.last_error_code = None
@@ -218,6 +255,251 @@ class ActivityReader:
         except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError) as exc:
             self._fail(exc)
             return _unknown_usage(days, by, self.last_error)
+
+    def usage_report(
+        self,
+        days: int = 7,
+        by: str = "user",
+        now: Optional[float] = None,
+    ) -> dict[str, Any]:
+        """Per-user / per-model / per-day report attributed by ``client_ip``.
+
+        Rows are grouped in one SQL pass and folded in Python. Every group
+        carries the same fixed counter set, a breakdown, and min/max first/last
+        timestamps. Failure keeps the report unknown rather than zero.
+        """
+
+        self._reset_error()
+        if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 365:
+            self._fail(ActivityReadError("parse"))
+            return _unknown_usage_report(days, by, self.timezone, "days must be an integer in 1..365")
+        if not isinstance(by, str) or by not in {"user", "model", "day"}:
+            self._fail(ActivityReadError("parse"))
+            return _unknown_usage_report(days, by, self.timezone, "by must be one of: user, model, day")
+
+        try:
+            now_ts = _coerce_now(now)
+            with closing(self._connect()) as conn:
+                columns = _activity_columns(conn)
+                _require_columns(columns, {"id", "ts_created", "model_id"})
+                if "input_tokens" not in columns or "output_tokens" not in columns:
+                    raise ActivityReadError("schema")
+                metadata_expr = "metadata_json" if "metadata_json" in columns else "NULL"
+                status_expr = "resp_status_code" if "resp_status_code" in columns else "NULL"
+                error_expr = "error_msg" if "error_msg" in columns else "NULL"
+                duration_expr = "duration_ms" if "duration_ms" in columns else "NULL"
+                since = int(now_ts - days * 86400)
+                until = int(now_ts)
+                file_containers, generated_at = self._file_containers()
+                rows = conn.execute(
+                    f"""
+                    SELECT
+                        model_id AS model,
+                        {metadata_expr} AS metadata_json,
+                        ts_created AS ts,
+                        COUNT(*) AS requests,
+                        SUM(input_tokens) AS input_tokens,
+                        SUM(output_tokens) AS output_tokens,
+                        SUM(CASE
+                            WHEN {status_expr} >= 400 THEN 1
+                            WHEN {error_expr} IS NOT NULL AND {error_expr} != '' THEN 1
+                            ELSE 0
+                        END) AS errors,
+                        SUM(CASE
+                            WHEN ({status_expr} IS NULL OR {status_expr} < 400)
+                                 AND input_tokens = 0 AND output_tokens = 0 THEN 1
+                            ELSE 0
+                        END) AS untracked_requests,
+                        SUM({duration_expr}) AS duration_ms,
+                        SUM(CASE
+                            WHEN input_tokens IS NULL OR output_tokens IS NULL THEN 1
+                            WHEN typeof(input_tokens) NOT IN ('integer', 'real') THEN 1
+                            WHEN typeof(output_tokens) NOT IN ('integer', 'real') THEN 1
+                            WHEN input_tokens < 0 OR output_tokens < 0 THEN 1
+                            WHEN input_tokens != CAST(input_tokens AS INTEGER) THEN 1
+                            WHEN output_tokens != CAST(output_tokens AS INTEGER) THEN 1
+                            ELSE 0
+                        END) AS invalid_tokens
+                    FROM activity
+                    WHERE ts_created >= ? AND ts_created <= ?
+                    GROUP BY model_id, metadata_json, ts_created
+                    """,
+                    (since, until),
+                ).fetchall()
+                report = self._build_usage_report(
+                    days, by, since, until, file_containers, generated_at, rows
+                )
+                if self._deadline_expired:
+                    raise ActivityReadError("deadline")
+                return report
+        except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError) as exc:
+            self._fail(exc)
+            return _unknown_usage_report(days, by, self.timezone, self.last_error)
+
+    def _build_usage_report(
+        self,
+        days: int,
+        by: str,
+        since: int,
+        until: int,
+        file_containers: Mapping[str, str],
+        generated_at: Optional[int],
+        rows: Any,
+    ) -> dict[str, Any]:
+        if self.ip_containers and file_containers:
+            map_source = "config+file"
+        elif self.ip_containers:
+            map_source = "config"
+        elif file_containers:
+            map_source = "file"
+        else:
+            map_source = "none"
+
+        primary: dict[str, dict[str, Any]] = {}
+        totals = _empty_counts()
+        for row in rows:
+            if int(row["invalid_tokens"]):
+                raise ActivityReadError("parse")
+            metadata = _metadata_object(row["metadata_json"])
+            client_ip = metadata.get("client_ip") if metadata else None
+            user, user_kind = self._attribution(client_ip, file_containers)
+            model = row["model"]
+            input_tokens = int(row["input_tokens"] or 0)
+            output_tokens = int(row["output_tokens"] or 0)
+            counts = {
+                "requests": int(row["requests"]),
+                "errors": int(row["errors"] or 0),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+                "untracked_requests": int(row["untracked_requests"] or 0),
+                "duration_ms": int(row["duration_ms"] or 0),
+            }
+            seen = int(row["ts"])
+            _accumulate(totals, counts)
+
+            if by == "user":
+                key, kind = user, user_kind
+                other, other_kind = model, "model"
+            elif by == "model":
+                key, kind = model, "model"
+                other, other_kind = user, user_kind
+            else:
+                key, kind = _local_day(seen, self._zone), "day"
+                other, other_kind = model, "model"
+
+            bucket = primary.get(key)
+            if bucket is None:
+                bucket = primary[key] = {
+                    "kind": kind,
+                    "counts": _empty_counts(),
+                    "first_seen": seen,
+                    "last_seen": seen,
+                    "breakdown": {},
+                }
+            _accumulate(bucket["counts"], counts)
+            bucket["first_seen"] = min(bucket["first_seen"], seen)
+            bucket["last_seen"] = max(bucket["last_seen"], seen)
+            entry = bucket["breakdown"].get(other)
+            if entry is None:
+                entry = bucket["breakdown"][other] = {"kind": other_kind, "counts": _empty_counts()}
+            _accumulate(entry["counts"], counts)
+
+        report_rows = []
+        for key, bucket in primary.items():
+            item = dict(bucket["counts"])
+            item[by] = key
+            item["kind"] = bucket["kind"]
+            item["first_seen"] = bucket["first_seen"]
+            item["last_seen"] = bucket["last_seen"]
+            other = "model" if by in ("user", "day") else "user"
+            breakdown = []
+            for other_key, entry in bucket["breakdown"].items():
+                sub = dict(entry["counts"])
+                sub[other] = other_key
+                sub["kind"] = entry["kind"]
+                breakdown.append(sub)
+            breakdown.sort(key=lambda item: (-item["requests"], item[other]))
+            item["breakdown"] = breakdown
+            report_rows.append(item)
+        if by == "day":
+            report_rows.sort(key=lambda item: item["day"])
+        else:
+            report_rows.sort(key=lambda item: (-item["requests"], item[by]))
+
+        return {
+            "days": days,
+            "by": by,
+            "since": since,
+            "until": until,
+            "known": True,
+            "error": None,
+            "timezone": self.timezone,
+            "attribution": {
+                "mode": "client_ip",
+                "map_source": map_source,
+                "map_updated_at": generated_at,
+                "mapped_ips": len(set(self.ip_containers) | set(file_containers)),
+            },
+            "rows": report_rows,
+            "totals": totals,
+        }
+
+    def _attribution(self, client_ip: Any, file_containers: Mapping[str, str]) -> tuple[str, str]:
+        if not isinstance(client_ip, str) or not client_ip.strip():
+            return "unattributed", "unattributed"
+        try:
+            ip = canonical_ip(client_ip.strip())
+        except ValueError:
+            return "unattributed", "unattributed"
+        if ip in self.host_ips:
+            return "host", "host"
+        container = self.ip_containers.get(ip)
+        if container is None:
+            container = file_containers.get(ip)
+        if container is not None:
+            return container, "container"
+        return "ip:" + ip, "ip"
+
+    def _file_containers(self) -> tuple[dict[str, str], Optional[int]]:
+        """Lazily parse the host IP->container export, cached by file identity."""
+
+        if self.ip_containers_path is None:
+            return {}, None
+        try:
+            stat = os.stat(self.ip_containers_path)
+            key: Any = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            key = None
+        if key is not None and key == self._ip_map_key:
+            return self._ip_map_containers, self._ip_map_generated_at
+
+        containers: dict[str, str] = {}
+        generated_at: Optional[int] = None
+        if key is not None:
+            try:
+                with self.ip_containers_path.open(encoding="utf-8") as stream:
+                    payload = json.load(stream)
+                if isinstance(payload, dict):
+                    generated = payload.get("generated_at")
+                    if isinstance(generated, int) and not isinstance(generated, bool):
+                        generated_at = generated
+                    raw = payload.get("containers")
+                    if isinstance(raw, dict):
+                        for source, name in raw.items():
+                            if not isinstance(name, str) or not name.strip():
+                                continue
+                            try:
+                                source = canonical_ip(source)
+                            except ValueError:
+                                continue
+                            containers[source] = name
+            except (OSError, ValueError, TypeError):
+                containers, generated_at = {}, None
+        self._ip_map_key = key
+        self._ip_map_containers = containers
+        self._ip_map_generated_at = generated_at
+        return containers, generated_at
 
     def _usage_by_source(
         self,
@@ -382,7 +664,7 @@ class ActivityReader:
         return conn
 
     def _source_from_row(self, src: Optional[str], metadata_json: Optional[str]) -> dict[str, Any]:
-        raw = _first_text(src, _metadata_source(metadata_json))
+        raw = _first_text(src, _metadata_source(metadata_json), _metadata_client_ip(metadata_json))
         ip = _source_ip(raw)
         if ip is None:
             return {"source_ip": None, "source_container": UNKNOWN_SOURCE}
@@ -431,6 +713,36 @@ def _metadata_source(metadata_json: Optional[str]) -> Optional[str]:
     return None
 
 
+def _metadata_object(metadata_json: Optional[str]) -> dict[str, Any]:
+    if not metadata_json:
+        return {}
+    try:
+        metadata = json.loads(metadata_json)
+    except (TypeError, ValueError):
+        return {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _metadata_client_ip(metadata_json: Optional[str]) -> Optional[str]:
+    value = _metadata_object(metadata_json).get("client_ip")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _empty_counts() -> dict[str, int]:
+    return {name: 0 for name in USAGE_REPORT_COUNTS}
+
+
+def _accumulate(target: dict[str, int], counts: Mapping[str, int]) -> None:
+    for name in USAGE_REPORT_COUNTS:
+        target[name] += counts[name]
+
+
+def _local_day(ts: int, zone: ZoneInfo) -> str:
+    return datetime.fromtimestamp(ts, zone).strftime("%Y-%m-%d")
+
+
 def _first_text(*values: Optional[str]) -> Optional[str]:
     for value in values:
         if isinstance(value, str) and value.strip():
@@ -468,4 +780,19 @@ def _unknown_usage(days: Any, by: str, error: str) -> dict[str, Any]:
         "totals": {"requests": None, "input_tokens": None, "output_tokens": None},
         "known": False,
         "error": error,
+    }
+
+
+def _unknown_usage_report(days: Any, by: Any, timezone: str, error: str) -> dict[str, Any]:
+    return {
+        "days": days,
+        "by": by,
+        "since": None,
+        "until": None,
+        "known": False,
+        "error": error,
+        "timezone": timezone,
+        "attribution": None,
+        "rows": [],
+        "totals": {name: None for name in USAGE_REPORT_COUNTS},
     }
