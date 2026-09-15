@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Usage
+
+- New `GET /v1/usage/report?days=N&by=user|model|day` endpoint (defaults
+  `days=7`, `by=user`): per-user / per-model / per-day request, error, token,
+  untracked-request and duration totals with per-model/per-user breakdowns and
+  `first_seen`/`last_seen`.
+- Attribution uses the `client_ip` field the patched llama-swap writes into
+  `activity.metadata_json`: peers in `host_ips` are `host`, mapped addresses
+  take their container name, other addresses are `ip:<addr>`, and missing ones
+  are `unattributed`. Legacy `by=container` grouping now falls back to
+  `client_ip` too.
+- New optional collectors keys: `ip_containers_path` (host-exported IP →
+  container JSON, re-read on mtime/size change, static `ip_containers` wins),
+  `host_ips` and `usage_timezone`. A missing/invalid map file never makes the
+  report unknown; `attribution.map_source` records the effective source.
+- `deploy/host/` exports the LXD IP → container map on a two-minute timer and
+  documents the read-only container mount; `deploy/llama-swap/` builds the
+  patched v252 binary reproducibly from pinned sources and patches.
+
 ### CLI
 
 - Redesigned `llm usage` around `GET /v1/usage/report`: `--days` accepts 1–365 and `--by`

@@ -235,6 +235,28 @@ class SchedulerConfig:
             if source in normalized and normalized[source] != owner:
                 raise ValueError("conflicting container mappings for the same IP")
             normalized[source] = owner
+        ip_containers_path = self.collectors.get("ip_containers_path")
+        if ip_containers_path is not None:
+            if not isinstance(ip_containers_path, str) or not Path(ip_containers_path).is_absolute():
+                raise ValueError("collectors.ip_containers_path must be an absolute path")
+        host_ips = self.collectors.get("host_ips")
+        if host_ips is not None:
+            if not isinstance(host_ips, list) or any(not isinstance(ip, str) for ip in host_ips):
+                raise ValueError("collectors.host_ips must be a list of IP address strings")
+            for ip in host_ips:
+                try:
+                    canonical_ip(ip)
+                except ValueError as exc:
+                    raise ValueError("collectors.host_ips must be a list of IP address strings") from exc
+        usage_timezone = self.collectors.get("usage_timezone")
+        if usage_timezone is not None:
+            from zoneinfo import ZoneInfo
+            if not isinstance(usage_timezone, str) or not usage_timezone:
+                raise ValueError("collectors.usage_timezone must be a known timezone name")
+            try:
+                ZoneInfo(usage_timezone)
+            except (KeyError, ValueError, OSError) as exc:
+                raise ValueError("collectors.usage_timezone must be a known timezone name") from exc
 
     def policy_settings(self):
         """Base PolicySettings every controller starts from; automation layers its TTLs on top."""

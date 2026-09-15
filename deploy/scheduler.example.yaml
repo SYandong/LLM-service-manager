@@ -31,6 +31,16 @@ host_min_available_gb: 150
 # adapter settings before bounded observation/preview checks; unknown is not zero.
 collectors: {}
 
+# Usage attribution (#usage report). The patched llama-swap records the request
+# peer address as client_ip in activity.metadata_json. Optional collector keys:
+#   ip_containers_path: /var/lib/llmsvc-host/export/ip-containers.json
+#     Host-exported {"generated_at": <epoch>, "containers": {<ip>: <name>}} map,
+#     re-read when its mtime/size changes; a missing/invalid file is an empty map.
+#     Static ip_containers entries win over the file.
+#   host_ips: ["127.0.0.1", "::1"]  # Peers that mean "the host machine".
+#   usage_timezone: UTC             # ZoneInfo name for by=day bucketing.
+# See deploy/host/README.md for the host export and the read-only container mount.
+
 # Optional ordinary sleeping recovery: disabled by default; runs sequentially
 # after the existing automation cycle. Effects also require automation_enabled,
 # model_actions_enabled and read_only: false. These comments enable nothing.

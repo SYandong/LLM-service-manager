@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from llmsvc.__main__ import build_collector, build_usage
+from llmsvc.__main__ import build_collector, build_usage, build_usage_report
 from llmsvc.config import SchedulerConfig
 from llmsvc.scheduler import Scheduler
 from llmsvc.server import SchedulerHTTPServer
@@ -23,7 +23,8 @@ def service(tmp_path):
         db.execute("INSERT INTO activity VALUES (1, ?, 'example', 11, 22, NULL)", (int(time.time()) - 1,))
     config = SchedulerConfig("127.0.0.1", 8011, collectors={"swap_url": "http://127.0.0.1:9", "activity_path": str(database)})
     collector = build_collector(config)
-    scheduler = Scheduler(config, collector, usage=build_usage(collector))
+    scheduler = Scheduler(config, collector, usage=build_usage(collector),
+                          usage_report=build_usage_report(collector))
     # Do not sample: no external probes are needed for the usage endpoint.
     server = SchedulerHTTPServer(("127.0.0.1", 0), scheduler)
     thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01))
@@ -92,3 +93,41 @@ def test_unconfigured_or_failed_reader_returns_unknown_503(service):
     assert status == 503
     assert result["error"] == "usage_unavailable"
     assert "private" not in json.dumps(result)
+
+
+def test_usage_report_happy_path(service):
+    _, address = service
+    status, result = get(address, "/v1/usage/report")
+    assert status == 200
+    assert result["days"] == 7 and result["by"] == "user"
+    assert result["known"] is True and result["error"] is None
+    assert result["totals"]["requests"] == 1
+    assert result["totals"]["total_tokens"] == 33
+    assert result["attribution"]["mode"] == "client_ip"
+    row, = result["rows"]
+    assert row["user"] == "unattributed" and row["kind"] == "unattributed"
+    assert row["total_tokens"] == 33
+
+
+def test_usage_report_unconfigured_or_failed_returns_unknown_503(service):
+    scheduler, address = service
+    scheduler._usage_report = None
+    status, result = get(address, "/v1/usage/report")
+    assert status == 503 and result["known"] is False
+    assert all(value is None for value in result["totals"].values())
+    assert result["attribution"] is None
+
+    def fail(**kwargs):
+        raise OSError("private backend details")
+    scheduler._usage_report = fail
+    status, result = get(address, "/v1/usage/report")
+    assert status == 503
+    assert result["error"] == "usage_unavailable"
+    assert "private" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("query", ["by=ip", "days=0", "days=366", "days=1.5", "days=",
+    "days=1&days=2", "extra=1"])
+def test_usage_report_invalid_query(service, query):
+    _, address = service
+    assert get(address, "/v1/usage/report?" + query)[0] == 400

@@ -17,6 +17,7 @@ from dataclasses import asdict, replace
 from datetime import datetime
 from typing import Callable, Optional
 
+from llmsvc.activity import USAGE_REPORT_COUNTS
 from llmsvc.config import SchedulerConfig
 from llmsvc.reload import describe
 from llmsvc.state import Event, MemoryState, Pin, Reserve, StateSnapshot
@@ -161,6 +162,7 @@ class Scheduler:
     def __init__(self, config: SchedulerConfig,
                  collect: Optional[Callable[[], StateSnapshot]] = None, *,
                  usage: Optional[Callable[..., dict]] = None,
+                 usage_report: Optional[Callable[..., dict]] = None,
                  store: Optional[IntentStore] = None, clock: Callable[[], float] = time.time,
                  event_relay=None, monotonic: Callable[[], float] = time.monotonic):
         self.config = config
@@ -181,6 +183,7 @@ class Scheduler:
         self._fault_thread = None
         self._catalog_thread = None
         self._usage = usage
+        self._usage_report = usage_report
         self._collector_closed = False
         # One lock for action/accounting and publication. Slow read-only probes
         # run outside it; Condition.wait releases it for other handlers.
@@ -622,6 +625,29 @@ class Scheduler:
             return result
         except Exception as exc:
             LOG.warning(json.dumps({"kind": "usage_error", "error_type": type(exc).__name__}))
+            return {**unknown, "error": "usage_unavailable"}
+
+    def usage_report(self, *, days: int = 7, by: str = "user") -> dict:
+        """Per-user/model/day report; unknown attribution stays explicit."""
+        if type(days) is not int or not 1 <= days <= 365:
+            raise ValueError("days must be an integer in 1..365")
+        if by not in ("user", "model", "day"):
+            raise ValueError("unsupported usage report grouping")
+        collectors = self.config.collectors if isinstance(self.config.collectors, dict) else {}
+        timezone = collectors.get("usage_timezone", "UTC")
+        unknown = {"days": days, "by": by, "since": None, "until": None, "known": False,
+                   "error": "usage_not_configured", "timezone": timezone, "attribution": None,
+                   "rows": [], "totals": {name: None for name in USAGE_REPORT_COUNTS}}
+        if self._usage_report is None:
+            return unknown
+        try:
+            result = self._usage_report(days=days, by=by)
+            if not isinstance(result, dict) or type(result.get("known")) is not bool:
+                raise TypeError("invalid usage report result")
+            json.dumps(result, allow_nan=False)
+            return result
+        except Exception as exc:
+            LOG.warning(json.dumps({"kind": "usage_report_error", "error_type": type(exc).__name__}))
             return {**unknown, "error": "usage_unavailable"}
 
     def quiet_callbacks(self, quiet):

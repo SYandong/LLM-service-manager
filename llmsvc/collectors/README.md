@@ -23,6 +23,13 @@ collectors:
   host_min_available_gb: 150         # Candidate; stakeholder approval pending
   ip_containers:
     192.0.2.10: example-container
+  # Optional host-exported IP -> container map, re-read when its mtime/size
+  # changes. Missing/invalid files are treated as an empty map.
+  ip_containers_path: /var/lib/llmsvc-host/export/ip-containers.json
+  # Peers that mean "the host machine"; default [127.0.0.1, ::1].
+  host_ips: [127.0.0.1, "::1"]
+  # Timezone for the per-day usage report bucket; default UTC.
+  usage_timezone: Asia/Shanghai
   models:
     example-model:
       daemon_url: http://127.0.0.1:8101  # Direct daemon; never /upstream
@@ -77,6 +84,21 @@ variants are supported. Missing token columns or invalid token values make usage
 unknown; missing source information creates an explicit `unknown` source group.
 The reader opens SQLite with `mode=ro`, `query_only`, a query deadline, and an
 explicitly closed connection; it never migrates the data-plane database.
+
+`usage_report(days=1..365, by="user"|"model"|"day")` adds a per-user, per-model
+or per-day view attributed by the patched `client_ip` field in
+`metadata_json`. A peer in `host_ips` is labelled `host`, a mapped address takes
+its container name, any other address is `ip:<addr>`, and a row without a peer
+address is `unattributed`. Each row carries `requests`, `errors`,
+`input_tokens`, `output_tokens`, `total_tokens`, `untracked_requests` (status
+<400 with both token counts zero, e.g. a stream with no usage chunk) and
+`duration_ms`, plus `first_seen`/`last_seen`, a per-model or per-user
+`breakdown`, and min/max timestamps. `by=day` buckets by the local date in
+`usage_timezone`. The static `ip_containers` map wins over the file map for the
+same IP; the file is re-read only when its mtime/size changes. A missing or
+invalid file leaves the report known and reports `attribution.map_source` as
+`config`, `file`, `config+file` or `none`. Invalid parameters or bad token data
+return a redacted unknown result rather than zero.
 
 The live 2026-09-08 v252 database had 31,605 rows, Unix-second `ts_created`, and
 `metadata_json` containing only `fifo_priority`. It had **no `src` column or source

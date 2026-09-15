@@ -66,14 +66,33 @@ def build_usage(collector):
     if reader is None:
         return None
 
-    def usage(*, days, by):
+    def request_reader():
         from llmsvc.activity import ActivityReader
         # ActivityReader.last_error is mutable. A request-local reader prevents
         # HTTP queries from overwriting the sampler's activity error signal.
-        request_reader = ActivityReader(reader.path, reader.ip_containers, reader.deadline_ms)
-        return request_reader.usage(days=days, by=by)
+        return ActivityReader(
+            reader.path,
+            reader.ip_containers,
+            reader.deadline_ms,
+            ip_containers_path=reader.ip_containers_path,
+            host_ips=reader.host_ips,
+            timezone=reader.timezone,
+        )
 
+    def usage(*, days, by):
+        return request_reader().usage(days=days, by=by)
+
+    def usage_report(*, days, by):
+        return request_reader().usage_report(days=days, by=by)
+
+    # Keep both callables reachable from the single factory so a catalog publish
+    # can re-bind them together and never drop the report binding.
+    usage.usage_report = usage_report
     return usage
+
+
+def build_usage_report(collector):
+    return getattr(build_usage(collector), "usage_report", None)
 
 
 def build_registry(config, scheduler):
@@ -246,7 +265,8 @@ def main():
         # The store is opened after the telemetry adapter; bind the measured
         # cold-start source once it exists so the collector can read the table.
         bind_cold_starts(collector, store)
-        scheduler = Scheduler(config, collect=collector, store=store, usage=build_usage(collector), event_relay=event_relay)
+        scheduler = Scheduler(config, collect=collector, store=store, usage=build_usage(collector),
+            usage_report=build_usage_report(collector), event_relay=event_relay)
         scheduler.registry = build_registry(config, scheduler)
         settings = config.policy_settings()
         if config.model_actions_enabled:
