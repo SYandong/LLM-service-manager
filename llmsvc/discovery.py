@@ -23,8 +23,10 @@ from llmsvc.reload import _source_byte_limit
 from llmsvc.registry import (
     DEFAULT_MODEL_CONFIG_MAX_BYTES,
     DEFAULT_WEIGHT_INDEX_MAX_BYTES,
+    MAX_NUM_SEQS,
     ImportOverrides,
     RegistryError,
+    _PARSER_NAME,
     _read_model_json,
     validate_safe_model_name,
 )
@@ -34,7 +36,8 @@ CONFIG_FILENAME = "llmsvc.json"
 MAX_CANDIDATES = 200
 MAX_ALIASES = 16
 MAX_MODEL_LEN = 2**31 - 1
-SUPPORTED_KEYS = ("base", "name", "util", "max_model_len", "aliases", "weights_gb")
+SUPPORTED_KEYS = ("base", "name", "util", "max_model_len", "aliases", "weights_gb",
+                  "tool_call_parser", "reasoning_parser", "speculative", "max_num_seqs")
 NAME_CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789._-"
 REJECTED_KEYS = {
     "is_default": "llmsvc.json must not set is_default; an imported model is never the default model",
@@ -100,7 +103,11 @@ def parse_import_config(document: Any, *, directory_name: str) -> tuple[str, str
     return name, base, ImportOverrides(util=_optional_util(document.get("util")),
                                        max_model_len=_optional_max_model_len(document.get("max_model_len")),
                                        aliases=_optional_aliases(document.get("aliases")),
-                                       weights_gb=_optional_weights_gb(document.get("weights_gb")))
+                                       weights_gb=_optional_weights_gb(document.get("weights_gb")),
+                                       tool_call_parser=_optional_parser(document.get("tool_call_parser"), "tool_call_parser"),
+                                       reasoning_parser=_optional_parser(document.get("reasoning_parser"), "reasoning_parser"),
+                                       speculative=_optional_bool(document.get("speculative"), "speculative"),
+                                       max_num_seqs=_optional_max_num_seqs(document.get("max_num_seqs")))
 
 
 def measure_weights_gb(model_path: str | Path, shared_roots: Sequence[str | Path], *,
@@ -301,6 +308,30 @@ def _optional_aliases(value: Any) -> tuple[str, ...]:
     if len(set(aliases)) != len(aliases):
         raise RegistryError("aliases must be distinct")
     return aliases
+
+
+def _optional_parser(value: Any, label: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _PARSER_NAME.fullmatch(value):
+        raise RegistryError(label + " must be a plain vLLM parser name (letters, digits, _ . -)")
+    return value
+
+
+def _optional_bool(value: Any, label: str) -> bool | None:
+    if value is None:
+        return None
+    if type(value) is not bool:
+        raise RegistryError(label + " must be true or false")
+    return value
+
+
+def _optional_max_num_seqs(value: Any) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or not 1 <= value <= MAX_NUM_SEQS:
+        raise RegistryError("max_num_seqs must be an integer between 1 and %d" % MAX_NUM_SEQS)
+    return value
 
 
 def _optional_weights_gb(value: Any) -> float | None:

@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Model registration
+
+- `llmsvc.json` accepts four more whitelisted overrides for the cloned vLLM command:
+  `tool_call_parser` (also ensures `--enable-auto-tool-choice`), `reasoning_parser`,
+  `speculative` (`false` drops the inherited `--speculative-config`, needed when the base uses
+  MTP and the new weights have no MTP head) and `max_num_seqs` (1–4096). They edit only the vLLM
+  segment of the cloned command; the wrapper and launcher segments are untouched and every other
+  key is still rejected.
+
+### Scheduling
+
+- A model absent from a successful usage-history query now reports known zero request
+  aggregates instead of unknown ones. A registered model that never served a request (for
+  example one whose first cold start failed) could not be unregistered: every removal was
+  blocked on `unknown_activity`.
+
 ## 1.1.6 — 2026-09-16
 
 Stable patch release; Python distribution `1.1.6`. It carries one merged PR,

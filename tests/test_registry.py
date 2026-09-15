@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from llmsvc.registry import (
+    ImportOverrides,
     RegistryError,
     add_full_weight_model,
     plan_temporary_model_removal,
@@ -167,6 +168,43 @@ def test_add_clones_base_flags_rewrites_ports_names_and_groups(tmp_path):
     assert result.record["daemon_port"] == 8105
     assert result.records["new.ft-1"]["path"] == str(model.resolve())
     assert "new.ft-1" not in config["models"]
+
+
+def test_parser_speculative_and_concurrency_overrides_edit_only_the_vllm_command(tmp_path):
+    """A base with MTP speculative decoding and no tool parser can still serve a model without an
+    MTP head: ``speculative=False`` drops the inherited option, the parsers and concurrency are set
+    on the vLLM segment only, and the wrapper/launcher segments stay untouched."""
+    root = tmp_path / "models"
+    model = _full_weight_model(root / "coder")
+    config = _config()
+    config["models"]["base-model"]["cmd"] += " --max-num-seqs 8 --reasoning-parser deepseek_r1"
+    result = add_full_weight_model(
+        config, {}, name="coder", model_path=model, base_model="base-model", shared_roots=(root,),
+        daemon_port_range=(8101, 8105), created_at=1.0,
+        overrides=ImportOverrides(tool_call_parser="qwen3_coder", reasoning_parser="qwen3",
+                                  speculative=False, max_num_seqs=32))
+    argv = shlex.split(result.config["models"]["coder"]["cmd"])
+    vllm = argv[len(argv) - argv[::-1].index("--"):]
+    assert "--speculative-config" not in argv
+    assert vllm[vllm.index("--tool-call-parser") + 1] == "qwen3_coder"
+    assert "--enable-auto-tool-choice" in vllm
+    assert vllm[vllm.index("--reasoning-parser") + 1] == "qwen3"
+    assert vllm[vllm.index("--max-num-seqs") + 1] == "32"
+    wrapper = argv[:argv.index("--")]
+    assert not {"--tool-call-parser", "--reasoning-parser", "--max-num-seqs"} & set(wrapper)
+    assert len(wrapper) == shlex.split(BASE_CMD).index("--")
+    # speculative=True (or unset) keeps the inherited option, rewritten to the new path.
+    kept = add_full_weight_model(
+        _config(), {}, name="kept", model_path=model, base_model="base-model", shared_roots=(root,),
+        daemon_port_range=(8101, 8105), created_at=1.0, overrides=ImportOverrides(speculative=True))
+    kept_argv = shlex.split(kept.config["models"]["kept"]["cmd"])
+    assert json.loads(kept_argv[kept_argv.index("--speculative-config") + 1])["model"] == str(model.resolve())
+    for bad in (ImportOverrides(tool_call_parser="a b"), ImportOverrides(reasoning_parser="../x"),
+                ImportOverrides(max_num_seqs=0), ImportOverrides(max_num_seqs=10**6)):
+        with pytest.raises(RegistryError):
+            add_full_weight_model(_config(), {}, name="bad", model_path=model, base_model="base-model",
+                                  shared_roots=(root,), daemon_port_range=(8101, 8105), created_at=1.0,
+                                  overrides=bad)
 
 
 def test_add_rejects_alias_setparams_and_default_model_name_collisions(tmp_path):

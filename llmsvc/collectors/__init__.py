@@ -157,7 +157,13 @@ class Collector:
                 port=unit.get("port") if unit and unit.get("port") else config.get("port"),
                 is_default=config.get("is_default", False),
                 cold_start_seconds=config.get("cold_start_seconds")))
-            row = first.get("activity", {}).get(name, {})
+            history = first.get("activity")
+            row = history.get(name) if history is not None else None
+            if row is None and history is not None:
+                # The history query succeeded and simply has no rows for this
+                # model: its aggregates are a known zero, not an unknown.
+                row = {"requests_last_hour": 0, "requests_last_10m": 0}
+            row = row or {}
             activity.append(Activity(
                 model=name, last_request_at=row.get("last_used"),
                 requests_last_hour=row.get("requests_last_hour"),

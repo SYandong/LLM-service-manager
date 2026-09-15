@@ -115,7 +115,8 @@ most one action per idle tick:
   `registry.add({"import": name})`, which re-reads that directory's own
   descriptor and derives name, path, base and the whitelisted overrides itself;
   a client cannot supply them. Supported descriptor keys are `base` (required),
-  `name`, `util`, `max_model_len`, `aliases` and `weights_gb`; `is_default`, any
+  `name`, `util`, `max_model_len`, `aliases`, `weights_gb`, `tool_call_parser`,
+  `reasoning_parser`, `speculative` and `max_num_seqs`; `is_default`, any
   command/argv/shell fragment and every unknown key are rejected. Overrides
   rewrite only the cloned block. A failed or queued submission starts a
   per-name backoff (60 s doubling to a 3600 s cap).

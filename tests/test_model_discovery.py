@@ -165,6 +165,11 @@ def test_unusable_directory_names_are_rejected(directory):
     ({"base": "b", "aliases": ["vllm-bad"]}, "reserved"),
     ({"base": "b", "weights_gb": -1}, "weights_gb"),
     ({"base": "b", "name": 7}, "name must be a string"),
+    ({"base": "b", "tool_call_parser": "qwen3 coder"}, "tool_call_parser"),
+    ({"base": "b", "reasoning_parser": ""}, "reasoning_parser"),
+    ({"base": "b", "speculative": "no"}, "speculative"),
+    ({"base": "b", "max_num_seqs": 0}, "max_num_seqs"),
+    ({"base": "b", "max_num_seqs": 8.0}, "max_num_seqs"),
     ([], "JSON object"),
 ])
 def test_descriptor_rejections_name_the_offending_field(document, message):
@@ -178,6 +183,11 @@ def test_supported_descriptor_parses_into_whitelisted_overrides():
         directory_name="Foo-7B")
     assert (name, base) == ("foo-7b", "base-model")
     assert overrides == ImportOverrides(util=.45, max_model_len=4096, aliases=("foo",), weights_gb=14.5)
+    _, _, overrides = parse_import_config(
+        {"base": "base-model", "tool_call_parser": "qwen3_coder", "reasoning_parser": "qwen3",
+         "speculative": False, "max_num_seqs": 32}, directory_name="Coder")
+    assert overrides == ImportOverrides(tool_call_parser="qwen3_coder", reasoning_parser="qwen3",
+                                        speculative=False, max_num_seqs=32)
 
 
 def test_overrides_rewrite_util_length_and_aliases_only(root):
