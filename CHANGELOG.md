@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.1.5 — 2026-09-15
+
+Stable patch release; Python distribution `1.1.5`. It carries one merged PR,
+#263: a scheduler restart after a fully released catalog transaction no longer
+fences placement, which on the native-maintenance site had left every restart
+after an add/remove transaction on `catalog_reconciliation_required`. That is
+below the normal five-PR cadence, so the reviewed release PR records
+`Release-Exception: #256` for the user-authorized delivery.
 
 ### Scheduling
 
