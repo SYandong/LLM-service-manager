@@ -234,6 +234,16 @@ class Collector:
         return tuple(output), resident
 
 
+def bind_cold_starts(collector, store) -> None:
+    """Attach the measured cold-start source to a collector that can read it.
+
+    A collector built by a catalog publish starts without the store source, so
+    every installed collector must be rebound, not just the startup one.
+    """
+    if store is not None and hasattr(collector, "cold_starts"):
+        collector.cold_starts = store.cold_starts
+
+
 def build_collector(config, cold_starts=None):
     """Core adapter for the nested ``collectors`` configuration mapping."""
     from llmsvc.activity import ActivityReader

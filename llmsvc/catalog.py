@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Trusted, proof-gated runtime catalog publication over the existing queue.
 
 No HTTP proof endpoint or live verifier is installed here. File visibility is
@@ -14,6 +15,7 @@ from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
 from llmsvc.catalog_state import catalog_json
+from llmsvc.collectors import bind_cold_starts
 from llmsvc.reload import RecoveryProof, ReloadError
 from llmsvc.reload_witness import CandidateBinding
 from llmsvc.store import finite_positive
@@ -282,6 +284,7 @@ class CatalogRuntime:
         try:
             config = self._config(manifest)
             collector = self.collector_factory(config)
+            bind_cold_starts(collector, getattr(self.scheduler, "store", None))
             relay = self.relay_factory(self._config(manifest, events=True))
             transport = self.transport_factory(config, config.collectors["models"])
             transport.active_models = frozenset(manifest["active"])

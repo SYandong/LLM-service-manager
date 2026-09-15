@@ -1,12 +1,13 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 import json
 import time
-from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from llmsvc.collectors import Collector
+from llmsvc.collectors import Collector, bind_cold_starts
 from llmsvc.collectors.parsers import (
     parse_gpus, parse_meminfo, parse_processes, parse_running, parse_sleeping, parse_units,
 )
@@ -315,3 +316,33 @@ def test_cold_starts_callable_failure_is_reported_and_falls_back():
         assert 'cold_starts: OSError' in s.errors
     finally:
         c.close()
+
+
+def test_bind_cold_starts_attaches_the_store_source():
+    store = SimpleNamespace(cold_starts=lambda: {'m': 42.0})
+    c = collector()
+    try:
+        assert c.cold_starts is None
+        bind_cold_starts(c, store)
+        assert c.cold_starts == store.cold_starts
+        m = next(item for item in c.collect().models if item.name == 'm')
+        assert m.cold_start_seconds == 42.0
+    finally:
+        c.close()
+
+
+def test_bind_cold_starts_without_a_store_is_a_noop():
+    c = collector()
+    try:
+        bind_cold_starts(c, None)
+        assert c.cold_starts is None
+    finally:
+        c.close()
+
+
+def test_bind_cold_starts_ignores_a_collector_without_the_attribute():
+    store = SimpleNamespace(cold_starts=lambda: {'m': 42.0})
+    plain = lambda: None
+    bind_cold_starts(plain, store)
+    assert not hasattr(plain, 'cold_starts')
+    bind_cold_starts(None, store)
