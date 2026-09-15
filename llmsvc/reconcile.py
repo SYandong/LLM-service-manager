@@ -82,7 +82,8 @@ class DirectoryReconciler:
             return "catalog_not_connected"
         if scheduler.catalog_fenced:
             return "catalog_reconciliation_required"
-        if scheduler.store is None or scheduler.store.catalog_pending() is not None:
+        # catalog_pending() is a boolean, not an optional record.
+        if scheduler.store is None or scheduler.store.catalog_pending():
             return "catalog_pending"
         if self.registry.queue.fenced:
             return "registry_reconciliation_required"
@@ -114,7 +115,8 @@ class DirectoryReconciler:
             if why is None:
                 continue
             snapshot = self.scheduler.snapshot()
-            blockers = reload_blockers(snapshot, self.clock(), self.scheduler.config.max_snapshot_age_seconds)
+            # Snapshot freshness is judged on the scheduler's wall clock; self.clock is monotonic.
+            blockers = reload_blockers(snapshot, self.scheduler.clock(), self.scheduler.config.max_snapshot_age_seconds)
             if blockers:
                 return self._finish({"action": None, "model": name, "reason": "snapshot_blocked"}, log=False)
             model = next((item for item in snapshot.models if item.name == name), None)

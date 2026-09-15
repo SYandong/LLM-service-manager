@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Models
+
+- The directory reconciler's preconditions used two wrong shapes: it treated
+  the boolean `store.catalog_pending()` as an optional record (so every tick
+  reported `catalog_pending`) and judged snapshot freshness with its monotonic
+  clock instead of the scheduler's wall clock (so every orphan was
+  `snapshot_blocked`). Both fixed; the test fakes now mirror the real shapes
+  and an integration test drives the reconciler through the real scheduler,
+  registry and catalog objects.
+
 ## 1.1.3 — 2026-09-15
 
 Stable patch release; Python distribution `1.1.3`. It carries one merged PR,

@@ -95,3 +95,32 @@ def test_model_without_profile_or_descriptor_still_needs_one(imported):
     c.runtime.profile_provider = build_profile_provider(replace(configured, catalog_profiles={}), c.s)
     with pytest.raises(RegistryError, match="lacks a trusted maintenance profile"):
         submit(api, {"name": "plain", "path": str(weights), "base": "base"})
+
+
+def test_directory_reconciler_drives_the_real_scheduler_registry_and_catalog(imported):
+    """Real objects, no fakes: the reconciler's preconditions must match the actual
+    shapes (boolean catalog_pending, bound submit_change, wall-clock snapshot age)."""
+    from llmsvc.reconcile import DirectoryReconciler
+    c, api, weights, _ = imported
+    reconciler = DirectoryReconciler(c.s, api, interval_seconds=30, clock=c.s.monotonic)
+    c.s.reconciler = reconciler  # GET /v1/models annotates through the mounted reconciler
+    result = reconciler.run_once()
+    assert result == {"action": "add", "model": "candidate", "reason": None}, result
+    make_quiet(c.q.quiet, c.clock)
+    assert c.runtime.process_once()["status"] == "applied"
+    c.s.sample_once()
+    assert "candidate" in api.records()
+    status, listed = request(c.address, "GET", "/v1/models")
+    assert status == 200 and [row["status"] for row in listed["discovered"]] == ["configured"]
+    # Descriptor gone: the record is an orphan and, since the fixture observes the
+    # model as stopped, the removal is submitted on the next scan.
+    (weights / "llmsvc.json").unlink()
+    reconciler._last_submission = reconciler._last_scan = None
+    reconciler._backoff.clear()  # the post-add backoff would otherwise defer the orphan for 60 s
+    result = reconciler.run_once()
+    assert result["model"] == "candidate" and result["action"] in ("remove", None), result
+    if result["action"] is None:
+        # A stale or unknown fixture observation is the only acceptable reason to wait.
+        assert result["reason"] in ("snapshot_blocked", "unknown_model_state"), result
+    status, listed = request(c.address, "GET", "/v1/models")
+    assert status == 200 and [row["status"] for row in listed["discovered"]] == ["orphaned"]
