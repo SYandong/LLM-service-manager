@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Model registration
+
+- `tool_call_parser` and `reasoning_parser` in `llmsvc.json` also accept `false`, which removes
+  the option inherited from the base (and, for the tool parser, `--enable-auto-tool-choice`).
+  A non-thinking model cloned from a base with `--reasoning-parser qwen3` otherwise returns every
+  reply in the `reasoning` field with an empty `content` (Qwen3-Coder-30B-A3B on 2026-09-16).
+
 ## 1.2.0 — 2026-09-16
 
 Minor release; Python distribution `1.2.0`. It carries one merged PR, #267:

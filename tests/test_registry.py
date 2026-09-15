@@ -199,7 +199,19 @@ def test_parser_speculative_and_concurrency_overrides_edit_only_the_vllm_command
         daemon_port_range=(8101, 8105), created_at=1.0, overrides=ImportOverrides(speculative=True))
     kept_argv = shlex.split(kept.config["models"]["kept"]["cmd"])
     assert json.loads(kept_argv[kept_argv.index("--speculative-config") + 1])["model"] == str(model.resolve())
+    # False removes the inherited parser options (and the auto tool choice flag) entirely.
+    config = _config()
+    config["models"]["base-model"]["cmd"] += (" --reasoning-parser qwen3 --tool-call-parser qwen3_xml"
+                                              " --enable-auto-tool-choice")
+    bare = add_full_weight_model(
+        config, {}, name="bare", model_path=model, base_model="base-model", shared_roots=(root,),
+        daemon_port_range=(8101, 8105), created_at=1.0,
+        overrides=ImportOverrides(tool_call_parser=False, reasoning_parser=False))
+    bare_argv = shlex.split(bare.config["models"]["bare"]["cmd"])
+    assert not {"--reasoning-parser", "--tool-call-parser", "--enable-auto-tool-choice", "qwen3", "qwen3_xml"} & set(bare_argv)
+    assert "--speculative-config" in bare_argv
     for bad in (ImportOverrides(tool_call_parser="a b"), ImportOverrides(reasoning_parser="../x"),
+                ImportOverrides(tool_call_parser=True), ImportOverrides(reasoning_parser=""),
                 ImportOverrides(max_num_seqs=0), ImportOverrides(max_num_seqs=10**6)):
         with pytest.raises(RegistryError):
             add_full_weight_model(_config(), {}, name="bad", model_path=model, base_model="base-model",

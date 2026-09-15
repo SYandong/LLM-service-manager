@@ -57,8 +57,8 @@ class ImportOverrides:
     max_model_len: int | None = None
     aliases: tuple[str, ...] = ()
     weights_gb: float | None = None
-    tool_call_parser: str | None = None
-    reasoning_parser: str | None = None
+    tool_call_parser: str | bool | None = None   # False removes the inherited option
+    reasoning_parser: str | bool | None = None   # False removes the inherited option
     speculative: bool | None = None
     max_num_seqs: int | None = None
 
@@ -357,11 +357,16 @@ def _transform_cmd(argv: list[str], base_model: str, name: str, model_path: str,
         _replace_or_append_option(result, "--max-model-len", str(overrides.max_model_len), start=vllm_start)
     if overrides.max_num_seqs is not None:
         _replace_or_append_option(result, "--max-num-seqs", str(overrides.max_num_seqs), start=vllm_start)
-    if overrides.tool_call_parser is not None:
+    if overrides.tool_call_parser is False:
+        _remove_option(result, "--tool-call-parser", start=vllm_start)
+        _remove_flag(result, "--enable-auto-tool-choice", start=vllm_start)
+    elif overrides.tool_call_parser is not None:
         _replace_or_append_option(result, "--tool-call-parser", overrides.tool_call_parser, start=vllm_start)
         if "--enable-auto-tool-choice" not in result[vllm_start:]:
             result.append("--enable-auto-tool-choice")
-    if overrides.reasoning_parser is not None:
+    if overrides.reasoning_parser is False:
+        _remove_option(result, "--reasoning-parser", start=vllm_start)
+    elif overrides.reasoning_parser is not None:
         _replace_or_append_option(result, "--reasoning-parser", overrides.reasoning_parser, start=vllm_start)
     if overrides.speculative is False:
         _remove_option(result, "--speculative-config", start=vllm_start)
@@ -391,8 +396,10 @@ def _validate_overrides(overrides: ImportOverrides | None) -> ImportOverrides:
         raise RegistryError("model aliases must be distinct")
     for label, value in (("tool_call_parser", overrides.tool_call_parser),
                          ("reasoning_parser", overrides.reasoning_parser)):
-        if value is not None and (not isinstance(value, str) or not _PARSER_NAME.fullmatch(value)):
-            raise RegistryError(f"{label} must be a plain vLLM parser name (letters, digits, _ . -)")
+        if value is None or value is False:
+            continue
+        if not isinstance(value, str) or not _PARSER_NAME.fullmatch(value):
+            raise RegistryError(f"{label} must be a plain vLLM parser name (letters, digits, _ . -) or false")
     if overrides.speculative is not None and type(overrides.speculative) is not bool:
         raise RegistryError("speculative must be true or false")
     if overrides.max_num_seqs is not None and (
@@ -650,6 +657,11 @@ def _replace_or_append_option(argv: list[str], option: str, value: str, *, start
             argv[index] = f"{option}={value}"
             return
     argv.extend([option, value])
+
+
+def _remove_flag(argv: list[str], flag: str, *, start: int) -> None:
+    """Drop every bare ``flag`` occurrence after ``start``."""
+    argv[start:] = [token for token in argv[start:] if token != flag]
 
 
 def _remove_option(argv: list[str], option: str, *, start: int) -> None:

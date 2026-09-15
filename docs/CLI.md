@@ -247,8 +247,8 @@ LLM_URL=http://scheduler:8011 python3 llm models
 | `max_model_len` | 否 | 正整数；覆写 `--max-model-len` |
 | `aliases` | 否 | 字符串数组（≤16）；走既有保留名/别名冲突校验 |
 | `weights_gb` | 否 | 正数；缺省时由 scheduler 从 `*.safetensors.index.json` 的 `weight_map` 去重求和，没有 index 则求和目录下的 `*.safetensors` |
-| `tool_call_parser` | 否 | vLLM 解析器名（如 `qwen3_coder`、`hermes`）；覆写 `--tool-call-parser`，并保证 `--enable-auto-tool-choice` 存在 |
-| `reasoning_parser` | 否 | vLLM 推理解析器名（如 `qwen3`）；覆写 `--reasoning-parser` |
+| `tool_call_parser` | 否 | vLLM 解析器名（如 `qwen3_coder`、`hermes`）；覆写 `--tool-call-parser`，并保证 `--enable-auto-tool-choice` 存在。`false` 则去掉从 base 继承的 `--tool-call-parser` 与 `--enable-auto-tool-choice` |
+| `reasoning_parser` | 否 | vLLM 推理解析器名（如 `qwen3`）；覆写 `--reasoning-parser`。`false` 则去掉从 base 继承的 `--reasoning-parser`（非思考模型从带推理解析器的 base 克隆时必需，否则全部输出会落到 `reasoning` 字段） |
 | `speculative` | 否 | `false` 时去掉从 base 继承的 `--speculative-config`（base 带 MTP 而你的权重没有 MTP 头时必需）；`true`/缺省沿用 base |
 | `max_num_seqs` | 否 | 1–4096 的整数；覆写 `--max-num-seqs`（并发上限） |
 
