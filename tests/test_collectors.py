@@ -147,6 +147,38 @@ def test_unit_exit_ready_sleeping_and_health_failure_remain_distinct():
         c.close()
 
 
+class FakeHistory:
+    last_error = None
+
+    def __init__(self, rows):
+        self.rows = rows
+
+    def read(self, now=None):
+        if self.last_error:
+            raise OSError('history unreadable')
+        return dict(self.rows)
+
+
+def test_models_missing_from_a_successful_history_query_have_known_zero_activity():
+    """A model that never served has no usage rows; the history query still succeeded, so its
+    aggregates are a known zero (removable), while a failed query keeps them unknown."""
+    history = FakeHistory({'m': {'last_used': 100, 'requests_last_hour': 3, 'requests_last_10m': 1}})
+    c = collector(activity_reader=history)
+    try:
+        s = c.collect()
+        by_name = {a.model: a for a in s.activity}
+        assert (by_name['m'].last_request_at, by_name['m'].requests_last_hour) == (100, 3)
+        assert by_name['absent'].last_request_at is None
+        assert (by_name['absent'].requests_last_hour, by_name['absent'].requests_last_10m) == (0, 0)
+        history.last_error = 'read_failed'
+        s = c.collect()
+        by_name = {a.model: a for a in s.activity}
+        assert by_name['absent'].requests_last_hour is None and by_name['m'].requests_last_hour is None
+        assert any(e.startswith('activity') for e in s.errors)
+    finally:
+        c.close()
+
+
 def test_failed_sources_never_become_stopped_zero_or_stale():
     p = FakeProbes()
     c = collector(p)
