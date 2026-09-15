@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.1.2 — 2026-09-15
+
+Stable patch release; Python distribution `1.1.2`. It carries one merged PR,
+#257 (maintenance-transaction deadline fix and the directory-driven model
+catalog). That is below the normal five-PR cadence, so the reviewed release PR
+records `Release-Exception: #256` for the user-authorized v1.1.2 delivery.
 
 ### Models
 
