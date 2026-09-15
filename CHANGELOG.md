@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 1.1.3 — 2026-09-15
+
+Stable patch release; Python distribution `1.1.3`. It carries one merged PR,
+#259, the reconciler catalog-binding fix without which v1.1.2's directory-driven
+registration never submits anything. That is below the normal five-PR cadence,
+so the reviewed release PR records `Release-Exception: #256` for the
+user-authorized v1.1.3 delivery.
 
 ### Models
 
