@@ -574,7 +574,12 @@ def format_status(snapshot, width=100, now=None):
         if width < 100:
             lines.append("  used %s  10m %s  from %s  pin %s" % (used, count, source, pin_text))
         if model.get("state") == "stopped":
-            lines.append("  cold start estimate: %s" % age(model.get("cold_start_seconds")))
+            estimate = model.get("cold_start_seconds")
+            if estimate is None:
+                lines.append("  cold start estimate: ? (policy default)")
+            else:
+                source = model.get("cold_start_source")
+                lines.append("  cold start estimate: %s (%s)" % (age(estimate), source or "configured"))
     if not snapshot.get("models"):
         lines.append("No model observations")
     for reserve in snapshot.get("reserves", []):

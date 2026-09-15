@@ -928,6 +928,13 @@ class ModelActionController:
                 except Exception:
                     pass
             result["elapsed_seconds"] = max(0.0, self.monotonic() - started)
+            if (result["status"] == "ready" and result["cold_start"]
+                    and self.scheduler.store is not None):
+                try:
+                    self.scheduler.store.record_cold_start(name, result["elapsed_seconds"], time.time())
+                except (OSError, ValueError, sqlite3.Error) as exc:
+                    LOG.warning(json.dumps({"kind": "cold_start_record_failed", "model": name,
+                                            "error_type": type(exc).__name__}))
             with self.scheduler.changed:
                 if owned:
                     self.pending.discard(name)

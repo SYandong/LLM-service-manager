@@ -1,6 +1,8 @@
 # Generated-By: Codex / gpt-6-astra
 """Export sanitized replay inputs; expected policy actions are authored separately."""
 
+# Generated-By: OpenCode / deepseek-v4.1-flash
+
 import argparse
 import json
 import math
@@ -51,6 +53,8 @@ class Sanitizer:
         for model in source.get('models', []):
             row = self.fields(model, ('gpu', 'util', 'budget_gb', 'weights_gb', 'resident_gb', 'port', 'cold_start_seconds'),
                               ('unit_active', 'health_ok', 'is_sleeping', 'is_default'))
+            cold_source = model.get('cold_start_source')
+            row['cold_start_source'] = cold_source if cold_source in ('measured', 'configured') else None
             row['name'] = self.label('model', model.get('name'))
             row['unit'] = 'vllm-{}.service'.format(row['name']) if model.get('unit') else None
             row['state'] = model.get('state') if model.get('state') in ('awake', 'sleeping', 'stopped', 'unknown') else 'unknown'

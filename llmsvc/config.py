@@ -56,6 +56,9 @@ class SchedulerConfig:
     placement_gpus: Optional[list] = None
     placement_fit: str = "first_fit"
     shared_external_threshold_gb: float = 1.0
+    # keep_value fallbacks shared by placement, free/wake, pressure and recovery.
+    default_cold_start_seconds: float = 120.0
+    never_used_idle_seconds: float = 3600.0
     lease_timeout_seconds: float = 900.0
     lease_probe_seconds: float = 1.0
     model_actions_enabled: bool = False
@@ -131,6 +134,14 @@ class SchedulerConfig:
             if (isinstance(value, bool) or not isinstance(value, (int, float))
                     or not math.isfinite(value) or value < 0):
                 raise ValueError(f"{name} must be a finite non-negative number")
+        value = self.default_cold_start_seconds
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or not 0 < value <= 3600):
+            raise ValueError("default_cold_start_seconds must be a finite number in (0, 3600]")
+        value = self.never_used_idle_seconds
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
+            raise ValueError("never_used_idle_seconds must be a finite non-negative number")
         if isinstance(self.exclusive_gpu, bool) or type(self.exclusive_gpu) is not int or self.exclusive_gpu < 0:
             raise ValueError("exclusive_gpu must be a non-negative integer")
         if self.placement_gpus is not None:
@@ -233,6 +244,8 @@ class SchedulerConfig:
             placement_gpus=None if self.placement_gpus is None else tuple(self.placement_gpus),
             placement_fit=self.placement_fit,
             shared_external_threshold_gb=self.shared_external_threshold_gb,
+            default_cold_start_seconds=self.default_cold_start_seconds,
+            never_used_idle_seconds=self.never_used_idle_seconds,
             shared_free_threshold_gb=self.automation_shared_free_threshold_gb)
 
     def owner_for_ip(self, source_ip: str) -> str:

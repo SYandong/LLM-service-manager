@@ -2,6 +2,7 @@
 """Client/core loopback protocol tests with disposable SQLite and simulated effects."""
 
 import json
+import logging
 import shutil
 import subprocess
 import sys
@@ -232,3 +233,38 @@ def test_zero_target_is_not_a_model_action(pin_api, action_service):
     assert result["status"] == "complete" and result["freed_gb"] == 0
     assert pin_api["result_exit_code"](args, result) == 0
     assert not action_service.effects["calls"]
+
+
+def test_ready_cold_wake_records_the_measured_duration(pin_api, action_service):
+    service = action_service
+    service.effects["model"] = replace(service.effects["model"], state="stopped",
+                                       unit_active=False, resident_gb=0)
+    _, result, _ = run(pin_api, service, "wake", "model")
+    assert result["ready"] is True and result["cold_start"] is True
+    recorded = service.scheduler.store.cold_starts()
+    assert set(recorded) == {"model"} and recorded["model"] >= 0
+
+
+def test_warm_wake_does_not_record_a_cold_start(pin_api, action_service):
+    service = action_service
+    service.effects["model"] = replace(service.effects["model"], state="sleeping",
+                                       is_sleeping=True, resident_gb=2)
+    _, result, _ = run(pin_api, service, "wake", "model")
+    assert result["ready"] is True and result["cold_start"] is False
+    assert service.scheduler.store.cold_starts() == {}
+
+
+def test_cold_start_store_failure_is_logged_and_wake_still_ready(pin_api, action_service, monkeypatch, caplog):
+    service = action_service
+    service.effects["model"] = replace(service.effects["model"], state="stopped",
+                                       unit_active=False, resident_gb=0)
+
+    def broken(*args, **kwargs):
+        raise ValueError("store unavailable")
+
+    monkeypatch.setattr(service.scheduler.store, "record_cold_start", broken)
+    with caplog.at_level(logging.WARNING, logger="llmsvc.actions"):
+        _, result, _ = run(pin_api, service, "wake", "model")
+    assert result["ready"] is True and result["status"] == "ready"
+    assert any(record.message.startswith("{") and json.loads(record.message).get("kind") == "cold_start_record_failed"
+               for record in caplog.records)
