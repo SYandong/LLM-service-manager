@@ -3,13 +3,17 @@
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->
 
 The scheduler's usage attribution needs llama-swap to record the request peer
-address as `client_ip` in `activity.metadata_json`. Upstream v252 does not, so
-this directory carries the patch set and a reproducible build script.
+address as `client_ip` in `activity.metadata_json`, and its per-model
+`concurrencyQueue` capacity needs the matching queue behaviour. Upstream v252 has
+neither, so this directory carries the patch set and a reproducible build
+script.
 
 ## Layout
 
 - `patches/*.patch` — every patch is applied in name order with `patch -p1`.
-  The set is maintained separately; the build fails if it is empty.
+  The set is maintained separately; the build fails if it is empty. It carries
+  `0001-record-client-ip.patch` (usage attribution) and
+  `0002-concurrency-queue.patch` (per-model `concurrencyQueue` wait list).
 - `build.sh` — downloads the pinned tarball, verifies its sha256, applies the
   patches, builds the UI bundle and the Go binary in Docker, then prints the
   output path and its sha256.
@@ -27,7 +31,7 @@ The work directory defaults to `./build/llama-swap`. The script requires
 
 The UI is built with `node:22-slim` (`npm ci && npm run build`) and the binary
 with `golang:1.26` using `-tags embed_ui` and the pinned ldflags
-(`-X main.version=v252-llmsvc.1 -X main.commit=e31a1ad -X main.date=...`).
+(`-X main.version=v252-llmsvc.2 -X main.commit=e31a1ad -X main.date=...`).
 The binary is written to
 `<work-dir>/llama-swap-252/build/llama-swap-linux-amd64`.
 

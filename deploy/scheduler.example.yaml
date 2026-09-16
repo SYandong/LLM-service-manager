@@ -64,6 +64,11 @@ collectors: {}
 #   # per-model concurrencyLimit for every model through the normal catalog
 #   # transaction, unless an llmsvc.json descriptor sets its own override.
 #   # default_concurrency_limit: 64
+#   # Optional: strict integer 0..65536. The idle reconciler also writes each
+#   # model's concurrencyQueue in the same transaction, unless an llmsvc.json
+#   # descriptor sets its own override; 0 keeps the immediate HTTP 429 behaviour
+#   # for over-limit requests and a positive value queues them in FIFO order.
+#   # default_concurrency_queue: 0
 #   # Optional byte caps: strict integers 1..16777216; no unlimited mode.
 #   config_max_bytes: 1048576
 #   model_config_max_bytes: 1048576

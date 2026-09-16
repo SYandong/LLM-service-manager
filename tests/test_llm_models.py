@@ -54,6 +54,30 @@ def test_discovered_statuses_are_accepted(api, status):
     assert api['validate_registry_result'](parsed, reply) == reply
 
 
+def test_discovered_concurrency_fields_are_optional(api):
+    parsed = args(api, 'models')
+    reply = {'records': {}, 'writes_enabled': False, 'blocked_by': [],
+             'discovered': [
+                 {'name': 'a', 'path': '/srv/a', 'base': None, 'util': None, 'weights_gb': None,
+                  'concurrency_limit': 32, 'concurrency_queue': 8, 'status': 'pending', 'reason': None},
+                 {'name': 'b', 'path': '/srv/b', 'base': None, 'util': None, 'weights_gb': None,
+                  'status': 'pending', 'reason': None}]}
+    assert api['validate_registry_result'](parsed, reply) == reply
+
+
+def test_inventory_concurrency_fields_are_optional(api):
+    parsed = args(api, 'models')
+    row = {'name': 'a', 'source': 'config', 'temporary': False, 'base': None, 'daemon_port': None,
+           'created_at': None, 'last_used_at': None, 'runtime_state': 'stopped', 'removable': False,
+           'blocked_by': []}
+    reply = {'records': {}, 'writes_enabled': False, 'blocked_by': [], 'discovered': None,
+             'inventory': {'config_sha256': 'a' * 64, 'fenced': False, 'recovery': {},
+                           'pending_changes': [],
+                           'models': [dict(row, concurrency_limit=32, concurrency_queue=8),
+                                      dict(row, name='b')]}}
+    assert api['validate_registry_result'](parsed, reply) == reply
+
+
 def test_unknown_discovered_status_is_rejected(api):
     parsed = args(api, 'models')
     reply = {'records': {}, 'writes_enabled': False, 'blocked_by': [],

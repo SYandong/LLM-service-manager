@@ -156,6 +156,19 @@ def test_registry_default_concurrency_limit_rejects_bad_types_and_ranges(tmp_pat
                         registry=registry_config(tmp_path, default_concurrency_limit=value))
 
 
+def test_registry_default_concurrency_queue_is_accepted(tmp_path):
+    config = SchedulerConfig("127.0.0.1", 8011,
+                             registry=registry_config(tmp_path, default_concurrency_queue=0))
+    assert config.registry["default_concurrency_queue"] == 0
+
+
+@pytest.mark.parametrize("value", [-1, 65537, "8", True])
+def test_registry_default_concurrency_queue_rejects_bad_types_and_ranges(tmp_path, value):
+    with pytest.raises(ValueError, match="default_concurrency_queue"):
+        SchedulerConfig("127.0.0.1", 8011,
+                        registry=registry_config(tmp_path, default_concurrency_queue=value))
+
+
 def test_registry_unknown_optional_key_is_still_rejected(tmp_path):
     with pytest.raises(ValueError, match="known optional keys"):
         SchedulerConfig("127.0.0.1", 8011, registry=registry_config(tmp_path, concurrency_limit=64))

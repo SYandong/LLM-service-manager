@@ -205,7 +205,7 @@ class SchedulerConfig:
         if self.registry:
             required = {"config_path", "shared_roots", "daemon_port_range"}
             limits = {"config_max_bytes", "model_config_max_bytes", "weight_index_max_bytes"}
-            optional = {"reserved_ports", "default_concurrency_limit"}
+            optional = {"reserved_ports", "default_concurrency_limit", "default_concurrency_queue"}
             if not required <= set(self.registry) or set(self.registry)-required-optional-limits:
                 raise ValueError("registry requires config_path/shared_roots/daemon_port_range and known optional keys")
             for key in limits & self.registry.keys():
@@ -215,6 +215,9 @@ class SchedulerConfig:
             concurrency = self.registry.get("default_concurrency_limit")
             if concurrency is not None and (type(concurrency) is not int or not 1 <= concurrency <= 4096):
                 raise ValueError("registry.default_concurrency_limit must be an integer within 1..4096")
+            concurrency_queue = self.registry.get("default_concurrency_queue")
+            if concurrency_queue is not None and (type(concurrency_queue) is not int or not 0 <= concurrency_queue <= 65536):
+                raise ValueError("registry.default_concurrency_queue must be an integer within 0..65536")
             path = self.registry["config_path"]
             roots = self.registry["shared_roots"]
             if not isinstance(path, str) or not Path(path).is_absolute():

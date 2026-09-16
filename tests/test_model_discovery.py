@@ -176,6 +176,10 @@ def test_unusable_directory_names_are_rejected(directory):
     ({"base": "b", "concurrency_limit": 4097}, "concurrency_limit"),
     ({"base": "b", "concurrency_limit": "8"}, "concurrency_limit"),
     ({"base": "b", "concurrency_limit": True}, "concurrency_limit"),
+    ({"base": "b", "concurrency_queue": -1}, "concurrency_queue"),
+    ({"base": "b", "concurrency_queue": 65537}, "concurrency_queue"),
+    ({"base": "b", "concurrency_queue": "8"}, "concurrency_queue"),
+    ({"base": "b", "concurrency_queue": True}, "concurrency_queue"),
     ([], "JSON object"),
 ])
 def test_descriptor_rejections_name_the_offending_field(document, message):
@@ -199,6 +203,8 @@ def test_supported_descriptor_parses_into_whitelisted_overrides():
     assert overrides == ImportOverrides(tool_call_parser=False, reasoning_parser=False)
     _, _, overrides = parse_import_config({"base": "b", "concurrency_limit": 32}, directory_name="Capped")
     assert overrides == ImportOverrides(concurrency_limit=32)
+    _, _, overrides = parse_import_config({"base": "b", "concurrency_queue": 0}, directory_name="Queued")
+    assert overrides == ImportOverrides(concurrency_queue=0)
 
 
 def test_concurrency_limit_reaches_the_clone_and_the_record(root):
@@ -208,6 +214,15 @@ def test_concurrency_limit_reaches_the_clone_and_the_record(root):
         overrides=ImportOverrides(concurrency_limit=16), concurrency_limit=16)
     assert result.config["models"]["ft"]["concurrencyLimit"] == 16
     assert result.record["concurrency_limit"] == 16
+
+
+def test_concurrency_queue_reaches_the_clone_and_the_record(root):
+    model = weights(root / "ft")
+    result = add_full_weight_model(base_config(), {}, name="ft", model_path=model, base_model="base-model",
+        shared_roots=(root,), daemon_port_range=(8105, 8110), created_at=10.0,
+        overrides=ImportOverrides(concurrency_queue=0), concurrency_queue=0)
+    assert result.config["models"]["ft"]["concurrencyQueue"] == 0
+    assert result.record["concurrency_queue"] == 0
 
 
 def test_overrides_rewrite_util_length_and_aliases_only(root):

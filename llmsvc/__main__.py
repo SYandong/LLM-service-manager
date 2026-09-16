@@ -124,6 +124,7 @@ def build_registry(config, scheduler):
         daemon_port_range=tuple(config.registry["daemon_port_range"]), reserved_ports=reserved_ports,
         now=scheduler.clock, discover=ModelDiscovery(config.registry["shared_roots"], **limits),
         default_concurrency_limit=config.registry.get("default_concurrency_limit"),
+        default_concurrency_queue=config.registry.get("default_concurrency_queue"),
         **limits)
 
 

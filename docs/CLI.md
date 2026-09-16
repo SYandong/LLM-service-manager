@@ -284,6 +284,7 @@ LLM_URL=http://scheduler:8011 python3 llm models
 | `speculative` | 否 | `false` 时去掉从 base 继承的 `--speculative-config`（base 带 MTP 而你的权重没有 MTP 头时必需）；`true`/缺省沿用 base |
 | `max_num_seqs` | 否 | 1–4096 的整数；覆写 `--max-num-seqs`（并发上限） |
 | `concurrency_limit` | 否 | 1–4096 的整数；设置 llama-swap 顶层的 `concurrencyLimit`（每模型在途请求上限，超出返回 429），并随记录驱动后续收敛；与 vLLM 的 `--max-num-seqs` 不是同一个开关 |
+| `concurrency_queue` | 否 | 0–65536 的整数；设置 llama-swap 顶层的 `concurrencyQueue`（超过 `concurrencyLimit` 的请求最多允许多少个在每模型的 FIFO 等待队列里排队，腾出槽位后按序放行），并随记录驱动后续收敛；缺省 `0` 保持超限立即 429 |
 
 明确拒绝：`is_default`（导入的模型永远不是默认模型）、`cmd`/`cmdStop`/`argv`/`command`/`env`/`shell` 等任何自带命令或 shell 片段、以及任何未列出的键。覆写只在克隆出的块上生效，仍然经过既有的 shell-token 禁令与命令形状校验；base 的配置块不被修改。
 
