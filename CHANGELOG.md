@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased
+## 1.6.0 — 2026-09-16
+
+Minor release; Python distribution `1.6.0`. One merged PR, implemented by an
+OpenCode worker from a written specification and reviewed by Claude: requests above
+a model's `concurrencyLimit` now wait in a per-model FIFO queue instead of getting
+HTTP 429, driven by the new llama-swap `concurrencyQueue` key (patched binary
+`v252-llmsvc.2`), `registry.default_concurrency_queue` and an `llmsvc.json`
+`concurrency_queue` override (#281). Below the normal five-PR cadence, so the reviewed
+release PR records `Release-Exception: #256` for the user-authorized delivery.
 
 ### Registry
 
