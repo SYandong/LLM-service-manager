@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 # Start with a specific loopback/private container address and an alternate port.
 # Do not expose the unauthenticated scheduler on a public or wildcard address.
 listen_host: 127.0.0.1
@@ -59,6 +60,10 @@ collectors: {}
 #   shared_roots: [/absolute/shared/models]
 #   daemon_port_range: [8101, 8199]
 #   reserved_ports: [] # Optional; scheduler listen/model collector ports reserved too.
+#   # Optional: strict integer 1..4096. The idle reconciler writes llama-swap's
+#   # per-model concurrencyLimit for every model through the normal catalog
+#   # transaction, unless an llmsvc.json descriptor sets its own override.
+#   # default_concurrency_limit: 64
 #   # Optional byte caps: strict integers 1..16777216; no unlimited mode.
 #   config_max_bytes: 1048576
 #   model_config_max_bytes: 1048576

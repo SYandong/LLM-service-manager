@@ -283,6 +283,7 @@ LLM_URL=http://scheduler:8011 python3 llm models
 | `reasoning_parser` | 否 | vLLM 推理解析器名（如 `qwen3`）；覆写 `--reasoning-parser`。`false` 则去掉从 base 继承的 `--reasoning-parser`（非思考模型从带推理解析器的 base 克隆时必需，否则全部输出会落到 `reasoning` 字段） |
 | `speculative` | 否 | `false` 时去掉从 base 继承的 `--speculative-config`（base 带 MTP 而你的权重没有 MTP 头时必需）；`true`/缺省沿用 base |
 | `max_num_seqs` | 否 | 1–4096 的整数；覆写 `--max-num-seqs`（并发上限） |
+| `concurrency_limit` | 否 | 1–4096 的整数；设置 llama-swap 顶层的 `concurrencyLimit`（每模型在途请求上限，超出返回 429），并随记录驱动后续收敛；与 vLLM 的 `--max-num-seqs` 不是同一个开关 |
 
 明确拒绝：`is_default`（导入的模型永远不是默认模型）、`cmd`/`cmdStop`/`argv`/`command`/`env`/`shell` 等任何自带命令或 shell 片段、以及任何未列出的键。覆写只在克隆出的块上生效，仍然经过既有的 shell-token 禁令与命令形状校验；base 的配置块不被修改。
 

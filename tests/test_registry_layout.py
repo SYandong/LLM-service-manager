@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Byte-preserving registry edits of administrator-maintained YAML."""
 from dataclasses import replace
 import json
@@ -6,9 +7,28 @@ import json
 import pytest
 import yaml
 
-from llmsvc.registry import RegistryError
+from llmsvc.registry import RegistryError, _RegistryYamlEditor
 from llmsvc.state import Activity, ModelState
 from test_registry_api import registry as registry
+
+
+CONCURRENCY_LAYOUT = (
+    '# administrator configuration — keep spelling\n'
+    'cap_source: &cap 5\n'
+    'models: # keep this header\n'
+    '  # resident documentation\n'
+    '  base: # model comment\n'
+    '    cmd: echo base\n'
+    '    concurrencyLimit: 10 # scalar comment\n'
+    '    ttl: 600\n'
+    '\n'
+    '  second:\n'
+    '    cmd: echo second\n'
+    '    ttl: 300\n'
+    '  third: # comment after header\n'
+    '    cmd: echo third\n'
+    '# final comment\n'
+)
 
 
 def admin_config(queue, *, flow_members=True, newline='\n'):
@@ -207,3 +227,73 @@ def test_anchored_models_header_preserved(registry):
     api.remove('fine')
     assert drain()['status'] == 'applied'
     assert queue.path.read_bytes() == original
+
+
+def _concurrency_config(original):
+    config = yaml.safe_load(original)
+    return config
+
+
+def test_concurrency_limit_replaces_existing_scalar_byte_for_byte():
+    original = CONCURRENCY_LAYOUT.encode()
+    config = _concurrency_config(original)
+    config['models']['base']['concurrencyLimit'] = 64
+    changed = _RegistryYamlEditor(original).render(config)
+    assert changed == original.replace(b'concurrencyLimit: 10 #', b'concurrencyLimit: 64 #')
+    assert yaml.safe_load(changed) == config
+
+
+def test_concurrency_limit_inserted_after_entry_header():
+    original = CONCURRENCY_LAYOUT.encode()
+    config = _concurrency_config(original)
+    config['models']['second']['concurrencyLimit'] = 64
+    config['models']['third']['concurrencyLimit'] = 32
+    changed = _RegistryYamlEditor(original).render(config)
+    assert changed == original.replace(
+        b'  second:\n', b'  second:\n    concurrencyLimit: 64\n').replace(
+        b'  third: # comment after header\n', b'  third: # comment after header\n    concurrencyLimit: 32\n')
+    assert yaml.safe_load(changed) == config
+
+
+def test_concurrency_limit_edit_keeps_crlf_and_other_bytes():
+    original = CONCURRENCY_LAYOUT.replace('\n', '\r\n').encode()
+    config = _concurrency_config(original)
+    config['models']['second']['concurrencyLimit'] = 64
+    changed = _RegistryYamlEditor(original).render(config)
+    assert b'\n' not in changed.replace(b'\r\n', b'')
+    assert b'  second:\r\n    concurrencyLimit: 64\r\n' in changed
+    assert yaml.safe_load(changed) == config
+
+
+def test_concurrency_limit_rejects_anchored_or_aliased_scalar():
+    config = _concurrency_config(CONCURRENCY_LAYOUT.encode())
+    config['models']['base']['concurrencyLimit'] = 64
+    anchored = CONCURRENCY_LAYOUT.replace(
+        'concurrencyLimit: 10 # scalar comment', 'concurrencyLimit: &cap 10 # scalar comment').encode()
+    with pytest.raises(RegistryError, match='layout'):
+        _RegistryYamlEditor(anchored).render(config)
+    aliased = CONCURRENCY_LAYOUT.replace(
+        'concurrencyLimit: 10 # scalar comment', 'concurrencyLimit: *cap # scalar comment').encode()
+    with pytest.raises(RegistryError, match='layout'):
+        _RegistryYamlEditor(aliased).render(config)
+    quoted = CONCURRENCY_LAYOUT.replace(
+        'concurrencyLimit: 10 # scalar comment', 'concurrencyLimit: "10" # scalar comment').encode()
+    with pytest.raises(RegistryError, match='layout'):
+        _RegistryYamlEditor(quoted).render(config)
+
+
+def test_concurrency_limit_rejects_mixed_or_foreign_edits():
+    original = CONCURRENCY_LAYOUT.encode()
+    config = _concurrency_config(original)
+    config['models']['base']['concurrencyLimit'] = 64
+    config['models']['added'] = {'cmd': 'echo added'}
+    with pytest.raises(RegistryError, match='layout'):
+        _RegistryYamlEditor(original).render(config)
+    foreign = _concurrency_config(original)
+    foreign['models']['base']['ttl'] = 1
+    with pytest.raises(RegistryError, match='layout'):
+        _RegistryYamlEditor(original).render(foreign)
+    removal = _concurrency_config(original)
+    del removal['models']['base']['concurrencyLimit']
+    with pytest.raises(RegistryError, match='layout'):
+        _RegistryYamlEditor(original).render(removal)
