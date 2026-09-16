@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 — 2026-09-16
+
+Minor release; Python distribution `1.5.0`. One merged PR, implemented by an
+OpenCode worker from a written specification and reviewed by Claude: the scheduler
+sets llama-swap's per-model `concurrencyLimit` through the catalog transaction from
+`registry.default_concurrency_limit` and an `llmsvc.json` `concurrency_limit`
+override (#279). Below the normal five-PR cadence, so the reviewed release PR
+records `Release-Exception: #256` for the user-authorized delivery.
 
 ### Registry
 
