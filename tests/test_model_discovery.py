@@ -1,4 +1,5 @@
 # Generated-By: Claude Code / claude-fable-5-1
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Shared-root discovery, llmsvc.json overrides and generated catalog profiles."""
 
 import json
@@ -171,6 +172,10 @@ def test_unusable_directory_names_are_rejected(directory):
     ({"base": "b", "speculative": "no"}, "speculative"),
     ({"base": "b", "max_num_seqs": 0}, "max_num_seqs"),
     ({"base": "b", "max_num_seqs": 8.0}, "max_num_seqs"),
+    ({"base": "b", "concurrency_limit": 0}, "concurrency_limit"),
+    ({"base": "b", "concurrency_limit": 4097}, "concurrency_limit"),
+    ({"base": "b", "concurrency_limit": "8"}, "concurrency_limit"),
+    ({"base": "b", "concurrency_limit": True}, "concurrency_limit"),
     ([], "JSON object"),
 ])
 def test_descriptor_rejections_name_the_offending_field(document, message):
@@ -192,6 +197,17 @@ def test_supported_descriptor_parses_into_whitelisted_overrides():
     _, _, overrides = parse_import_config({"base": "b", "reasoning_parser": False, "tool_call_parser": False},
                                           directory_name="Bare")
     assert overrides == ImportOverrides(tool_call_parser=False, reasoning_parser=False)
+    _, _, overrides = parse_import_config({"base": "b", "concurrency_limit": 32}, directory_name="Capped")
+    assert overrides == ImportOverrides(concurrency_limit=32)
+
+
+def test_concurrency_limit_reaches_the_clone_and_the_record(root):
+    model = weights(root / "ft")
+    result = add_full_weight_model(base_config(), {}, name="ft", model_path=model, base_model="base-model",
+        shared_roots=(root,), daemon_port_range=(8105, 8110), created_at=10.0,
+        overrides=ImportOverrides(concurrency_limit=16), concurrency_limit=16)
+    assert result.config["models"]["ft"]["concurrencyLimit"] == 16
+    assert result.record["concurrency_limit"] == 16
 
 
 def test_overrides_rewrite_util_length_and_aliases_only(root):

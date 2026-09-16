@@ -12,6 +12,7 @@ registry:
   config_max_bytes: 1048576
   model_config_max_bytes: 1048576
   weight_index_max_bytes: 8388608
+  default_concurrency_limit: 64
 ```
 
 The scheduler also has directory-driven registration toggles:
@@ -29,7 +30,14 @@ worker, validator process, unit action or adoption notifier is started.
 The three optional byte limits bound configuration YAML, model `config.json`
 and weight-index JSON respectively. Each is an integer in 1..16777216; omitting
 them retains the finite registry defaults shown above. There is no unlimited
-mode. Configured YAML paths must be canonical, without symlink components;
+mode. The optional `default_concurrency_limit` is a strict integer 1..4096: the
+idle reconciler writes llama-swap's per-model `concurrencyLimit` for every
+configured model through the usual catalog transaction, unless that model's
+`llmsvc.json` descriptor sets its own `concurrency_limit`. Omitted, with no
+descriptor overrides, means the reconciler enqueues nothing and leaves every
+existing scalar alone; convergence only ever sets values, never removes one.
+
+Configured YAML paths must be canonical, without symlink components;
 model links may resolve within the configured shared roots. No-follow,
 nonblocking regular-file reads reject special files, excess bytes and detected
 identity changes. Actual weights are only sampled for readability, not read in
@@ -57,7 +65,9 @@ remains readable during an interrupted transaction and adds
 The additive `inventory` field contains the existing registry's configured model
 rows, configuration digest, pending changes and recovery fence. Unlike `records`,
 these rows can also include permanent configured names (`source: config`,
-`temporary: false`). Runtime state is separately observed and stays unknown for
+`temporary: false`). Each row carries `concurrency_limit`, the entry's current
+top-level llama-swap `concurrencyLimit` or null. Runtime state is separately
+observed and stays unknown for
 missing/stale observations. `last_used_at` remains null when unknown. `removable`
 is model-level eligibility, not global reload readiness. The action lock
 serializes daemon operations; separate registry reads do not promise an atomic
@@ -116,10 +126,14 @@ most one action per idle tick:
   descriptor and derives name, path, base and the whitelisted overrides itself;
   a client cannot supply them. Supported descriptor keys are `base` (required),
   `name`, `util`, `max_model_len`, `aliases`, `weights_gb`, `tool_call_parser`,
-  `reasoning_parser`, `speculative` and `max_num_seqs`; `is_default`, any
-  command/argv/shell fragment and every unknown key are rejected. Overrides
-  rewrite only the cloned block. A failed or queued submission starts a
-  per-name backoff (60 s doubling to a 3600 s cap).
+  `reasoning_parser`, `speculative`, `max_num_seqs` and `concurrency_limit`;
+  `is_default`, any command/argv/shell fragment and every unknown key are
+  rejected. Overrides rewrite only the cloned block. A failed or queued
+  submission starts a per-name backoff (60 s doubling to a 3600 s cap).
+  `concurrency_limit` (1..4096) sets llama-swap's top-level `concurrencyLimit`
+  on the clone and is saved in the `llmsvc_registry` record only when the
+  descriptor names it; the record override then drives later convergence for
+  that model.
 - **remove**: a record whose descriptor was deleted (or is no longer a regular
   file, or now declares a different name) is unregistered once its state is
   `stopped`. If it is `awake` or `sleeping`, it is stopped first

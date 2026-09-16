@@ -42,7 +42,8 @@ class FakeQueue:
 class FakeRegistry:
     """Only the surface the reconciler reads or submits through."""
 
-    def __init__(self, *, rows=(), records=None, add_error=None, stop_error=None, discover=object()):
+    def __init__(self, *, rows=(), records=None, add_error=None, stop_error=None, discover=object(),
+                 converge_result=None, converge_error=None):
         self.rows = [dict(row) for row in rows]
         self.record_map = dict(records or {})
         self.add_error = add_error
@@ -50,6 +51,10 @@ class FakeRegistry:
         self.discover = discover
         self.add_calls = []
         self.remove_calls = []
+        self.converge_calls = 0
+        self.converge_result = dict(converge_result or {
+            "kind": "set_concurrency_limit", "changed": [], "submitted": False})
+        self.converge_error = converge_error
         self.queue = FakeQueue()
         self.submit_change = lambda *args, **kwargs: None
 
@@ -74,6 +79,12 @@ class FakeRegistry:
         if self.stop_error is not None:
             raise self.stop_error
         return {"id": "job", "status": "queued"}
+
+    def converge_concurrency(self, *, dry_run=False):
+        self.converge_calls += 1
+        if self.converge_error is not None:
+            raise self.converge_error
+        return dict(self.converge_result)
 
 
 class FakeCatalog:
@@ -317,7 +328,7 @@ def test_invalid_descriptor_keeps_the_model_registered(tmp_path):
     snap = snapshot([ModelState("kept", state="stopped")])
     world = build(rows=[row("kept", status="invalid", path=str(directory), reason="llmsvc.json must contain a JSON object")],
                   records={"kept": record("kept", str(directory))}, snap=snap)
-    assert world.reconciler.run_once() == {"action": None, "model": None, "reason": None}
+    assert idle(world.reconciler.run_once())
     assert world.registry.remove_calls == []
     assert [r["status"] for r in world.reconciler.annotate(world.registry.discovered())] == ["invalid"]
 
@@ -337,12 +348,17 @@ def test_descriptor_that_now_names_another_model_is_an_orphan(tmp_path):
     assert result == {"action": "remove", "model": "old-name", "reason": None}
 
 
+def idle(result):
+    assert result["action"] is None and result["model"] is None and result["reason"] is None
+    return True
+
+
 def test_shared_roots_are_scanned_at_most_once_per_interval():
     world = build(rows=[], interval=30.0)
-    assert world.reconciler.run_once() == {"action": None, "model": None, "reason": None}
+    assert idle(world.reconciler.run_once())
     assert world.reconciler.run_once()["reason"] == "interval"
     world.clock.advance(30)
-    assert world.reconciler.run_once() == {"action": None, "model": None, "reason": None}
+    assert idle(world.reconciler.run_once())
 
 
 def test_snapshot_freshness_uses_the_scheduler_wall_clock(tmp_path):
@@ -361,3 +377,55 @@ def test_catalog_pending_boolean_blocks_only_when_true():
     assert world.reconciler.run_once()["reason"] == "catalog_pending"
     world.scheduler.store.pending = False
     assert world.reconciler.run_once()["action"] == "add"
+
+
+def test_converge_runs_once_per_idle_cycle_and_is_surfaced_in_last():
+    world = build(rows=[row("base", status="configured")])
+    result = world.reconciler.run_once()
+    assert idle(result)
+    assert world.registry.converge_calls == 1
+    assert result["concurrency"] == {"kind": "set_concurrency_limit", "changed": [], "submitted": False}
+    assert world.reconciler.last["concurrency"] == result["concurrency"]
+
+
+def test_converge_is_not_called_when_the_cycle_submits_an_add():
+    world = build(rows=[row("cand")])
+    assert world.reconciler.run_once()["action"] == "add"
+    assert world.registry.converge_calls == 0
+
+
+def test_converge_is_not_called_behind_a_pending_job():
+    world = build(rows=[row("base", status="configured")])
+    world.registry.queue.jobs = [{"id": "j", "pending": True}]
+    assert world.reconciler.run_once()["reason"] == "pending_change"
+    assert world.registry.converge_calls == 0
+    # A pending job appearing after the precondition is still caught by the guard.
+    result = world.reconciler._converge_concurrency({"action": None, "model": None, "reason": None})
+    assert world.registry.converge_calls == 0 and "concurrency" not in result
+
+
+def test_converge_failure_records_backoff_under_its_own_slot():
+    world = build(rows=[])
+    world.registry.converge_error = RegistryError("boom")
+    first = world.reconciler.run_once()
+    assert first["concurrency"]["reason"] == "RegistryError: boom"
+    assert world.registry.converge_calls == 1
+    assert "__concurrency__" in world.reconciler._backoff
+    world.clock.advance(31)
+    second = world.reconciler.run_once()
+    assert world.registry.converge_calls == 1
+    assert second["concurrency"]["reason"] == "RegistryError: boom"
+    world.clock.advance(31)
+    assert world.reconciler.run_once()["action"] is None
+    assert world.registry.converge_calls == 2
+
+
+def test_converge_success_counts_as_the_cycles_submission():
+    world = build(rows=[])
+    world.registry.converge_result = {"kind": "set_concurrency_limit", "changed": ["base"], "submitted": True}
+    first = world.reconciler.run_once()
+    assert first["concurrency"]["submitted"] is True
+    assert "__concurrency__" not in world.reconciler._backoff
+    world.clock.advance(10)
+    assert world.reconciler.run_once()["reason"] == "interval"
+    assert world.registry.converge_calls == 1

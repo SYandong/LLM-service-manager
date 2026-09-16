@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: OpenCode / deepseek-v4.1-flash
 """Explicit write opt-in and canonical source mapping checks."""
 
 from dataclasses import replace
@@ -130,6 +131,34 @@ def test_standalone_dryrun_flag_overrides_live_config_for_http(tmp_path):
         if process.poll() is None:
             process.kill()
             process.communicate(timeout=3)
+
+
+def registry_config(tmp_path, **overrides):
+    config = {
+        "config_path": str(tmp_path / "llama-swap.yaml"),
+        "shared_roots": [str(tmp_path / "models")],
+        "daemon_port_range": [8101, 8110],
+    }
+    config.update(overrides)
+    return config
+
+
+def test_registry_default_concurrency_limit_is_accepted(tmp_path):
+    config = SchedulerConfig("127.0.0.1", 8011,
+                             registry=registry_config(tmp_path, default_concurrency_limit=64))
+    assert config.registry["default_concurrency_limit"] == 64
+
+
+@pytest.mark.parametrize("value", [0, 4097, "8", True, 1.5, -1])
+def test_registry_default_concurrency_limit_rejects_bad_types_and_ranges(tmp_path, value):
+    with pytest.raises(ValueError, match="default_concurrency_limit"):
+        SchedulerConfig("127.0.0.1", 8011,
+                        registry=registry_config(tmp_path, default_concurrency_limit=value))
+
+
+def test_registry_unknown_optional_key_is_still_rejected(tmp_path):
+    with pytest.raises(ValueError, match="known optional keys"):
+        SchedulerConfig("127.0.0.1", 8011, registry=registry_config(tmp_path, concurrency_limit=64))
 
 
 def test_explicit_normal_startup_opens_writable_store(tmp_path, monkeypatch):

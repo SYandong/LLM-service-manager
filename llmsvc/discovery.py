@@ -23,6 +23,7 @@ from llmsvc.reload import _source_byte_limit
 from llmsvc.registry import (
     DEFAULT_MODEL_CONFIG_MAX_BYTES,
     DEFAULT_WEIGHT_INDEX_MAX_BYTES,
+    MAX_CONCURRENCY_LIMIT,
     MAX_NUM_SEQS,
     ImportOverrides,
     RegistryError,
@@ -37,7 +38,8 @@ MAX_CANDIDATES = 200
 MAX_ALIASES = 16
 MAX_MODEL_LEN = 2**31 - 1
 SUPPORTED_KEYS = ("base", "name", "util", "max_model_len", "aliases", "weights_gb",
-                  "tool_call_parser", "reasoning_parser", "speculative", "max_num_seqs")
+                  "tool_call_parser", "reasoning_parser", "speculative", "max_num_seqs",
+                  "concurrency_limit")
 NAME_CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789._-"
 REJECTED_KEYS = {
     "is_default": "llmsvc.json must not set is_default; an imported model is never the default model",
@@ -64,6 +66,7 @@ class Candidate:
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "path": self.path, "base": self.base,
                 "util": self.overrides.util, "weights_gb": self.overrides.weights_gb,
+                "concurrency_limit": self.overrides.concurrency_limit,
                 "status": self.status, "reason": self.reason}
 
 
@@ -107,7 +110,8 @@ def parse_import_config(document: Any, *, directory_name: str) -> tuple[str, str
                                        tool_call_parser=_optional_parser(document.get("tool_call_parser"), "tool_call_parser"),
                                        reasoning_parser=_optional_parser(document.get("reasoning_parser"), "reasoning_parser"),
                                        speculative=_optional_bool(document.get("speculative"), "speculative"),
-                                       max_num_seqs=_optional_max_num_seqs(document.get("max_num_seqs")))
+                                       max_num_seqs=_optional_max_num_seqs(document.get("max_num_seqs")),
+                                       concurrency_limit=_optional_concurrency_limit(document.get("concurrency_limit")))
 
 
 def measure_weights_gb(model_path: str | Path, shared_roots: Sequence[str | Path], *,
@@ -333,6 +337,14 @@ def _optional_max_num_seqs(value: Any) -> int | None:
         return None
     if type(value) is not int or not 1 <= value <= MAX_NUM_SEQS:
         raise RegistryError("max_num_seqs must be an integer between 1 and %d" % MAX_NUM_SEQS)
+    return value
+
+
+def _optional_concurrency_limit(value: Any) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or not 1 <= value <= MAX_CONCURRENCY_LIMIT:
+        raise RegistryError("concurrency_limit must be an integer between 1 and %d" % MAX_CONCURRENCY_LIMIT)
     return value
 
 

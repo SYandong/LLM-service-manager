@@ -26,6 +26,8 @@ LOG = logging.getLogger("llmsvc.reconcile")
 
 FIRST_BACKOFF_SECONDS = 60.0
 MAX_BACKOFF_SECONDS = 3600.0
+# One backoff slot for the periodic concurrency convergence, distinct from model names.
+CONCURRENCY_BACKOFF_KEY = "__concurrency__"
 
 
 class DirectoryReconciler:
@@ -64,7 +66,10 @@ class DirectoryReconciler:
                     self._last_submission = self.clock()
                     self._set_backoff(name, None)
                     return self._finish({"action": "add", "model": name, "reason": None}, log=True)
-            return self._reconcile_orphans(rows)
+            result = self._reconcile_orphans(rows)
+            if result["action"] is not None:
+                return result
+            return self._converge_concurrency(result)
         except (RegistryError, ReloadError, IntentWriteError, OSError, ValueError) as exc:
             reason = "%s: %s" % (type(exc).__name__, exc)
             if name is not None:
@@ -106,7 +111,7 @@ class DirectoryReconciler:
 
     def _reconcile_orphans(self, rows) -> dict:
         records = self.registry.records()
-        for stale in [key for key in self._backoff if key not in records]:
+        for stale in [key for key in self._backoff if key != CONCURRENCY_BACKOFF_KEY and key not in records]:
             del self._backoff[stale]
         for name, record in records.items():
             if self._in_backoff(name):
@@ -138,6 +143,34 @@ class DirectoryReconciler:
             self._set_backoff(name, reason)
             return self._finish({"action": "stop", "model": name, "reason": reason}, log=True)
         return self._finish({"action": None, "model": None, "reason": None}, log=False)
+
+    def _converge_concurrency(self, result: dict) -> dict:
+        """One concurrency convergence after a submission-free idle cycle.
+
+        Skipped while a job is pending or the convergence backoff is still
+        active. A failed submission records its reason under the dedicated
+        backoff slot; a successful one clears it and counts as this cycle's
+        submission so the next cycle waits out the interval.
+        """
+        if self._in_backoff(CONCURRENCY_BACKOFF_KEY):
+            result["concurrency"] = {"kind": "set_concurrency_limit", "changed": [], "submitted": False,
+                                     "reason": self._backoff[CONCURRENCY_BACKOFF_KEY]["reason"]}
+            return self._finish(result, log=False)
+        if any(job.get("pending") for job in self.registry.queue.queue_snapshot()["jobs"]):
+            return self._finish(result, log=False)
+        try:
+            outcome = self.registry.converge_concurrency()
+        except (RegistryError, ReloadError, IntentWriteError, OSError, ValueError) as exc:
+            reason = "%s: %s" % (type(exc).__name__, exc)
+            self._set_backoff(CONCURRENCY_BACKOFF_KEY, reason)
+            result["concurrency"] = {"kind": "set_concurrency_limit", "changed": [], "submitted": False,
+                                     "reason": reason}
+            return self._finish(result, log=True)
+        if outcome.get("submitted"):
+            self._last_submission = self.clock()
+            self._backoff.pop(CONCURRENCY_BACKOFF_KEY, None)
+        result["concurrency"] = outcome
+        return self._finish(result, log=bool(outcome.get("submitted")))
 
     # ---------------------------------------------------------------- helpers
 

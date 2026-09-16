@@ -54,7 +54,8 @@ def test_list_reports_discovery_without_touching_anything(described):
     rows = {row["name"]: row for row in listed["discovered"]}
     assert set(rows) == {"broken", "candidate", "saved"}
     assert rows["candidate"] == {"name": "candidate", "path": str(described.weights), "base": "base",
-                                 "util": .4, "weights_gb": 12.5, "status": "pending", "reason": None}
+                                 "util": .4, "weights_gb": 12.5, "concurrency_limit": None,
+                                 "status": "pending", "reason": None}
     assert rows["saved"]["status"] == "configured" and rows["saved"]["reason"] is None
     assert rows["broken"]["status"] == "invalid" and "is_default" in rows["broken"]["reason"]
     assert listed["reconcile"] == {"enabled": False, "last": None}

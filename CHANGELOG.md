@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Registry
+
+- The scheduler now sets llama-swap's per-model `concurrencyLimit` for every
+  configured model through the normal catalog transaction: an optional
+  `registry.default_concurrency_limit` (strict integer 1..4096) supplies the
+  value for models without a descriptor override, and an `llmsvc.json`
+  `concurrency_limit` overrides it for one imported model and is stored in its
+  `llmsvc_registry` record. The idle directory reconciler converges once per
+  submission-free tick behind its own backoff slot; with no default and no
+  overrides it enqueues nothing, and it only ever sets values, never removes
+  them.
+- Registry inventory rows and discovery candidates expose
+  `concurrency_limit` (the current scalar or null) so `llm models` /
+  `registry --json` can show it. The catalog edit is a byte-preserving
+  `concurrencyLimit` scalar rewrite that rejects anchors, aliases, non-integer
+  scalars and any mixed model change.
+
 ## 1.4.0 — 2026-09-16
 
 Minor release; Python distribution `1.4.0`. Two merged PRs, both implemented by
