@@ -297,3 +297,82 @@ def test_concurrency_limit_rejects_mixed_or_foreign_edits():
     del removal['models']['base']['concurrencyLimit']
     with pytest.raises(RegistryError, match='layout'):
         _RegistryYamlEditor(original).render(removal)
+
+
+QUEUE_LAYOUT = CONCURRENCY_LAYOUT.replace(
+    '    concurrencyLimit: 10 # scalar comment\n',
+    '    concurrencyLimit: 10 # scalar comment\n    concurrencyQueue: 4 # queue comment\n')
+
+
+def test_concurrency_queue_replaces_existing_scalar_byte_for_byte():
+    original = QUEUE_LAYOUT.encode()
+    config = _concurrency_config(original)
+    config['models']['base']['concurrencyQueue'] = 128
+    changed = _RegistryYamlEditor(original).render(config)
+    assert changed == original.replace(b'concurrencyQueue: 4 #', b'concurrencyQueue: 128 #')
+    assert yaml.safe_load(changed) == config
+
+
+def test_concurrency_fields_inserted_together_after_entry_header():
+    original = CONCURRENCY_LAYOUT.encode()
+    config = _concurrency_config(original)
+    config['models']['second']['concurrencyLimit'] = 64
+    config['models']['second']['concurrencyQueue'] = 8
+    config['models']['third']['concurrencyLimit'] = 32
+    config['models']['third']['concurrencyQueue'] = 16
+    changed = _RegistryYamlEditor(original).render(config)
+    assert changed == original.replace(
+        b'  second:\n', b'  second:\n    concurrencyLimit: 64\n    concurrencyQueue: 8\n').replace(
+        b'  third: # comment after header\n',
+        b'  third: # comment after header\n    concurrencyLimit: 32\n    concurrencyQueue: 16\n')
+    assert yaml.safe_load(changed) == config
+
+
+def test_concurrency_queue_inserted_when_limit_already_present():
+    original = CONCURRENCY_LAYOUT.encode()
+    config = _concurrency_config(original)
+    config['models']['base']['concurrencyQueue'] = 8
+    changed = _RegistryYamlEditor(original).render(config)
+    assert changed == original.replace(
+        b'  base: # model comment\n', b'  base: # model comment\n    concurrencyQueue: 8\n')
+    assert yaml.safe_load(changed) == config
+
+
+def test_concurrency_fields_edit_keeps_crlf_and_other_bytes():
+    original = CONCURRENCY_LAYOUT.replace('\n', '\r\n').encode()
+    config = _concurrency_config(original)
+    config['models']['second']['concurrencyLimit'] = 64
+    config['models']['second']['concurrencyQueue'] = 8
+    changed = _RegistryYamlEditor(original).render(config)
+    assert b'\n' not in changed.replace(b'\r\n', b'')
+    assert b'  second:\r\n    concurrencyLimit: 64\r\n    concurrencyQueue: 8\r\n' in changed
+    assert yaml.safe_load(changed) == config
+
+
+@pytest.mark.parametrize('bad', ['&cap 4', '*cap', '"4"'])
+def test_concurrency_queue_rejects_anchored_aliased_or_quoted_scalar(bad):
+    original = QUEUE_LAYOUT.encode()
+    config = _concurrency_config(original)
+    config['models']['base']['concurrencyQueue'] = 8
+    replacement = ('concurrencyQueue: ' + bad + ' #').encode()
+    broken = original.replace(b'concurrencyQueue: 4 #', replacement)
+    with pytest.raises(RegistryError, match='layout'):
+        _RegistryYamlEditor(broken).render(config)
+
+
+def test_concurrency_queue_rejects_mixed_foreign_and_removal_edits():
+    original = CONCURRENCY_LAYOUT.encode()
+    config = _concurrency_config(original)
+    config['models']['base']['concurrencyQueue'] = 8
+    config['models']['added'] = {'cmd': 'echo added'}
+    with pytest.raises(RegistryError, match='layout'):
+        _RegistryYamlEditor(original).render(config)
+    foreign = _concurrency_config(original)
+    foreign['models']['base']['ttl'] = 1
+    with pytest.raises(RegistryError, match='layout'):
+        _RegistryYamlEditor(original).render(foreign)
+    removal_original = QUEUE_LAYOUT.encode()
+    removal = _concurrency_config(removal_original)
+    del removal['models']['base']['concurrencyQueue']
+    with pytest.raises(RegistryError, match='layout'):
+        _RegistryYamlEditor(removal_original).render(removal)

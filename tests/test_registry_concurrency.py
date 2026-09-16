@@ -1,5 +1,5 @@
 # Generated-By: OpenCode / deepseek-v4.1-flash
-"""Per-model llama-swap concurrencyLimit: clone plumbing and convergence."""
+"""Per-model llama-swap concurrencyLimit/concurrencyQueue: clone plumbing and convergence."""
 
 import threading
 from dataclasses import replace
@@ -42,19 +42,23 @@ class FakeDiscovery:
         return self.candidate
 
 
-def base_config(*, concurrency=None):
+def base_config(*, concurrency=None, queue=None):
     block = {"cmd": BASE_CMD, "cmdStop": BASE_STOP}
     if concurrency is not None:
         block["concurrencyLimit"] = concurrency
+    if queue is not None:
+        block["concurrencyQueue"] = queue
     return {"models": {"base-model": block}, "groups": {"default": {"members": ["base-model"]}}}
 
 
-def simple_config(*names, concurrency=None):
+def simple_config(*names, concurrency=None, queue=None):
     models = {}
     for name in names:
         block = {"cmd": "echo " + name, "cmdStop": "echo stop " + name}
         if concurrency is not None:
             block["concurrencyLimit"] = concurrency
+        if queue is not None:
+            block["concurrencyQueue"] = queue
         models[name] = block
     return {"models": models}
 
@@ -66,7 +70,7 @@ def full_weight_model(path):
     return path
 
 
-def make_runtime(tmp_path, config, *, default_limit=None, discover=None):
+def make_runtime(tmp_path, config, *, default_limit=None, default_queue=None, discover=None):
     clock = Clock()
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(config, sort_keys=False))
@@ -84,7 +88,8 @@ def make_runtime(tmp_path, config, *, default_limit=None, discover=None):
     (tmp_path / "models").mkdir(exist_ok=True)
     registry = ModelRegistry(
         queue, shared_roots=(tmp_path / "models",), daemon_port_range=(8101, 8110),
-        reserved_ports=lambda: (), now=clock, discover=discover, default_concurrency_limit=default_limit)
+        reserved_ports=lambda: (), now=clock, discover=discover, default_concurrency_limit=default_limit,
+        default_concurrency_queue=default_queue)
 
     def drain():
         quiet.observe(0)
@@ -116,6 +121,51 @@ def test_effective_value_reaches_the_clone_and_override_the_record(tmp_path):
         overrides=ImportOverrides(concurrency_limit=8), concurrency_limit=8)
     assert result.config["models"]["ft"]["concurrencyLimit"] == 8
     assert result.record["concurrency_limit"] == 8
+
+
+def test_clone_inherits_base_concurrency_queue(tmp_path):
+    root = tmp_path / "models"
+    model = full_weight_model(root / "ft")
+    result = add_full_weight_model(
+        base_config(queue=4), {}, name="ft", model_path=model, base_model="base-model",
+        shared_roots=(root,), daemon_port_range=(8101, 8110), created_at=1.0)
+    assert result.config["models"]["ft"]["concurrencyQueue"] == 4
+    assert "concurrency_queue" not in result.record
+
+
+def test_concurrency_queue_override_reaches_the_clone_and_record(tmp_path):
+    root = tmp_path / "models"
+    model = full_weight_model(root / "ft")
+    result = add_full_weight_model(
+        base_config(concurrency=5, queue=4), {}, name="ft", model_path=model, base_model="base-model",
+        shared_roots=(root,), daemon_port_range=(8101, 8110), created_at=1.0,
+        overrides=ImportOverrides(concurrency_queue=128), concurrency_queue=128)
+    assert result.config["models"]["ft"]["concurrencyQueue"] == 128
+    assert result.record["concurrency_queue"] == 128
+
+
+def test_queue_default_is_applied_when_the_base_lacks_the_scalar(tmp_path):
+    root = tmp_path / "models"
+    model = full_weight_model(root / "ft")
+    result = add_full_weight_model(
+        base_config(), {}, name="ft", model_path=model, base_model="base-model",
+        shared_roots=(root,), daemon_port_range=(8101, 8110), created_at=1.0, concurrency_queue=32)
+    assert result.config["models"]["ft"]["concurrencyQueue"] == 32
+    assert "concurrency_queue" not in result.record
+
+
+def test_import_queue_override_beats_the_configured_default(tmp_path):
+    root = tmp_path / "models"
+    model = full_weight_model(root / "ft")
+    candidate = Candidate("ft", str(model), base="base-model", status="pending",
+                          overrides=ImportOverrides(concurrency_queue=128))
+    registry, queue, drain, _ = make_runtime(
+        tmp_path, base_config(), default_queue=16, discover=FakeDiscovery(candidate))
+    registry.add({"import": "ft"})
+    assert drain()["status"] == "applied"
+    saved = yaml.safe_load(queue.path.read_text())
+    assert saved["models"]["ft"]["concurrencyQueue"] == 128
+    assert saved["models"]["ft"]["metadata"]["llmsvc_registry"]["concurrency_queue"] == 128
 
 
 def test_default_is_applied_when_the_base_lacks_the_scalar(tmp_path):
@@ -175,11 +225,72 @@ def test_converge_sets_several_entries_in_one_transaction(tmp_path):
     outcome = registry.converge_concurrency()
     assert outcome["changed"] == ["a", "b"] and outcome["submitted"] is True
     assert outcome["description"] == {"kind": "set_concurrency_limit", "models": ["a", "b"], "limit": 64}
+    assert "queue" not in outcome["description"]
     assert len([job for job in queue.queue_snapshot()["jobs"] if job["pending"]]) == 1
     assert drain()["status"] == "applied"
     saved = yaml.safe_load(queue.path.read_text())
     assert saved["models"]["a"]["concurrencyLimit"] == 64
     assert saved["models"]["b"]["concurrencyLimit"] == 64
+
+
+def test_converge_sets_both_fields_in_one_transaction(tmp_path):
+    registry, queue, drain, _ = make_runtime(tmp_path, simple_config("a", "b"),
+                                             default_limit=64, default_queue=8)
+    outcome = registry.converge_concurrency()
+    assert outcome["changed"] == ["a", "b"] and outcome["submitted"] is True
+    assert outcome["description"] == {"kind": "set_concurrency_limit", "models": ["a", "b"],
+                                      "limit": 64, "queue": 8}
+    assert len([job for job in queue.queue_snapshot()["jobs"] if job["pending"]]) == 1
+    assert drain()["status"] == "applied"
+    saved = yaml.safe_load(queue.path.read_text())
+    assert saved["models"]["a"]["concurrencyLimit"] == 64
+    assert saved["models"]["a"]["concurrencyQueue"] == 8
+    assert saved["models"]["b"]["concurrencyQueue"] == 8
+
+
+def test_converge_is_a_noop_when_both_fields_already_match(tmp_path):
+    registry, queue, _, _ = make_runtime(tmp_path, simple_config("a", "b", concurrency=64, queue=8),
+                                         default_limit=64, default_queue=8)
+    before = queue.path.read_bytes()
+    outcome = registry.converge_concurrency()
+    assert outcome == {"kind": "set_concurrency_limit", "changed": [], "submitted": False}
+    assert queue.path.read_bytes() == before and not queue._jobs and not queue._pending
+
+
+def test_converge_updates_only_the_queue_when_the_limit_matches(tmp_path):
+    registry, queue, drain, _ = make_runtime(tmp_path, simple_config("a", "b", concurrency=64),
+                                             default_queue=8)
+    outcome = registry.converge_concurrency()
+    assert outcome["changed"] == ["a", "b"] and outcome["submitted"] is True
+    assert outcome["description"] == {"kind": "set_concurrency_limit", "models": ["a", "b"],
+                                      "limit": None, "queue": 8}
+    assert drain()["status"] == "applied"
+    saved = yaml.safe_load(queue.path.read_text())
+    assert saved["models"]["a"]["concurrencyLimit"] == 64
+    assert saved["models"]["a"]["concurrencyQueue"] == 8
+    assert saved["models"]["b"]["concurrencyQueue"] == 8
+
+
+def test_converge_description_carries_queue_when_a_queue_is_desired(tmp_path):
+    config = simple_config("base")
+    config["models"]["fine"] = {
+        "cmd": "echo fine", "cmdStop": "echo stop fine",
+        "metadata": {"llmsvc_registry": {
+            "name": "fine", "kind": "full_weight", "base": "base", "path": "/srv/models/fine",
+            "created_at": 1.0, "daemon_port": 8102, "concurrency_limit": 8,
+            "concurrency_queue": 128}}}
+    registry, queue, drain, _ = make_runtime(tmp_path, config, default_limit=64)
+    outcome = registry.converge_concurrency()
+    assert outcome["changed"] == ["base", "fine"]
+    assert outcome["description"] == {"kind": "set_concurrency_limit", "models": ["base", "fine"],
+                                      "limit": None, "queue": None}
+    assert drain()["status"] == "applied"
+    saved = yaml.safe_load(queue.path.read_text())
+    assert saved["models"]["base"]["concurrencyLimit"] == 64
+    assert saved["models"]["base"].get("concurrencyQueue") is None
+    assert saved["models"]["fine"]["concurrencyLimit"] == 8
+    assert saved["models"]["fine"]["concurrencyQueue"] == 128
+    assert saved["models"]["fine"]["metadata"]["llmsvc_registry"]["concurrency_queue"] == 128
 
 
 def test_converge_respects_a_record_override(tmp_path):
@@ -209,12 +320,26 @@ def test_converge_dry_run_previews_without_writing(tmp_path):
     assert queue.path.read_bytes() == before and not queue._jobs and not queue._pending
 
 
+def test_converge_dry_run_previews_both_fields_without_writing(tmp_path):
+    registry, queue, _, _ = make_runtime(tmp_path, simple_config("a"),
+                                         default_limit=64, default_queue=8)
+    before = queue.path.read_bytes()
+    outcome = registry.converge_concurrency(dry_run=True)
+    assert outcome["changed"] == ["a"] and outcome["submitted"] is True
+    assert outcome["would"] == [{"kind": "set_concurrency_limit", "models": ["a"],
+                                 "limit": 64, "queue": 8}]
+    assert queue.path.read_bytes() == before and not queue._jobs and not queue._pending
+
+
 # -------------------------------------------------------------- inventory
 
-def test_inventory_reports_the_current_concurrency_limit(tmp_path):
+def test_inventory_reports_the_current_concurrency_fields(tmp_path):
     config = simple_config("a", "b")
     config["models"]["a"]["concurrencyLimit"] = 5
+    config["models"]["a"]["concurrencyQueue"] = 8
     registry, _, _, _ = make_runtime(tmp_path, config)
     rows = {row["name"]: row for row in registry.inventory()["models"]}
     assert rows["a"]["concurrency_limit"] == 5
+    assert rows["a"]["concurrency_queue"] == 8
     assert rows["b"]["concurrency_limit"] is None
+    assert rows["b"]["concurrency_queue"] is None

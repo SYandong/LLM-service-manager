@@ -1,0 +1,683 @@
+diff -ruN '--exclude=.gocache' '--exclude=.gomodcache' '--exclude=node_modules' '--exclude=ui_dist' llama-swap-work/config-schema.json llama-swap-work2/config-schema.json
+--- a/config-schema.json	2026-09-16 04:39:25.325000979 +0800
++++ b/config-schema.json	2026-09-16 18:32:05.388255000 +0800
+@@ -536,6 +536,12 @@
+                         "default": 0,
+                         "description": "Overrides allowed number of active parallel requests to a model. 0 uses internal default of 10. >0 overrides default. Requests exceeding limit get HTTP 429."
+                     },
++                    "concurrencyQueue": {
++                        "type": "integer",
++                        "minimum": 0,
++                        "default": 0,
++                        "description": "Maximum number of requests allowed to wait for a free concurrencyLimit slot of a model. 0 keeps immediate HTTP 429 behaviour for over-limit requests; a positive value queues them in FIFO order."
++                    },
+                     "sendLoadingState": {
+                         "type": "boolean",
+                         "description": "Overrides the global sendLoadingState for this model. Ommitting this property will use the global setting."
+diff -ruN '--exclude=.gocache' '--exclude=.gomodcache' '--exclude=node_modules' '--exclude=ui_dist' llama-swap-work/docs/config.example.yaml llama-swap-work2/docs/config.example.yaml
+--- a/docs/config.example.yaml	2026-09-16 04:39:25.329000953 +0800
++++ b/docs/config.example.yaml	2026-09-16 18:32:02.296274871 +0800
+@@ -404,6 +404,16 @@
+     # - recommended to be omitted and the default used
+     concurrencyLimit: 0
+ 
++    # concurrencyQueue: maximum number of requests allowed to wait for a free
++    # concurrencyLimit slot of this model
++    # - optional, default: 0
++    # - 0 keeps immediate HTTP 429 Too Many Requests behaviour
++    # - useful to absorb bursts: over-limit requests wait and are served in
++    #   FIFO order (honouring routing.scheduler.settings.fifo.priority) as
++    #   slots free up
++    # - must be set per model
++    concurrencyQueue: 0
++
+     # sendLoadingState: overrides the global sendLoadingState setting for this model
+     # - optional, default: undefined (use global setting)
+     sendLoadingState: false
+diff -ruN '--exclude=.gocache' '--exclude=.gomodcache' '--exclude=node_modules' '--exclude=ui_dist' llama-swap-work/docs/kb/guides/routing/capacity-and-queues.md llama-swap-work2/docs/kb/guides/routing/capacity-and-queues.md
+--- a/docs/kb/guides/routing/capacity-and-queues.md	2026-09-16 04:39:25.329000953 +0800
++++ b/docs/kb/guides/routing/capacity-and-queues.md	2026-09-16 18:32:09.300229864 +0800
+@@ -3,14 +3,22 @@
+ summary: Configure concurrencyLimit and understand queued work while a model is loading or busy.
+ category: guides
+ tags: [routing, queue, capacity, concurrency, concurrency-limit, max-concurrent-requests]
+-config_keys: [routing, models.*.concurrencyLimit]
+-updated: 2026-08-28
++config_keys: [routing, models.*.concurrencyLimit, models.*.concurrencyQueue]
++updated: 2026-09-16
+ ---
+ 
+ # Routing capacity and request queues
+ 
+ There is no `models.*.maxConcurrentRequests` setting. The real per-model key
+-is `models.*.concurrencyLimit`, which limits active parallel requests.
++is `models.*.concurrencyLimit`, which limits active parallel requests. By
++default a request that arrives once the limit is reached is rejected with HTTP
++429 Too Many Requests.
++
++Set `models.*.concurrencyQueue` to a positive number to make those over-limit
++requests wait instead. Up to that many requests park in a per-model FIFO wait
++list (honouring `routing.scheduler.settings.fifo.priority`) and are admitted in
++order as concurrency slots free up. The default, `0`, keeps the immediate 429
++behaviour. Waiting requests do not count as active and hold no concurrency slot.
+ 
+ The router serializes model swaps and queues requests until the selected model
+ is ready. Avoid using many simultaneous client retries as a capacity control:
+diff -ruN '--exclude=.gocache' '--exclude=.gomodcache' '--exclude=node_modules' '--exclude=ui_dist' llama-swap-work/internal/config/load.go llama-swap-work2/internal/config/load.go
+--- a/internal/config/load.go	2026-09-16 04:39:25.329000953 +0800
++++ b/internal/config/load.go	2026-09-16 18:31:59.268294335 +0800
+@@ -144,6 +144,10 @@
+ 			return Config{}, fmt.Errorf("model %s: invalid TTL value %d", modelId, modelConfig.UnloadAfter)
+ 		}
+ 
++		if modelConfig.ConcurrencyQueue < 0 {
++			return Config{}, fmt.Errorf("model %s: invalid concurrencyQueue value %d", modelId, modelConfig.ConcurrencyQueue)
++		}
++
+ 		// set model unloadTimeout to the global value when left at the default
+ 		if modelConfig.UnloadTimeout < 0 {
+ 			return Config{}, fmt.Errorf("model %s: invalid unloadTimeout value %d", modelId, modelConfig.UnloadTimeout)
+diff -ruN '--exclude=.gocache' '--exclude=.gomodcache' '--exclude=node_modules' '--exclude=ui_dist' llama-swap-work/internal/config/model_config.go llama-swap-work2/internal/config/model_config.go
+--- a/internal/config/model_config.go	2026-09-16 04:39:25.329000953 +0800
++++ b/internal/config/model_config.go	2026-09-16 18:31:50.556350359 +0800
+@@ -94,6 +94,10 @@
+ 	// Limit concurrency of HTTP requests to process
+ 	ConcurrencyLimit int `yaml:"concurrencyLimit"`
+ 
++	// Maximum number of requests allowed to wait for a free concurrency slot
++	// when ConcurrencyLimit is reached. 0 rejects over-limit requests with 429.
++	ConcurrencyQueue int `yaml:"concurrencyQueue"`
++
+ 	// Model filters see issue #174
+ 	Filters ModelFilters `yaml:"filters"`
+ 
+@@ -135,6 +139,7 @@
+ 		Unlisted:         false,
+ 		UseModelName:     "",
+ 		ConcurrencyLimit: 0,
++		ConcurrencyQueue: 0,
+ 		Name:             "",
+ 		Description:      "",
+ 
+diff -ruN '--exclude=.gocache' '--exclude=.gomodcache' '--exclude=node_modules' '--exclude=ui_dist' llama-swap-work/internal/config/model_config_test.go llama-swap-work2/internal/config/model_config_test.go
+--- a/internal/config/model_config_test.go	2026-09-16 04:39:25.329000953 +0800
++++ b/internal/config/model_config_test.go	2026-09-16 18:34:32.655312791 +0800
+@@ -112,6 +112,34 @@
+ 	}
+ }
+ 
++func TestConfig_ConcurrencyQueue(t *testing.T) {
++	content := `
++models:
++  m:
++    cmd: path/to/cmd --port ${PORT}
++    concurrencyLimit: 2
++    concurrencyQueue: 5
++  default:
++    cmd: path/to/cmd --port ${PORT}
++`
++	cfg, err := LoadConfigFromReader(strings.NewReader(content))
++	assert.NoError(t, err)
++	assert.Equal(t, 2, cfg.Models["m"].ConcurrencyLimit)
++	assert.Equal(t, 5, cfg.Models["m"].ConcurrencyQueue)
++	assert.Equal(t, 0, cfg.Models["default"].ConcurrencyQueue)
++}
++
++func TestConfig_ConcurrencyQueueNegative(t *testing.T) {
++	content := `
++models:
++  m:
++    cmd: path/to/cmd --port ${PORT}
++    concurrencyQueue: -1
++`
++	_, err := LoadConfigFromReader(strings.NewReader(content))
++	assert.ErrorContains(t, err, "invalid concurrencyQueue value")
++}
++
+ func TestConfig_ModelCompat(t *testing.T) {
+ 	content := `
+ models:
+diff -ruN '--exclude=.gocache' '--exclude=.gomodcache' '--exclude=node_modules' '--exclude=ui_dist' llama-swap-work/internal/router/scheduler/fifo.go llama-swap-work2/internal/router/scheduler/fifo.go
+--- a/internal/router/scheduler/fifo.go	2026-09-16 04:39:25.329000953 +0800
++++ b/internal/router/scheduler/fifo.go	2026-09-16 18:31:44.988386180 +0800
+@@ -39,11 +39,18 @@
+ 	cfg     config.FifoConfig
+ 	effects Effects
+ 
+-	limits   map[string]int
+-	active   map[string]*activeSwap
+-	reserved map[string]int
+-	inFlight map[string]int
+-	queued   []HandlerReq
++	limits      map[string]int
++	queueLimits map[string]int
++	active      map[string]*activeSwap
++	reserved    map[string]int
++	inFlight    map[string]int
++	queued      []HandlerReq
++
++	// waiting holds requests that were admitted-eligible but could not get a
++	// concurrency slot, keyed by model ID. Each list is FIFO (priority ordered
++	// like queued). Requests here hold no reservation and have not received
++	// their admission yet.
++	waiting map[string][]HandlerReq
+ }
+ 
+ // NewFIFO builds a FIFO scheduler. Per-model concurrency limits are derived
+@@ -51,24 +58,28 @@
+ // when set to a value greater than zero.
+ func NewFIFO(name string, logger *logmon.Monitor, planner Swapper, cfg config.FifoConfig, models map[string]config.ModelConfig, eff Effects) *FIFO {
+ 	limits := make(map[string]int, len(models))
++	queueLimits := make(map[string]int, len(models))
+ 	for id, mc := range models {
+ 		limit := defaultConcurrencyLimit
+ 		if mc.ConcurrencyLimit > 0 {
+ 			limit = mc.ConcurrencyLimit
+ 		}
+ 		limits[id] = limit
++		queueLimits[id] = mc.ConcurrencyQueue
+ 	}
+ 
+ 	return &FIFO{
+-		name:     name,
+-		logger:   logger,
+-		planner:  planner,
+-		cfg:      cfg,
+-		effects:  eff,
+-		limits:   limits,
+-		active:   make(map[string]*activeSwap),
+-		reserved: make(map[string]int),
+-		inFlight: make(map[string]int),
++		name:        name,
++		logger:      logger,
++		planner:     planner,
++		cfg:         cfg,
++		effects:     eff,
++		limits:      limits,
++		queueLimits: queueLimits,
++		active:      make(map[string]*activeSwap),
++		reserved:    make(map[string]int),
++		inFlight:    make(map[string]int),
++		waiting:     make(map[string][]HandlerReq),
+ 	}
+ }
+ 
+@@ -104,6 +115,15 @@
+ 		return
+ 	}
+ 
++	s.afterAdmit(req, state)
++}
++
++// afterAdmit runs the part of the OnRequest decision tree that follows a
++// successful admission: join an in-flight swap, serve the fast path, queue, or
++// start a swap. It is shared by OnRequest and by dequeueWaiting so a request
++// released from the concurrency wait list is indistinguishable from one
++// admitted directly.
++func (s *FIFO) afterAdmit(req HandlerReq, state process.ProcessState) {
+ 	// (2) Join an in-flight swap for the same model.
+ 	if sw, ok := s.active[req.Model]; ok {
+ 		s.logger.Debugf("%s: joining in-flight swap for model %s (%d waiters)", s.name, req.Model, len(sw.waiters)+1)
+@@ -148,13 +168,35 @@
+ func (s *FIFO) OnCancel(req HandlerReq) {
+ 	removed := false
+ 
+-	// Prune from the queue.
++	// Prune from the concurrency wait list. These requests hold no reservation
++	// and have not been admitted, so there is nothing to release.
++	if list, ok := s.waiting[req.Model]; ok {
++		kept := list[:0]
++		for _, w := range list {
++			if w.Respond == req.Respond {
++				removed = true
++				continue
++			}
++			kept = append(kept, w)
++		}
++		if len(kept) == 0 {
++			delete(s.waiting, req.Model)
++		} else {
++			s.waiting[req.Model] = kept
++		}
++	}
++
++	// Prune from the queue, remembering which reservations were released so the
++	// releases (and the dequeues they trigger) run after every list has been
++	// walked. Releasing mid-iteration would let a dequeue mutate the very
++	// slices being traversed.
++	var released []string
+ 	if len(s.queued) > 0 {
+ 		kept := s.queued[:0]
+ 		for _, q := range s.queued {
+ 			if q.Respond == req.Respond {
+ 				removed = true
+-				s.release(q.Model)
++				released = append(released, q.Model)
+ 				continue
+ 			}
+ 			kept = append(kept, q)
+@@ -168,7 +210,7 @@
+ 		for _, w := range sw.waiters {
+ 			if w.Respond == req.Respond {
+ 				removed = true
+-				s.release(w.Model)
++				released = append(released, w.Model)
+ 				continue
+ 			}
+ 			filtered = append(filtered, w)
+@@ -176,9 +218,14 @@
+ 		sw.waiters = filtered
+ 	}
+ 
++	for _, modelID := range released {
++		s.release(modelID)
++	}
++
+ 	if removed {
+ 		s.logger.Debugf("%s: cancelled request for model %s pruned from scheduler", s.name, req.Model)
+ 		broadcastQueuePositions(s.queued)
++		s.broadcastWaitingPositions()
+ 	}
+ }
+ 
+@@ -227,6 +274,18 @@
+ 		targetSet[id] = true
+ 	}
+ 
++	// Fail requests waiting for a concurrency slot on a targeted model first.
++	// They were never admitted, so the failure travels back through the
++	// admission channel rather than a grant. Clearing them before any release
++	// below also guarantees a release-triggered dequeue cannot resurrect a
++	// request for a model that is being unloaded.
++	for _, id := range targets {
++		for _, w := range s.waiting[id] {
++			s.rejectAdmission(w, unloadErr)
++		}
++		delete(s.waiting, id)
++	}
++
+ 	// Release waiters of any in-flight swap whose target is being unloaded.
+ 	// The swap goroutine itself is left to finish on its own; when its
+ 	// SwapDone arrives, OnSwapDone will find no entry in active and drop it.
+@@ -268,6 +327,16 @@
+ 
+ // OnShutdown grants err to every waiter still held by the scheduler.
+ func (s *FIFO) OnShutdown(err error) {
++	// Fail concurrency waiters first: they were never admitted, so the error
++	// goes back through the admission channel. Clearing them before the
++	// releases below keeps a release-triggered dequeue from admitting new
++	// requests during shutdown.
++	for modelID, list := range s.waiting {
++		for _, w := range list {
++			s.rejectAdmission(w, err)
++		}
++		delete(s.waiting, modelID)
++	}
+ 	for _, sw := range s.active {
+ 		for _, w := range sw.waiters {
+ 			s.grantError(w, err)
+@@ -305,8 +374,19 @@
+ // admit performs the pre-stream admission handshake. Accepted requests reserve
+ // one future serving slot until they serve, cancel while waiting, or receive a
+ // post-admission error.
++//
++// When the model is already at its concurrency limit, the request is parked in
++// the model's wait list if that list has room; otherwise it is rejected with
++// the usual HTTP 429. A parked request holds no reservation and has not been
++// admitted, so the caller must not proceed.
+ func (s *FIFO) admit(req HandlerReq) bool {
+ 	if s.reserved[req.Model] >= s.limit(req.Model) {
++		if len(s.waiting[req.Model]) < s.queueLimit(req.Model) {
++			s.waiting[req.Model] = s.insertByPriority(s.waiting[req.Model], req)
++			s.logger.Debugf("%s: request for model %s waiting for a concurrency slot (%d waiting)", s.name, req.Model, len(s.waiting[req.Model]))
++			s.broadcastWaitingPositions()
++			return false
++		}
+ 		s.rejectAdmission(req, swaputil.ConcurrencyLimitError{})
+ 		return false
+ 	}
+@@ -317,6 +397,39 @@
+ 	return true
+ }
+ 
++// dequeueWaiting promotes requests parked for a model as long as a concurrency
++// slot is free. Each promoted request goes through the exact admission sequence
++// a fresh OnRequest would have used — admission send, reservation, then
++// afterAdmit — so it is indistinguishable from a directly admitted request.
++// Requests whose client has gone are dropped silently.
++func (s *FIFO) dequeueWaiting(modelID string) {
++	for s.reserved[modelID] < s.limit(modelID) {
++		list := s.waiting[modelID]
++		if len(list) == 0 {
++			return
++		}
++		req := list[0]
++		if len(list) == 1 {
++			delete(s.waiting, modelID)
++		} else {
++			s.waiting[modelID] = list[1:]
++		}
++
++		state, ok := s.effects.ModelState(req.Model)
++		if !ok {
++			s.rejectAdmission(req, ErrModelNotFound)
++			continue
++		}
++		if !sendAdmission(req, nil) {
++			continue
++		}
++		s.reserved[modelID]++
++		s.logger.Debugf("%s: dequeued waiting request for model %s (%d still waiting)", s.name, modelID, len(s.waiting[modelID]))
++		s.broadcastWaitingPositions()
++		s.afterAdmit(req, state)
++	}
++}
++
+ func (s *FIFO) rejectAdmission(req HandlerReq, err error) {
+ 	sendAdmission(req, err)
+ }
+@@ -354,6 +467,15 @@
+ 	if s.reserved[modelID] == 0 {
+ 		delete(s.reserved, modelID)
+ 	}
++	// A slot just freed: promote any request waiting for this model.
++	s.dequeueWaiting(modelID)
++}
++
++// queueLimit returns how many requests may wait for a concurrency slot of
++// modelID. Zero means "do not wait" — over-limit requests are rejected
++// immediately, preserving the behaviour before concurrencyQueue existed.
++func (s *FIFO) queueLimit(modelID string) int {
++	return s.queueLimits[modelID]
+ }
+ 
+ // limit returns the per-model concurrency cap, defaulting to
+@@ -378,22 +500,30 @@
+ 	s.effects.StartSwap(initial.Model, evict)
+ }
+ 
+-// enqueue inserts req into the queue in priority order: it goes just before the
+-// first queued item whose priority is strictly lower, so higher-priority models
+-// are serviced first while equal-priority requests keep their arrival (FIFO)
+-// order. Priorities come from the FifoConfig; unlisted models default to 0.
+-func (s *FIFO) enqueue(req HandlerReq) {
++// insertByPriority inserts req into list just before the first item whose
++// priority is strictly lower, so higher-priority models are serviced first
++// while equal-priority requests keep their arrival (FIFO) order. Priorities
++// come from the FifoConfig; unlisted models default to 0. The list is returned
++// so callers can replace their slice header.
++func (s *FIFO) insertByPriority(list []HandlerReq, req HandlerReq) []HandlerReq {
+ 	p := s.cfg.Priority[req.Model]
+-	i := len(s.queued)
+-	for j, q := range s.queued {
++	i := len(list)
++	for j, q := range list {
+ 		if s.cfg.Priority[q.Model] < p {
+ 			i = j
+ 			break
+ 		}
+ 	}
+-	s.queued = append(s.queued, HandlerReq{})
+-	copy(s.queued[i+1:], s.queued[i:])
+-	s.queued[i] = req
++	list = append(list, HandlerReq{})
++	copy(list[i+1:], list[i:])
++	list[i] = req
++	return list
++}
++
++// enqueue inserts req into the swap queue in priority order and rebroadcasts
++// every waiter's position.
++func (s *FIFO) enqueue(req HandlerReq) {
++	s.queued = s.insertByPriority(s.queued, req)
+ 	broadcastQueuePositions(s.queued)
+ }
+ 
+@@ -534,6 +664,15 @@
+ 	return false
+ }
+ 
++// broadcastWaitingPositions sends each concurrency waiter its 1-indexed
++// position within its own model's wait list. Positions are per model because
++// requests only ever wait behind others of the same model.
++func (s *FIFO) broadcastWaitingPositions() {
++	for _, list := range s.waiting {
++		broadcastQueuePositions(list)
++	}
++}
++
+ // broadcastQueuePositions sends each queued request its current 1-indexed
+ // position. Sends are non-blocking: if the channel is full, the old value is
+ // drained first so the consumer always sees the latest position.
+diff -ruN '--exclude=.gocache' '--exclude=.gomodcache' '--exclude=node_modules' '--exclude=ui_dist' llama-swap-work/internal/router/scheduler/fifo_queue_test.go llama-swap-work2/internal/router/scheduler/fifo_queue_test.go
+--- a/internal/router/scheduler/fifo_queue_test.go	1970-01-01 07:30:00.000000000 +0730
++++ b/internal/router/scheduler/fifo_queue_test.go	2026-09-16 18:33:45.811611653 +0800
+@@ -0,0 +1,228 @@
++// Generated-By: OpenCode / deepseek-v4.1-flash
++package scheduler
++
++import (
++	"io"
++	"testing"
++	"time"
++
++	"github.com/mostlygeek/llama-swap/internal/config"
++	"github.com/mostlygeek/llama-swap/internal/logmon"
++	"github.com/mostlygeek/llama-swap/internal/process"
++)
++
++// assertNoAdmission fails when the request received an admission result before
++// it was expected to be promoted from the concurrency wait list.
++func assertNoAdmission(t *testing.T, r HandlerReq) {
++	t.Helper()
++	select {
++	case err := <-r.Admit:
++		t.Fatalf("unexpected admission: %v", err)
++	default:
++	}
++}
++
++// newFIFOWithQueue builds a FIFO whose single model "a" is StateReady with the
++// given concurrencyLimit and concurrencyQueue.
++func newFIFOWithQueue(t *testing.T, limit, queue int) (*FIFO, *fakeEffects) {
++	t.Helper()
++	eff := newFakeEffects()
++	eff.states["a"] = process.StateReady
++	models := map[string]config.ModelConfig{
++		"a": {ConcurrencyLimit: limit, ConcurrencyQueue: queue},
++	}
++	s := NewFIFO("test", logmon.NewWriter(io.Discard), &stubPlanner{}, config.FifoConfig{}, models, eff)
++	return s, eff
++}
++
++// waitingOrder returns the model IDs of a model's wait list in order.
++func waitingOrder(s *FIFO, model string) []string {
++	out := make([]string, 0, len(s.waiting[model]))
++	for _, w := range s.waiting[model] {
++		out = append(out, w.Model)
++	}
++	return out
++}
++
++// TestFIFO_ConcurrencyQueue_WaitsAndDrainsFIFO covers limit 1 / queue 2: three
++// requests yield one served and two waiting, a fourth is rejected with 429, and
++// finishing the served request admits the waiters in FIFO order.
++func TestFIFO_ConcurrencyQueue_WaitsAndDrainsFIFO(t *testing.T) {
++	s, eff := newFIFOWithQueue(t, 1, 2)
++
++	r1 := reqCh("a")
++	r2 := reqCh("a")
++	r3 := reqCh("a")
++	s.OnRequest(r1)
++	s.OnRequest(r2)
++	s.OnRequest(r3)
++
++	assertAdmitted(t, r1)
++	if got := eff.served("a"); got != 1 {
++		t.Fatalf("served(a)=%d want 1", got)
++	}
++	if got := waitingOrder(s, "a"); len(got) != 2 || got[0] != "a" || got[1] != "a" {
++		t.Fatalf("waiting=%v want two requests for a", got)
++	}
++	assertNoAdmission(t, r2)
++	assertNoAdmission(t, r3)
++
++	// The wait list is full: a fourth over-limit request is rejected.
++	r4 := req("a")
++	s.OnRequest(r4)
++	assertAdmission429(t, r4)
++	if got := len(s.waiting["a"]); got != 2 {
++		t.Fatalf("waiting len=%d want 2 (rejected request must not be parked)", got)
++	}
++
++	// r1 finishes; r2 is promoted (FIFO), r3 stays waiting.
++	s.OnServeDone(ServeDoneEvent{ModelID: "a"})
++	assertAdmitted(t, r2)
++	assertNoAdmission(t, r3)
++	if got := eff.served("a"); got != 2 {
++		t.Fatalf("served(a)=%d want 2 after first drain", got)
++	}
++	if got := len(s.waiting["a"]); got != 1 {
++		t.Fatalf("waiting len=%d want 1", got)
++	}
++
++	// r2 finishes; r3 is promoted.
++	s.OnServeDone(ServeDoneEvent{ModelID: "a"})
++	assertAdmitted(t, r3)
++	if got := eff.served("a"); got != 3 {
++		t.Fatalf("served(a)=%d want 3 after second drain", got)
++	}
++	if got := len(s.waiting["a"]); got != 0 {
++		t.Fatalf("waiting len=%d want 0", got)
++	}
++}
++
++// TestFIFO_ConcurrencyQueue_CancelWaitingSkips verifies a cancelled waiter is
++// removed from the wait list and later slots skip over it.
++func TestFIFO_ConcurrencyQueue_CancelWaitingSkips(t *testing.T) {
++	s, eff := newFIFOWithQueue(t, 1, 3)
++
++	r1 := reqCh("a")
++	r2 := reqCh("a")
++	r3 := reqCh("a")
++	r4 := reqCh("a")
++	s.OnRequest(r1)
++	s.OnRequest(r2)
++	s.OnRequest(r3)
++	s.OnRequest(r4)
++	assertAdmitted(t, r1)
++	if got := len(s.waiting["a"]); got != 3 {
++		t.Fatalf("waiting len=%d want 3", got)
++	}
++
++	// Cancel the middle waiter.
++	s.OnCancel(r3)
++
++	if got := len(s.waiting["a"]); got != 2 {
++		t.Fatalf("waiting len=%d want 2 after cancel", got)
++	}
++	for _, w := range s.waiting["a"] {
++		if w.Respond == r3.Respond {
++			t.Fatal("cancelled request still present in wait list")
++		}
++	}
++
++	// Drain: r2 then r4 are promoted; r3 never is.
++	s.OnServeDone(ServeDoneEvent{ModelID: "a"})
++	assertAdmitted(t, r2)
++	s.OnServeDone(ServeDoneEvent{ModelID: "a"})
++	assertAdmitted(t, r4)
++	assertNoAdmission(t, r3)
++
++	if got := eff.served("a"); got != 3 {
++		t.Fatalf("served(a)=%d want 3 (r1, r2, r4)", got)
++	}
++}
++
++// TestFIFO_ConcurrencyQueue_ZeroRejectsImmediately verifies that the default
++// concurrencyQueue of 0 keeps the original immediate 429 behaviour.
++func TestFIFO_ConcurrencyQueue_ZeroRejectsImmediately(t *testing.T) {
++	s, eff := newFIFOWithQueue(t, 1, 0)
++
++	r1 := req("a")
++	s.OnRequest(r1)
++	assertAdmitted(t, r1)
++
++	r2 := req("a")
++	s.OnRequest(r2)
++	assertAdmission429(t, r2)
++
++	if got := len(s.waiting["a"]); got != 0 {
++		t.Fatalf("waiting len=%d want 0 (queue disabled)", got)
++	}
++	if got := eff.errored("a"); got != 0 {
++		t.Fatalf("errored(a)=%d want 0 (reject before grant)", got)
++	}
++}
++
++// TestFIFO_ConcurrencyQueue_OnUnloadFailsWaiters verifies unloading a model
++// fails every request parked in its wait list through the admission channel,
++// without touching their (nonexistent) reservations.
++func TestFIFO_ConcurrencyQueue_OnUnloadFailsWaiters(t *testing.T) {
++	s, eff := newFIFOWithQueue(t, 1, 2)
++
++	r1 := req("a")
++	r2 := reqCh("a")
++	r3 := reqCh("a")
++	s.OnRequest(r1)
++	s.OnRequest(r2)
++	s.OnRequest(r3)
++	assertAdmitted(t, r1)
++
++	s.OnUnload([]string{"a"}, time.Second)
++
++	if got := len(s.waiting["a"]); got != 0 {
++		t.Fatalf("waiting len=%d want 0 after unload", got)
++	}
++	for i, r := range []HandlerReq{r2, r3} {
++		err := admitErr(t, r)
++		if err == nil {
++			t.Fatalf("waiter %d admitted after unload, want error", i)
++		}
++		if got := err.Error(); got != "test: model unloaded" {
++			t.Fatalf("waiter %d err=%q want %q", i, got, "test: model unloaded")
++		}
++	}
++	if got := eff.errored(""); got != 0 {
++		t.Fatalf("error grants=%d want 0 (unload reported via admission)", got)
++	}
++}
++
++// TestFIFO_ConcurrencyQueue_WaitingPriorityOrder verifies the shared insertion
++// helper orders a list by descending priority while preserving arrival order
++// for ties, and that admit parks same-model requests in arrival (FIFO) order.
++func TestFIFO_ConcurrencyQueue_WaitingPriorityOrder(t *testing.T) {
++	cfg := config.FifoConfig{Priority: map[string]int{"a": 10, "b": 5, "c": 1}}
++	s := NewFIFO("test", logmon.NewWriter(io.Discard), &stubPlanner{}, cfg, nil, newFakeEffects())
++
++	var list []HandlerReq
++	for _, m := range []string{"c", "a", "b", "b"} {
++		list = s.insertByPriority(list, reqCh(m))
++	}
++	var got []string
++	for _, r := range list {
++		got = append(got, r.Model)
++	}
++	want := []string{"a", "b", "b", "c"}
++	for i := range want {
++		if got[i] != want[i] {
++			t.Fatalf("priority order=%v want %v", got, want)
++		}
++	}
++
++	// Same model: equal priority, so admit preserves arrival order.
++	s2, _ := newFIFOWithQueue(t, 1, 3)
++	s2.OnRequest(req("a")) // served, holds the only slot
++	first := reqCh("a")
++	second := reqCh("a")
++	s2.OnRequest(first)
++	s2.OnRequest(second)
++	if got := s2.waiting["a"]; len(got) != 2 || got[0].Respond != first.Respond || got[1].Respond != second.Respond {
++		t.Fatalf("wait list not in arrival order: %v", got)
++	}
++}

@@ -62,6 +62,7 @@ class ImportOverrides:
     speculative: bool | None = None
     max_num_seqs: int | None = None
     concurrency_limit: int | None = None
+    concurrency_queue: int | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,7 @@ def add_full_weight_model(
     weight_index_max_bytes: int = DEFAULT_WEIGHT_INDEX_MAX_BYTES,
     overrides: ImportOverrides | None = None,
     concurrency_limit: int | None = None,
+    concurrency_queue: int | None = None,
 ) -> RegistryAddResult:
     """Return detached config and temporary records with one full-weight model added."""
     name = validate_safe_model_name(name)
@@ -163,6 +165,8 @@ def add_full_weight_model(
     overrides = _validate_overrides(overrides)
     if concurrency_limit is not None:
         concurrency_limit = _validate_concurrency_limit(concurrency_limit, "concurrency_limit")
+    if concurrency_queue is not None:
+        concurrency_queue = _validate_concurrency_queue(concurrency_queue, "concurrency_queue")
     path_info = validate_full_weight_model_dir(model_path, shared_roots,
         model_config_max_bytes=model_config_max_bytes, weight_index_max_bytes=weight_index_max_bytes)
 
@@ -186,7 +190,8 @@ def add_full_weight_model(
 
     daemon_port = _choose_daemon_port(new_config, new_records, daemon_port_range, reserved_ports)
     new_block = _clone_model_block(base_model, name, base_block, path_info.path, daemon_port,
-                                   overrides=overrides, concurrency_limit=concurrency_limit)
+                                   overrides=overrides, concurrency_limit=concurrency_limit,
+                                   concurrency_queue=concurrency_queue)
     models[name] = new_block
     groups = _append_group_membership(new_config, base_model, name)
 
@@ -208,6 +213,8 @@ def add_full_weight_model(
         record["aliases"] = list(overrides.aliases)
     if overrides.concurrency_limit is not None:
         record["concurrency_limit"] = overrides.concurrency_limit
+    if overrides.concurrency_queue is not None:
+        record["concurrency_queue"] = overrides.concurrency_queue
     new_records[name] = copy.deepcopy(record)
     return RegistryAddResult(config=new_config, records=new_records, record=record)
 
@@ -272,11 +279,14 @@ def _models_mapping(config: dict[str, Any]) -> dict[str, Any]:
 
 def _clone_model_block(base_model: str, name: str, base_block: dict[str, Any], model_path: str,
                        daemon_port: int, *, overrides: ImportOverrides | None = None,
-                       concurrency_limit: int | None = None) -> dict[str, Any]:
+                       concurrency_limit: int | None = None,
+                       concurrency_queue: int | None = None) -> dict[str, Any]:
     overrides = _validate_overrides(overrides)
     block = copy.deepcopy(base_block)
     if concurrency_limit is not None:
         block["concurrencyLimit"] = _validate_concurrency_limit(concurrency_limit, "concurrency_limit")
+    if concurrency_queue is not None:
+        block["concurrencyQueue"] = _validate_concurrency_queue(concurrency_queue, "concurrency_queue")
     block.pop("aliases", None)
     block.pop("alias", None)
     block.pop("setParamsByID", None)
@@ -416,6 +426,8 @@ def _validate_overrides(overrides: ImportOverrides | None) -> ImportOverrides:
         raise RegistryError("max_num_seqs must be an integer between 1 and %d" % MAX_NUM_SEQS)
     if overrides.concurrency_limit is not None:
         _validate_concurrency_limit(overrides.concurrency_limit, "concurrency_limit")
+    if overrides.concurrency_queue is not None:
+        _validate_concurrency_queue(overrides.concurrency_queue, "concurrency_queue")
     return overrides
 
 
@@ -425,9 +437,17 @@ def _validate_concurrency_limit(value: Any, label: str) -> int:
     return value
 
 
+def _validate_concurrency_queue(value: Any, label: str) -> int:
+    if type(value) is not int or not 0 <= value <= MAX_CONCURRENCY_QUEUE:
+        raise RegistryError(f"{label} must be an integer between 0 and {MAX_CONCURRENCY_QUEUE}")
+    return value
+
+
 _PARSER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 MAX_NUM_SEQS = 4096
 MAX_CONCURRENCY_LIMIT = 4096
+MAX_CONCURRENCY_QUEUE = 65536
+_CONCURRENCY_FIELDS = ("concurrencyLimit", "concurrencyQueue")
 
 
 def _effective_util(block: Mapping[str, Any]) -> float | None:
@@ -1153,42 +1173,55 @@ class _RegistryYamlEditor:
 
     @staticmethod
     def _concurrency_only(before_block, after_block) -> bool:
-        """True when two model entries differ only in their concurrencyLimit."""
+        """True when two model entries differ only in their concurrency fields."""
         if not isinstance(before_block, dict) or not isinstance(after_block, dict):
             return False
-        desired = after_block.get("concurrencyLimit")
-        if type(desired) is not int:
-            return False
-        for field in set(before_block) | set(after_block):
-            if field != "concurrencyLimit" and before_block.get(field) != after_block.get(field):
+        changed = False
+        for field in _CONCURRENCY_FIELDS:
+            if field in before_block and field not in after_block:
                 return False
-        return before_block.get("concurrencyLimit") != desired
+            if field in after_block and type(after_block.get(field)) is not int:
+                return False
+            if before_block.get(field) != after_block.get(field):
+                changed = True
+        for field in set(before_block) | set(after_block):
+            if field not in _CONCURRENCY_FIELDS and before_block.get(field) != after_block.get(field):
+                return False
+        return changed
 
-    def _set_concurrency_limit(self, entry_key, entry_value, value: int) -> None:
-        """Set one entry's top-level concurrencyLimit, preserving every other byte."""
+    def _set_concurrency_fields(self, entry_key, entry_value, values: dict[str, int]) -> None:
+        """Set one entry's top-level concurrency fields, preserving every other byte."""
         if not isinstance(entry_value, yaml.MappingNode):
-            self._unsupported("concurrencyLimit requires a block mapping model entry")
+            self._unsupported("concurrencyLimit/concurrencyQueue require a block mapping model entry")
         fields = self._mapping(entry_value)
-        if "concurrencyLimit" in fields:
-            field_key, field_value = fields["concurrencyLimit"]
-            self._direct(field_key, field_value)
-            if (not isinstance(field_value, yaml.ScalarNode)
-                    or field_value.tag != "tag:yaml.org,2002:int"
-                    or field_value.style is not None
-                    or field_value.start_mark.line != field_value.end_mark.line):
-                self._unsupported("concurrencyLimit must be a plain single-line integer")
-            if any(isinstance(token, (yaml.tokens.AnchorToken, yaml.tokens.AliasToken, yaml.tokens.TagToken))
-                   and field_key.end_mark.index <= token.start_mark.index < field_value.end_mark.index
-                   for token in self.tokens):
-                self._unsupported("concurrencyLimit scalar must not use anchors, aliases or explicit tags")
-            self.edits.append((field_value.start_mark.index, field_value.end_mark.index, str(value)))
+        missing: list[str] = []
+        for field in _CONCURRENCY_FIELDS:
+            if field not in values:
+                continue
+            if field in fields:
+                field_key, field_value = fields[field]
+                self._direct(field_key, field_value)
+                if (not isinstance(field_value, yaml.ScalarNode)
+                        or field_value.tag != "tag:yaml.org,2002:int"
+                        or field_value.style is not None
+                        or field_value.start_mark.line != field_value.end_mark.line):
+                    self._unsupported(f"{field} must be a plain single-line integer")
+                if any(isinstance(token, (yaml.tokens.AnchorToken, yaml.tokens.AliasToken, yaml.tokens.TagToken))
+                       and field_key.end_mark.index <= token.start_mark.index < field_value.end_mark.index
+                       for token in self.tokens):
+                    self._unsupported(f"{field} scalar must not use anchors, aliases or explicit tags")
+                self.edits.append((field_value.start_mark.index, field_value.end_mark.index, str(values[field])))
+            else:
+                missing.append(field)
+        if not missing:
             return
         header_end = self._line_end(entry_key.end_mark.index)
         header = self.text[entry_key.end_mark.index:header_end]
         if not re.fullmatch(r":[ \t]*(?:&[\w-]+[ \t]*)?(?:#[^\r\n]*)?\r?\n", header) or not fields:
             self._unsupported("model entry header or indentation is unsupported")
         indent = " " * min(child_key.start_mark.column for child_key, _ in fields.values())
-        self.edits.append((header_end, header_end, indent + "concurrencyLimit: " + str(value) + self.newline))
+        rendered = "".join(indent + field + ": " + str(values[field]) + self.newline for field in missing)
+        self.edits.append((header_end, header_end, rendered))
 
     def render(self, config: dict) -> bytes:
         if "models" not in self.fields:
@@ -1203,7 +1236,7 @@ class _RegistryYamlEditor:
         concurrency_edit = (not added and not removed and bool(changed)
                             and all(self._concurrency_only(before[name], after[name]) for name in changed))
         if not single_entry and not concurrency_edit:
-            self._unsupported("only one added or removed model entry, or concurrencyLimit-only edits, is supported")
+            self._unsupported("only one added or removed model entry, or concurrencyLimit/concurrencyQueue-only edits, is supported")
         adding = bool(added)
         name = next(iter(added or removed), None)
         if single_entry:
@@ -1226,7 +1259,9 @@ class _RegistryYamlEditor:
             for changed_name in sorted(changed):
                 entry_key, entry_value = entries[changed_name]
                 self._direct(entry_key, entry_value)
-                self._set_concurrency_limit(entry_key, entry_value, after[changed_name]["concurrencyLimit"])
+                after_block = after[changed_name]
+                values = {field: after_block[field] for field in _CONCURRENCY_FIELDS if field in after_block}
+                self._set_concurrency_fields(entry_key, entry_value, values)
         old_groups, new_groups = self.original.get("groups", {}), config.get("groups", {})
         if old_groups != new_groups:
             group_key, groups = self.fields["groups"]
@@ -1359,6 +1394,7 @@ class ModelRegistry:
                  model_config_max_bytes: int = DEFAULT_MODEL_CONFIG_MAX_BYTES,
                  weight_index_max_bytes: int = DEFAULT_WEIGHT_INDEX_MAX_BYTES,
                  default_concurrency_limit: int | None = None,
+                 default_concurrency_queue: int | None = None,
                  submit_change: Callable[..., dict] | None = None,
                  discover: Any | None = None):
         if submit_change is not None and not callable(submit_change):
@@ -1368,6 +1404,8 @@ class ModelRegistry:
             raise ValueError("discover must expose candidates() and resolve()")
         if default_concurrency_limit is not None:
             _validate_concurrency_limit(default_concurrency_limit, "default_concurrency_limit")
+        if default_concurrency_queue is not None:
+            _validate_concurrency_queue(default_concurrency_queue, "default_concurrency_queue")
         self.submit_change = submit_change
         self.discover = discover
         self.queue, self.shared_roots, self.daemon_port_range = queue, tuple(shared_roots), daemon_port_range
@@ -1375,6 +1413,7 @@ class ModelRegistry:
         self.model_config_max_bytes = _source_byte_limit(model_config_max_bytes, "model_config_max_bytes")
         self.weight_index_max_bytes = _source_byte_limit(weight_index_max_bytes, "weight_index_max_bytes")
         self.default_concurrency_limit = default_concurrency_limit
+        self.default_concurrency_queue = default_concurrency_queue
         self._removals: dict[str, str] = {}
 
     def _enqueue(self, transform: Callable[[bytes], bytes], **options: Any) -> dict:
@@ -1471,6 +1510,8 @@ class ModelRegistry:
         created_at = self.now()
         concurrency_limit = (overrides.concurrency_limit if overrides.concurrency_limit is not None
                              else self.default_concurrency_limit)
+        concurrency_queue = (overrides.concurrency_queue if overrides.concurrency_queue is not None
+                             else self.default_concurrency_queue)
         def transform(data: bytes) -> bytes:
             config, records = self._decode(data)
             result = add_full_weight_model(config, records, name=name, model_path=path, base_model=base,
@@ -1478,52 +1519,69 @@ class ModelRegistry:
                                            reserved_ports=self.reserved_ports(), created_at=created_at,
                                            model_config_max_bytes=self.model_config_max_bytes,
                                            weight_index_max_bytes=self.weight_index_max_bytes,
-                                           overrides=overrides, concurrency_limit=concurrency_limit)
+                                           overrides=overrides, concurrency_limit=concurrency_limit,
+                                           concurrency_queue=concurrency_queue)
             return self._encode(data, result.config, result.records)
         return self._enqueue(transform, description={"kind": "add_model", "model": name, "base": base}, dry_run=dry_run)
 
-    def _desired_concurrency_limits(self, config: Mapping[str, Any],
-                                    records: Mapping[str, Any]) -> dict[str, int]:
-        """Configured default plus per-model record overrides, model by model."""
-        desired: dict[str, int] = {}
+    def _desired_concurrency(self, config: Mapping[str, Any],
+                             records: Mapping[str, Any]) -> dict[str, dict[str, int]]:
+        """Configured defaults plus per-model record overrides, field by field."""
+        desired: dict[str, dict[str, int]] = {}
         for name in config["models"]:
             record = records.get(name)
+            fields: dict[str, int] = {}
             if isinstance(record, Mapping) and record.get("concurrency_limit") is not None:
-                desired[name] = _validate_concurrency_limit(record["concurrency_limit"], "record concurrency_limit")
+                fields["concurrencyLimit"] = _validate_concurrency_limit(record["concurrency_limit"], "record concurrency_limit")
             elif self.default_concurrency_limit is not None:
-                desired[name] = self.default_concurrency_limit
+                fields["concurrencyLimit"] = self.default_concurrency_limit
+            if isinstance(record, Mapping) and record.get("concurrency_queue") is not None:
+                fields["concurrencyQueue"] = _validate_concurrency_queue(record["concurrency_queue"], "record concurrency_queue")
+            elif self.default_concurrency_queue is not None:
+                fields["concurrencyQueue"] = self.default_concurrency_queue
+            if fields:
+                desired[name] = fields
         return desired
 
     def converge_concurrency(self, *, dry_run: bool = False) -> dict:
-        """Submit one transaction setting every model's llama-swap concurrencyLimit.
+        """Submit one transaction setting every model's llama-swap concurrency fields.
 
         The target is the saved record override when present, else the configured
-        default. With no default and no record overrides, or when every entry
-        already matches, this is a queue-free no-op.
+        default, for concurrencyLimit and concurrencyQueue independently. With no
+        default and no record overrides, or when every entry already matches, this
+        is a queue-free no-op.
         """
         with self.queue.action_lock:
             data, _ = self.queue._read()
             config, records = self._decode(data)
-            desired = self._desired_concurrency_limits(config, records)
-            changed = sorted(name for name, value in desired.items()
-                             if config["models"][name].get("concurrencyLimit") != value)
+            desired = self._desired_concurrency(config, records)
+            changed = sorted(name for name, fields in desired.items()
+                             if any(config["models"][name].get(field) != value
+                                    for field, value in fields.items()))
             if not changed:
                 return {"kind": "set_concurrency_limit", "changed": [], "submitted": False}
             limit = (self.default_concurrency_limit
-                     if all(desired[name] == self.default_concurrency_limit for name in changed) else None)
+                     if all(desired[name].get("concurrencyLimit") == self.default_concurrency_limit
+                            for name in changed) else None)
+            description = {"kind": "set_concurrency_limit", "models": changed, "limit": limit}
+            if any("concurrencyQueue" in desired[name] for name in changed):
+                queue = (self.default_concurrency_queue
+                         if all(desired[name].get("concurrencyQueue") == self.default_concurrency_queue
+                                for name in changed) else None)
+                description["queue"] = queue
 
             def transform(current: bytes) -> bytes:
                 current_config, current_records = self._decode(current)
-                current_desired = self._desired_concurrency_limits(current_config, current_records)
-                for name, value in current_desired.items():
+                current_desired = self._desired_concurrency(current_config, current_records)
+                for name, fields in current_desired.items():
                     block = current_config["models"][name]
                     if not isinstance(block, dict):
                         raise RegistryError("model block must be a mapping")
-                    block["concurrencyLimit"] = value
+                    for field, value in fields.items():
+                        block[field] = value
                 return self._encode(current, current_config, current_records)
 
-            result = self._enqueue(transform, description={"kind": "set_concurrency_limit",
-                                                           "models": changed, "limit": limit}, dry_run=dry_run)
+            result = self._enqueue(transform, description=description, dry_run=dry_run)
             return {"kind": "set_concurrency_limit", "changed": changed, "submitted": True, **result}
 
     def remove(self, name: str, *, dry_run: bool = False) -> dict:
@@ -1600,6 +1658,7 @@ class ModelRegistry:
                              "created_at": record["created_at"] if record is not None else None,
                              "last_used_at": plan.last_used_at,
                              "concurrency_limit": block.get("concurrencyLimit") if isinstance(block, dict) else None,
+                             "concurrency_queue": block.get("concurrencyQueue") if isinstance(block, dict) else None,
                              "runtime_state": model.state if model else "unknown",
                              "removable": plan.allowed,
                              "blocked_by": [asdict(item) for item in plan.blockers]})

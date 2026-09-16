@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Registry
+
+- The scheduler now also sets llama-swap's per-model `concurrencyQueue` in the
+  same catalog transaction as `concurrencyLimit`. New optional
+  `registry.default_concurrency_queue` (strict integer 0..65536) supplies the
+  queue for models without an override, and an `llmsvc.json` `concurrency_queue`
+  overrides it for one imported model and is stored in its `llmsvc_registry`
+  record. `0` keeps the immediate HTTP 429 for over-limit requests; a positive
+  value parks up to that many in a per-model FIFO wait list. A deployment that
+  configures no queue keeps the previous transaction description unchanged.
+- Registry inventory rows and discovery candidates expose `concurrency_queue`
+  (the current scalar or null) alongside `concurrency_limit`. The catalog edit
+  now preserves both scalars byte-for-byte, inserting whichever is missing in
+  one combined edit and still rejecting anchors, aliases, non-integer scalars,
+  field removal and any mixed model change.
+
 ## 1.5.0 — 2026-09-16
 
 Minor release; Python distribution `1.5.0`. One merged PR, implemented by an

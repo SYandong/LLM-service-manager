@@ -46,7 +46,7 @@ docker run --rm -v "$src":/src -w /src/ui node:22-slim sh -c 'npm ci && npm run 
 
 docker run --rm -v "$src":/src -w /src -e GOFLAGS=-buildvcs=false golang:1.26 \
     go build -tags embed_ui \
-    -ldflags "-X main.version=${VERSION}-llmsvc.1 -X main.commit=e31a1ad -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    -ldflags "-X main.version=${VERSION}-llmsvc.2 -X main.commit=e31a1ad -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     -o build/llama-swap-linux-amd64 .
 
 out="$src/build/llama-swap-linux-amd64"

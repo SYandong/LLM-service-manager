@@ -1198,9 +1198,9 @@ def validate_discovered(result):
     rows = result.get("discovered")
     if rows is None:
         return None  # Servers without discovery keep the older list shape.
-    keys = {"name", "path", "base", "util", "weights_gb", "concurrency_limit", "status", "reason"}
-    # concurrency_limit is a newer optional field; older servers omit it entirely.
-    optional = {"concurrency_limit"}
+    keys = {"name", "path", "base", "util", "weights_gb", "concurrency_limit", "concurrency_queue", "status", "reason"}
+    # concurrency_limit/concurrency_queue are newer optional fields; older servers omit them entirely.
+    optional = {"concurrency_limit", "concurrency_queue"}
     try:
         if not isinstance(rows, list) or len(rows) > 1000:
             raise ValueError
@@ -1221,6 +1221,9 @@ def validate_discovered(result):
                     raise ValueError
             limit = row.get("concurrency_limit")
             if limit is not None and (type(limit) is not int or not 1 <= limit <= 4096):
+                raise ValueError
+            queue = row.get("concurrency_queue")
+            if queue is not None and (type(queue) is not int or not 0 <= queue <= 65536):
                 raise ValueError
     except (KeyError, TypeError, ValueError, OverflowError):
         raise ClientError("Invalid discovered model list; no candidates inferred") from None
@@ -1254,7 +1257,7 @@ def validate_registry_details(args, result):
         if not all(isinstance(job, dict) for job in detail["pending_changes"]) or not isinstance(detail["models"], list):
             raise ValueError
         row_keys = {"name", "source", "temporary", "base", "daemon_port", "created_at", "last_used_at",
-                    "concurrency_limit", "runtime_state", "removable", "blocked_by"}
+                    "concurrency_limit", "concurrency_queue", "runtime_state", "removable", "blocked_by"}
         for row in detail["models"]:
             if not isinstance(row, dict) or set(row) - row_keys:
                 raise ValueError
@@ -1272,6 +1275,9 @@ def validate_registry_details(args, result):
                     raise ValueError
             limit = row.get("concurrency_limit")
             if limit is not None and (type(limit) is not int or not 1 <= limit <= 4096):
+                raise ValueError
+            queue = row.get("concurrency_queue")
+            if queue is not None and (type(queue) is not int or not 0 <= queue <= 65536):
                 raise ValueError
     except (KeyError, TypeError, ValueError, OverflowError):
         raise ClientError("Invalid optional registry inventory details; no values inferred") from None
