@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Scheduling
+
+- A sleeping model whose GPU no longer has room for it can now migrate instead
+  of failing. Waking one used to check only the card it fell asleep on and raise
+  `insufficient_gpu_memory`, so an external process arriving on that GPU left the
+  model permanently unwakeable even while other cards sat empty. The wake
+  admission now asks the placement policy for a cold-start GPU on another card
+  and, when one fits, stops the sleeper and cold-starts it there as a single wake
+  request.
+- The preflight is read-only and conservative: it requires a free fit and never
+  plans an eviction of another model, excludes the source card, projects the
+  source as stopped (its budget leaves the GPU, its weights return to host RAM)
+  before asking, and honours pins, in-flight requests and the host-RAM admission
+  floor. When no card fits, the previous `insufficient_gpu_memory` failure stands
+  and nothing is stopped — the scheduler never stops a model it could not start
+  again.
+- The default model is deliberately out of scope here and keeps its existing
+  `default_requires_exclusive_gpu` behaviour.
+- The wake receipt reports `migrated`, `source_gpu`, `target_gpu` and
+  `source_stopped`, and sets `cold_start`, because a migrated caller waits for a
+  cold start rather than a warm wake. A new `wake_migration` event and structured
+  log line record the planned source and destination.
+- New `wake_migration_enabled` (boolean, default `true`) restores the previous
+  hard-failure behaviour when set to `false`.
+
 ## 1.6.0 — 2026-09-16
 
 Minor release; Python distribution `1.6.0`. One merged PR, implemented by an

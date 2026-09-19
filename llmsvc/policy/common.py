@@ -35,13 +35,20 @@ class PolicySettings:
     # known zero. Unknown history still blocks (fail closed).
     default_cold_start_seconds: float = 120.0
     never_used_idle_seconds: float = 3600.0
+    # Sleeping-model wake admission may ask placement for a different-GPU cold
+    # start when the in-place wake budget does not fit. Pure policy never
+    # stops anything by itself; this only gates that preflight.
+    wake_migration_enabled: bool = True
 
     def __post_init__(self):
         if isinstance(self.exclusive_gpu, bool) or not isinstance(self.exclusive_gpu, int) or self.exclusive_gpu < 0:
             raise ValueError("exclusive_gpu must be a non-negative integer")
+        if type(self.wake_migration_enabled) is not bool:
+            raise ValueError("wake_migration_enabled must be a boolean")
         for key, value in vars(self).items():
             if key in ("exclusive_gpu", "placement_gpus", "placement_fit",
-                       "default_cold_start_seconds", "never_used_idle_seconds"):
+                       "default_cold_start_seconds", "never_used_idle_seconds",
+                       "wake_migration_enabled"):
                 continue
             if not known_number(value):
                 raise ValueError(f"{key} must be finite and non-negative")
