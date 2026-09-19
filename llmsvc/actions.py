@@ -971,29 +971,40 @@ class ModelActionController:
                 if exc.reason != "deadline_exceeded":
                     return False, exc.reason, stop_observed
                 break
-            with self._locked(deadline):
-                if self.scheduler.stopping.is_set():
-                    break
-                # The raw collector round carries no lease-merge errors, so a
-                # stopped source stays observable while its account drains.
-                raw = self.scheduler._snapshot
-                candidates = [item for item in raw.models if item.name == name]
-                stopped = (self._fresh(raw) and len(candidates) == 1
-                           and candidates[0].state == "stopped" and candidates[0].unit_active is False)
-                if stopped:
-                    stop_observed = True
-                elif self.monotonic() >= observe:
-                    break
-                leased = (self.scheduler.store is not None and
-                          any(lease.model == name for lease, _ in self.scheduler.store.leases()))
-                if stopped and not leased:
-                    if complete_seen is not None and raw.sampled_at > complete_seen:
-                        return True, None, True
-                    complete_seen = raw.sampled_at
-                else:
-                    complete_seen = None
-                self.scheduler.changed.wait(timeout=min(self.scheduler.config.action_poll_seconds,
-                                                        max(0, deadline - self.monotonic())))
+            # Running out of the wake deadline while taking the action lock is
+            # the same outcome as the loop condition expiring, so it has to be
+            # reported the same way. Letting it raise past the caller instead
+            # would drop `source_stopped` from the receipt, which is the one
+            # field telling the operator this model is now stopped. Nothing in
+            # the body raises this reason, so catching it here is unambiguous.
+            try:
+                with self._locked(deadline):
+                    if self.scheduler.stopping.is_set():
+                        break
+                    # The raw collector round carries no lease-merge errors, so
+                    # a stopped source stays observable while its account drains.
+                    raw = self.scheduler._snapshot
+                    candidates = [item for item in raw.models if item.name == name]
+                    stopped = (self._fresh(raw) and len(candidates) == 1
+                               and candidates[0].state == "stopped" and candidates[0].unit_active is False)
+                    if stopped:
+                        stop_observed = True
+                    elif self.monotonic() >= observe:
+                        break
+                    leased = (self.scheduler.store is not None and
+                              any(lease.model == name for lease, _ in self.scheduler.store.leases()))
+                    if stopped and not leased:
+                        if complete_seen is not None and raw.sampled_at > complete_seen:
+                            return True, None, True
+                        complete_seen = raw.sampled_at
+                    else:
+                        complete_seen = None
+                    self.scheduler.changed.wait(timeout=min(self.scheduler.config.action_poll_seconds,
+                                                            max(0, deadline - self.monotonic())))
+            except ActionDispatchError as exc:
+                if exc.reason != "deadline_exceeded":
+                    raise
+                break
         if dispatch_error is not None and not stop_observed:
             return False, dispatch_error.reason, False
         if not stop_observed:

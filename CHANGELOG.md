@@ -46,6 +46,14 @@
   `OSError`, so it escaped the reader thread instead of being caught: progress
   was never marked unavailable and an unhandled traceback surfaced from a thread
   whose entire contract is that it never affects the wake.
+- A wake migration whose deadline expires while its observe loop is taking the
+  action lock now reports the same receipt as one whose loop simply ran out of
+  time. The lock acquisition was the only observe loop in the module without the
+  `deadline_exceeded` guard the others carry, so it raised past the caller that
+  fills in `source_stopped` and answered `timeout` instead of `partial` — losing
+  the one field that says whether the model is now stopped, exactly when the
+  operator needs it. Which of the two exits happens is a race, so both now
+  produce the same answer.
 
 ## 1.6.0 — 2026-09-16
 
