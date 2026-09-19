@@ -12,6 +12,7 @@ import re
 import socket
 import threading
 import time
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.request import Request
 from urllib.parse import quote, urlsplit
@@ -214,7 +215,13 @@ class WakeProgressReader:
                         self._emit(stage)
             if not self._stop.is_set():
                 self._unavailable()
-        except (HTTPError, URLError, OSError, ValueError, UnicodeError, TimeoutError, TypeError, AttributeError):
+        # HTTPException covers the protocol-level failures that are not OSError
+        # — IncompleteRead above all, raised whenever the upstream closes a
+        # chunked response early. Letting one escape would kill this thread
+        # without ever marking progress unavailable, which is precisely what
+        # "advisory only" promises it will not do.
+        except (HTTPError, URLError, OSError, HTTPException, ValueError, UnicodeError,
+                TimeoutError, TypeError, AttributeError):
             self._unavailable()
         finally:
             with self._lock:
