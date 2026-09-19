@@ -35,13 +35,20 @@ class PolicySettings:
     # known zero. Unknown history still blocks (fail closed).
     default_cold_start_seconds: float = 120.0
     never_used_idle_seconds: float = 3600.0
+    # Sleeping-model wake admission may ask placement for a different-GPU cold
+    # start when the in-place wake budget does not fit. Pure policy never
+    # stops anything by itself; this only gates that preflight.
+    wake_migration_enabled: bool = True
 
     def __post_init__(self):
         if isinstance(self.exclusive_gpu, bool) or not isinstance(self.exclusive_gpu, int) or self.exclusive_gpu < 0:
             raise ValueError("exclusive_gpu must be a non-negative integer")
+        if type(self.wake_migration_enabled) is not bool:
+            raise ValueError("wake_migration_enabled must be a boolean")
         for key, value in vars(self).items():
             if key in ("exclusive_gpu", "placement_gpus", "placement_fit",
-                       "default_cold_start_seconds", "never_used_idle_seconds"):
+                       "default_cold_start_seconds", "never_used_idle_seconds",
+                       "wake_migration_enabled"):
                 continue
             if not known_number(value):
                 raise ValueError(f"{key} must be finite and non-negative")
@@ -130,7 +137,7 @@ class Projection:
             if excluded not in self.blockers:
                 self.blockers.append(excluded)
 
-    def protection(self, model, *, stop=False, min_idle=None):
+    def protection(self, model, *, stop=False, min_idle=None, relocating=False):
         if model.state not in ("awake", "sleeping"):
             return "unknown_model_state"
         if any(p.model == model.name and (not known_number(p.until) or p.until > self.snapshot.sampled_at) for p in self.snapshot.pins):
@@ -142,7 +149,11 @@ class Projection:
             return "unknown_in_flight"
         if activity.in_flight:
             return "in_flight"
-        if stop and model.is_default:
+        # Stopping the default model outright would leave the service without
+        # one, so an explicit request never may. A relocation is not that: the
+        # caller has already proven another GPU can host it, and refusing here
+        # is what strands it when its own card is taken.
+        if stop and model.is_default and not relocating:
             return "default_model"
         if min_idle is not None:
             if not known_number(activity.last_request_at) or activity.last_request_at > self.snapshot.sampled_at:
@@ -178,10 +189,10 @@ class Projection:
         except ValueError as exc:
             raise ValueError("unknown_keep_value") from exc
 
-    def candidates(self, models, *, stop=False, min_idle=None):
+    def candidates(self, models, *, stop=False, min_idle=None, relocating=False):
         ranked = []
         for model in models:
-            reason = self.protection(model, stop=stop, min_idle=min_idle)
+            reason = self.protection(model, stop=stop, min_idle=min_idle, relocating=relocating)
             if reason:
                 self.block(model, reason)
                 continue

@@ -15,7 +15,7 @@ import re
 import sqlite3
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import Any, Callable, Optional, Protocol
 from urllib.parse import quote
 
@@ -90,6 +90,25 @@ class ActionDispatchError(RuntimeError):
         # A transport error/timeout can follow a remote mutation. Never assume
         # rollback or budget release from an error or a successful submission.
         self.attempted = attempted
+
+
+@dataclass(frozen=True)
+class WakeMigration:
+    """Read-only placement preflight result for one unwakeable sleeper.
+
+    ``target_gpu`` is the placement policy's free-fit choice at preflight
+    time; the actual cold start re-plans through the ordinary place path and
+    the observed destination is reported in the wake receipt.
+    """
+
+    source_gpu: int
+    target_gpu: int
+    budget_gb: Optional[float] = None
+
+
+# Stop reasons that move a model to a destination placement already approved,
+# rather than taking it out of service. Only these may stop the default model.
+RELOCATION_REASONS = frozenset({"wake_migration", "reserve"})
 
 
 def _known(value):
@@ -171,7 +190,13 @@ class ModelActionDispatcher:
         if activity[0].in_flight:
             raise ActionDispatchError("in_flight")
         if action.kind == "stop":
-            if model.is_default is not False:
+            # Stopping the default model outright would leave the service with
+            # no default at all. A relocation is not that: it is planned against
+            # a destination the placement policy already proved free, and starts
+            # the model again immediately. An unknown role stays refused either
+            # way, because we cannot tell what we would be stopping.
+            if model.is_default is not False and not (
+                    model.is_default is True and action.reason in RELOCATION_REASONS):
                 raise ActionDispatchError("default_or_unknown_role")
             if not isinstance(model.unit, str) or not re.fullmatch(r"vllm-[A-Za-z0-9_.@-]+\.service", model.unit):
                 raise ActionDispatchError("invalid_unit")
@@ -801,8 +826,6 @@ class ModelActionController:
         activity = [item for item in snapshot.activity if item.model == name]
         if len(activity) != 1 or type(activity[0].in_flight) is not int or activity[0].in_flight < 0:
             raise ActionDispatchError("unknown_in_flight")
-        if model.is_default and model.state != "stopped" and model.gpu != self.settings.exclusive_gpu:
-            raise ActionDispatchError("default_requires_exclusive_gpu")
         if self._ready(model):
             return model
         if activity[0].in_flight:
@@ -828,11 +851,154 @@ class ModelActionController:
             if (len(gpus) != 1 or not _known(gpus[0].free_gb) or not _known(model.budget_gb)
                     or not _known(model.resident_gb)):
                 raise ActionDispatchError("unknown_gpu_capacity")
-            if model.is_default and model.gpu != self.settings.exclusive_gpu:
-                raise ActionDispatchError("default_requires_exclusive_gpu")
             if gpus[0].free_gb < max(0, model.budget_gb - model.resident_gb):
                 raise ActionDispatchError("insufficient_gpu_memory")
         return model
+
+    def _wake_migration_enabled(self):
+        """Migration needs the live cold-start gates, not just the policy flag.
+
+        The data-plane launcher cold start reenters /v1/place, so a migration
+        is only considered when that path is actually available: the config and
+        policy-settings switches, placement, a writable scheduler and a
+        writable intent store.
+        """
+        config = self.scheduler.config
+        store = self.scheduler.store
+        return (self.settings.wake_migration_enabled and config.wake_migration_enabled
+                and config.placement_enabled and not config.read_only
+                and store is not None and not store.read_only)
+
+    def plan_wake_migration(self, snapshot, name):
+        """Ask placement for a cold-start GPU for an in-place-unwakeable sleeper.
+
+        Read-only preflight on the same fresh snapshot the wake admission used:
+        the source is projected stopped (its budget leaves the source GPU, its
+        sleeping weights return to host RAM) and the placement policy is asked
+        for a free-fit GPU outside the source card. A free fit is required —
+        this never plans evictions of other models — and any missing input,
+        protection or durable-account gate returns None so the caller keeps
+        today's ``insufficient_gpu_memory`` failure without stopping anything.
+
+        The default model is included: placement decides where it may go, and
+        it still prefers the exclusive card whenever that card can host it.
+        """
+        from dataclasses import replace
+        from llmsvc.policy import plan_placement
+        if not self._wake_migration_enabled():
+            return None
+        if not self._fresh(snapshot):
+            return None
+        model = self._model(snapshot, name)
+        if (model.state != "sleeping" or model.gpu is None
+                or not _known(model.weights_gb) or not _known(model.budget_gb)):
+            return None
+        if any(pin.model == name and (not _known(pin.until) or pin.until > self.scheduler.clock())
+               for pin in snapshot.pins):
+            return None
+        activity = [item for item in snapshot.activity if item.model == name]
+        if (len(activity) != 1 or type(activity[0].in_flight) is not int
+                or activity[0].in_flight != 0):
+            return None
+        if any(lease.model == name and lease.status == "confirmed" for lease in snapshot.leases) \
+                and self.scheduler.placement is None:
+            # Nothing would reconcile the source account after the stop.
+            return None
+        # Match the launcher's cold admission floor, including unobserved
+        # pending starts, using only the source's own release.
+        pending_weight = 0.0
+        for lease in snapshot.leases:
+            if lease.status not in ("pending", "stale"):
+                continue
+            amount = self.transport.models.get(lease.model, {}).get("weights_gb")
+            if not _known(amount):
+                return None
+            pending_weight += amount
+        memory = snapshot.memory
+        if (not _known(memory.host_available_gb) or not _known(memory.host_min_available_gb)
+                or memory.host_available_gb - pending_weight < memory.host_min_available_gb):
+            return None
+        # Charge no less than the launcher's real place request would: trusted
+        # metadata budget/util win over the observed sleeper's own values.
+        metadata = self.transport.models.get(name, {})
+        budget = model.budget_gb
+        meta_budget = metadata.get("budget_gb")
+        if _known(meta_budget) and meta_budget > budget:
+            budget = meta_budget
+        meta_util = metadata.get("util")
+        util = meta_util if _known(meta_util) and 0 < meta_util <= 1 else model.util
+        stopped = replace(model, state="stopped", gpu=None, unit_active=False,
+                          budget_gb=budget, util=util)
+        models = tuple(stopped if item.name == name else item for item in snapshot.models)
+        # Detached post-stop state for preflight only, never persisted.
+        sleeping = memory.sleeping_weights_gb
+        if _known(sleeping):
+            sleeping = max(0.0, sleeping - model.weights_gb)
+        hypothetical = replace(snapshot, models=models, memory=replace(
+            memory, host_available_gb=memory.host_available_gb + model.weights_gb,
+            sleeping_weights_gb=sleeping))
+        decision = plan_placement(hypothetical, stopped, settings=self.settings,
+                                  gpu_exclusions={model.gpu: "wake_migration_source"})
+        if decision.gpu is None or any(action.kind != "place" for action in decision.actions):
+            return None
+        return WakeMigration(model.gpu, decision.gpu, decision.budget_gb)
+
+    def _migrate_stop(self, name, migration, deadline, refresh):
+        """Submit the migration stop and wait for its durable account release.
+
+        Returns ``(confirmed, error, stopped)``. The stop is the existing
+        protected dispatcher path against the configured unit, with the same
+        observe window as an explicit stop request. Each observed round also
+        runs the lease reconciler, which releases the confirmed source lease
+        once the exit is observed; that release may take further sampler
+        rounds, so it waits within the remaining wake deadline. Confirmation
+        needs the stopped state and a released account in two newer rounds,
+        mirroring the other observed-effect waits.
+        """
+        action = Action("stop", name, "wake_migration", migration.source_gpu)
+        dispatch_error = None
+        try:
+            self.dispatcher.execute(action, dry_run=False, deadline=deadline)
+        except ActionDispatchError as exc:
+            dispatch_error = exc
+        observe = min(deadline, self.monotonic() + self.scheduler.config.action_observe_seconds)
+        complete_seen = None
+        stop_observed = False
+        while self.monotonic() < deadline and not self.scheduler.stopping.is_set():
+            try:
+                refresh()
+            except ActionDispatchError as exc:
+                if exc.reason != "deadline_exceeded":
+                    return False, exc.reason, stop_observed
+                break
+            with self._locked(deadline):
+                if self.scheduler.stopping.is_set():
+                    break
+                # The raw collector round carries no lease-merge errors, so a
+                # stopped source stays observable while its account drains.
+                raw = self.scheduler._snapshot
+                candidates = [item for item in raw.models if item.name == name]
+                stopped = (self._fresh(raw) and len(candidates) == 1
+                           and candidates[0].state == "stopped" and candidates[0].unit_active is False)
+                if stopped:
+                    stop_observed = True
+                elif self.monotonic() >= observe:
+                    break
+                leased = (self.scheduler.store is not None and
+                          any(lease.model == name for lease, _ in self.scheduler.store.leases()))
+                if stopped and not leased:
+                    if complete_seen is not None and raw.sampled_at > complete_seen:
+                        return True, None, True
+                    complete_seen = raw.sampled_at
+                else:
+                    complete_seen = None
+                self.scheduler.changed.wait(timeout=min(self.scheduler.config.action_poll_seconds,
+                                                        max(0, deadline - self.monotonic())))
+        if dispatch_error is not None and not stop_observed:
+            return False, dispatch_error.reason, False
+        if not stop_observed:
+            return False, "migration_stop_unconfirmed", False
+        return False, "lease_release_unconfirmed", True
 
     def wake(self, name, *, by, dry_run=False, _recovery=None, _deadline=None, _transition=True):
         if dry_run:
@@ -857,8 +1023,20 @@ class ModelActionController:
             with self._locked(deadline):
                 self._enabled()
                 initial = self._snapshot()
-                model = self.wake_model(initial, name)
-                result["cold_start"] = model.state == "stopped"
+                migration = None
+                try:
+                    model = self.wake_model(initial, name)
+                except ActionDispatchError as exc:
+                    if exc.reason != "insufficient_gpu_memory" or _recovery is not None:
+                        raise
+                    # In-place wake cannot fit this sleeper. Ask placement for
+                    # a cold-start GPU on another card before failing (and
+                    # before stopping anything).
+                    migration = self.plan_wake_migration(initial, name)
+                    if migration is None:
+                        raise
+                    model = self._model(initial, name)
+                result["cold_start"] = model.state == "stopped" or migration is not None
                 if self._ready(model):
                     result.update(status="ready", ready=True)
                     return result
@@ -870,6 +1048,23 @@ class ModelActionController:
                 if faults is not None and model.state == "sleeping":
                     faults.note_wake(name)
                 self.scheduler.emit("wake_requested", model=name, detail={"by": by, "cold_start": result["cold_start"]})
+            if migration is not None:
+                result.update(migrated=True, source_gpu=migration.source_gpu,
+                              target_gpu=migration.target_gpu)
+                LOG.info(json.dumps({"kind": "wake_migration", "model": name,
+                                     "source_gpu": migration.source_gpu, "target_gpu": migration.target_gpu,
+                                     "budget_gb": migration.budget_gb, "dry_run": False}, allow_nan=False))
+                self.scheduler.emit("wake_migration", model=name, detail={
+                    "by": by, "source_gpu": migration.source_gpu,
+                    "target_gpu": migration.target_gpu, "dry_run": False})
+                confirmed, error, stopped = self._migrate_stop(name, migration, deadline, refresh)
+                # The receipt has to say whether the source actually left its
+                # GPU: a failure before the stop is a no-op the caller can
+                # retry, while one after it leaves the model cold-startable.
+                result["source_stopped"] = stopped
+                if not confirmed:
+                    result.update(status="partial" if stopped else "failed", error=error)
+                    return result
             if result["cold_start"]:
                 # This reader is advisory and starts after the action lock is
                 # released.  A delayed header never delays the wake request.
@@ -890,8 +1085,7 @@ class ModelActionController:
                 candidates = [model for model in observed.models if model.name == name]
                 ready = (self._fresh(observed) and observed.sampled_at > initial.sampled_at
                          and len(candidates) == 1 and self._ready(candidates[0])
-                         and candidates[0].unit == self.transport.unit_for_model(name)
-                         and (not candidates[0].is_default or candidates[0].gpu == self.settings.exclusive_gpu))
+                         and candidates[0].unit == self.transport.unit_for_model(name))
                 result.update(status="partial" if ready else "failed", ready=ready, error=error)
                 return result
             progress = None
@@ -904,11 +1098,12 @@ class ModelActionController:
                         if model.unit not in (None, self.transport.unit_for_model(name)):
                             result.update(status="failed", error="configured_unit_mismatch")
                             break
-                        if model.is_default and model.state == "awake" and model.gpu != self.settings.exclusive_gpu:
-                            result.update(status="blocked", error="default_requires_exclusive_gpu")
-                            break
                         if (observed.sampled_at > initial.sampled_at and self._ready(model)
                                 and model.unit == self.transport.unit_for_model(name)):
+                            if migration is not None and model.gpu is not None:
+                                # Report the observed destination; the launcher
+                                # re-planned through the ordinary place path.
+                                result["target_gpu"] = model.gpu
                             result.update(status="ready", ready=True)
                             break
                     state = (model.state, model.swap_state) if model is not None else ("unknown", None)

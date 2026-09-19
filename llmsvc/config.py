@@ -56,6 +56,9 @@ class SchedulerConfig:
     placement_gpus: Optional[list] = None
     placement_fit: str = "first_fit"
     shared_external_threshold_gb: float = 1.0
+    # Sleeping-model wake admission may migrate an in-place-unwakeable sleeper
+    # to a placement-approved GPU (stop + cold start) instead of failing.
+    wake_migration_enabled: bool = True
     # keep_value fallbacks shared by placement, free/wake, pressure and recovery.
     default_cold_start_seconds: float = 120.0
     never_used_idle_seconds: float = 3600.0
@@ -176,6 +179,8 @@ class SchedulerConfig:
             raise ValueError("placement_wait_seconds must not exceed 120")
         if type(self.placement_enabled) is not bool:
             raise ValueError("placement_enabled must be a boolean")
+        if type(self.wake_migration_enabled) is not bool:
+            raise ValueError("wake_migration_enabled must be a boolean")
         if type(self.model_actions_enabled) is not bool:
             raise ValueError("model_actions_enabled must be a boolean")
         if type(self.model_reconcile_enabled) is not bool:
@@ -273,6 +278,7 @@ class SchedulerConfig:
             placement_gpus=None if self.placement_gpus is None else tuple(self.placement_gpus),
             placement_fit=self.placement_fit,
             shared_external_threshold_gb=self.shared_external_threshold_gb,
+            wake_migration_enabled=self.wake_migration_enabled,
             default_cold_start_seconds=self.default_cold_start_seconds,
             never_used_idle_seconds=self.never_used_idle_seconds,
             shared_free_threshold_gb=self.automation_shared_free_threshold_gb)

@@ -3,6 +3,7 @@
 
 import threading
 import time
+from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from urllib.request import HTTPRedirectHandler, ProxyHandler, build_opener
@@ -93,6 +94,25 @@ def test_reader_oversized_stream_becomes_unavailable_without_raw_payload():
     response = ChunkedResponse([b"x" * (256 * 1024 + 1)])
     details = []
     reader = WakeProgressReader(opener=lambda *_args, **_kwargs: response,
+                                base_url="http://127.0.0.1:8000", model="model", configured_models={"model"},
+                                deadline=time.monotonic() + 2, emit=details.append)
+    reader.start()
+    assert reader.close(timeout=2)
+    assert [item["stage"] for item in details] == ["unavailable"]
+
+
+def test_reader_survives_a_chunked_stream_that_ends_early():
+    # IncompleteRead is an HTTPException, not an OSError, so it used to escape
+    # the reader thread: no "unavailable" stage and an unhandled traceback from
+    # a reader whose whole contract is that it never affects the wake.
+    class Truncated(ChunkedResponse):
+        def read(self, _size):
+            raise IncompleteRead(b"")
+
+        read1 = read
+
+    details = []
+    reader = WakeProgressReader(opener=lambda *_args, **_kwargs: Truncated([]),
                                 base_url="http://127.0.0.1:8000", model="model", configured_models={"model"},
                                 deadline=time.monotonic() + 2, emit=details.append)
     reader.start()

@@ -1,10 +1,12 @@
 # Generated-By: Codex / gpt-6-astra
 """Free, M2 fixed TTL and RAM budget policies from DESIGN §4."""
 
+from dataclasses import replace
 from typing import Mapping, Optional
 
 from llmsvc.state import Blocker, StateSnapshot
 from .common import Decision, PolicySettings, Projection, known_number
+from .placement import plan_placement
 
 
 def plan_free(
@@ -112,6 +114,28 @@ def reload_admission(snapshot: StateSnapshot, *, settings: PolicySettings = Poli
     return p.result()
 
 
+def _relocatable(snapshot, model, gpu, settings, exclusions):
+    """Whether ``model`` could be placed off ``gpu`` if it were stopped now.
+
+    The reserved card is excluded and the model is projected stopped, which is
+    also what lets accounting retire its confirmed lease. A free fit is
+    required: evacuating the default model is only safe when some other card
+    can take it without evicting anything else, and refusing otherwise keeps
+    the guarantee that the blanket protection was there to give.
+    """
+    stopped = replace(model, state="stopped", gpu=None, unit_active=False)
+    models = tuple(stopped if item.name == model.name else item for item in snapshot.models)
+    memory = snapshot.memory
+    sleeping = memory.sleeping_weights_gb
+    if known_number(sleeping) and known_number(model.weights_gb):
+        sleeping = max(0.0, sleeping - model.weights_gb)
+    hypothetical = replace(snapshot, models=models,
+                           memory=replace(memory, sleeping_weights_gb=sleeping))
+    decision = plan_placement(hypothetical, stopped, settings=settings, exclusions=exclusions,
+                              gpu_exclusions={gpu: "reserved"})
+    return decision.gpu is not None and all(action.kind == "place" for action in decision.actions)
+
+
 def plan_reserve(
     snapshot: StateSnapshot, *, gpu: int, settings: PolicySettings = PolicySettings(),
     exclusions: Optional[Mapping[str, str]] = None,
@@ -119,16 +143,22 @@ def plan_reserve(
     """Clear eligible sleepers from a reserved GPU; persistence is core-owned.
 
     Awake models are left alone. Protected sleepers report blockers. Subsequent
-    cold placement must exclude active reserves; relocation is an M3 action.
+    cold placement must exclude active reserves. The default model is evacuated
+    only when another card could take it, so reserving its GPU relocates it
+    instead of being refused outright.
     """
     if isinstance(gpu, bool) or not isinstance(gpu, int) or gpu < 0:
         raise ValueError("gpu must be a non-negative integer")
     p = Projection(snapshot, settings, exclusions=exclusions)
     if p.blockers:
         return p.result()
-    for model in p.candidates(
-        [m for m in snapshot.models if m.gpu == gpu and m.state == "sleeping"], stop=True,
-    ):
+    residents = [m for m in snapshot.models if m.gpu == gpu and m.state == "sleeping"]
+    # `relocating` only ever relaxes the default-model guard, and a snapshot
+    # carries at most one default model, so one flag for the whole list stays
+    # precisely scoped to that model.
+    default = next((m for m in residents if m.is_default), None)
+    relocating = default is not None and _relocatable(snapshot, default, gpu, settings, exclusions)
+    for model in p.candidates(residents, stop=True, relocating=relocating):
         p.stop(model, "reserve")
     for model in snapshot.models:
         if model.gpu == gpu and model.state == "unknown":

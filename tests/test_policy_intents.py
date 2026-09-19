@@ -112,6 +112,25 @@ def test_default_never_stopped_under_unresolved_memory_pressure():
     assert {b.reason for b in d.blocked_by} == {"default_model", "memory_budget"}
 
 
+def test_reserve_relocates_the_default_model_when_another_card_can_take_it():
+    # Reserving the default model's card used to be refused outright, which is
+    # what left it stranded when an external process took that GPU.
+    s = snapshot(model("default", state="sleeping", is_default=True),
+                 gpus=(GPUState(0, total_gb=100, free_gb=60, external_gb=0),
+                       GPUState(1, total_gb=100, free_gb=100, external_gb=0)))
+    assert actions(plan_reserve(s, gpu=0)) == [("stop", "default")]
+
+
+def test_reserve_keeps_the_default_model_when_no_card_could_take_it():
+    # Without a proven destination the blanket protection still applies: the
+    # service must never be left with no default model at all.
+    s = snapshot(model("default", state="sleeping", is_default=True),
+                 gpus=(GPUState(0, total_gb=100, free_gb=60, external_gb=0),
+                       GPUState(1, total_gb=100, free_gb=100, external_gb=95)))
+    d = plan_reserve(s, gpu=0)
+    assert not d.actions and "default_model" in {b.reason for b in d.blocked_by}
+
+
 def test_reserve_only_clears_unprotected_sleepers_on_target_gpu():
     s = snapshot(model("awake"), model("sleep", state="sleeping"),
                  model("default", state="sleeping", is_default=True),

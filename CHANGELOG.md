@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased
+
+### Scheduling
+
+- A sleeping model whose GPU no longer has room for it can now migrate instead
+  of failing. Waking one used to check only the card it fell asleep on and raise
+  `insufficient_gpu_memory`, so an external process arriving on that GPU left the
+  model permanently unwakeable even while other cards sat empty. The wake
+  admission now asks the placement policy for a cold-start GPU on another card
+  and, when one fits, stops the sleeper and cold-starts it there as a single wake
+  request.
+- The preflight is read-only and conservative: it requires a free fit and never
+  plans an eviction of another model, excludes the source card, projects the
+  source as stopped (its budget leaves the GPU, its weights return to host RAM)
+  before asking, and honours pins, in-flight requests and the host-RAM admission
+  floor. When no card fits, the previous `insufficient_gpu_memory` failure stands
+  and nothing is stopped — the scheduler never stops a model it could not start
+  again.
+- The default model can now leave its exclusive GPU when that card cannot host
+  it. The exclusive GPU was previously a hard requirement in four places at
+  once — placement refused every other card, both wake admissions refused a
+  default model found elsewhere, and the stop guards refused to move it — so an
+  external process arriving on that card made the default model permanently
+  unwakeable, unmovable and unplaceable, with nothing reporting it. It is now a
+  preference: placement still tries the exclusive card first and still prefers
+  it even at the cost of an eviction there, and only when that card cannot host
+  the model at all does the rest of the pool become eligible.
+- A reserve on the default model's GPU relocates it instead of being refused,
+  but only once placement has confirmed another card could take it with a free
+  fit. An explicit `llm stop` of the default model is still refused, and so is
+  stopping a model whose role is unknown: the protection exists so the service
+  is never left without a default model, which a relocation does not do.
+- The wake receipt reports `migrated`, `source_gpu`, `target_gpu` and
+  `source_stopped`, and sets `cold_start`, because a migrated caller waits for a
+  cold start rather than a warm wake. A new `wake_migration` event and structured
+  log line record the planned source and destination.
+- New `wake_migration_enabled` (boolean, default `true`) restores the previous
+  hard-failure behaviour when set to `false`.
+
+### Corrected
+
+- The advisory wake-progress reader no longer dies on a chunked log stream that
+  ends early. `http.client.IncompleteRead` is an `HTTPException` rather than an
+  `OSError`, so it escaped the reader thread instead of being caught: progress
+  was never marked unavailable and an unhandled traceback surfaced from a thread
+  whose entire contract is that it never affects the wake.
+
 ## 1.6.0 — 2026-09-16
 
 Minor release; Python distribution `1.6.0`. One merged PR, implemented by an
