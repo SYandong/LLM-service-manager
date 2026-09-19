@@ -137,7 +137,7 @@ class Projection:
             if excluded not in self.blockers:
                 self.blockers.append(excluded)
 
-    def protection(self, model, *, stop=False, min_idle=None):
+    def protection(self, model, *, stop=False, min_idle=None, relocating=False):
         if model.state not in ("awake", "sleeping"):
             return "unknown_model_state"
         if any(p.model == model.name and (not known_number(p.until) or p.until > self.snapshot.sampled_at) for p in self.snapshot.pins):
@@ -149,7 +149,11 @@ class Projection:
             return "unknown_in_flight"
         if activity.in_flight:
             return "in_flight"
-        if stop and model.is_default:
+        # Stopping the default model outright would leave the service without
+        # one, so an explicit request never may. A relocation is not that: the
+        # caller has already proven another GPU can host it, and refusing here
+        # is what strands it when its own card is taken.
+        if stop and model.is_default and not relocating:
             return "default_model"
         if min_idle is not None:
             if not known_number(activity.last_request_at) or activity.last_request_at > self.snapshot.sampled_at:
@@ -185,10 +189,10 @@ class Projection:
         except ValueError as exc:
             raise ValueError("unknown_keep_value") from exc
 
-    def candidates(self, models, *, stop=False, min_idle=None):
+    def candidates(self, models, *, stop=False, min_idle=None, relocating=False):
         ranked = []
         for model in models:
-            reason = self.protection(model, stop=stop, min_idle=min_idle)
+            reason = self.protection(model, stop=stop, min_idle=min_idle, relocating=relocating)
             if reason:
                 self.block(model, reason)
                 continue

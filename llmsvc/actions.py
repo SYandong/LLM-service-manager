@@ -106,6 +106,11 @@ class WakeMigration:
     budget_gb: Optional[float] = None
 
 
+# Stop reasons that move a model to a destination placement already approved,
+# rather than taking it out of service. Only these may stop the default model.
+RELOCATION_REASONS = frozenset({"wake_migration", "reserve"})
+
+
 def _known(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
 
@@ -185,7 +190,13 @@ class ModelActionDispatcher:
         if activity[0].in_flight:
             raise ActionDispatchError("in_flight")
         if action.kind == "stop":
-            if model.is_default is not False:
+            # Stopping the default model outright would leave the service with
+            # no default at all. A relocation is not that: it is planned against
+            # a destination the placement policy already proved free, and starts
+            # the model again immediately. An unknown role stays refused either
+            # way, because we cannot tell what we would be stopping.
+            if model.is_default is not False and not (
+                    model.is_default is True and action.reason in RELOCATION_REASONS):
                 raise ActionDispatchError("default_or_unknown_role")
             if not isinstance(model.unit, str) or not re.fullmatch(r"vllm-[A-Za-z0-9_.@-]+\.service", model.unit):
                 raise ActionDispatchError("invalid_unit")
@@ -815,8 +826,6 @@ class ModelActionController:
         activity = [item for item in snapshot.activity if item.model == name]
         if len(activity) != 1 or type(activity[0].in_flight) is not int or activity[0].in_flight < 0:
             raise ActionDispatchError("unknown_in_flight")
-        if model.is_default and model.state != "stopped" and model.gpu != self.settings.exclusive_gpu:
-            raise ActionDispatchError("default_requires_exclusive_gpu")
         if self._ready(model):
             return model
         if activity[0].in_flight:
@@ -842,8 +851,6 @@ class ModelActionController:
             if (len(gpus) != 1 or not _known(gpus[0].free_gb) or not _known(model.budget_gb)
                     or not _known(model.resident_gb)):
                 raise ActionDispatchError("unknown_gpu_capacity")
-            if model.is_default and model.gpu != self.settings.exclusive_gpu:
-                raise ActionDispatchError("default_requires_exclusive_gpu")
             if gpus[0].free_gb < max(0, model.budget_gb - model.resident_gb):
                 raise ActionDispatchError("insufficient_gpu_memory")
         return model
@@ -872,6 +879,9 @@ class ModelActionController:
         this never plans evictions of other models — and any missing input,
         protection or durable-account gate returns None so the caller keeps
         today's ``insufficient_gpu_memory`` failure without stopping anything.
+
+        The default model is included: placement decides where it may go, and
+        it still prefers the exclusive card whenever that card can host it.
         """
         from dataclasses import replace
         from llmsvc.policy import plan_placement
@@ -880,7 +890,7 @@ class ModelActionController:
         if not self._fresh(snapshot):
             return None
         model = self._model(snapshot, name)
-        if (model.state != "sleeping" or model.is_default or model.gpu is None
+        if (model.state != "sleeping" or model.gpu is None
                 or not _known(model.weights_gb) or not _known(model.budget_gb)):
             return None
         if any(pin.model == name and (not _known(pin.until) or pin.until > self.scheduler.clock())
@@ -1075,8 +1085,7 @@ class ModelActionController:
                 candidates = [model for model in observed.models if model.name == name]
                 ready = (self._fresh(observed) and observed.sampled_at > initial.sampled_at
                          and len(candidates) == 1 and self._ready(candidates[0])
-                         and candidates[0].unit == self.transport.unit_for_model(name)
-                         and (not candidates[0].is_default or candidates[0].gpu == self.settings.exclusive_gpu))
+                         and candidates[0].unit == self.transport.unit_for_model(name))
                 result.update(status="partial" if ready else "failed", ready=ready, error=error)
                 return result
             progress = None
@@ -1088,9 +1097,6 @@ class ModelActionController:
                     if model is not None and self._fresh(observed):
                         if model.unit not in (None, self.transport.unit_for_model(name)):
                             result.update(status="failed", error="configured_unit_mismatch")
-                            break
-                        if model.is_default and model.state == "awake" and model.gpu != self.settings.exclusive_gpu:
-                            result.update(status="blocked", error="default_requires_exclusive_gpu")
                             break
                         if (observed.sampled_at > initial.sampled_at and self._ready(model)
                                 and model.unit == self.transport.unit_for_model(name)):

@@ -43,10 +43,13 @@ def test_all_gpu_candidates_excluded_produces_no_eviction():
 
 
 @pytest.mark.parametrize("exclusive", [0,1])
-def test_default_never_uses_shared_gpu_when_exclusive_is_excluded(exclusive):
+def test_default_relocates_off_its_exclusive_gpu_when_that_card_is_excluded(exclusive):
+    # Excluding the exclusive card is exactly what a wake migration does to the
+    # source GPU. The default model has to land somewhere, or it could never
+    # leave a card an external process has taken.
     d=plan_placement(state(),request(is_default=True),settings=PolicySettings(exclusive_gpu=exclusive),
                      gpu_exclusions={exclusive:"relocation_source"})
-    assert not d.actions and d.gpu is None
+    assert d.gpu==1-exclusive and stopped(d)==[]
 
 
 def test_excluded_gpu_remains_in_cross_gpu_conflict_accounting():

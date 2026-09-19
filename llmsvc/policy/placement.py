@@ -89,6 +89,33 @@ def plan_placement(
     exclusions: Optional[Mapping[str, str]] = None,
     gpu_exclusions: Optional[Mapping[int, str]] = None,
 ) -> PlacementDecision:
+    """Place ``request``, letting the default model leave a hopeless home card.
+
+    The exclusive GPU is still the default model's home and still wins even at
+    the cost of an eviction there. It is a preference rather than a prison: when
+    that card cannot host the model at all — an external process owns it, or
+    every resident is protected — the default model is placed in the rest of the
+    pool instead of becoming permanently unplaceable.
+    """
+    decision = _plan_placement(snapshot, request, waiting=waiting, settings=settings,
+                               exclusions=exclusions, gpu_exclusions=gpu_exclusions)
+    if decision.gpu is not None:
+        return decision
+    current = next((m for m in snapshot.models if m.name == request.name), None)
+    if not (request.is_default or (current is not None and current.is_default)):
+        return decision
+    return _plan_placement(snapshot, request, waiting=waiting, settings=settings,
+                           exclusions=exclusions, gpu_exclusions=gpu_exclusions,
+                           default_fallback=True)
+
+
+def _plan_placement(
+    snapshot: StateSnapshot, request: ModelState, *, waiting: bool = False,
+    settings: PolicySettings = PolicySettings(),
+    exclusions: Optional[Mapping[str, str]] = None,
+    gpu_exclusions: Optional[Mapping[int, str]] = None,
+    default_fallback: bool = False,
+) -> PlacementDecision:
     """Choose one GPU, then emit its complete eviction plan and final place.
 
     ``request`` carries trusted registry metadata (including default status and
@@ -121,7 +148,7 @@ def plan_placement(
     feasible = []
     candidate_cards = []
     for gpu in sorted(snapshot.gpus, key=lambda g: g.index):
-        if default and gpu.index != settings.exclusive_gpu:
+        if default and not default_fallback and gpu.index != settings.exclusive_gpu:
             blockers.append(Blocker(request.name, "default_requires_exclusive_gpu", gpu.index))
             continue
         if any(b.gpu == gpu.index for b in accounting_blockers):

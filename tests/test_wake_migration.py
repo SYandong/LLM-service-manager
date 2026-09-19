@@ -240,22 +240,38 @@ def test_disabled_switch_keeps_today_behavior(migration_system):
     assert scheduler.store.leases() == before
 
 
-def test_default_model_keeps_exclusive_gpu_failure_without_migration(migration_system):
+def test_default_model_migrates_home_to_its_exclusive_gpu(migration_system):
     system = migration_system
-    scheduler, state = system.scheduler, system.state
-    # A default sleeper off its exclusive card keeps the existing guard: the
-    # admission fails before any memory or migration reasoning.
+    scheduler = system.scheduler
+    # The default model sleeps off its exclusive card and cannot wake in place.
+    # Its exclusive card is free, so that is where it goes.
     scheduler.model_actions.settings = replace(scheduler.model_actions.settings, exclusive_gpu=1)
     system.transport.models["m"]["is_default"] = True
     scheduler.sample_once()
-    before = scheduler.store.leases()
     status, result = request(system.address, "POST", "/v1/wake/m")
-    assert status == 200 and result["status"] == "blocked"
-    assert result["error"] == "default_requires_exclusive_gpu"
-    assert "migrated" not in result
-    assert state["stop_calls"] == [] and upstream_wake_calls(state) == []
-    assert scheduler.snapshot().models[0].state == "sleeping"
-    assert scheduler.store.leases() == before
+    assert status == 200 and result["status"] == "ready" and result["ready"] is True
+    assert result["migrated"] is True and result["source_stopped"] is True
+    assert result["source_gpu"] == 0 and result["target_gpu"] == 1
+    model = scheduler.snapshot().models[0]
+    assert model.state == "awake" and model.gpu == 1
+
+
+def test_default_model_falls_back_when_its_exclusive_gpu_is_taken(migration_system):
+    system = migration_system
+    scheduler, state = system.scheduler, system.state
+    # The production deadlock: an external process owns 130 of the exclusive
+    # card's 200 GiB, so the default model can neither wake there nor, before
+    # this change, go anywhere else. The exclusive card is a preference, so it
+    # falls back to the rest of the pool instead of staying unavailable.
+    assert scheduler.model_actions.settings.exclusive_gpu == 0
+    system.transport.models["m"]["is_default"] = True
+    scheduler.sample_once()
+    status, result = request(system.address, "POST", "/v1/wake/m")
+    assert status == 200 and result["status"] == "ready" and result["ready"] is True
+    assert result["migrated"] is True and result["source_gpu"] == 0 and result["target_gpu"] == 1
+    assert state["stop_calls"] == ["vllm-m.service"]
+    model = scheduler.snapshot().models[0]
+    assert model.state == "awake" and model.gpu == 1
 
 
 def test_failed_migration_stop_leaves_the_sleeper_untouched(migration_system, monkeypatch):

@@ -72,9 +72,13 @@ def test_default_placement_exclusive_even_when_shared_is_empty_and_cheaper():
     assert d.gpu == 0 and stopped(d) == ["ordinary"]
 
 
-def test_default_never_falls_back_to_shared_when_exclusive_is_blocked():
+def test_default_falls_back_to_shared_when_exclusive_is_blocked():
+    # The exclusive card's only resident is pinned, so it cannot host the
+    # default model at all. Preferring that card must not mean refusing every
+    # other one: an unplaceable default model is an outage.
     s = state(resident("pinned", budget=80), pins=(Pin("pinned", 20000, "owner"),))
-    assert plan_placement(s, request(is_default=True)).actions == ()
+    d = plan_placement(s, request(is_default=True))
+    assert d.gpu == 1 and stopped(d) == []
 
 
 def test_exclusive_gpu_is_configurable_and_snapshot_default_cannot_be_masked():
