@@ -4,7 +4,7 @@ llama-swap 之上的多 GPU 控制面：查看模型与用量、请求释放/唤
 pin 与 GPU reserve，并提供可选终端面板。llama-swap 和 vllm-wrapper
 负责推理路由、排队及后端 sleep/wake；scheduler 负责资源记账、保护和调度。
 
-当前文档面向 [v1.6.0 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v1.6.0)。
+当前文档面向 [v1.7.0 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v1.7.0)。
 发布功能不等于所在部署已启用它们：scheduler 默认只读，模型动作、放置、
 自动策略、故障恢复及 sleeping recovery 各有独立开关。实现与现场验收进度见 [ROADMAP](docs/ROADMAP.md)。
 
