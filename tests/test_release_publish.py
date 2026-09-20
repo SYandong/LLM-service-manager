@@ -36,125 +36,6 @@ def test_untrusted_or_incomplete_events_rejected(key, value):
         pub.validate_event(e)
 
 
-def review(head=HEAD, state='COMMENTED', body=None, at='2026-09-10T00:00:00Z'):
-    return {'user': {'login': pub.TRUSTED_LOGIN}, 'commit_id': head, 'state': state,
-            'body': body or f'FABLE-APPROVED {head}\n\nGenerated-By: Claude Code / claude-fable-5-1',
-            'submitted_at': at, 'html_url': 'https://example.invalid/review'}
-
-
-def codex_review(head=HEAD, state='COMMENTED', body=None, at='2026-09-10T00:00:00Z'):
-    return {'user': {'login': pub.TRUSTED_LOGIN}, 'commit_id': head, 'state': state,
-            'body': body or f'CODEX-APPROVED {head}\n\nGenerated-By: Codex / gpt-6-astra',
-            'submitted_at': at, 'html_url': 'https://example.invalid/codex'}
-
-
-def test_shared_account_commented_exact_fable_is_valid():
-    assert pub.approval([review()], HEAD) == {'url': 'https://example.invalid/review', 'harness': 'Fable'}
-
-
-def test_trusted_codex_review_is_valid():
-    assert pub.approval([codex_review()], HEAD) == {'url': 'https://example.invalid/codex', 'harness': 'Codex'}
-
-
-def test_wrong_identity_codex_review_rejected():
-    with pytest.raises(ValueError):
-        pub.approval([dict(codex_review(), user={'login': 'attacker'})], HEAD)
-
-
-def test_codex_review_without_watermark_rejected():
-    with pytest.raises(ValueError):
-        pub.approval([codex_review(body=f'CODEX-APPROVED {HEAD}')], HEAD)
-
-
-@pytest.mark.parametrize('body', [
-    'CODEX-APPROVED ' + COMMIT + '\n\nGenerated-By: Codex / gpt-6-astra',
-    'CODEX-APPROVED\n\nGenerated-By: Codex / gpt-6-astra',
-    'FABLE-APPROVED ' + HEAD + '\n\nGenerated-By: Codex / gpt-6-astra',
-    'CODEX-APPROVED ' + HEAD + '\n\nGenerated-By: Claude Code / claude-fable-5-1',
-])
-def test_wrong_or_mismatched_marker_rejected(body):
-    with pytest.raises(ValueError):
-        pub.approval([codex_review(body=body)], HEAD)
-
-
-def test_later_cross_harness_changes_requested_fails_closed():
-    reviews = [review(at='2026-09-10T00:00:00Z'),
-               codex_review(state='CHANGES_REQUESTED', body=f'Needs work\n\nGenerated-By: Codex / gpt-6-astra',
-                            at='2026-09-11T00:00:00Z')]
-    with pytest.raises(ValueError):
-        pub.approval(reviews, HEAD)
-
-
-def test_later_stale_trusted_review_fails_closed():
-    reviews = [review(at='2026-09-10T00:00:00Z'), codex_review(head=COMMIT, at='2026-09-11T00:00:00Z')]
-    with pytest.raises(ValueError):
-        pub.approval(reviews, HEAD)
-
-
-def test_earlier_rejection_is_superseded_by_later_approval():
-    reviews = [codex_review(state='CHANGES_REQUESTED', body=f'Draft\n\nGenerated-By: Codex / gpt-6-astra',
-                            at='2026-09-09T00:00:00Z'),
-               review(at='2026-09-10T00:00:00Z')]
-    assert pub.approval(reviews, HEAD)['harness'] == 'Fable'
-
-
-def trusted_comment(body, at):
-    return {'user': {'login': pub.TRUSTED_LOGIN}, 'commit_id': HEAD, 'state': 'COMMENTED',
-            'body': body, 'submitted_at': at, 'html_url': 'https://example.invalid/later'}
-
-
-def test_earlier_valid_review_with_later_missing_watermark_fails_closed():
-    with pytest.raises(ValueError):
-        pub.approval([review(at='2026-09-10T00:00:00Z'),
-                      trusted_comment('Looks fine, no watermark here', at='2026-09-11T00:00:00Z')], HEAD)
-
-
-def test_earlier_valid_review_with_later_ambiguous_watermark_fails_closed():
-    body = (f'FABLE-APPROVED {HEAD}\n\nGenerated-By: Claude Code / claude-fable-5-1\n'
-            'Generated-By: Codex / gpt-6-astra')
-    with pytest.raises(ValueError):
-        pub.approval([review(at='2026-09-10T00:00:00Z'), trusted_comment(body, at='2026-09-11T00:00:00Z')], HEAD)
-
-
-@pytest.mark.parametrize('body', [
-    'CODEX-APPROVED ' + HEAD + '\n\nGenerated-By: Codex / gpt-6-astra-fake',
-    'CODEX-APPROVED ' + HEAD + '\nQuoted: Generated-By: Codex / gpt-6-astra',
-    'CODEX-APPROVED ' + HEAD + '\n\nGenerated-By: Codex / gpt-6-astra extra',
-    'CODEX-APPROVED ' + HEAD + '\n\nGenerated-By: Codex / gpt-6-astra\nGenerated-By: Codex / gpt-6-astra',
-])
-def test_suffixed_embedded_or_duplicate_watermark_rejected(body):
-    with pytest.raises(ValueError):
-        pub.approval([codex_review(body=body)], HEAD)
-
-
-@pytest.mark.parametrize('body', [
-    f'CODEX-APPROVED {HEAD}\nCODEX-APPROVED {HEAD}\n\nGenerated-By: Codex / gpt-6-astra',
-    f'FABLE-APPROVED {HEAD}\nCODEX-APPROVED {HEAD}\n\nGenerated-By: Codex / gpt-6-astra',
-    f'CODEX-APPROVED {HEAD}\nFABLE-APPROVED {HEAD}\n\nGenerated-By: Codex / gpt-6-astra',
-    f'CODEX-APPROVED {HEAD}\nCODEX-APPROVED short\n\nGenerated-By: Codex / gpt-6-astra',
-])
-def test_duplicate_or_conflicting_markers_rejected(body):
-    with pytest.raises(ValueError):
-        pub.approval([codex_review(body=body)], HEAD)
-
-
-@pytest.mark.parametrize('order', [0, 1])
-def test_equal_latest_timestamps_fail_closed(order):
-    fable = review(at='2026-09-10T00:00:00Z')
-    codex = codex_review(at='2026-09-10T00:00:00Z')
-    with pytest.raises(ValueError):
-        pub.approval([fable, codex] if order == 0 else [codex, fable], HEAD)
-
-
-@pytest.mark.parametrize('reviews', [[], [review(head=COMMIT)], [review(state='CHANGES_REQUESTED')],
-    [review(body='FABLE-APPROVED ' + HEAD)],
-    [review(), review(state='CHANGES_REQUESTED', at='2026-09-11T00:00:00Z')],
-    [dict(review(), user={'login': 'attacker'})]])
-def test_stale_missing_or_revoked_review_rejected(reviews):
-    with pytest.raises(ValueError):
-        pub.approval(reviews, HEAD)
-
-
 def assets(path):
     path.mkdir()
     m = {'commit': COMMIT, 'tag': TAG, 'python_version': '0.1.0a9', 'assets': {}}
@@ -242,7 +123,7 @@ def release_gate(tmp_path, monkeypatch):
           'base': {'ref': 'main', 'repo': {'full_name': pub.REPO}},
           'head': {'sha': HEAD, 'repo': {'full_name': pub.REPO}},
           'title': 'chore(release): ' + TAG, 'body': '', 'html_url': 'https://example.invalid/169'}
-    state = {'pr': pr, 'reviews': [review()], 'ci': 'success', 'threads': [], 'log': '\n'.join(f'Change (#{n})' for n in range(5)), 'runs': []}
+    state = {'pr': pr, 'ci': 'success', 'threads': [], 'log': '\n'.join(f'Change (#{n})' for n in range(5)), 'runs': []}
     def api(path):
         if '/actions/runs/' in path: return event()['workflow_run'] | {'html_url': 'https://example.invalid/ci'}
         if '/commits/' in path: return [pr]
@@ -250,7 +131,6 @@ def release_gate(tmp_path, monkeypatch):
         if '/workflows/ci.yml/runs' in path: return {'workflow_runs': [{'id': 1, 'conclusion': state['ci']}]}
         pytest.fail(path)
     def pages(path):
-        if path.endswith('/reviews'): return state['reviews']
         if path.endswith('/releases'): return [{'tag_name': 'v0.1.0-alpha.8', 'draft': False}]
         pytest.fail(path)
     def run(*args, **kwargs):
@@ -269,29 +149,16 @@ def release_gate(tmp_path, monkeypatch):
 def test_complete_release_guard_counts_only_non_release_prs(release_gate):
     release_gate['log'] += '\nchore(release): v0.1.0-alpha.9 (#169)'
     result = pub.guard(event())
-    assert result['commit'] == COMMIT and result['reviewed_head'] == HEAD
+    assert result['commit'] == COMMIT and result['release_head'] == HEAD
     assert len(result['qualifying_prs']) == 5
     assert ('git', 'diff', '--exit-code', HEAD, COMMIT) in release_gate['runs']
 
 
-def test_guard_records_generic_review_metadata_for_codex(release_gate):
-    release_gate['reviews'] = [codex_review()]
-    result = pub.guard(event())
-    assert result['review_url'].endswith('/codex') and result['review_harness'] == 'Codex'
-    assert result['fable_review'] is None
-
-
-def test_guard_keeps_fable_review_metadata_additively(release_gate):
-    result = pub.guard(event())
-    assert result['review_harness'] == 'Fable' and result['review_url'] == result['fable_review']
-
-
-@pytest.mark.parametrize('damage', ['ci', 'threads', 'cadence', 'review', 'fork', 'title', 'direct_push'])
+@pytest.mark.parametrize('damage', ['ci', 'threads', 'cadence', 'fork', 'title', 'direct_push'])
 def test_complete_guard_rejects_unmet_gates(release_gate, damage):
     if damage == 'ci': release_gate['ci'] = 'failure'
     if damage == 'threads': release_gate['threads'] = [{'isResolved': False}]
     if damage == 'cadence': release_gate['log'] = 'Fix (#1)'
-    if damage == 'review': release_gate['reviews'] = [review(head=COMMIT)]
     if damage == 'fork': release_gate['pr']['head']['repo']['full_name'] = 'attacker/fork'
     if damage == 'title': release_gate['pr']['title'] = 'chore(release): v0.1.0-alpha.8'
     if damage == 'direct_push': release_gate['log'] += '\nDirect unreviewed change'

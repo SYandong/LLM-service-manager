@@ -42,8 +42,7 @@ Per the user's #108 instruction, validation uses bounded minutes-scale checks
 and deterministic regression/replay rather than mandatory day/week soak waits.
 Record the measured window and unmeasured long-term behavior explicitly; do not
 use elapsed calendar time as a release gate or claim short tests prove long-term
-stability. Existing correctness, trusted-review/CI and relevant operational gates
-remain.
+stability. Existing correctness, CI and relevant operational gates remain.
 
 Integration owns subsequent release coordination. A single release owner
 prepares the version bump, changelog and artifacts in an isolated worktree.
@@ -67,18 +66,11 @@ Root owns the initial #76 release. Use a `chore/<issue>-release-...` branch and 
    receipts retain their historical exclusions; do not copy those exclusions
    into current validation. Model-running deployment harnesses remain separately
    owned by ops and require their actual idle/protection gates.
-3. Require an explicit approval of the current release PR head from a recognized
-   trusted harness (Fable or Codex) under the shared trusted account, current
-   successful CI and resolved blockers. The single latest review from that account
-   decides, and it must itself carry exactly one recognized **full watermark line**
-   (`Generated-By: Claude Code / claude-fable-5-1` or
-   `Generated-By: Codex / gpt-6-astra`, no suffix) plus exactly one matching full
-   marker line (`FABLE-APPROVED <sha>` or `CODEX-APPROVED <sha>`) naming the exact
-   head. Filtering is applied only after the latest account review is chosen, so a
-   later rejection, stale commit, missing/ambiguous/suffixed/embedded watermark,
-   conflicting marker or equal-timestamp tie fails closed instead of skipping to an
-   earlier approval. Apply the ROADMAP's squash/commit verification rules. New
-   commits invalidate prior approval.
+3. Require current successful CI on the exact release PR head and resolved review
+   threads. **The publisher no longer requires a watermarked approval review from
+   the trusted account**: merging the release PR is now the whole human decision,
+   so whoever merges is the one accountable for the release. Apply the ROADMAP's
+   squash/commit verification rules.
 4. Pin the merged release commit. Build wheel and sdist from a clean checkout
    of that commit using the project's setuptools build backend. Verify the
    wheel installs and reports the same version through `llmsvc`,
@@ -110,8 +102,7 @@ conditions remain; authorization is not evidence that they hold.
 repository's main branch**. It never publishes for PR/fork events, tag pushes or
 ordinary feature merges. The publisher re-fetches the CI run and checks the
 unique merged `chore(release): <tag>` PR (`vX.Y.Z`; historical `v0.1.0-alpha.N` remains
-verifiable), exact final-head trusted marker and reviewer identity for a
-recognized harness, successful head CI, resolved review threads, identical
+verifiable), successful head CI, resolved review threads, identical
 merge/head trees, version literals and changelog. Checkout credentials are not
 persisted. One concurrency group serializes publication; the workflow uses only
 GitHub's scoped token and never obtains host deployment credentials.
@@ -150,11 +141,10 @@ not applied to the existing environment in place. Older releases (including
 alpha.8's completed five-asset publication) remain immutable and are not silently
 retrofitted with a wheelhouse.
 
-`release-manifest.json` binds tag, Python version, exact merge, reviewed head,
-generic `review_url`/`review_harness` metadata plus a legacy `fable_review` URL
-for actual Fable reviews only, merge CI URL, previous baseline and qualifying
-PRs. The generic fields are additive, so a Codex approval is never mislabeled as
-a Fable review and manifest consumers keep a stable shape. Its `assets`
+`release-manifest.json` binds tag, Python version, exact merge, release head,
+merge CI URL, previous baseline and qualifying PRs. The former
+`review_url`/`review_harness`/`fable_review` fields are gone with the approval
+gate, and `reviewed_head` is now `release_head` because nothing reviews it. Its `assets`
 map contains payload byte lengths and SHA-256 values; `SHA256SUMS` covers those
 payloads plus the manifest. After upload, the publisher downloads and verifies
 all six assets before making the draft public. The tag is annotated and never

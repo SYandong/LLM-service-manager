@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Release process
+
+- The publisher no longer requires a watermarked approval review from the
+  trusted account on the release PR head. `approval()` and the harness
+  watermark/marker machinery are removed, along with the fourteen fail-closed
+  tests that covered them. **Merging the release PR is now the whole human
+  decision**, so whoever merges it is accountable for the release; nothing else
+  gates publication on a person. The remaining automatic gates are unchanged:
+  successful CI on the exact head, resolved review threads, repository-owned
+  head, matching merge/head trees, version literals, changelog, and the five-PR
+  cadence or a recorded `Release-Exception`.
+- `release-manifest.json` drops `review_url`, `review_harness` and
+  `fable_review`, and renames `reviewed_head` to `release_head` because nothing
+  reviews it any more. Deployment reads `tag`, `python_version` and `commit`,
+  which are unchanged.
+
 ### Scheduling
 
 - No GPU is reserved for the default model any more: `exclusive_gpu` is now
