@@ -11,7 +11,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from llmsvc.actions import ManagedModelTransport, ModelActionController, WakeMigration
+from llmsvc.actions import (
+    ActionDispatchError, ManagedModelTransport, ModelActionController, WakeMigration,
+)
 from llmsvc.config import SchedulerConfig
 from llmsvc.leases import PlacementController, UnitObservation
 from llmsvc.policy import PolicySettings
@@ -304,6 +306,31 @@ def test_unreleased_source_account_reports_partial_without_cold_start(migration_
     assert not state["places"]
     assert scheduler.snapshot().models[0].state == "stopped"
     assert scheduler.store.leases()[0][0].lease_id == "source-lease"
+
+
+def test_migration_deadline_during_the_lock_still_reports_the_source_state(migration_system, monkeypatch):
+    # The wake deadline can expire while the observe loop is taking the action
+    # lock. That used to raise past the caller that fills in `source_stopped`,
+    # so the receipt lost the one field saying whether this model is now
+    # stopped — exactly when the operator needs it. Which of the two deadline
+    # exits happens is a race, so both have to produce the same receipt.
+    system = migration_system
+    scheduler = system.scheduler
+    scheduler.placement.probe = lambda model, **kwargs: UnitObservation(True, False, True, "source-lease")
+    controller = scheduler.model_actions
+    original, seen = controller._locked, []
+
+    def locked(deadline):
+        seen.append(deadline)
+        if len(seen) > 2:
+            raise ActionDispatchError("deadline_exceeded")
+        return original(deadline)
+
+    monkeypatch.setattr(controller, "_locked", locked)
+    status, result = request(system.address, "POST", "/v1/wake/m")
+    assert status == 200 and result["status"] in ("partial", "failed")
+    assert result["migrated"] is True and isinstance(result["source_stopped"], bool)
+    assert result["source_gpu"] == 0 and result["target_gpu"] == 1
 
 
 def test_wake_migration_flags_are_strict_bools():
