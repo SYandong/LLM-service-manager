@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Scheduling
+
+- No GPU is reserved for the default model any more: `exclusive_gpu` is now
+  optional and defaults to null. A dedicated card was a promise the scheduler
+  could not keep on a machine it shares with other tenants — the moment an
+  external process took that GPU, the model it was supposed to guarantee became
+  the only one that could not recover — and believing the promise also left
+  `pressure` blind to external usage on exactly the card that most needed
+  watching. Where a card really is llmsvc's alone, setting `exclusive_gpu`
+  restores every part of the previous behaviour: the default model prefers that
+  card, wins there even at the cost of an eviction, and gets the longer
+  `exclusive_ttl_seconds` grace.
+- A wake migration may now reclaim a sleeper's reserved budget by evicting it,
+  under the same rules an ordinary cold start already uses. Requiring a free fit
+  made a migration strictly weaker than a brand-new placement even though it
+  recovers a model that already exists, which is how a sleeping model could be
+  stranded on a card while another card held nothing but reserved-but-unused
+  budget. Protected residents are still never evicted, so a destination that
+  would need a pinned or busy victim remains no destination at all.
+
 ## 1.7.0 — 2026-09-20
 
 Minor release; Python distribution `1.7.0`. Two merged PRs: a model whose GPU is

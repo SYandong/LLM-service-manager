@@ -89,17 +89,18 @@ def plan_placement(
     exclusions: Optional[Mapping[str, str]] = None,
     gpu_exclusions: Optional[Mapping[int, str]] = None,
 ) -> PlacementDecision:
-    """Place ``request``, letting the default model leave a hopeless home card.
+    """Place ``request``; a configured exclusive GPU is a preference, not a prison.
 
-    The exclusive GPU is still the default model's home and still wins even at
-    the cost of an eviction there. It is a preference rather than a prison: when
-    that card cannot host the model at all — an external process owns it, or
-    every resident is protected — the default model is placed in the rest of the
-    pool instead of becoming permanently unplaceable.
+    Without ``exclusive_gpu`` every model, default or not, is placed by the one
+    ordinary rule. Where a card really is llmsvc's alone and is configured as
+    such, the default model still prefers it and still wins there even at the
+    cost of an eviction; only when that card cannot host the model at all does
+    the rest of the pool become eligible, because an unplaceable default model
+    is an outage.
     """
     decision = _plan_placement(snapshot, request, waiting=waiting, settings=settings,
                                exclusions=exclusions, gpu_exclusions=gpu_exclusions)
-    if decision.gpu is not None:
+    if decision.gpu is not None or settings.exclusive_gpu is None:
         return decision
     current = next((m for m in snapshot.models if m.name == request.name), None)
     if not (request.is_default or (current is not None and current.is_default)):
@@ -148,7 +149,8 @@ def _plan_placement(
     feasible = []
     candidate_cards = []
     for gpu in sorted(snapshot.gpus, key=lambda g: g.index):
-        if default and not default_fallback and gpu.index != settings.exclusive_gpu:
+        if (default and not default_fallback and settings.exclusive_gpu is not None
+                and gpu.index != settings.exclusive_gpu):
             blockers.append(Blocker(request.name, "default_requires_exclusive_gpu", gpu.index))
             continue
         if any(b.gpu == gpu.index for b in accounting_blockers):

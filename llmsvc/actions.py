@@ -875,10 +875,13 @@ class ModelActionController:
         Read-only preflight on the same fresh snapshot the wake admission used:
         the source is projected stopped (its budget leaves the source GPU, its
         sleeping weights return to host RAM) and the placement policy is asked
-        for a free-fit GPU outside the source card. A free fit is required —
-        this never plans evictions of other models — and any missing input,
-        protection or durable-account gate returns None so the caller keeps
-        today's ``insufficient_gpu_memory`` failure without stopping anything.
+        for a destination outside the source card, under the same rules a cold
+        start gets. That includes evicting a sleeper to reclaim its reserved
+        budget: a migration recovers a model that already exists, so holding it
+        to a stricter standard than a brand-new cold start is what leaves it
+        stranded. Any missing input, protection or durable-account gate returns
+        None, so the caller keeps today's ``insufficient_gpu_memory`` failure
+        without stopping anything.
 
         The default model is included: placement decides where it may go, and
         it still prefers the exclusive card whenever that card can host it.
@@ -939,7 +942,7 @@ class ModelActionController:
             sleeping_weights_gb=sleeping))
         decision = plan_placement(hypothetical, stopped, settings=self.settings,
                                   gpu_exclusions={model.gpu: "wake_migration_source"})
-        if decision.gpu is None or any(action.kind != "place" for action in decision.actions):
+        if decision.gpu is None:
             return None
         return WakeMigration(model.gpu, decision.gpu, decision.budget_gb)
 

@@ -75,7 +75,7 @@ def test_best_fit_counts_external_usage_as_part_of_the_hole():
 
 
 def test_best_fit_never_evicts_for_packing_and_default_stays_exclusive():
-    settings = PolicySettings(placement_fit="best_fit")
+    settings = PolicySettings(placement_fit="best_fit", exclusive_gpu=0)
     d = plan_placement(state(resident("a", budget=80, score=0), cards=gpus(0, 0)), request(), settings=settings)
     assert d.gpu == 1 and stopped(d) == []
     d = plan_placement(state(resident("a", gpu=1, budget=10), cards=gpus(0, 0)), request(is_default=True),
@@ -92,7 +92,9 @@ def test_exclusive_gpu_moves_with_the_pool():
 
 @pytest.mark.parametrize("kwargs", [
     {"placement_gpus": ()}, {"placement_gpus": [0, 1]}, {"placement_gpus": (0, 0)}, {"placement_gpus": (0, True)},
-    {"placement_gpus": (1, 2)}, {"placement_gpus": (0, -1)}, {"placement_fit": "worst_fit"}, {"placement_fit": None},
+    # The pool must still contain the exclusive GPU where one is configured.
+    {"placement_gpus": (1, 2), "exclusive_gpu": 0},
+    {"placement_gpus": (0, -1)}, {"placement_fit": "worst_fit"}, {"placement_fit": None},
 ])
 def test_invalid_pool_or_fit_settings_are_rejected(kwargs):
     with pytest.raises(ValueError):
