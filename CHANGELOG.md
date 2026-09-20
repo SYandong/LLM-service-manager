@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 1.7.0 — 2026-09-20
+
+Minor release; Python distribution `1.7.0`. Two merged PRs: a model whose GPU is
+taken by a process the scheduler does not control is no longer stranded there
+(#283), and the migration receipt survives a deadline that expires while its
+observe loop is taking the action lock (#284). A sleeping model that cannot wake
+in place now migrates to a card placement approves, and the default model's
+exclusive GPU becomes a preference rather than a hard requirement; together they
+remove a deadlock that made the default model permanently unavailable once an
+external process owned its card. The wake-time migration was implemented by an
+OpenCode worker from a written specification; the default-model relocation, the
+two corrections and the review are Claude's. Below the normal five-PR cadence, so
+the reviewed release PR records `Release-Exception: #256` for the user-authorized
+delivery.
 
 ### Scheduling
 
