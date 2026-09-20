@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 1.8.0 — 2026-09-20
+
+Minor release; Python distribution `1.8.0`. Two merged PRs. #286 finishes the
+work v1.7.0 started: a model can now reach room that is free in every sense but
+the scheduler's own bookkeeping. A wake migration may reclaim a sleeper's
+reserved budget by evicting it, under the same rules an ordinary cold start
+already uses, and `exclusive_gpu` becomes optional and defaults to null, because
+a card reserved for the default model was a promise the scheduler could not keep
+on a machine it shares with tenants it does not control. #287 removes the
+trusted-review gate from the release publisher at the maintainer's request:
+merging the release PR is now the whole human decision. Below the normal five-PR
+cadence, so the release PR records `Release-Exception: #256` for the
+user-authorized delivery.
 
 ### Release process
 
