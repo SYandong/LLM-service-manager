@@ -52,7 +52,10 @@ def test_maintenance_timeout_rejects_out_of_range_or_boolean(tmp_path, value):
 
 
 @pytest.mark.parametrize("kwargs", [
-    {"placement_gpus": []}, {"placement_gpus": [0, 0]}, {"placement_gpus": [1]}, {"placement_gpus": [0, "1"]},
+    {"placement_gpus": []}, {"placement_gpus": [0, 0]},
+    # The pool must still contain the exclusive GPU where one is configured;
+    # without one the pool is free to leave any card out.
+    {"placement_gpus": [1], "exclusive_gpu": 0}, {"placement_gpus": [0, "1"]},
     {"placement_gpus": [0, True]}, {"placement_gpus": (0, 1)}, {"exclusive_gpu": -1}, {"exclusive_gpu": True},
     {"exclusive_gpu": 1.0}, {"placement_fit": "worst_fit"}, {"shared_external_threshold_gb": -1},
     {"shared_external_threshold_gb": float("nan")}, {"shared_external_threshold_gb": True},

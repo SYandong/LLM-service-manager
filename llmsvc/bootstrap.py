@@ -331,7 +331,8 @@ class BootstrapController:
             observed=s.placement._inspect(self.model,self.deadline)
             if not s.placement._fresh(snapshot) or observed.exists is not False:
                 raise BootstrapError('bootstrap start lacks fresh unit absence')
-        if unit!=self.unit or lease.gpu!=s.config.policy_settings().exclusive_gpu:
+        exclusive=s.config.policy_settings().exclusive_gpu
+        if unit!=self.unit or (exclusive is not None and lease.gpu!=exclusive):
             raise BootstrapError('bootstrap default placement binding changed')
         gpu=next((value for value in snapshot.gpus if value.index==lease.gpu),None)
         available=snapshot.memory.host_available_gb

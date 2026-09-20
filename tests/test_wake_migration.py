@@ -19,7 +19,7 @@ from llmsvc.leases import PlacementController, UnitObservation
 from llmsvc.policy import PolicySettings
 from llmsvc.scheduler import Scheduler
 from llmsvc.server import SchedulerHTTPServer
-from llmsvc.state import Activity, GPUState, Lease, MemoryState, ModelState, StateSnapshot
+from llmsvc.state import Activity, GPUState, Lease, MemoryState, ModelState, Pin, StateSnapshot
 from llmsvc.store import IntentStore
 
 
@@ -174,20 +174,22 @@ def test_wake_migrates_sleeper_to_placement_gpu(migration_system):
     assert any(event.kind == "lease_released" for event in scheduler.events_since(0))
 
 
-def test_preflight_returns_free_fit_plan_and_never_an_eviction(migration_system):
+def test_preflight_takes_a_free_fit_first_then_plans_an_eviction(migration_system):
     system = migration_system
     scheduler, state = system.scheduler, system.state
     plan = scheduler.model_actions.plan_wake_migration(scheduler.snapshot(), "m")
     assert plan == WakeMigration(0, 1, 80)
-    # A destination that only fits after evicting another sleeper is no plan:
-    # the migration must find a free fit or keep today's hard failure.
+    # A destination that only fits after evicting another sleeper is still a
+    # plan. A migration recovers a model that already exists, so refusing what
+    # an ordinary cold start is allowed to do is what strands it.
     state["extra_models"] = (ModelState("other", state="sleeping", gpu=1, budget_gb=150,
                                         weights_gb=60, resident_gb=2, unit="vllm-other.service",
                                         unit_active=True, health_ok=True, is_sleeping=True,
                                         swap_state="stopped", cold_start_seconds=120),)
     state["extra_activity"] = (Activity("other", time.time() - 1000, 0, 0, 0),)
     scheduler.sample_once()
-    assert scheduler.model_actions.plan_wake_migration(scheduler.snapshot(), "m") is None
+    plan = scheduler.model_actions.plan_wake_migration(scheduler.snapshot(), "m")
+    assert plan is not None and (plan.source_gpu, plan.target_gpu) == (0, 1)
 
 
 def test_wake_without_any_feasible_gpu_keeps_the_hard_failure(migration_system):
@@ -208,7 +210,7 @@ def test_wake_without_any_feasible_gpu_keeps_the_hard_failure(migration_system):
     assert not any(event.kind == "wake_migration" for event in scheduler.events_since(0))
 
 
-def test_eviction_only_destination_is_not_a_migration(migration_system):
+def test_destination_that_needs_a_protected_victim_is_not_a_migration(migration_system):
     system = migration_system
     scheduler, state = system.scheduler, system.state
     state["extra_models"] = (ModelState("other", state="sleeping", gpu=1, budget_gb=150,
@@ -216,13 +218,18 @@ def test_eviction_only_destination_is_not_a_migration(migration_system):
                                         unit_active=True, health_ok=True, is_sleeping=True,
                                         swap_state="stopped", cold_start_seconds=120),)
     state["extra_activity"] = (Activity("other", time.time() - 1000, 0, 0, 0),)
+    # Reclaiming the only candidate destination means evicting `other`, and a
+    # pin says that is not allowed. Eviction being permitted does not make a
+    # protected resident evictable, so this stays the hard failure.
+    scheduler.store.put_pin(Pin("other", time.time() + 100, "owner"))
     scheduler.sample_once()
     before = scheduler.store.leases()
+    assert scheduler.model_actions.plan_wake_migration(scheduler.snapshot(), "m") is None
     status, result = request(system.address, "POST", "/v1/wake/m")
     assert status == 200 and result["status"] == "blocked"
     assert result["error"] == "insufficient_gpu_memory"
     assert "migrated" not in result
-    # Neither the source nor the potential victim was stopped.
+    # Neither the source nor the protected resident was stopped.
     assert state["stop_calls"] == [] and upstream_wake_calls(state) == []
     assert scheduler.store.leases() == before
     assert {model.name: model.state for model in scheduler.snapshot().models} == {"m": "sleeping", "other": "sleeping"}
@@ -261,11 +268,12 @@ def test_default_model_migrates_home_to_its_exclusive_gpu(migration_system):
 def test_default_model_falls_back_when_its_exclusive_gpu_is_taken(migration_system):
     system = migration_system
     scheduler, state = system.scheduler, system.state
-    # The production deadlock: an external process owns 130 of the exclusive
-    # card's 200 GiB, so the default model can neither wake there nor, before
-    # this change, go anywhere else. The exclusive card is a preference, so it
-    # falls back to the rest of the pool instead of staying unavailable.
-    assert scheduler.model_actions.settings.exclusive_gpu == 0
+    # The production deadlock, on a deployment that does configure an exclusive
+    # card: an external process owns 130 of its 200 GiB, so the default model
+    # can neither wake there nor, before this change, go anywhere else. The
+    # exclusive card is a preference, so it falls back to the rest of the pool
+    # instead of staying unavailable.
+    scheduler.model_actions.settings = replace(scheduler.model_actions.settings, exclusive_gpu=0)
     system.transport.models["m"]["is_default"] = True
     scheduler.sample_once()
     status, result = request(system.address, "POST", "/v1/wake/m")

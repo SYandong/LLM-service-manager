@@ -16,7 +16,12 @@ from llmsvc.state import GPUProcess, ModelState, Pin, Reserve
 @pytest.fixture
 def pressure(system):
     scheduler, cycle, state, models, transport, observations = system
-    scheduler.config = replace(scheduler.config, automation_policy="gpu_pressure")
+    # These cases are about the per-GPU TTL split, which only exists where an
+    # exclusive card is configured; it is opt-in rather than the default now.
+    # The cycle reads the controller's settings, which are built once at
+    # construction, so the config alone would not reach it.
+    scheduler.config = replace(scheduler.config, automation_policy="gpu_pressure", exclusive_gpu=0)
+    scheduler.model_actions.settings = replace(scheduler.model_actions.settings, exclusive_gpu=0)
     state.update(external=0, free=100, processes=())
     collect = scheduler.collect
     def observed():
@@ -90,7 +95,9 @@ def test_per_gpu_exact_ttl_boundaries(pressure, idle, acts):
 def test_only_selected_ttl_planner_runs(system, monkeypatch, mode, idle, acts):
     import llmsvc.policy
     scheduler, cycle, state, _, _, _ = system
-    scheduler.config = replace(scheduler.config, automation_policy=mode)
+    scheduler.config = replace(scheduler.config, automation_policy=mode, exclusive_gpu=0)
+    # GPU0's longer TTL is the exclusive-card behaviour, which is opt-in.
+    scheduler.model_actions.settings = replace(scheduler.model_actions.settings, exclusive_gpu=0)
     state["idle"]["a"] = idle
     scheduler.sample_once()
     def forbidden(*args, **kwargs):

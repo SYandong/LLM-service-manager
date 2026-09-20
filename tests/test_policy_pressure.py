@@ -29,9 +29,16 @@ def pairs(decision):
 
 
 def test_shared_five_minute_ttl_and_exclusive_sixty_minute_ttl():
-    assert pairs(plan_pressure_sleep(snapshot(model(), idle=300))) == [("sleep", "a")]
-    assert not plan_pressure_sleep(snapshot(model(gpu=0), idle=600)).actions
-    assert pairs(plan_pressure_sleep(snapshot(model(gpu=0), idle=3600))) == [("sleep", "a")]
+    # The longer TTL belongs to a configured exclusive card, which is opt-in.
+    exclusive = PolicySettings(exclusive_gpu=0)
+    assert pairs(plan_pressure_sleep(snapshot(model(), idle=300), settings=exclusive)) == [("sleep", "a")]
+    assert not plan_pressure_sleep(snapshot(model(gpu=0), idle=600), settings=exclusive).actions
+    assert pairs(plan_pressure_sleep(snapshot(model(gpu=0), idle=3600), settings=exclusive)) == [("sleep", "a")]
+
+
+def test_every_card_uses_the_shared_ttl_without_an_exclusive_gpu():
+    # The shipped default: no card gets the hour-long grace, including GPU0.
+    assert pairs(plan_pressure_sleep(snapshot(model(gpu=0), idle=300))) == [("sleep", "a")]
 
 
 def test_per_gpu_ttl_and_exclusive_index_are_configurable():
@@ -59,7 +66,15 @@ def test_pressure_threshold_is_configurable_and_exact_boundary_is_not_low():
 def test_exclusive_card_ignores_shared_pressure_signal_before_its_ttl():
     s = snapshot(model(gpu=0), idle=600)
     s = replace(s, gpus=(replace(s.gpus[0], free_gb=1, external_gb=50), s.gpus[1]))
-    assert not plan_pressure_sleep(s).actions
+    assert not plan_pressure_sleep(s, settings=PolicySettings(exclusive_gpu=0)).actions
+
+
+def test_without_an_exclusive_gpu_external_pressure_is_seen_on_every_card():
+    # The blind spot this removes: a neighbour arriving on GPU0 used to trigger
+    # nothing at all, which is how it filled up unnoticed.
+    s = snapshot(model(gpu=0), idle=600)
+    s = replace(s, gpus=(replace(s.gpus[0], free_gb=1, external_gb=50), s.gpus[1]))
+    assert pairs(plan_pressure_sleep(s)) == [("sleep", "a")]
 
 
 def test_one_cold_candidate_then_reobserve_and_stop_when_pressure_clears():

@@ -16,7 +16,10 @@ PLACEMENT_FITS = ("first_fit", "best_fit")
 
 @dataclass(frozen=True)
 class PolicySettings:
-    exclusive_gpu: int = 0
+    # None means no card is reserved for the default model, which is the only
+    # honest default on a machine shared with tenants the scheduler does not
+    # control. Set it only where the GPU really is llmsvc's alone.
+    exclusive_gpu: Optional[int] = None
     fixed_ttl_seconds: float = 600.0
     exclusive_ttl_seconds: float = 3600.0
     shared_ttl_seconds: float = 300.0
@@ -41,8 +44,9 @@ class PolicySettings:
     wake_migration_enabled: bool = True
 
     def __post_init__(self):
-        if isinstance(self.exclusive_gpu, bool) or not isinstance(self.exclusive_gpu, int) or self.exclusive_gpu < 0:
-            raise ValueError("exclusive_gpu must be a non-negative integer")
+        if self.exclusive_gpu is not None and (isinstance(self.exclusive_gpu, bool)
+                                               or not isinstance(self.exclusive_gpu, int) or self.exclusive_gpu < 0):
+            raise ValueError("exclusive_gpu must be a non-negative integer or None")
         if type(self.wake_migration_enabled) is not bool:
             raise ValueError("wake_migration_enabled must be a boolean")
         for key, value in vars(self).items():
@@ -62,7 +66,7 @@ class PolicySettings:
                     or any(isinstance(index, bool) or not isinstance(index, int) or index < 0 for index in pool)
                     or len(set(pool)) != len(pool)):
                 raise ValueError("placement_gpus must be a nonempty tuple of unique non-negative integers")
-            if self.exclusive_gpu not in pool:
+            if self.exclusive_gpu is not None and self.exclusive_gpu not in pool:
                 raise ValueError("placement_gpus must include exclusive_gpu")
         if self.placement_fit not in PLACEMENT_FITS:
             raise ValueError("placement_fit must be first_fit or best_fit")

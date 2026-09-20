@@ -52,7 +52,11 @@ class SchedulerConfig:
     placement_enabled: bool = False
     placement_wait_seconds: float = 120.0
     # Base policy settings shared by placement, free/wake and automation.
-    exclusive_gpu: int = 0
+    # A dedicated GPU for the default model is opt-in and off by default: on a
+    # machine the scheduler shares with other tenants it cannot enforce the
+    # claim, and believing it strands the default model as soon as something
+    # else takes that card.
+    exclusive_gpu: Optional[int] = None
     placement_gpus: Optional[list] = None
     placement_fit: str = "first_fit"
     shared_external_threshold_gb: float = 1.0
@@ -145,15 +149,16 @@ class SchedulerConfig:
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not math.isfinite(value) or value < 0):
             raise ValueError("never_used_idle_seconds must be a finite non-negative number")
-        if isinstance(self.exclusive_gpu, bool) or type(self.exclusive_gpu) is not int or self.exclusive_gpu < 0:
-            raise ValueError("exclusive_gpu must be a non-negative integer")
+        if self.exclusive_gpu is not None and (isinstance(self.exclusive_gpu, bool)
+                                               or type(self.exclusive_gpu) is not int or self.exclusive_gpu < 0):
+            raise ValueError("exclusive_gpu must be a non-negative integer or null")
         if self.placement_gpus is not None:
             pool = self.placement_gpus
             if (not isinstance(pool, list) or not pool
                     or any(isinstance(index, bool) or type(index) is not int or index < 0 for index in pool)
                     or len(set(pool)) != len(pool)):
                 raise ValueError("placement_gpus must be a nonempty list of unique non-negative integers")
-            if self.exclusive_gpu not in pool:
+            if self.exclusive_gpu is not None and self.exclusive_gpu not in pool:
                 raise ValueError("placement_gpus must include exclusive_gpu")
         if self.placement_fit not in ("first_fit", "best_fit"):
             raise ValueError("placement_fit must be first_fit or best_fit")

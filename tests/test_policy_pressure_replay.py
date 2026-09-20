@@ -7,7 +7,7 @@ from time import perf_counter
 
 import pytest
 
-from llmsvc.policy import plan_pressure_sleep, plan_relocation
+from llmsvc.policy import PolicySettings, plan_pressure_sleep, plan_relocation
 from llmsvc.state import Activity, GPUState, MemoryState, ModelState, Reserve, StateSnapshot
 
 CASES = json.loads((Path(__file__).parent / "fixtures/policy/pressure_recovery.json").read_text())["cases"]
@@ -33,8 +33,11 @@ def replay(case):
                                             external_gb=case.get("external_gb", 0))),
                              memory=MemoryState(500, 40 if recovery else 0), reserves=tuple(reserves))
     before = snapshot.to_dict()
+    # A reserved card is opt-in, so a case that replays its longer TTL has to
+    # say which card it is; the rest run with no card reserved.
+    settings = PolicySettings(exclusive_gpu=case["exclusive_gpu"]) if "exclusive_gpu" in case else PolicySettings()
     decision = (plan_relocation(snapshot, model="source", reason=case["reason"])
-                if recovery else plan_pressure_sleep(snapshot))
+                if recovery else plan_pressure_sleep(snapshot, settings=settings))
     assert [a.kind for a in decision.actions] == case["expected"]
     if "destination" in case:
         assert decision.gpu == case["destination"]

@@ -68,8 +68,17 @@ def test_compares_cost_across_gpus_and_can_choose_multiple_victims():
 
 
 def test_default_placement_exclusive_even_when_shared_is_empty_and_cheaper():
-    d = plan_placement(state(resident("ordinary", budget=80, score=100)), request(is_default=True))
+    # An exclusive card is opt-in now, so this asks for one explicitly: where it
+    # is configured, the default model still takes it over an empty shared card.
+    d = plan_placement(state(resident("ordinary", budget=80, score=100)), request(is_default=True),
+                       settings=PolicySettings(exclusive_gpu=0))
     assert d.gpu == 0 and stopped(d) == ["ordinary"]
+
+
+def test_default_placement_is_ordinary_without_an_exclusive_gpu():
+    # The shipped default: no card is reserved, so a free fit beats an eviction.
+    d = plan_placement(state(resident("ordinary", budget=80, score=100)), request(is_default=True))
+    assert d.gpu == 1 and stopped(d) == []
 
 
 def test_default_falls_back_to_shared_when_exclusive_is_blocked():
