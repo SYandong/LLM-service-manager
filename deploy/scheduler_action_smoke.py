@@ -701,11 +701,327 @@ class ActionRun(lifecycle.Run):
     def observation_quiet(self, preflight):
         return lifecycle.scheduler_actions_quiet(preflight, self.model)
 
+    def _resident_enabled(self):
+        return (self.config.get('mode') in ('scheduler-actions','idle_resident')
+                and isinstance(self.config.get('idle_resident'), dict)
+                and self.config['idle_resident'].get('enabled') is True)
+
+    def _resident_pmon(self, gpu_index):
+        """Read two bounded pmon samples; failures remain unknown."""
+        binary=self.config.get('nvidia_smi','nvidia-smi')
+        result=self.command([binary,'pmon','-i',str(gpu_index),'-c','2','-s','um'],limit=3)
+        samples={}
+        for line in result.stdout.splitlines():
+            fields=line.split()
+            if not fields or fields[0].startswith('#') or len(fields)<7:
+                continue
+            try:
+                pid=int(fields[1])
+                sm=None if fields[3] in ('-','N/A') else float(fields[3])
+                mem=None if fields[4] in ('-','N/A') else float(fields[4])
+            except (TypeError,ValueError):
+                continue
+            if pid>0 and (sm is None or math.isfinite(sm)) and (mem is None or math.isfinite(mem)):
+                samples.setdefault(pid,[]).append({'sm_percent':sm,'mem_percent':mem})
+        return samples
+
+    def _host_process_identity(self, host_process):
+        if not isinstance(host_process,dict) or type(host_process.get('pid')) is not int or host_process['pid']<=0:
+            raise lifecycle.SmokeError('protected host PID unavailable')
+        proc=Path('/proc')/str(host_process['pid'])
+        try:
+            start=proc.joinpath('stat').read_text().rsplit(') ',1)[1].split()[19]
+            cgroup=proc.joinpath('cgroup').read_text()
+            pid_namespace=os.readlink(proc.joinpath('ns/pid'))
+            nspid=[]
+            for line in proc.joinpath('status').read_text().splitlines():
+                if line.startswith('NSpid:'):
+                    nspid=[int(value) for value in line.split()[1:]]
+                    break
+        except (OSError,ValueError,IndexError) as exc:
+            raise lifecycle.SmokeError('protected host process identity unavailable') from exc
+        if start != host_process.get('start_ticks') or cgroup != host_process.get('cgroup') or not nspid:
+            raise lifecycle.SmokeError('protected host process identity changed')
+        return {'start_ticks':start,'cgroup':cgroup,'pid_namespace':pid_namespace,'nspid':nspid}
+
+    def _host_cgroup_binds(self, cgroup, unit):
+        return any(path.rstrip('/') == '/system.slice/'+unit or path.rstrip('/').endswith('/'+unit)
+                   for path in (line.rsplit(':',1)[-1] for line in cgroup.splitlines()))
+
+    def _primary_state(self):
+        """Read the configured primary state endpoint before private setup."""
+        reader=getattr(self,'_primary_state_reader',None)
+        if callable(reader):
+            return reader()
+        spec=self.config.get('idle_resident',{})
+        url=spec.get('primary_state_url')
+        if not isinstance(url,str) or not url.startswith(('http://','https://')):
+            raise lifecycle.SmokeError('idle_resident primary state target unavailable')
+        code='''import json,sys,urllib.request
+x=json.load(sys.stdin);req=urllib.request.Request(x["url"])
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+ def redirect_request(self,*a,**k):return None
+opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
+with opener.open(req,timeout=2) as r:
+ if r.status!=200:raise RuntimeError("primary state status")
+ raw=r.read(1048577)
+ if len(raw)>1048576:raise RuntimeError("primary state too large")
+ print(raw.decode())
+'''
+        result=self.container(['python3','-B','-c',code],input=json.dumps({'url':url}),limit=3)
+        return json.loads(result.stdout)
+
+    def _primary_ledger(self):
+        """Read the existing IntentStore lease table through SQLite mode=ro."""
+        reader=getattr(self,'_primary_ledger_reader',None)
+        if callable(reader):
+            return reader()
+        spec=self.config.get('idle_resident',{});path=spec.get('primary_ledger_path')
+        if not isinstance(path,str) or not path.startswith('/'):
+            raise lifecycle.SmokeError('idle_resident primary ledger target unavailable')
+        code='''import json,sqlite3,sys,time
+x=json.load(sys.stdin);uri="file:"+x["path"]+"?mode=ro"
+db=sqlite3.connect(uri,uri=True,timeout=2)
+try:
+ rows=db.execute("SELECT lease_id,model,gpu,util,expires_at,budget_gb,status,unit FROM llmsvc_leases ORDER BY model,lease_id").fetchall()
+ leases=[dict(zip(("lease_id","model","gpu","util","expires_at","budget_gb","status","unit"),row)) for row in rows]
+ blockers=[]
+ tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+ if "llmsvc_reserves" in tables:
+  blockers += [{"kind":"reserve","id":row[0]} for row in db.execute("SELECT id FROM llmsvc_reserves WHERE until > ?",(time.time(),))]
+ if "llmsvc_faults" in tables:
+  blockers += [{"kind":"fault","id":row[0]} for row in db.execute("SELECT lease_id FROM llmsvc_faults WHERE stage != 'complete'")]
+ if "llmsvc_recoveries" in tables:
+  blockers += [{"kind":"recovery","id":row[0]} for row in db.execute("SELECT id FROM llmsvc_recoveries WHERE stage NOT IN ('complete','aborted','rolled_back')")]
+ print(json.dumps({"leases":leases,"blockers":blockers},allow_nan=False))
+finally:db.close()
+'''
+        result=self.container(['python3','-B','-c',code],input=json.dumps({'path':path}),limit=3)
+        rows=json.loads(result.stdout)
+        if not isinstance(rows,dict) or not isinstance(rows.get('leases'),list) or not isinstance(rows.get('blockers'),list):
+            raise lifecycle.SmokeError('primary ledger response malformed')
+        return rows
+
+    def _primary_probe(self, port):
+        """Probe real protected daemon endpoints; health may have an empty body."""
+        probe=getattr(self,'_primary_probe_reader',None)
+        if callable(probe):
+            return probe(port)
+        if type(port) is not int or not 1<=port<=65535:
+            raise lifecycle.SmokeError('protected model port unavailable')
+        code='''import json,sys,urllib.request
+x=json.load(sys.stdin)
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+ def redirect_request(self,*a,**k):return None
+opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
+def check_health():
+ with opener.open(urllib.request.Request(x["base"]+"/health"),timeout=1) as r:
+  if r.status!=200:raise RuntimeError("/health status")
+def check_sleeping():
+ with opener.open(urllib.request.Request(x["base"]+"/is_sleeping"),timeout=1) as r:
+  if r.status!=200:raise RuntimeError("/is_sleeping status")
+  raw=r.read(65537)
+  if len(raw)>65536:raise RuntimeError("/is_sleeping too large")
+  value=json.loads(raw.decode())
+  if not isinstance(value,dict) or value.get("is_sleeping") is not True:raise RuntimeError("sleeping proof")
+check_health();check_sleeping();print(json.dumps({"health":True,"sleeping":True}))
+'''
+        result=self.container(['python3','-B','-c',code],input=json.dumps({'base':'http://127.0.0.1:'+str(port)}),limit=3)
+        return {'health':True,'sleeping':True}
+
+    def _primary_unit_identity(self, unit, model, lease_id, host_process):
+        """Use the existing container/systemd namespace, bound to host cgroup identity."""
+        reader=getattr(self,'_primary_unit_reader',None)
+        if callable(reader):
+            return reader(unit,model,lease_id,host_process)
+        host_before=self._host_process_identity(host_process)
+        if not self._host_cgroup_binds(host_before['cgroup'],unit):
+            raise lifecycle.SmokeError('protected host cgroup is not bound to unit')
+        code='''import json,os,subprocess,sys
+x=json.load(sys.stdin)
+def read():
+ show=subprocess.run(["systemctl","show",x["unit"],"-p","Id","-p","MainPID","-p","InvocationID","-p","ControlGroup","-p","Environment"],capture_output=True,text=True,check=True)
+ v=dict(line.split("=",1) for line in show.stdout.splitlines() if "=" in line)
+ main_pid=int(v.get("MainPID","0"));
+ if (v.get("Id")!=x["unit"] or main_pid<=0 or not v.get("InvocationID")
+     or not v.get("ControlGroup")):raise RuntimeError("protected unit binding")
+ main_proc="/proc/"+str(main_pid);target_proc="/proc/"+str(x["namespace_pid"]);env={}
+ main_cg=open(main_proc+"/cgroup").read()
+ if not any(line.rsplit(":",1)[-1].rstrip("/") == v["ControlGroup"].rstrip("/") for line in main_cg.splitlines()):raise RuntimeError("protected main cgroup binding")
+ for item in open(target_proc+"/environ","rb").read().split(b"\\0"):
+  if not item:continue
+  if b"=" not in item:raise RuntimeError("protected process environment malformed")
+  key,value=item.split(b"=",1);key=key.decode();value=value.decode()
+  if key in env:raise RuntimeError("protected process environment duplicated")
+  env[key]=value
+ ticks=open(target_proc+"/stat").read().rsplit(") ",1)[1].split()[19];cg=open(target_proc+"/cgroup").read()
+ pid_namespace=os.readlink(target_proc+"/ns/pid")
+ if not any(line.rsplit(":",1)[-1].rstrip("/") == v["ControlGroup"].rstrip("/") for line in cg.splitlines()):raise RuntimeError("protected cgroup binding")
+ if ticks != x["host_start_ticks"]:raise RuntimeError("host/container start identity mismatch")
+ if pid_namespace != x["host_pid_namespace"]:raise RuntimeError("host/container PID namespace mismatch")
+ if env.get("LLMSVC_MODEL")!=x["model"] or env.get("LLMSVC_LEASE_ID")!=x["lease"] or env.get("CUDA_VISIBLE_DEVICES")!=str(x["gpu"]):raise RuntimeError("protected process binding")
+ return v,main_pid,ticks,cg,pid_namespace
+first=read();second=read()
+if any(first[i]!=second[i] for i in (0,1,2,3,4)):raise RuntimeError("protected unit changed")
+print(json.dumps({"unit":x["unit"],"pid":x["namespace_pid"],"start_ticks":first[2],"cgroup":first[3],"pid_namespace":first[4],"invocation_id":first[0].get("InvocationID","")}))
+'''
+        result=self.container(['python3','-B','-c',code],input=json.dumps({'unit':unit,'model':model,'lease':lease_id,'gpu':self.config['gpu'],
+                                                                          'namespace_pid':host_before['nspid'][-1],
+                                                                          'host_start_ticks':host_before['start_ticks'],
+                                                                          'host_pid_namespace':host_before['pid_namespace']}),limit=3)
+        host_after=self._host_process_identity(host_process)
+        if host_after != host_before:raise lifecycle.SmokeError('protected host process changed during proof')
+        identity=json.loads(result.stdout)
+        if identity.get('start_ticks')!=host_before['start_ticks'] or identity.get('pid_namespace')!=host_before['pid_namespace']:
+            raise lifecycle.SmokeError('host/container process identity mismatch')
+        return identity
+
+    def resident_observation(self, gpu, current_processes):
+        """Build fresh proof from the independent primary state and ledger."""
+        state=self._primary_state(); now=time.time()
+        if (not isinstance(state,dict) or type(state.get('schema_version')) is not int
+                or type(state.get('sampled_at')) not in (int,float)
+                or not math.isfinite(state['sampled_at']) or state['sampled_at']>now
+                or now-state['sampled_at']>5 or state.get('errors')!=[]):
+            raise lifecycle.SmokeError('idle_resident primary state stale or malformed')
+        models=state.get('models'); activities=state.get('activity'); gpus=state.get('gpus')
+        if not isinstance(models,list) or not isinstance(activities,list) or not isinstance(gpus,list):
+            raise lifecycle.SmokeError('idle_resident primary state shape unknown')
+        model_names=[row.get('name') if isinstance(row,dict) else None for row in models]
+        if (any(not isinstance(name,str) or not name for name in model_names)
+                or len(model_names)!=len(set(model_names))):
+            raise lifecycle.SmokeError('idle_resident primary model rows malformed or duplicated')
+        gpu_rows=[row for row in gpus if isinstance(row,dict) and row.get('index')==self.config['gpu']]
+        if len(gpu_rows)!=1 or gpu_rows[0].get('uuid')!=gpu['uuid']:
+            raise lifecycle.SmokeError('idle_resident primary GPU binding mismatch')
+        if not activities or any(not isinstance(row,dict) or not isinstance(row.get('model'),str)
+                                 or type(row.get('in_flight')) is not int or row['in_flight']<0 for row in activities):
+            raise lifecycle.SmokeError('idle_resident primary inflight observation unknown')
+        inflight=sum(row['in_flight'] for row in activities)
+        if state.get('blocked_by'):
+            raise lifecycle.SmokeError('idle_resident primary state has pending blockers')
+        ledger_result=self._primary_ledger()
+        if not isinstance(ledger_result,dict):raise lifecycle.SmokeError('idle_resident primary ledger malformed')
+        if ledger_result.get('blockers'):raise lifecycle.SmokeError('idle_resident primary ledger has pending fences')
+        ledger=ledger_result.get('leases')
+        if not isinstance(ledger,list) or not ledger:raise lifecycle.SmokeError('idle_resident primary ledger unavailable')
+        lease_ids=[row.get('lease_id') if isinstance(row,dict) else None for row in ledger]
+        if (any(not isinstance(row,dict) or not isinstance(row.get('lease_id'),str)
+                or not isinstance(row.get('model'),str) or type(row.get('gpu')) is not int
+                or not isinstance(row.get('unit'),str) or row.get('status') not in ('pending','stale','confirmed','released')
+                or type(row.get('budget_gb')) not in (int,float)
+                or not math.isfinite(row['budget_gb']) or row['budget_gb']<=0 for row in ledger)
+                or len(lease_ids)!=len(set(lease_ids))):
+            raise lifecycle.SmokeError('idle_resident primary lease rows malformed')
+        resident=self.config.get('idle_resident',{});expected_protected=resident.get('protected_processes',[])
+        expected_baseline=resident.get('baseline_processes',[])
+        if not isinstance(expected_protected,list) or not expected_protected:
+            raise lifecycle.SmokeError('idle_resident protected identity proof is required')
+        if not isinstance(expected_baseline,list):raise lifecycle.SmokeError('idle_resident baseline identities malformed')
+        protected_expected_names={row.get('model') for row in expected_protected if isinstance(row,dict)}
+        if any(row['status'] in ('pending','stale') and (row['gpu']==self.config['gpu'] or row['model'] in protected_expected_names)
+               for row in ledger):
+            raise lifecycle.SmokeError('idle_resident primary lease is pending or stale')
+        activity_models={row['model'] for row in activities}
+        if not protected_expected_names.issubset(activity_models):
+            raise lifecycle.SmokeError('idle_resident protected activity coverage unavailable')
+        current_by_id={(row.get('gpu_uuid'),row.get('pid'),row.get('start_ticks'),row.get('cgroup')):row
+                       for row in current_processes if isinstance(row,dict)}
+        pmon=self._resident_pmon(self.config['gpu'])
+        def idle_samples(samples):
+            return (isinstance(samples,list) and len(samples)>=2 and all(
+                isinstance(item,dict) and type(item.get('sm_percent')) in (int,float)
+                and type(item.get('mem_percent')) in (int,float)
+                and math.isfinite(item['sm_percent']) and math.isfinite(item['mem_percent'])
+                and item['sm_percent']<=resident.get('idle_util_percent',1)
+                and item['mem_percent']<=resident.get('idle_util_percent',1) for item in samples))
+        def protected_samples(samples):
+            if not isinstance(samples,list) or not samples:return True
+            for item in samples:
+                if not isinstance(item,dict):return False
+                for key in ('sm_percent','mem_percent'):
+                    value=item.get(key)
+                    if value is not None and (type(value) not in (int,float) or not math.isfinite(value)
+                                               or value>0):
+                        return False
+            return True
+        protected=[];protected_names=set()
+        for expected in expected_protected:
+            if not isinstance(expected,dict) or not isinstance(expected.get('model'),str):
+                raise lifecycle.SmokeError('idle_resident protected identity expectation malformed')
+            name=expected['model'];
+            if name in protected_names:raise lifecycle.SmokeError('idle_resident protected identities duplicated')
+            protected_names.add(name)
+            rows=[row for row in models if isinstance(row,dict) and row.get('name')==name]
+            if len(rows)!=1:raise lifecycle.SmokeError('idle_resident protected model observation ambiguous')
+            model=rows[0]
+            if (model.get('gpu')!=self.config['gpu'] or model.get('state')!='sleeping'
+                    or model.get('is_sleeping') is not True or model.get('health_ok') is not True
+                    or type(model.get('port')) is not int):
+                raise lifecycle.SmokeError('idle_resident protected model sleep/health proof unavailable')
+            lease_rows=[row for row in ledger if row['model']==name and row['gpu']==self.config['gpu']
+                        and row['unit']==model.get('unit') and row['status']=='confirmed']
+            if len(lease_rows)!=1:raise lifecycle.SmokeError('idle_resident protected ledger/unit proof unavailable')
+            lease=lease_rows[0]
+            identity={k:expected.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup')}
+            key=tuple(identity.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup'))
+            if any(identity.get(k) in (None,'') for k in ('gpu_uuid','pid','start_ticks','cgroup')) or key not in current_by_id:
+                raise lifecycle.SmokeError('idle_resident protected process identity unavailable')
+            if not protected_samples(pmon.get(identity['pid'])):
+                raise lifecycle.SmokeError('idle_resident protected process is not idle')
+            probe=self._primary_probe(model['port'])
+            if not isinstance(probe,dict) or probe.get('health') is not True or probe.get('sleeping') is not True:
+                raise lifecycle.SmokeError('idle_resident protected HTTP proof unavailable')
+            checked=self._primary_unit_identity(model.get('unit'),name,lease['lease_id'],current_by_id[key])
+            protected_counter_samples=pmon.get(identity['pid'],[])
+            counter_status=('unknown' if not protected_counter_samples or any(
+                item.get('sm_percent') is None or item.get('mem_percent') is None
+                for item in protected_counter_samples) else 'finite_idle')
+            protected.append({**identity,'model':name,'ledger_status':'confirmed','model_state':'sleeping',
+                              'health_status':'sleeping','full_budget_gb':lease['budget_gb'],
+                              'counter_status':counter_status,'unit_identity':checked})
+        for model in models:
+            if (isinstance(model,dict) and model.get('name')!=self.model
+                    and model.get('gpu')==self.config['gpu']
+                    and model.get('name') not in protected_names):
+                raise lifecycle.SmokeError('idle_resident unclassified protected model')
+        baseline=[]
+        for expected in expected_baseline:
+            if not isinstance(expected,dict):raise lifecycle.SmokeError('idle_resident baseline identity malformed')
+            key=tuple(expected.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup'))
+            row=current_by_id.get(key);samples=pmon.get(expected.get('pid'),[])
+            if row is None or len(samples)<2:raise lifecycle.SmokeError('idle_resident baseline proof unavailable')
+            baseline.append({**expected,'utilization_samples':samples})
+        external_ids={tuple(row.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup'))
+                      for row in current_processes if isinstance(row,dict) and not self._process_owned(row)}
+        expected_ids={tuple(row.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup'))
+                      for row in expected_baseline+expected_protected if isinstance(row,dict)}
+        if external_ids-set(expected_ids):raise lifecycle.SmokeError('idle_resident unknown external process')
+        external_baseline=sum(float(row.get('used_memory_mib',0))/1024 for row in current_processes
+                              if isinstance(row,dict) and tuple(row.get(k) for k in ('gpu_uuid','pid','start_ticks','cgroup')) in external_ids)
+        return {'source':'collector','ledger_source':'state+ledger','unit_source':'systemd+proc',
+                'capacity_source':'nvidia-smi','sampled_at':state['sampled_at'],'inflight':inflight,
+                'protected_processes':protected,'baseline_processes':baseline,
+                'external_baseline_gb':external_baseline,'candidate_util':self.config.get('util')}
+
+    def _process_owned(self, row):
+        return lifecycle.cgroup_owned(row.get('cgroup',''),self.unit)
+
+    def _resident_unit_identity(self, unit, model, lease):
+        return unit_identity(unit,self.token,lease=lease,model=model,deadline=self.deadline)
+
+    def inventory(self, *, allow_own=False, allow_resident=False):
+        if allow_resident is False and self._resident_enabled() and getattr(self,'profile',None) is not None:
+            allow_resident=True
+        return super().inventory(allow_own=allow_own,allow_resident=allow_resident)
+
     def __init__(self,config):
         super().__init__(config)
         self.scheduler_unit='llmsvc-ops-action-scheduler-'+self.token+'.service'
         self.source_unit='llmsvc-ops-action-source-'+self.token+'.service'
         self.units=[];self.lease=None;self.preserve=False;self.measured_phases=set();self.phase_measurements={}
+        self._submitted_requests=[];self._submitted_receipts=[]
+        self._resident_worker_observed=False
 
     def _ledger_release_witness(self, binding):
         code='''import json,sqlite3,sys
@@ -915,7 +1231,7 @@ print('{}')
 
     def phase(self,name,seconds):
         if self.deadline-time.monotonic()<=60:raise lifecycle.SmokeError('insufficient remaining action/cleanup budget')
-        self.inventory(allow_own=self.attempted and name!='cold')
+        self.inventory(allow_own=self.attempted and name!='cold', allow_resident=self._resident_enabled())
         if name=='cold':self.attempted=True
         request_id=uuid.uuid4().hex;input_name='request-'+request_id+'.json';output_name='result-'+request_id+'.json'
         request={'id':request_id,'operation':name,'output':output_name,
@@ -923,8 +1239,18 @@ print('{}')
         self.python("import json,sys;from pathlib import Path;x=json.load(sys.stdin);p=Path(x['root'])/x['name'];p.write_text(json.dumps(x['data']));p.chmod(0o600);print('{}')",
                     {'root':self.temp,'name':input_name,'data':request})
         unit='llmsvc-ops-action-request-'+request_id+'.service'
-        self.control(unit,[self.config['scheduler_python'],'-B',self.temp+'/runtime/deploy/scheduler_action_smoke.py',
-                           'request',self.temp+'/profile.json',input_name],seconds+3)
+        submitted={'id':request_id,'operation':name,'output':output_name,
+                   'unit':unit,'deadline':request['deadline'],'submission_state':'attempted'}
+        self._submitted_requests.append(submitted)
+        try:
+            self.control(unit,[self.config['scheduler_python'],'-B',self.temp+'/runtime/deploy/scheduler_action_smoke.py',
+                               'request',self.temp+'/profile.json',input_name],seconds+3)
+        except Exception:
+            submitted['submission_state']='unknown'
+            self.log('action_submission_unknown',request_id=request_id,operation=name,unit=unit,output=output_name)
+            raise
+        submitted['submission_state']='submitted'
+        self.log('action_submitted',request_id=request_id,operation=name,unit=unit,output=output_name)
         while time.monotonic()<request['deadline']+3:
             self.inventory(allow_own=True)
             value=self.python("import json,sys;from pathlib import Path;x=json.load(sys.stdin);p=Path(x['root'])/x['name'];print(p.read_text() if p.exists() else '{}')",
@@ -953,6 +1279,37 @@ print('{}')
                 raise lifecycle.SmokeError('request unit exited without a complete receipt')
             time.sleep(.5)
         raise lifecycle.SmokeError('bounded action request did not complete')
+
+    def _capture_submitted_receipts(self):
+        """Capture only matching bounded receipts before deciding file cleanup."""
+        requests=getattr(self,'_submitted_requests',())
+        if not requests:
+            return
+        code='''import json,sys
+from pathlib import Path
+x=json.load(sys.stdin);p=Path(x['root'])/x['name']
+if not p.is_file():print('null')
+else:
+ with p.open('rb') as stream:
+  raw=stream.read(262145)
+ if len(raw)>262144:raise RuntimeError('submitted receipt too large')
+ print(raw.decode())
+'''
+        for request in requests:
+            value=None
+            try:
+                value=self.python(code,{'root':self.temp,'name':request['output']},cleanup=True,limit=2)
+            except Exception:
+                value=None
+            if (not isinstance(value,dict) or value.get('local_request_id')!=request['id']
+                    or value.get('operation')!=request['operation']):
+                self.preserve=True
+                self.log('submitted_outcome_unknown',request_id=request['id'],operation=request['operation'],
+                         output=request['output'])
+                continue
+            self._submitted_receipts.append(value)
+            self.log('submitted_receipt_captured',request_id=request['id'],operation=request['operation'],
+                     status=value.get('status'),receipt=value)
 
     def daemon_binding(self, *, cleanup=False):
         code='''import json,sys,subprocess
@@ -1094,6 +1451,10 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity,'control_g
                         lifecycle.remaining(end,2);time.sleep(.2)
                     else:raise lifecycle.SmokeError('control unit did not exit before cleanup deadline')
             except Exception as exc:errors.append(str(exc));self.preserve=True
+        try:
+            self._capture_submitted_receipts()
+        except Exception as exc:
+            errors.append(str(exc));self.preserve=True
         if self.temp_created and not self.preserve:
             self.python("import json,sys,shutil;from pathlib import Path;x=json.load(sys.stdin);p=Path(x['root']);\nif p.exists():\n assert not p.is_symlink() and (p/'owner').read_text()==x['token'];shutil.rmtree(p)\nprint('{}')",
                         {'root':self.temp,'token':self.token},cleanup=True)
@@ -1104,7 +1465,7 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity,'control_g
         result='failed'
         cleanup_succeeded=True
         try:
-            gpu=self.inventory();self.gpu_uuid=gpu[1]
+            gpu=self.inventory(allow_resident=self._resident_enabled());self.gpu_uuid=gpu[1]
             if self.container(['systemctl','show',self.unit,'-p','LoadState','--value']).stdout.strip()!='not-found':
                 raise lifecycle.SmokeError('test daemon unit already exists')
             self.prepare();self.inventory()
@@ -1123,6 +1484,8 @@ print(json.dumps({'absent':False,'lease_id':lease,'identity':identity,'control_g
                 lifecycle.remaining(self.work_deadline,1);time.sleep(.2)
             self.profile['control_instances']=self.identities()
             self.python("import json,sys;from pathlib import Path;x=json.load(sys.stdin);(Path(x['root'])/'profile.json').write_text(json.dumps(x));print('{}')",self.profile)
+            if self._resident_enabled():
+                self.inventory(allow_resident=True)
             self.phase('cold',self.config.get('startup_seconds',150))
             self.wait_free_eligible()
             self.phase('free',25);self.phase('wake',25)

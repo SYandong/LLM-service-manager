@@ -29,7 +29,7 @@ from llmsvc.config import SchedulerConfig
 from llmsvc.leases import PlacementController,UnitObservation
 from llmsvc.scheduler import Scheduler
 from llmsvc.server import SchedulerHTTPServer
-from llmsvc.state import StateSnapshot,GPUState,MemoryState,ModelState,Activity
+from llmsvc.state import StateSnapshot,GPUState,MemoryState,ModelState,Activity,Lease
 from llmsvc.store import IntentStore
 
 ROOT=Path(__file__).parents[1]
@@ -207,7 +207,7 @@ def test_scheduler_wake_cold_route_owns_one_post_and_validates_final_response(re
             evidence=receipt['evidence']
             assert all(field in evidence for field in ('started_wall','started_monotonic','post_returned_monotonic','progress_truncated','identity_checks'))
             assert evidence['progress_truncated'] is False and evidence['identity_checks']['account'] is True
-            run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='model';run.unit='vllm-model.service';run.temp=str(root);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run.config={'scheduler_python':sys.executable};run.log=lambda *a,**k:None;run.inventory=lambda **_:None;run.control=lambda *a,**k:None
+            run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='model';run.unit='vllm-model.service';run.temp=str(root);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run._submitted_requests=[];run._submitted_receipts=[];run.config={'scheduler_python':sys.executable};run.log=lambda *a,**k:None;run.inventory=lambda **_:None;run.control=lambda *a,**k:None
             monkeypatch.setattr(smoke.uuid,'uuid4',lambda:SimpleNamespace(hex=request_id))
             run.python=lambda code,data,**kwargs: (Path(data['root'],data['name']).write_text(json.dumps(data['data'])) or {}) if 'write_text' in code else json.loads(Path(data['root'],data['name']).read_text())
             consumed=run.phase('cold',1)
@@ -302,6 +302,223 @@ def test_scheduler_wake_expired_before_worker_invoke_does_not_post(monkeypatch):
     assert posts==[] and closed and closed[0]>0
 
 
+def _resident_boundary_run(monkeypatch, tmp_path, *, stale=False, active_baseline=False, own=False):
+    run=smoke.ActionRun.__new__(smoke.ActionRun)
+    pid=os.getpid();proc=Path('/proc')/str(pid)
+    ticks=proc.joinpath('stat').read_text().rsplit(') ',1)[1].split()[19]
+    cgroup=proc.joinpath('cgroup').read_text().split(':',2)[-1].strip().rstrip('/')
+    unit=cgroup.rsplit('/',1)[-1] or 'fixture.service'
+    protected={'gpu_uuid':'GPU0','pid':pid,'start_ticks':ticks,
+               'cgroup':'/system.slice/vllm-protected.service','model':'protected'}
+    baseline={'gpu_uuid':'GPU0','pid':pid+1,'start_ticks':'100000',
+              'cgroup':'/user.slice/external.service'}
+    run.config={'mode':'scheduler-actions','gpu':0,'util':.07,'nvidia_smi':'nvidia-smi',
+                'idle_resident':{'enabled':True,'margin_gb':4,'idle_util_percent':1,
+                    'candidate_full_budget_gb':99,'external_baseline_gb':99,
+                    'inflight':99,'protected_processes':[protected],
+                    'baseline_processes':[] if own else [baseline]}}
+    run.token='token';run.model='candidate';run.unit=unit;run.deadline=time.monotonic()+10
+    run.work_deadline=run.deadline-1;run.profile={'scheduler_url':'http://scheduler'};run.records=[]
+    run._idle_owned_processes=[];run.port=None
+    current=[{**protected,'used_memory_mib':'128'}]
+    if not own:
+        current.append({**baseline,'used_memory_mib':'128'})
+    else:
+        current.append({'gpu_uuid':'GPU0','pid':pid+1,'start_ticks':'100001',
+                         'cgroup':'/system.slice/'+unit,'used_memory_mib':'128'})
+    state=StateSnapshot(sampled_at=time.time()-(10 if stale else 0),read_only=False,errors=(),
+        gpus=(GPUState(0,uuid='GPU0',total_gb=140.0,free_gb=139.0,utilization_percent=0.0),),
+        models=(ModelState('protected',state='sleeping',gpu=0,unit='vllm-protected.service',
+                           health_ok=True,is_sleeping=True,port=8101,budget_gb=42),),
+        activity=(Activity('protected',in_flight=0),),leases=())
+    state_dict=json.loads(json.dumps(state.to_dict()))
+    state_dict['errors']=[]
+    store=IntentStore(str(tmp_path/'primary.sqlite'),action_lock=threading.RLock())
+    store.create_lease(Lease('lease-protected','protected',0,.3,time.time()+600,42,'pending'),
+                       'vllm-protected.service')
+    store.transition_lease('lease-protected','confirmed')
+    store.close()
+    ledger_path=tmp_path/'primary.sqlite'
+    def command(argv, **kwargs):
+        if any(item.startswith('--query-gpu=') for item in argv):
+            return subprocess.CompletedProcess(argv,0,'0, GPU0, 143360.0, 1024.0, 142336.0, 0.0\n','')
+        if any(item.startswith('--query-compute-apps=') for item in argv):
+            text=f'GPU0, {pid}, owned, 128\n'
+            return subprocess.CompletedProcess(argv,0,text,'')
+        if argv[1:2]==['pmon']:
+            util='2.0' if active_baseline else '0.0'
+            mem='2.0' if active_baseline else '0.0'
+            other_pid=pid+1
+            other_line=f'0 {other_pid} C {util} {mem} 0 0 0 python\n'
+            return subprocess.CompletedProcess(argv,0,
+                f'# gpu pid type sm mem enc dec command\n0 {pid} C 0.0 0.0 0 0 0 protected\n'+other_line,'')
+        raise AssertionError(argv)
+    run.command=command
+    run.process_records=lambda processes,**kwargs:list(current)
+    run._resident_state=state_dict
+    run._primary_state_reader=lambda:run._resident_state
+    def ledger_reader():
+        db=sqlite3.connect('file:'+str(ledger_path)+'?mode=ro',uri=True)
+        try:
+            return {'leases':[dict(zip(('lease_id','model','gpu','util','expires_at','budget_gb','status','unit'),row))
+                    for row in db.execute('SELECT lease_id,model,gpu,util,expires_at,budget_gb,status,unit FROM llmsvc_leases')],
+                    'blockers':[]}
+        finally:db.close()
+    run._primary_ledger_reader=ledger_reader
+    run._primary_probe_reader=lambda port:{'health':True,'sleeping':True}
+    run._primary_unit_reader=lambda unit,model,lease,host:{'unit':unit,'pid':host['pid'],
+                                                             'start_ticks':host['start_ticks'],'cgroup':host['cgroup']}
+    if own:
+        run._resident_pmon=lambda _gpu:{pid:[{'sm_percent':0.0,'mem_percent':0.0}]*2,
+                                         pid+1:[{'sm_percent':2.0,'mem_percent':2.0}]*2}
+    run.json_at=lambda url,path,*args,**kwargs: state_dict
+    run.python=lambda code,data,**kwargs: {'events':[{'type':'modelStatus','data':'[]'},
+        {'type':'inflight','data':'{"operation":"snapshot","requests":[]}'}],
+        'cached_weights_complete':True,'weight_bytes':1000000,'port':12345}
+    monkeypatch.setattr(smoke.lifecycle,'check_host_capacity',lambda *a,**k:None)
+    return run
+
+
+@pytest.mark.parametrize('case', ['stale_static','active_baseline','own_activity'])
+def test_action_run_idle_resident_uses_fresh_boundary_observation(monkeypatch, tmp_path, case):
+    run=_resident_boundary_run(monkeypatch,tmp_path,stale=case=='stale_static',
+                               active_baseline=case=='active_baseline', own=case=='own_activity')
+    if case=='own_activity':
+        assert run.inventory(allow_own=True,allow_resident=True)[1]=='GPU0'
+    else:
+        with pytest.raises(life.SmokeError):run.inventory(allow_resident=True)
+
+
+def test_action_run_idle_resident_does_not_accept_static_sleeping_booleans(monkeypatch,tmp_path):
+    run=_resident_boundary_run(monkeypatch,tmp_path)
+    run._resident_state={**run._resident_state,
+        'models':[{'name':'protected','state':'ready','gpu':0,'unit':'vllm-protected.service',
+                   'health_ok':False,'is_sleeping':False,'port':8101,'budget_gb':42}]}
+    run.config['idle_resident']['protected_processes'][0]['sleeping_proof']=True
+    with pytest.raises(life.SmokeError,match='sleep/health'):
+        run.inventory(allow_resident=True)
+
+
+def test_action_run_idle_resident_rejects_missing_protected_process_identity(monkeypatch,tmp_path):
+    run=_resident_boundary_run(monkeypatch,tmp_path)
+    run.config['idle_resident']['protected_processes'][0].pop('start_ticks')
+    with pytest.raises(life.SmokeError,match='protected process identity'):
+        run.inventory(allow_resident=True)
+
+
+def test_action_run_idle_resident_rejects_missing_primary_activity_coverage(monkeypatch,tmp_path):
+    run=_resident_boundary_run(monkeypatch,tmp_path)
+    run._resident_state={**run._resident_state,'activity':[]}
+    with pytest.raises(life.SmokeError,match='inflight observation'):
+        run.inventory(allow_resident=True)
+
+
+def test_action_run_idle_resident_allows_unknown_protected_counters_with_sleep_proof(monkeypatch,tmp_path):
+    run=_resident_boundary_run(monkeypatch,tmp_path)
+    protected_pid=run.config['idle_resident']['protected_processes'][0]['pid']
+    baseline_pid=run.config['idle_resident']['baseline_processes'][0]['pid']
+    run._resident_pmon=lambda _gpu:{protected_pid:[{'sm_percent':None,'mem_percent':None}]*2,
+                                     baseline_pid:[{'sm_percent':0.0,'mem_percent':0.0}]*2}
+    assert run.inventory(allow_resident=True)[1]=='GPU0'
+
+
+@pytest.mark.parametrize('change', ['loss','pid','start_ticks','extra'])
+def test_action_run_idle_resident_cold_start_preserves_first_worker_identity(monkeypatch,tmp_path,change):
+    run=_resident_boundary_run(monkeypatch,tmp_path,own=True)
+    protected=run.config['idle_resident']['protected_processes'][0]
+    worker={'gpu_uuid':'GPU0','pid':protected['pid']+1,'start_ticks':'100001',
+            'cgroup':'/system.slice/'+run.unit,'used_memory_mib':'128'}
+    changes={'loss':[],
+             'pid':[{**worker,'pid':worker['pid']+1}],
+             'start_ticks':[{**worker,'start_ticks':'100002'}],
+             'extra':[worker,{**worker,'pid':worker['pid']+1}]}
+    sequence=iter([[{**protected,'used_memory_mib':'128'}],
+                   [{**protected,'used_memory_mib':'128'},worker],
+                   [{**protected,'used_memory_mib':'128'},*changes[change]]])
+    run.process_records=lambda processes,**kwargs:next(sequence)
+    run.attempted=True
+    assert run.inventory(allow_own=True,allow_resident=True)[1]=='GPU0'
+    assert run.inventory(allow_own=True,allow_resident=True)[1]=='GPU0'
+    with pytest.raises(life.SmokeError,match='owned daemon identity'):
+        run.inventory(allow_own=True,allow_resident=True)
+
+
+@pytest.mark.parametrize('sleeping_body', [b'{"is_sleeping": false}', b'not-json'])
+def test_primary_probe_executes_real_loopback_code_and_rejects_bad_sleeping(sleeping_body):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*args):pass
+        def do_GET(self):
+            if self.path=='/health':body=b''
+            elif self.path=='/is_sleeping':body=sleeping_body
+            else:self.send_response(404);self.end_headers();return
+            self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.config={'container':'fixture'}
+    def container(argv,**kwargs):
+        result=subprocess.run(argv,input=kwargs.get('input'),capture_output=True,text=True,timeout=3)
+        if result.returncode:raise life.SmokeError(result.stderr or 'probe failed')
+        return result
+    run.container=container
+    try:
+        with pytest.raises(life.SmokeError):run._primary_probe(server.server_port)
+    finally:
+        server.shutdown();server.server_close();thread.join(2)
+
+
+@pytest.mark.parametrize('lease_env,expect_success',[('lease-protected',True),('wrong-lease',False)])
+def test_primary_unit_identity_executes_remote_namespace_and_rechecks_byte_env(tmp_path,lease_env,expect_success):
+    model='protected';lease='lease-protected';
+    child=subprocess.Popen([sys.executable,'-B','-c','import time;time.sleep(4)'],env={**os.environ,
+        'LLMSVC_MODEL':model,'LLMSVC_LEASE_ID':lease_env,'CUDA_VISIBLE_DEVICES':'0'})
+    host_cgroup=Path('/proc/'+str(child.pid)+'/cgroup').read_text()
+    control_group=host_cgroup.split(':',2)[-1].strip().rstrip('/')
+    unit=control_group.rsplit('/',1)[-1] or 'fixture.service'
+    systemctl=tmp_path/'systemctl';systemctl.write_text(
+        '#!/bin/sh\necho Id='+unit+'\necho MainPID='+str(child.pid)+'\necho InvocationID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+        'echo ControlGroup='+control_group+'\necho Environment=LLMSVC_MODEL=protected LLMSVC_LEASE_ID=lease-protected\n')
+    systemctl.chmod(0o700)
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.config={'gpu':0}
+    def container(argv,**kwargs):
+        result=subprocess.run(argv,input=kwargs.get('input'),capture_output=True,text=True,timeout=3,
+                              env={**os.environ,'PATH':str(tmp_path)+':'+os.environ.get('PATH','')})
+        if result.returncode:raise life.SmokeError(result.stderr or 'identity failed')
+        return result
+    run.container=container
+    start_ticks=Path('/proc/'+str(child.pid)+'/stat').read_text().rsplit(') ',1)[1].split()[19]
+    host={'gpu_uuid':'GPU0','pid':child.pid,'start_ticks':start_ticks,
+          'cgroup':host_cgroup}
+    try:
+        if expect_success:
+            identity=run._primary_unit_identity(unit,model,lease,host)
+            assert identity['unit']==unit and identity['pid']==child.pid
+        else:
+            with pytest.raises(life.SmokeError):run._primary_unit_identity(unit,model,lease,host)
+    finally:
+        child.terminate();child.wait(timeout=3)
+
+
+def test_primary_unit_identity_rejects_wrong_host_start_before_remote(tmp_path):
+    child=subprocess.Popen([sys.executable,'-B','-c','import time;time.sleep(3)'],env=os.environ.copy())
+    host_cgroup=Path('/proc/'+str(child.pid)+'/cgroup').read_text()
+    control_group=host_cgroup.split(':',2)[-1].strip().rstrip('/')
+    unit=control_group.rsplit('/',1)[-1] or 'fixture.service';calls=[]
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.config={'gpu':0}
+    run.container=lambda *args,**kwargs:calls.append(args)
+    try:
+        with pytest.raises(life.SmokeError,match='identity changed'):
+            run._primary_unit_identity(unit,'model','lease',{
+                'gpu_uuid':'GPU0','pid':child.pid,'start_ticks':'0','cgroup':host_cgroup})
+        assert calls==[]
+    finally:
+        child.terminate();child.wait(timeout=3)
+
+
+@pytest.mark.parametrize('raw',[b'LLMSVC_MODEL=x\0BROKEN\0',b'LLMSVC_MODEL=x\0LLMSVC_MODEL=y\0'])
+def test_process_environment_parser_rejects_malformed_or_duplicate_bytes(raw):
+    with pytest.raises(smoke.EvidenceError):smoke._parse_process_environment(raw)
+
+
 def test_scheduler_wake_postresponse_identity_failure_preserves_response_and_progress():
     class Client:
         def __init__(self,url,timeout=10):pass
@@ -329,7 +546,7 @@ def test_scheduler_wake_postresponse_identity_failure_preserves_response_and_pro
 
 
 def test_scheduler_wake_route_checks_warm_latency_independently(tmp_path):
-    run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='model';run.unit='vllm-model.service';run.temp=str(tmp_path);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run.config={'scheduler_python':sys.executable,'cold_route':'scheduler_wake'};run.log=lambda *a,**k:None;run.inventory=lambda **_:None;run.control=lambda *a,**k:None
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='model';run.unit='vllm-model.service';run.temp=str(tmp_path);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run._submitted_requests=[];run._submitted_receipts=[];run.config={'scheduler_python':sys.executable,'cold_route':'scheduler_wake'};run.log=lambda *a,**k:None;run.inventory=lambda **_:None;run.control=lambda *a,**k:None
     def python(code,data,**kwargs):
         if 'write_text' in code:
             receipt={'local_request_id':data['data']['id'],'operation':'wake','status':'passed','evidence':{'http_seconds':4.0}}
@@ -756,7 +973,7 @@ def test_completion_reports_no_measurements_after_preflight_failure():
 
 
 def test_phase_records_measured_receipt_for_completion_reporting(tmp_path):
-    run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='fixture';run.unit='vllm-fixture.service';run.temp=str(tmp_path);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run.config={'scheduler_python':sys.executable};run.log=lambda *a,**k:None
+    run=smoke.ActionRun.__new__(smoke.ActionRun);run.attempted=True;run.model='fixture';run.unit='vllm-fixture.service';run.temp=str(tmp_path);run.deadline=time.monotonic()+70;run.work_deadline=run.deadline-5;run.measured_phases=set();run.phase_measurements={};run.units=[];run._submitted_requests=[];run._submitted_receipts=[];run.config={'scheduler_python':sys.executable};run.log=lambda *a,**k:None
     run.inventory=lambda **_:None;run.control=lambda *a,**k:None
     captured={}
     def python(code,data,**kwargs):

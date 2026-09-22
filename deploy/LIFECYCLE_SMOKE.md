@@ -72,6 +72,40 @@ not a day/week completion gate. Actual LoRA still requires its compatible cached
 adapter and semantic fixture. Test cleanup may never stop/sleep existing
 workloads to make space.
 
+The optional `idle_resident.enabled: true` is a test-harness-only admission
+variant of `mode: scheduler-actions` (the legacy `mode: idle_resident` spelling
+is routed through the same ActionRun). It keeps the default exclusive-card guard
+unchanged and admits a selected card only from one fresh collector-bound
+observation before private test files or units are prepared. The configured
+primary state URL and ledger path are read-only targets; actual serialized
+`StateSnapshot` data, `activity[].in_flight`, the existing lease table, remote
+container unit/proc identity, and the model port's `/health` plus `/is_sleeping`
+responses supply the proof. Protected sleeping full budgets therefore require
+an exact current lease/model/unit/process binding; configured rows are expected
+identities, never proof. Known protected process SM/memory counters must be zero;
+missing counters stay explicitly unknown under the independent sleeping and
+health checks. External baseline memory and pmon samples are read at admission,
+with the candidate budget bound to configured utilization times the observed
+physical card size. Baseline processes are bound by GPU UUID, PID/start identity
+and cgroup; new, changed, active or unknown occupants, stale data, missing
+inflight proof, or capacity shortfall fail closed. Any invalidation aborts and
+cleanup may stop only the test-owned daemon; short idle evidence is not future
+quiet or production authority.
+
+During cold startup, absence of the test-owned GPU worker before its first
+allocation is an explicit not-yet-observed state and does not fail the run.
+After a worker identity has been observed, disappearance or replacement fails
+closed; no second action or deadline extension is introduced. A protected
+native sleeper with unavailable process counters retains an explicit unknown
+counter status when its independent sleeping, health, lease and unit proof is
+positive.
+
+An enabled resident configuration must provide `primary_state_url`,
+`primary_ledger_path`, and non-empty expected protected identities. The URL and
+path select where to read; they do not assert health, sleeping, lease, unit, or
+capacity outcomes. Missing primary targets fail before preparation or any unit
+effect.
+
 ## Scheduler action mode (#9 / #10 / #23)
 
 Set `mode: scheduler-actions` using
