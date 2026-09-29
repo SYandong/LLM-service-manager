@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.9.0 — 2026-09-30
+
+Minor release; Python distribution `1.9.0`. One merged PR. #297 gives an
+operator a way to change the live llama-swap configuration without fencing the
+scheduler, and stops a default model that cannot be placed from blocking every
+maintenance transaction. The maintainer decided the shared service no longer
+needs a default model; this release is what lets the site retire it. Below the
+normal five-PR cadence, so the release PR records `Release-Exception: #256`.
+
+### Maintenance
+
+- `python -m llmsvc --maintenance-apply CANDIDATE [--expect-base-sha256 S]`
+  submits an edited llama-swap configuration through the same `submit_change`
+  path the registry uses, so it is a real maintenance transaction with a
+  witness binding and marker; `--dry-run` prints the diff and blockers. The
+  candidate keeps the live model set; a model whose command changes must be
+  observed stopped and idle at submission and at claim, and must not stay in
+  the startup preload. Its native profile row is rewritten after release, and
+  a failed rewrite is reported (`ok: false`, nonzero exit).
+- A managed startup-preload model (started through the lease-aware launcher)
+  that llama-swap reports stopped and whose unit has fully exited no longer
+  needs a confirmed backend during inspection. Source preloads, unreported
+  models and intermediate unit states still fail closed (#201 unchanged).
+- A default model may give up its role only inside an apply whose candidate
+  removes it from the preload.
+
 ## 1.8.3 — 2026-09-29
 
 Patch release; Python distribution `1.8.3`. One merged PR. #294 fixes model
