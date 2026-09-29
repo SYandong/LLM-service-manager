@@ -189,9 +189,12 @@ def add_full_weight_model(
         raise RegistryError("base model config block must be a mapping")
 
     daemon_port = _choose_daemon_port(new_config, new_records, daemon_port_range, reserved_ports)
+    wrapper_port = None
+    if "cmd" in base_block and _listen_port(_command_argv(base_block["cmd"])) is not None:
+        wrapper_port = _choose_wrapper_port(new_config, reserved_ports=(daemon_port, *reserved_ports))
     new_block = _clone_model_block(base_model, name, base_block, path_info.path, daemon_port,
                                    overrides=overrides, concurrency_limit=concurrency_limit,
-                                   concurrency_queue=concurrency_queue)
+                                   concurrency_queue=concurrency_queue, wrapper_port=wrapper_port)
     models[name] = new_block
     groups = _append_group_membership(new_config, base_model, name)
 
@@ -280,9 +283,14 @@ def _models_mapping(config: dict[str, Any]) -> dict[str, Any]:
 def _clone_model_block(base_model: str, name: str, base_block: dict[str, Any], model_path: str,
                        daemon_port: int, *, overrides: ImportOverrides | None = None,
                        concurrency_limit: int | None = None,
-                       concurrency_queue: int | None = None) -> dict[str, Any]:
+                       concurrency_queue: int | None = None,
+                       wrapper_port: int | None = None) -> dict[str, Any]:
     overrides = _validate_overrides(overrides)
     block = copy.deepcopy(base_block)
+    # The base's display name and description describe the base, not the clone.
+    if "name" in block:
+        block["name"] = name
+    block.pop("description", None)
     if concurrency_limit is not None:
         block["concurrencyLimit"] = _validate_concurrency_limit(concurrency_limit, "concurrency_limit")
     if concurrency_queue is not None:
@@ -301,10 +309,21 @@ def _clone_model_block(base_model: str, name: str, base_block: dict[str, Any], m
     stop_port = _extract_vllm_url_port(stop_argv)
     if _helper_stop_model_index(stop_argv) is None and stop_port is not None and cmd_port != stop_port:
         raise RegistryError("cmd and cmdStop must use the same upstream daemon port")
-    block["cmd"] = _same_shape_command(
-        base_block["cmd"],
-        _transform_cmd(cmd_argv, base_model, name, model_path, daemon_port, overrides=overrides, block=block),
-    )
+    new_cmd = _transform_cmd(cmd_argv, base_model, name, model_path, daemon_port, overrides=overrides, block=block)
+    base_listen = _listen_port(cmd_argv)
+    if base_listen is not None:
+        # A literal wrapper port copied verbatim makes two models share one
+        # listener, and llama-swap then proxies one model's requests to the
+        # other (#289). ${PORT} templates are left to llama-swap.
+        if wrapper_port is None:
+            raise RegistryError("a literal wrapper --listen port needs a new wrapper port")
+        new_cmd = _rewrite_listen_port(new_cmd, wrapper_port)
+        proxy = block.get("proxy")
+        if isinstance(proxy, str) and "${" not in proxy:
+            if _parse_url_port(proxy, "proxy URL") != base_listen:
+                raise RegistryError("proxy must target the wrapper --listen port")
+            block["proxy"] = _replace_url_port(proxy, base_listen, wrapper_port)
+    block["cmd"] = _same_shape_command(base_block["cmd"], new_cmd)
     if overrides.aliases:
         block["aliases"] = list(overrides.aliases)
     block["cmdStop"] = _same_shape_command(
@@ -665,6 +684,61 @@ def _replace_unit_tokens(argv: Sequence[str], base_model: str, name: str) -> lis
         else token
         for token in argv
     ]
+
+
+def _listen_value(argv: Sequence[str]) -> tuple[int, str] | None:
+    for index, token in enumerate(argv):
+        if token == "--listen" and index + 1 < len(argv):
+            return index + 1, argv[index + 1]
+        if token.startswith("--listen="):
+            return index, token.split("=", 1)[1]
+    return None
+
+
+def _listen_port(argv: Sequence[str]) -> int | None:
+    """The wrapper's literal --listen port, or None for a ${PORT} template."""
+    found = _listen_value(argv)
+    if found is None or "${" in found[1]:
+        return None
+    port = found[1].rsplit(":", 1)[-1]
+    if not port.isdigit():
+        raise RegistryError("wrapper --listen must end with a numeric port or ${PORT}")
+    return _validate_port(int(port), "wrapper --listen port")
+
+
+def _rewrite_listen_port(argv: Sequence[str], new_port: int) -> list[str]:
+    result = list(argv)
+    index, value = _listen_value(result)
+    rewritten = value.rsplit(":", 1)[0] + ":" + str(new_port) if ":" in value else str(new_port)
+    result[index] = rewritten if result[index] == value else "--listen=" + rewritten
+    return result
+
+
+def _choose_wrapper_port(config: Mapping[str, Any], *, reserved_ports: Sequence[int] = ()) -> int:
+    """First port from llama-swap's startPort that no model listens, proxies or serves on."""
+    start = config.get("startPort", 5800)
+    if not isinstance(start, int) or isinstance(start, bool) or not 0 < start <= 65535:
+        raise RegistryError("startPort is invalid")
+    used = {_validate_port(port, "reserved port") for port in reserved_ports}
+    models = config.get("models", {})
+    if isinstance(models, Mapping):
+        for block in models.values():
+            if not isinstance(block, Mapping):
+                continue
+            for key in ("cmd", "cmdStop"):
+                if block.get(key) is not None:
+                    argv = _command_argv(block[key])
+                    used.update(_ports_in_command(argv))
+                    listen = _listen_port(argv)
+                    if listen is not None:
+                        used.add(listen)
+            proxy = block.get("proxy")
+            if isinstance(proxy, str) and "${" not in proxy:
+                used.add(_parse_url_port(proxy, "proxy URL"))
+    for port in range(start, 65536):
+        if port not in used:
+            return port
+    raise RegistryError("no free wrapper port")
 
 
 def _ports_in_command(argv: Sequence[str]) -> set[int]:

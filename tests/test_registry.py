@@ -452,6 +452,52 @@ def test_remove_detaches_config_records_and_returns_stop_action(tmp_path):
     assert records == {"temp": {"created_at": now - 10.0, "daemon_port": 8102}}
 
 
+def test_literal_wrapper_port_is_not_shared_by_clones(tmp_path):
+    # Generated-By: Claude Code / claude-opus-5-5
+    # Site config (#289): the base listens on a literal port. Copying it made
+    # two clones share :5806 with the base, so one model's requests reached
+    # another model and each clone kept the base's display name.
+    root = tmp_path / "models"
+    config = _config()
+    config["startPort"] = 5800
+    base = config["models"]["base-model"]
+    base["cmd"] = BASE_CMD.replace(":${PORT}", ":5806")
+    base["proxy"] = "http://localhost:5806"
+    base["name"] = "Base Model Display"
+    base["description"] = "the base"
+    config["models"]["other"] = {
+        "cmd": BASE_CMD.replace("8101", "8102").replace(":${PORT}", ":5800"),
+        "cmdStop": BASE_STOP.replace("8101", "8102"),
+        "proxy": "http://localhost:5800",
+    }
+
+    first = add_full_weight_model(
+        config, {}, name="clone-a", model_path=_full_weight_model(root / "a"), base_model="base-model",
+        shared_roots=(root,), daemon_port_range=(8101, 8110), created_at=1.0)
+    second = add_full_weight_model(
+        first.config, first.records, name="clone-b", model_path=_full_weight_model(root / "b"),
+        base_model="base-model", shared_roots=(root,), daemon_port_range=(8101, 8110), created_at=2.0)
+
+    models = second.config["models"]
+    listens = {}
+    for name, block in models.items():
+        argv = shlex.split(block["cmd"])
+        listens[name] = argv[argv.index("--listen") + 1]
+    assert listens == {"base-model": ":5806", "other": ":5800", "clone-a": ":5801", "clone-b": ":5802"}
+    assert models["clone-a"]["proxy"] == "http://localhost:5801"
+    assert models["clone-b"]["proxy"] == "http://localhost:5802"
+    assert models["base-model"]["proxy"] == "http://localhost:5806"
+    assert models["clone-a"]["name"] == "clone-a" and "description" not in models["clone-a"]
+    assert models["base-model"]["name"] == "Base Model Display"
+
+    mismatched = copy.deepcopy(config)
+    mismatched["models"]["base-model"]["proxy"] = "http://localhost:5807"
+    with pytest.raises(RegistryError, match="proxy must target the wrapper --listen port"):
+        add_full_weight_model(
+            mismatched, {}, name="clone-c", model_path=_full_weight_model(root / "c"), base_model="base-model",
+            shared_roots=(root,), daemon_port_range=(8101, 8110), created_at=3.0)
+
+
 def _config():
     return {
         "models": {
