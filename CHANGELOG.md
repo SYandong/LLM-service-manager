@@ -1,8 +1,11 @@
 # Changelog
 
-## 1.9.0 — 2026-09-30
+## 1.9.1 — 2026-09-30
 
-Minor release; Python distribution `1.9.0`. One merged PR. #297 gives an
+Minor release; Python distribution `1.9.1`. One merged PR. The `v1.9.0`
+release commit was merged but never published: GitHub delivered no push
+event for it, so main CI and the publisher never ran; `v1.9.0` has no tag or
+artifacts and `v1.9.1` carries the same change. #297 gives an
 operator a way to change the live llama-swap configuration without fencing the
 scheduler, and stops a default model that cannot be placed from blocking every
 maintenance transaction. The maintainer decided the shared service no longer
