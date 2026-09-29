@@ -110,3 +110,71 @@ def test_latest_lookup_retains_summary_snapshot_across_concurrent_commit(tmp_pat
     second = reader.read(now=200)
     assert second["m"]["requests_last_10m"] == 2
     assert second["m"]["source_ip"] == "192.0.2.2"
+
+
+# The summary aggregate that scanned every row ever logged (#289).
+LEGACY_SUMMARY = """
+SELECT model_id, MAX(ts_created),
+       SUM(CASE WHEN ts_created >= ? THEN 1 ELSE 0 END),
+       SUM(CASE WHEN ts_created >= ? THEN 1 ELSE 0 END)
+FROM activity WHERE ts_created <= ? GROUP BY model_id
+"""
+
+
+@pytest.mark.parametrize("indexed", [True, False])
+def test_summary_work_does_not_grow_with_old_history(tmp_path, monkeypatch, indexed):
+    # Generated-By: Claude Code / claude-opus-5-5
+    path = tmp_path / "activity.sqlite"
+    now = 10_000_000
+    with make_db(path) as conn:
+        if not indexed:
+            conn.execute("DROP INDEX idx_activity_model_created_id")
+            conn.execute("DROP INDEX idx_activity_created_id")
+        conn.executemany(
+            """
+            INSERT INTO activity (
+                id, ts_created, model_id, req_path, resp_content_type, resp_status_code,
+                cache_tokens, draft_tokens, draft_acc_tokens, input_tokens, output_tokens,
+                prompt_per_second, tokens_per_second, duration_ms, error_msg, metadata_json
+            )
+            VALUES (?, ?, ?, '/v1/chat/completions', 'application/json', 200,
+                    0, 0, 0, 0, 0, 1.0, 2.0, 10, NULL, NULL)
+            """,
+            [(i + 1, now - 86400 - i, "model-{}".format(i % 6)) for i in range(60_000)],
+        )
+        insert_activity(conn, 60_001, now - 30, "model-0")
+        insert_activity(conn, 60_002, now - 1200, "model-1")
+        insert_activity(conn, 60_003, now + 50, "future-only")
+
+    legacy = {"n": 0}
+    with sqlite3.connect(path) as conn:
+        def tick():
+            legacy["n"] += 100
+            return 0
+        conn.set_progress_handler(tick, 100)
+        expected = {row[0]: tuple(row[1:]) for row in conn.execute(
+            LEGACY_SUMMARY, (now - 3600, now - 600, now)).fetchall()}
+
+    steps = {"n": 0}
+    original_connect = sqlite3.connect
+
+    class CountingConnection(sqlite3.Connection):
+        def set_progress_handler(self, callback, count):
+            def counted():
+                steps["n"] += count
+                return callback()
+            return super().set_progress_handler(counted, count)
+
+    monkeypatch.setattr(activity.sqlite3, "connect", lambda *a, **kw: original_connect(
+        *a, factory=CountingConnection, **kw))
+    monkeypatch.setattr(activity, "time", SimpleNamespace(monotonic=lambda: 0.0))
+    reader = ActivityReader(path)
+    result = reader.read(now=now)
+    assert reader.last_error_code is None
+    assert {model: (row["last_used"], row["requests_last_hour"], row["requests_last_10m"])
+            for model, row in result.items()} == expected
+    assert "future-only" not in result
+    assert result["model-0"]["requests_last_10m"] == 1
+    assert result["model-1"]["requests_last_hour"] == 1
+    if indexed:
+        assert steps["n"] < legacy["n"] * 0.05
