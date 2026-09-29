@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.8.2 — 2026-09-29
+
+Patch release; Python distribution `1.8.2`. One merged PR. #292 lets an operator
+raise the collector's time budgets without the scheduler refusing to start. On
+the production host `nvidia-smi` now takes 3–7 s per call, so with a 6 s round
+(3 s for the first phase) every round reported `gpus: deadline exceeded` and no
+model could be placed. Raising `collectors.deadline` and `probe_timeout` to their
+allowed maxima made the scheduler exit with `catalog source settings changed;
+reconciliation required`, because the catalog checkpoint treated every collector
+setting, time budgets included, as part of the catalog's source identity. Below
+the normal five-PR cadence, so the release PR records `Release-Exception: #256`.
+
+### Scheduler
+
+- Catalog source comparisons ignore `deadline` and `probe_timeout` on both sides.
+  Existing checkpoints still carry those keys, so only the comparison changes; a
+  real source change such as `swap_url` is still refused.
+
 ## 1.8.1 — 2026-09-29
 
 Patch release; Python distribution `1.8.1`. One merged PR. #290 fixes the
