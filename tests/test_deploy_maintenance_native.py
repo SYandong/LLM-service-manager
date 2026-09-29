@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from deploy.maintenance_executor import ExecutorError, digest
-from deploy.maintenance_native import NativeAdapter, helper_unit, private_create
+from deploy.maintenance_native import NativeAdapter, helper_unit, lease_aware_command, private_create
 
 
 @pytest.fixture
@@ -401,3 +401,65 @@ def test_legacy_still_rechecks_file_after_generation_rpc(native_observation, mon
     result = adapter.operation('observe_candidate', context, time.monotonic() + 1)
     assert result['configuration_confirmed'] is False
     assert 'configuration_file_confirmed' not in result
+
+
+
+MANAGED = ('/opt/llama-swap/vllm-wrapper serve --vllm-url http://127.0.0.1:8101 --listen :5801 -- '
+           '/opt/rev/deploy/vllm-launch 0.3 vllm-default --config /etc/llmsvc/launcher.json -- '
+           'vllm serve /m --port 8101')
+SOURCE = '/opt/llama-swap/vllm-wrapper serve --vllm-url http://127.0.0.1:8101 --listen :5801 -- vllm serve /m'
+
+
+def exited_unit(**changes):
+    unit = {'LoadState': 'loaded', 'ActiveState': 'inactive', 'MainPID': '0', 'ControlGroup': '', 'Job': ''}
+    unit.update(changes)
+    return unit
+
+
+@pytest.mark.parametrize('state,cmd,unit,needed', [
+    ('stopped', MANAGED, exited_unit(), False),                          # managed, never came up
+    ('stopped', MANAGED, exited_unit(ActiveState='failed'), False),
+    ('stopped', MANAGED, exited_unit(LoadState='not-found'), False),
+    ('stopped', SOURCE, exited_unit(), True),                            # #201: source preload stays required
+    ('stopped', '', exited_unit(), True),
+    ('stopped', MANAGED, exited_unit(ControlGroup='/system.slice/vllm-default.service'), True),  # leftover processes
+    ('stopped', MANAGED, exited_unit(ActiveState='active', MainPID='4242'), True),  # sleeping backend
+    ('stopped', MANAGED, exited_unit(ActiveState='deactivating'), True),
+    ('stopped', MANAGED, exited_unit(Job='17'), True),                   # a queued start is not absence
+    ('stopped', MANAGED, {'Restart': 'no'}, True),                       # unknown fields fail closed
+    (None, MANAGED, exited_unit(), True),                                # not reported by llama-swap
+    ('ready', MANAGED, exited_unit(ActiveState='active', MainPID='4242'), True),
+])
+def test_preload_exemption_needs_managed_stopped_and_exited(state, cmd, unit, needed):
+    # Generated-By: Claude Code / claude-opus-5-5
+    # #296: a managed default that could not be placed made every maintenance
+    # transaction fail with backend_instance_unconfirmed; #201 still refuses an
+    # unleased source preload.
+    adapter = NativeAdapter.__new__(NativeAdapter)
+    adapter.models = {'default': {'unit': 'vllm-default.service'}}
+    adapter.show = lambda name, deadline: unit
+    states = {} if state is None else {'default': state}
+    result = adapter._preload_needed(['default'], states, {'default': {'cmd': cmd}}, time.monotonic() + 1)
+    assert result == ({'default'} if needed else set())
+
+
+@pytest.mark.parametrize('command,expected', [
+    (MANAGED, True),
+    (MANAGED.replace('--config /etc/llmsvc/launcher.json', '--config=/etc/llmsvc/launcher.json'), True),
+    (MANAGED.replace(' --config /etc/llmsvc/launcher.json', ''), False),
+    (SOURCE, False),
+    (MANAGED.replace('vllm-launch', 'other-launch'), False),
+    ('not a wrapper', False),
+    ('unterminated "quote', False),
+])
+def test_lease_aware_command_shape(command, expected):
+    # Generated-By: Claude Code / claude-opus-5-5
+    assert lease_aware_command(command) is expected
+
+
+def test_preload_missing_profile_still_fails_closed():
+    # Generated-By: Claude Code / claude-opus-5-5
+    adapter = NativeAdapter.__new__(NativeAdapter)
+    adapter.models = {}
+    with pytest.raises(ExecutorError, match='native_preload_profile_missing'):
+        adapter._preload_needed(['default'], {}, {}, time.monotonic() + 1)

@@ -107,6 +107,57 @@ pin, inflight, freshness, unit and captured lease/incarnation. The site adapter
 can only receive that exact target. Positive unit absence precedes account
 release; proxy exit, policy estimates and transport ACKs do not release budgets.
 
+## Operator-applied candidates (#296)
+
+The registry can only add or remove directory-registered models. Any other
+edit to the live llama-swap configuration (a wrapper port, a display name, the
+startup preload) previously had no path that kept the catalog settled: editing
+the file fences the scheduler with `catalog_reconciliation_required`.
+
+`python -m llmsvc --config X --maintenance-apply CANDIDATE [--expect-base-sha256 S]`
+submits the candidate through the same `submit_change` → `prepare` → `enqueue`
+path the registry uses, so it gets a real witness binding, marker and
+maintenance transaction; it never writes the configuration or a checkpoint
+itself. Like `--maintenance-recover` it binds the control endpoint first, so it
+cannot race a running scheduler. `--dry-run` prints the unified diff and
+today's blockers without an adapter call, submission or write.
+
+- The candidate must keep the live model set; add and remove stay with the
+  registry. An identical candidate is refused.
+- Every model whose `cmd` or `cmdStop` changes must be observed stopped
+  (`unit_active` false) with nothing in flight, at submission and again when
+  the queue claims the job.
+- A model whose command changes must not stay in the candidate's startup
+  preload: the new instance would start it with the new command while its
+  profile row still holds the old one.
+- The native profile row of a model whose command changed is rewritten only
+  after release, together with the rows of removed models: before release the
+  old instance is still attributed through the old row, and the profile is
+  hashed into every scope observation. If that rewrite fails the apply reports
+  `ok: false` with `profile_rows_error` and exits nonzero.
+- A default model may give up its role (`is_default` from `true` to `false`,
+  every other field unchanged) only inside an apply whose candidate removes it
+  from the startup preload. Any other submission, including a registry import
+  after the scheduler config was edited, still refuses the profile change, as
+  does promotion to default.
+
+A startup-preload model no longer needs a confirmed backend during inspection
+when all of these are positive: llama-swap reports it `stopped`, its command
+starts the backend through the lease-aware launcher (`vllm-launch ... --config`),
+and `unit_exited` confirms the unit is inactive or failed with no main process,
+no job and an empty control group. Previously a default that could not be
+placed made every maintenance transaction fail with
+`backend_instance_unconfirmed`. A source preload outside the launcher, an
+unreported model and every intermediate unit state still need a confirmed
+backend, so #201's refusal of an unleased native default is unchanged.
+
+The one-shot binds the control endpoint without serving it, so a candidate that
+keeps such an exempted model in its preload makes the new instance's launcher
+wait for a lease no one answers; the candidate observation then times out and
+the transaction rolls back (fail closed). An apply for an unplaceable default
+should remove it from the preload. `--dry-run` exits 0 as a preview; read
+`blocked_by`, not the exit code.
+
 ## Validation scope
 
 Tests run real owned loopback proxy/helper processes and temporary SQLite/config

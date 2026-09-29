@@ -41,6 +41,18 @@ def same_sources(recorded, current):
     return identity(recorded) == identity(current)
 
 
+def default_demotion(old, new):
+    """True only when an existing profile gives up the default role (#296).
+
+    Promoting a model to default, or changing any other field, still needs
+    separate reconciliation.
+    """
+    if old.get("is_default") is not True or new.get("is_default") is not False:
+        return False
+    rest = lambda value: {k: v for k, v in value.items() if k != "is_default"}
+    return rest(old) == rest(new)
+
+
 @dataclass(frozen=True)
 class PreparedCatalog:
     base_sha256: str
@@ -71,6 +83,14 @@ class CatalogRuntime:
         self.jobs = {}
         self.pending = None
         self.profile_retire = None
+        # Models an operator maintenance apply may demote from default because
+        # its candidate removes them from the startup preload (#296). Empty for
+        # every other submission, so a changed scheduler config alone never
+        # drops the default role.
+        self.allow_default_demotion = frozenset()
+        # job_id -> error for a released job whose native profile rows could
+        # not be rewritten; an operator apply reports it instead of success.
+        self.profile_errors = {}
         previous = scheduler.catalog
         if previous is not None and previous.busy:
             raise ReloadError("catalog owner is still active")
@@ -229,7 +249,8 @@ class CatalogRuntime:
                     raise ValueError("catalog requires a known model role")
                 if name not in self.manifest["active"] and profile["is_default"]:
                     raise ValueError("temporary catalog model cannot become default")
-                if name in old and old[name] != profile:
+                if name in old and old[name] != profile and not (
+                        name in self.allow_default_demotion and default_demotion(old[name], profile)):
                     raise ValueError("existing catalog profile changes require separate configuration reconciliation")
                 if name in retained and self._retained_required(name, retained[name]):
                     raise ReloadError("retained model cannot be reactivated before resource reconciliation")
@@ -371,7 +392,7 @@ class CatalogRuntime:
             if dry_run:
                 return {"would": [{"kind": "install_catalog", "models": sorted(json.loads(prepared.manifest_json)["active"])}]}
             self._enabled(); self._idle()
-            restore, removed = self._sync_native_profile(original, prepared.candidate)
+            restore, removed, updated = self._sync_native_profile(original, prepared.candidate)
             job_id = None
             def combined_precheck():
                 manifest = json.loads(prepared.manifest_json)
@@ -406,8 +427,8 @@ class CatalogRuntime:
                 raise
             job_id = result["id"]
             self.jobs[job_id] = prepared
-            if removed:
-                self.profile_retire = (job_id, removed)
+            if removed or updated:
+                self.profile_retire = (job_id, removed, updated)
             return result
 
     def _sync_native_profile(self, original, candidate):
@@ -423,16 +444,23 @@ class CatalogRuntime:
         """
         profile = self.transition.native_profile() if self.transition is not None else None
         if profile is None:
-            return None, ()
+            return None, (), {}
         from llmsvc.native_profile import candidate_profile_entries
         from llmsvc.registry import ModelRegistry
-        before = set(ModelRegistry._decode(original)[0]["models"])
-        after = set(ModelRegistry._decode(candidate)[0]["models"])
+        before_models = ModelRegistry._decode(original)[0]["models"]
+        after_models = ModelRegistry._decode(candidate)[0]["models"]
+        before, after = set(before_models), set(after_models)
         added, removed = sorted(after - before), tuple(sorted(before - after))
+        # A kept model whose command changed keeps its old row until release:
+        # the old instance is still attributed through it (#296).
+        changed = sorted(name for name in before & after
+                         if isinstance(before_models[name], dict) and isinstance(after_models[name], dict)
+                         and before_models[name].get("cmd") != after_models[name].get("cmd"))
+        updated = candidate_profile_entries(candidate, changed) if changed else {}
         if not added:
-            return None, removed
+            return None, removed, updated
         raw = profile.add(candidate_profile_entries(candidate, added))
-        return (lambda: profile.restore(raw)), removed
+        return (lambda: profile.restore(raw)), removed, updated
 
     def _retire_native_profile(self, job_id):
         """Drop the rows of the models a released transaction removed.
@@ -445,13 +473,21 @@ class CatalogRuntime:
         pending, self.profile_retire = self.profile_retire, None
         if pending is None or pending[0] != job_id or self.transition is None:
             return
+        _, removed, updated = pending
         try:
             profile = self.transition.native_profile()
             if profile is not None:
-                profile.remove(pending[1])
+                if removed:
+                    profile.remove(removed)
+                if updated:
+                    profile.add(updated)
         except (OSError, ValueError, ReloadError) as exc:
-            self.queue.log({"kind": "native_profile_retire_failed", "models": list(pending[1]),
-                            "error": type(exc).__name__})
+            self.queue.log({"kind": "native_profile_retire_failed",
+                            "models": sorted(set(removed) | set(updated)), "error": type(exc).__name__})
+            if updated:
+                # A stale removal row is harmless; a stale command row makes the
+                # next maintenance fail to attribute the model, so surface it.
+                self.profile_errors[job_id] = type(exc).__name__ + ": " + str(exc)
 
     def submit_change(self, transform, *, description, dry_run=False, precheck=None, after_apply=None):
         """Existing registry callback shape; no fallback around a catalog error."""
