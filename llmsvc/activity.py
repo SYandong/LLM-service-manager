@@ -161,19 +161,7 @@ class ActivityReader:
                 _require_columns(columns, {"id", "ts_created", "model_id"})
                 src_expr = "src" if "src" in columns else "NULL"
                 metadata_expr = "metadata_json" if "metadata_json" in columns else "NULL"
-                summary_rows = conn.execute(
-                    """
-                    SELECT
-                        model_id,
-                        MAX(ts_created) AS last_used,
-                        SUM(CASE WHEN ts_created >= ? THEN 1 ELSE 0 END) AS requests_last_hour,
-                        SUM(CASE WHEN ts_created >= ? THEN 1 ELSE 0 END) AS requests_last_10m
-                    FROM activity
-                    WHERE ts_created <= ?
-                    GROUP BY model_id
-                    """,
-                    (int(now_ts - 3600), int(now_ts - 600), int(now_ts)),
-                ).fetchall()
+                summary_rows = _summary_rows(conn, int(now_ts))
                 latest_by_model: dict[str, tuple[Optional[str], Optional[str]]] = {}
                 for row in summary_rows:
                     # The aggregate already found the last eligible timestamp.
@@ -672,6 +660,58 @@ class ActivityReader:
             "source_ip": ip,
             "source_container": self.ip_containers.get(ip, "ip:{}".format(ip)),
         }
+
+
+def _summary_rows(conn: sqlite3.Connection, now_ts: int) -> list[dict[str, Any]]:
+    """Per-model last use and recent counts without scanning history.
+
+    A single GROUP BY over the table visits every row ever logged, so its cost
+    grows with history until it no longer fits the sampler deadline (#289).
+    Instead, enumerate model ids by skip-scan and answer each model with range
+    seeks on the producer's (model_id, ts_created DESC, id DESC) index. Work is
+    O(models * log rows + rows in the last hour). Without the index the result
+    is identical, only slower.
+    """
+
+    def scalar(sql: str, params: tuple = ()) -> Any:
+        # fetchall keeps a cancelled-but-silent statement an empty result.
+        rows = conn.execute(sql, params).fetchall()
+        return rows[0][0] if rows else None
+
+    models: list[Any] = []
+    if scalar("SELECT 1 FROM activity WHERE model_id IS NULL LIMIT 1"):
+        models.append(None)
+    model_id = scalar("SELECT MIN(model_id) FROM activity")
+    while model_id is not None:
+        models.append(model_id)
+        model_id = scalar("SELECT MIN(model_id) FROM activity WHERE model_id > ?", (model_id,))
+
+    rows = []
+    for model_id in models:
+        last_used = scalar(
+            "SELECT MAX(ts_created) FROM activity WHERE model_id IS ? AND ts_created <= ?",
+            (model_id, now_ts),
+        )
+        if last_used is None:
+            continue
+        counts = conn.execute(
+            """
+            SELECT COUNT(*), SUM(CASE WHEN ts_created >= ? THEN 1 ELSE 0 END)
+            FROM activity
+            WHERE model_id IS ? AND ts_created >= ? AND ts_created <= ?
+            """,
+            (now_ts - 600, model_id, now_ts - 3600, now_ts),
+        ).fetchall()
+        if not counts:
+            raise ActivityReadError("read_failed")
+        last_hour, last_10m = counts[0]
+        rows.append({
+            "model_id": model_id,
+            "last_used": last_used,
+            "requests_last_hour": last_hour,
+            "requests_last_10m": last_10m or 0,
+        })
+    return rows
 
 
 def _activity_columns(conn: sqlite3.Connection) -> set[str]:
