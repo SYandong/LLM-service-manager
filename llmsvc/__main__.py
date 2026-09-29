@@ -9,8 +9,10 @@ import logging
 import math
 import signal
 import sqlite3
+import sys
 import threading
 from dataclasses import replace
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from llmsvc import __version__
@@ -18,6 +20,7 @@ from llmsvc.actions import AutomaticPolicyController, ManagedModelTransport, Mod
 from llmsvc.collectors import bind_cold_starts
 from llmsvc.config import load_config
 from llmsvc.leases import PlacementController
+from llmsvc.reload import ReloadError
 from llmsvc.scheduler import Scheduler
 from llmsvc.server import SchedulerHTTPServer
 from llmsvc.store import IntentStore
@@ -233,7 +236,16 @@ def main():
                         help="explicit bounded recovery of a durable default bootstrap")
     parser.add_argument("--maintenance-recover", choices=("observe", "rollback"),
                         help="exclusive operator recovery using the configured maintenance adapter")
+    parser.add_argument("--maintenance-apply", metavar="CANDIDATE",
+                        help="exclusive operator transaction applying an edited llama-swap config (same models)")
+    parser.add_argument("--expect-base-sha256", metavar="SHA256",
+                        help="with --maintenance-apply: refuse unless the live config has this digest")
     args = parser.parse_args()
+    if args.expect_base_sha256 and not args.maintenance_apply:
+        parser.error("--expect-base-sha256 requires --maintenance-apply")
+    if args.maintenance_apply and (args.maintenance_recover or args.once or args.check_config
+                                   or args.bootstrap_default or args.bootstrap_recover):
+        parser.error("maintenance apply cannot be combined with other one-shot modes")
     bootstrap_mode = args.bootstrap_default or args.bootstrap_recover is not None
     if args.bootstrap_default and args.bootstrap_recover:
         parser.error("choose one bootstrap operation")
@@ -326,6 +338,19 @@ def main():
         finally:
             close_scheduler()
         return 0
+    if args.maintenance_apply and args.dry_run:
+        from llmsvc.maintenance_apply import ApplyError, preview_apply
+        try:
+            candidate = Path(args.maintenance_apply).read_bytes()
+            original = Path(config.registry["config_path"]).read_bytes()
+            print(json.dumps(preview_apply(scheduler, original, candidate,
+                                           expected_base_sha256=args.expect_base_sha256), allow_nan=False))
+            return 0
+        except (ApplyError, OSError, KeyError, TypeError) as exc:
+            print(json.dumps({"error": "maintenance_apply_failed", "detail": str(exc)}), file=sys.stderr)
+            return 1
+        finally:
+            close_scheduler()
     if args.check_config:
         close_scheduler()
         return 0
@@ -366,6 +391,24 @@ def main():
                 server.server_close()
                 if bootstrap_thread.ident is not None:
                     bootstrap_thread.join(timeout=config.request_timeout_seconds)
+    if args.maintenance_apply:
+        # Like recovery, the control endpoint is bound first, so this cannot
+        # race a running scheduler; the transaction is the normal catalog one.
+        from llmsvc.maintenance_apply import ApplyError, run_apply
+        try:
+            candidate = Path(args.maintenance_apply).read_bytes()
+            result = run_apply(scheduler, candidate, expected_base_sha256=args.expect_base_sha256,
+                               timeout_seconds=float(config.maintenance_timeout_seconds) * 3)
+            print(json.dumps(result, allow_nan=False))
+            return 0 if result["ok"] else 1
+        except (ApplyError, ReloadError, OSError, ValueError, sqlite3.Error) as exc:
+            print(json.dumps({"error": "maintenance_apply_failed", "detail": str(exc)}), file=sys.stderr)
+            return 1
+        finally:
+            try:
+                close_scheduler()
+            finally:
+                server.server_close()
     if args.maintenance_recover:
         # Binding the normal control endpoint precedes recovery effects, so a
         # running normal scheduler cannot be bypassed by a second operator CLI.

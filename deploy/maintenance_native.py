@@ -115,6 +115,27 @@ def helper_unit(scope_hash, model):
     return 'llmsvc-maint-helper-'+digest([scope_hash,model])[:32]+'.service'
 
 
+def lease_aware_command(command):
+    """True when a wrapper command starts its backend through the lease-aware launcher.
+
+    Shape: ``<wrapper> serve ... -- <.../vllm-launch> <util> <unit> [--config F] -- <vllm ...>``.
+    Such a model can only be started by scheduler placement, never as an
+    unleased native process (#201, #296).
+    """
+    try:
+        argv=shlex.split(command) if isinstance(command,str) else list(command)
+    except (ValueError,TypeError):
+        return False
+    if len(argv)<2 or argv[1]!='serve':
+        return False
+    delimiters=[i for i,token in enumerate(argv) if token=='--']
+    if len(delimiters)!=2:
+        return False
+    launch=argv[delimiters[0]+1:delimiters[1]]
+    return (bool(launch) and Path(launch[0]).name=='vllm-launch'
+            and any(token=='--config' or token.startswith('--config=') for token in launch[1:]))
+
+
 class NativeHTTP:
     """Literal HTTP IP only, with one absolute socket watchdog and no redirect."""
     def __init__(self, origin):
@@ -385,6 +406,32 @@ class NativeAdapter(ScopeInspector):
         host=self.profile['listen_host'];expected=('['+host+']' if ':' in host else host)+':'+str(self.profile['listen_port'])
         if listens!=[expected]:raise ExecutorError('native_listener_argument_unbound')
 
+    def _preload_needed(self,preload,states,models,deadline):
+        # A managed preload model that never came up has no backend to bind.
+        # Requiring one made every maintenance transaction fail while the
+        # default model could not be placed (#296). #201 still holds: a source
+        # preload outside the lease-aware launcher stays required, so an
+        # unleased native default keeps blocking normal maintenance. Exempt
+        # only when all three are positive: llama-swap reports the model
+        # stopped, its command goes through the lease-aware launcher (a new
+        # instance can only start it through scheduler placement), and the
+        # unit has fully exited with an empty control group.
+        needed=set()
+        for name in preload:
+            row=self.models.get(name)
+            if row is None:raise ExecutorError('native_preload_profile_missing')
+            block=models.get(name) if isinstance(models,dict) else None
+            if (states.get(name)=='stopped' and isinstance(block,dict)
+                    and lease_aware_command(block.get('cmd',''))):
+                try:
+                    exited=self.unit_exited(row['unit'],deadline)
+                except KeyError:
+                    exited=False
+                if exited:
+                    continue
+            needed.add(name)
+        return needed
+
     def inspect_native(self,context,deadline):
         raw,cfg=self.config_data();base=super().inspect(deadline)
         source=self.show(self.profile['unit'],deadline)
@@ -404,7 +451,7 @@ class NativeAdapter(ScopeInspector):
         if hooks.get('profile'):raise ExecutorError('startup_profile_requires_explicit_managed_preload')
         preload=hooks.get('preload',[])
         if not isinstance(preload,list):raise ExecutorError('invalid_native_preload')
-        needed=set(active)|set(preload)
+        needed=set(active)|self._preload_needed(preload,snapshot.states,cfg.get('models'),deadline)
         bindings=[]
         for name in (account_map if account_map is not None else sorted(needed)):
             b=self.backend(name,deadline)

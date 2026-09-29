@@ -182,6 +182,28 @@ LoRA 路径待 M4 调研（base 开 `--enable-lora` + 运行时装载，是否�
 JSON 协议；未完成的适配器必须报告未知。受控进程／loopback 回放证明代码
 边界，现场采用、helper 结清与回滚证据由实际适配器及获准演练单独提供。
 
+#### 运维提交的候选配置与默认模型降级（#296）
+
+registry 只能增删目录注册的模型；其他对 llama-swap 配置的修改（wrapper 端口、
+显示名、启动 preload）此前没有能保持目录 settled 的途径，带外编辑会触发
+`catalog_reconciliation_required`。`--maintenance-apply` 让运维提交一份候选配置，
+经由与 registry 相同的 `submit_change` 路径形成真实的 binding、marker 与维护
+事务，自身不写配置也不写检查点。候选必须保持模型集合不变；命令发生变化的模型
+在提交与认领时都必须被观测为已停止且无在途请求，其 native profile 行在发布后
+才更新。
+
+维护者决定不再需要默认模型（2026-09-29）：已有 profile 唯一允许的直接变化是
+`is_default` 由 true 降为 false，且只能发生在候选把该模型移出启动 preload 的
+`--maintenance-apply` 中；其他提交（包括只改了调度器配置后的 registry 导入）、
+提升为默认或修改其他字段仍需单独 reconciliation。命令变化的模型不得留在候选的
+preload 中。
+
+受管 preload 模型（命令经 lease-aware launcher `vllm-launch ... --config` 启动）
+若 llama-swap 明确报告为 stopped 且 `unit_exited` 确认 unit 已退出（inactive/failed、
+无主进程、无任务、控制组为空），检查时不再要求已确认的后端：新实例只能经调度器
+放置启动它，不存在未记账进程。source preload、未被报告的模型和任何中间状态仍
+fail closed，下文 #201 对"无已确认账户的 source preload"的拒绝不变。
+
 ### 首次默认模型的受管 bootstrap（#201）
 
 已有 source preload 但没有已确认账户时，普通维护仍须拒绝；不能删除默认项或
