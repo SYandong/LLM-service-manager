@@ -534,6 +534,28 @@ def test_retained_reactivation_requires_fresh_absence_before_publication(catalog
     assert "base" not in c.runtime.manifest["active"] and "base" in c.runtime.manifest["retained"]
 
 
+def test_timing_budgets_are_not_catalog_sources(catalog):
+    # Generated-By: Claude Code / claude-opus-5-5
+    """Raising the collector deadline or probe timeout on a slow host must not
+    read as a changed catalog source and refuse to start (#289); a real source
+    change still does."""
+    c=catalog;result,_=install(c)
+    assert result["status"]=="applied" and c.store.catalog_checkpoint()["phase"]=="released"
+    epoch=c.runtime.epoch
+    c.s.config.collectors["deadline"]=12
+    c.s.config.collectors["probe_timeout"]=6
+    c.store.close()
+    c.store=IntentStore(c.cfg.state_db_path,action_lock=c.s.action_lock)
+    c.s.store=c.store
+    restored=CatalogRuntime(c.s,c.q,verifier=c.verify,collector_factory=c.collector_factory,
+        relay_factory=lambda config:None,transport_factory=c.transport_factory)
+    assert not c.s.catalog_fenced and restored.epoch==epoch and restored.pending is None
+    c.s.config.collectors["swap_url"]="http://127.0.0.1:2"
+    with pytest.raises(ValueError,match="catalog source settings changed"):
+        CatalogRuntime(c.s,c.q,verifier=c.verify,collector_factory=c.collector_factory,
+            relay_factory=lambda config:None,transport_factory=c.transport_factory)
+
+
 def test_settled_release_does_not_fence_a_restart(catalog):
     """A released transaction whose candidate is still the live configuration and
     whose receipt is retired is fully settled: a restart publishes its generation

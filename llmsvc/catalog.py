@@ -29,6 +29,18 @@ def sources(config):
     return copy.deepcopy({k: v for k, v in config.collectors.items() if k != "models"})
 
 
+# Time budgets tune how long a round may wait; they say nothing about which
+# sources the catalog was built from. Raising them on a slow host (#289) must
+# not read as a changed catalog and refuse to start.
+TIMING_SOURCE_KEYS = frozenset({"deadline", "probe_timeout"})
+
+
+def same_sources(recorded, current):
+    def identity(value):
+        return {k: v for k, v in value.items() if k not in TIMING_SOURCE_KEYS}
+    return identity(recorded) == identity(current)
+
+
 @dataclass(frozen=True)
 class PreparedCatalog:
     base_sha256: str
@@ -89,7 +101,7 @@ class CatalogRuntime:
                 # prove: publish its generation and keep actions unfenced. It
                 # could not be re-observed later anyway, because post-release
                 # profile retirement changes the adapter's scope hash.
-                if record["new_manifest"]["sources"] != sources(scheduler.config):
+                if not same_sources(record["new_manifest"]["sources"], sources(scheduler.config)):
                     raise ValueError("catalog source settings changed; reconciliation required")
                 bundle = self._construct(record["new_manifest"])
                 with scheduler.action_lock:
@@ -107,7 +119,7 @@ class CatalogRuntime:
                 if maintenance is None:
                     raise ValueError("rolled-back catalog lacks its transition proof")
                 epoch = maintenance["rollback_epoch"]
-            if manifest["sources"] != sources(scheduler.config):
+            if not same_sources(manifest["sources"], sources(scheduler.config)):
                 raise ValueError("catalog source settings changed; reconciliation required")
             bundle = self._construct(manifest)
             with scheduler.action_lock:
@@ -469,7 +481,7 @@ class CatalogRuntime:
         self._enabled()
         if self.queue.clock() >= deadline:
             raise ReloadError("catalog deadline exceeded")
-        if sources(self.scheduler.config) != record["new_manifest"]["sources"]:
+        if not same_sources(record["new_manifest"]["sources"], sources(self.scheduler.config)):
             raise ReloadError("catalog source settings changed")
         raw, _ = self.queue._read()
         if digest(raw) != record["candidate_sha256"]:
@@ -490,7 +502,7 @@ class CatalogRuntime:
                                                proof.settlement_confirmed, proof.cleanup_confirmed))):
             raise ReloadError("catalog adoption or settlement unconfirmed")
         if (self.queue.clock() >= deadline or digest(self.queue._read()[0]) != record["candidate_sha256"]
-                or sources(self.scheduler.config) != record["new_manifest"]["sources"]):
+                or not same_sources(record["new_manifest"]["sources"], sources(self.scheduler.config))):
             raise ReloadError("catalog changed during confirmation")
         self._enabled()
         return proof
@@ -543,7 +555,7 @@ class CatalogRuntime:
                     return self.queue.process_once()
                 manifest = json.loads(prepared.manifest_json)
                 self._check_reactivation(manifest)
-                if manifest["sources"] != sources(s.config):
+                if not same_sources(manifest["sources"], sources(s.config)):
                     raise ReloadError("catalog source settings changed")
                 budget = self.queue.maintenance_timeout if self.transition is not None else self.queue.operation_timeout
                 self.deadline = min(job.submitted_at+self.queue.timeout, self.queue.clock()+budget)
