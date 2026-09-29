@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.8.3 — 2026-09-29
+
+Patch release; Python distribution `1.8.3`. One merged PR. #294 fixes model
+registration on a site whose llama-swap config spells wrapper ports literally.
+Cloning a base block copied its `--listen` port, `proxy` and display `name`
+verbatim, so every model registered from the same base shared one wrapper
+listener with it: the second wrapper failed to bind, llama-swap's health check
+reached the first, and requests for one model were proxied to another. Below
+the normal five-PR cadence, so the release PR records `Release-Exception: #256`.
+
+### Registry
+
+- When the base's `--listen` port is literal, a clone gets the first port from
+  llama-swap's `startPort` that no model listens, proxies or serves on, and its
+  `--listen` and `proxy` are rewritten together; a `proxy` that disagrees with
+  the base's `--listen` is refused. `${PORT}` templates are unchanged.
+- A clone's `name` is its own model name, and the base's `description` is not
+  inherited.
+
 ## 1.8.2 — 2026-09-29
 
 Patch release; Python distribution `1.8.2`. One merged PR. #292 lets an operator
