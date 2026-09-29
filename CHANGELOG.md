@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.8.1 — 2026-09-29
+
+Patch release; Python distribution `1.8.1`. One merged PR. #290 fixes the
+activity sampler, which had grown too slow for its own deadline: the per-model
+summary was a single `GROUP BY` over every request ever logged, so its cost rose
+with history until, at roughly 870k rows, every scheduler round reported
+`activity: deadline`. Because the scheduler refuses to act on evidence it could
+not read, every stop and sleep was then blocked, and `llm status` showed `?` for
+all usage columns. Below the normal five-PR cadence, so the release PR records
+`Release-Exception: #256` for the maintainer-authorized fix.
+
+### Scheduler
+
+- The activity summary enumerates model ids by skip-scan and answers each model
+  with range seeks on the producer's `(model_id, ts_created DESC, id DESC)`
+  index. Work is O(models × log rows + rows in the last hour) instead of
+  O(all rows): on the production database 0.4–1.3 ms instead of 100–113 ms,
+  with identical results. Without the index the result is unchanged, only slower.
+- A regression test counts SQLite VM steps rather than wall-clock time: with
+  60k rows of old history the reader does under 5% of the legacy aggregate's
+  work, and matches it exactly with and without the index.
+
 ## 1.8.0 — 2026-09-20
 
 Minor release; Python distribution `1.8.0`. Two merged PRs. #286 finishes the
