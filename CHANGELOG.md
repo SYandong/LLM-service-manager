@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Faults
+
+- A model that llama-swap reports `ready` while its daemon still answers
+  `/is_sleeping: true` (a warm wake that failed, for example on CUDA OOM, and
+  that vllm-wrapper ignored) no longer deadlocks behind its own stuck requests.
+  With the new opt-in `wake_failure_recovery_enabled: true`, once the condition
+  has held for `wake_failure_grace_seconds` (default 90, at least three
+  published rounds) the scheduler stops the unit despite in-flight requests,
+  lets the existing exit reconciliation release the lease, then unloads the
+  model in llama-swap so the next request cold-starts. Pinned and default
+  models are only reported (`wake_failure_blocked`). Read-only and `--dry-run`
+  log `wake_failure_preview`. Events: `wake_failure_detected`,
+  `wake_failure_result` (#300).
+
 ## 1.9.1 — 2026-09-30
 
 Minor release; Python distribution `1.9.1`. One merged PR. The `v1.9.0`

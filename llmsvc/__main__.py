@@ -295,6 +295,9 @@ def main():
         if config.fault_recovery_enabled:
             from llmsvc.faults import FaultRecoveryController
             scheduler.faults = FaultRecoveryController(scheduler)
+        if config.wake_failure_recovery_enabled:
+            from llmsvc.wake_failure import WakeFailureRecoveryController
+            scheduler.wake_failures = WakeFailureRecoveryController(scheduler)
         if config.catalog_enabled or (store is not None and store.catalog_checkpoint() is not None):
             build_catalog(config, scheduler)
             checkpoint = store.catalog_checkpoint() if store is not None else None
@@ -361,6 +364,8 @@ def main():
                 scheduler.automation.run(dry_run=True)  # Plan-only structured log; no extra sample or action.
             if scheduler.faults is not None:
                 scheduler.faults.run_once(dry_run=True)  # One sample cannot prove a fresh fault sequence.
+            if scheduler.wake_failures is not None:
+                scheduler.wake_failures.run_once(dry_run=True)  # One sample cannot span the grace period.
         finally:
             close_scheduler()
         return 0

@@ -88,6 +88,10 @@ class SchedulerConfig:
     fault_interval_seconds: float = 1.0
     fault_timeout_seconds: float = 30.0
     fault_health_failures: int = 3
+    # Opt-in recovery of a wedged warm wake (#300): data plane ready while the
+    # backend still reports is_sleeping for longer than the grace period.
+    wake_failure_recovery_enabled: bool = False
+    wake_failure_grace_seconds: float = 90.0
     free_timeout_seconds: float = 120.0
     reserve_timeout_seconds: float = 120.0
     wake_timeout_seconds: float = 900.0
@@ -168,6 +172,12 @@ class SchedulerConfig:
             raise ValueError("fault intervals must be <=1s and fault timeouts <=120s")
         if type(self.fault_health_failures) is not int or not 3 <= self.fault_health_failures <= 100:
             raise ValueError("fault_health_failures must be an integer in 3..100")
+        if type(self.wake_failure_recovery_enabled) is not bool:
+            raise ValueError("wake_failure_recovery_enabled must be a boolean")
+        value = self.wake_failure_grace_seconds
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or not 30 <= value <= 3600):
+            raise ValueError("wake_failure_grace_seconds must be a finite number in [30, 3600]")
         if type(self.automation_enabled) is not bool:
             raise ValueError("automation_enabled must be a boolean")
         if type(self.sleeping_recovery_enabled) is not bool:

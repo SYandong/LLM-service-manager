@@ -1,5 +1,6 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: OpenCode / deepseek-v4.1-flash
+# Generated-By: Claude Code / claude-opus-5-5
 # Start with a specific loopback/private container address and an alternate port.
 # Do not expose the unauthenticated scheduler on a public or wildcard address.
 listen_host: 127.0.0.1
@@ -48,6 +49,15 @@ collectors: {}
 # Recent-use relocation additionally needs placement_enabled before source stop.
 # sleeping_recovery_enabled: false
 # sleeping_recovery_timeout_seconds: 900 # Finite seconds >0 and <=900; one budget.
+
+# Optional wedged-wake recovery (#300): disabled by default. A model whose data
+# plane is ready while its daemon still reports is_sleeping for the grace period
+# is stopped (its in-flight requests cannot complete), its lease is reconciled
+# and llama-swap unloads it so the next request cold-starts. Pinned and default
+# models are only reported. Effects also require model_actions_enabled and
+# read_only: false; read-only and --dry-run log wake_failure_preview only.
+# wake_failure_recovery_enabled: false
+# wake_failure_grace_seconds: 90 # Finite seconds in [30, 3600]; at least 3 rounds.
 
 # Optional registry mount: omitted by default. Uncomment only after configuring
 # the reviewed absolute paths. This enables temporary-model list/dry-run preview
