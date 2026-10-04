@@ -109,6 +109,10 @@ class WakeMigration:
 # Stop reasons that move a model to a destination placement already approved,
 # rather than taking it out of service. Only these may stop the default model.
 RELOCATION_REASONS = frozenset({"wake_migration", "reserve"})
+# Stop reasons for a backend that cannot serve (#300): requests routed to it
+# never complete, so its in-flight count is not a protection (DESIGN §4).
+# Pins and the default model stay protected.
+WAKE_FAILED_REASONS = frozenset({"wake_failed"})
 
 
 def _known(value):
@@ -187,7 +191,7 @@ class ModelActionDispatcher:
         activity = [item for item in snapshot.activity if item.model == model.name]
         if len(activity) != 1 or type(activity[0].in_flight) is not int or activity[0].in_flight < 0:
             raise ActionDispatchError("unknown_in_flight")
-        if activity[0].in_flight:
+        if activity[0].in_flight and not (action.kind == "stop" and action.reason in WAKE_FAILED_REASONS):
             raise ActionDispatchError("in_flight")
         if action.kind == "stop":
             # Stopping the default model outright would leave the service with

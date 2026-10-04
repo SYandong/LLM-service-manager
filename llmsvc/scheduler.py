@@ -181,6 +181,8 @@ class Scheduler:
         self.faults = None
         self.sleeping_recovery = None
         self._fault_thread = None
+        self.wake_failures = None
+        self._wake_failure_thread = None
         self._catalog_thread = None
         self._usage = usage
         self._usage_report = usage_report
@@ -193,6 +195,7 @@ class Scheduler:
         self._cycle_failures = {
             "catalog_cycle_error": _RepeatLimiter(CYCLE_ERROR_INTERVAL_SECONDS, lambda: self.monotonic()),
             "fault_error": _RepeatLimiter(CYCLE_ERROR_INTERVAL_SECONDS, lambda: self.monotonic()),
+            "wake_failure_error": _RepeatLimiter(CYCLE_ERROR_INTERVAL_SECONDS, lambda: self.monotonic()),
         }
         self.action_lock = store.action_lock if store is not None else threading.RLock()
         self.changed = threading.Condition(self.action_lock)
@@ -816,6 +819,19 @@ class Scheduler:
             self._fault_cycle()
             self.stopping.wait(self.config.fault_interval_seconds)
 
+    def _run_wake_failures(self):
+        # One observation per published sample; read-only mode only previews.
+        while not self.stopping.is_set():
+            try:
+                # Re-read the attribute: catalog publication rebinds it.
+                self.wake_failures.run_once()
+            except Exception as exc:
+                self._log_cycle_failure("wake_failure_error", exc)
+            with self.changed:
+                seen = self._sample_published
+                self.changed.wait_for(lambda: self.stopping.is_set() or self._sample_published != seen,
+                                      timeout=self.config.sample_interval_seconds)
+
     def _catalog_cycle(self):
         try:
             if self.catalog is not None and self.catalog.can_submit():
@@ -847,6 +863,10 @@ class Scheduler:
             if not sampling_only and self.faults is not None and self.faults.enabled():
                 self._fault_thread = threading.Thread(target=self._run_faults, name="llmsvc-faults", daemon=True)
                 self._fault_thread.start()
+            if not sampling_only and self.wake_failures is not None and self.wake_failures.configured():
+                self._wake_failure_thread = threading.Thread(target=self._run_wake_failures,
+                                                             name="llmsvc-wake-failures", daemon=True)
+                self._wake_failure_thread.start()
             if not sampling_only and self.catalog is not None and self.catalog.can_submit():
                 self._catalog_thread = threading.Thread(target=self._run_catalog, name="llmsvc-catalog", daemon=True)
                 self._catalog_thread.start()
@@ -880,6 +900,10 @@ class Scheduler:
                         self._fault_thread.join(timeout=self.config.fault_timeout_seconds+self.config.request_timeout_seconds)
                         if self._fault_thread.is_alive():
                             raise RuntimeError("fault worker did not stop")
+                    if self._wake_failure_thread is not None and self._wake_failure_thread.is_alive():
+                        self._wake_failure_thread.join(timeout=self.config.free_timeout_seconds+self.config.request_timeout_seconds)
+                        if self._wake_failure_thread.is_alive():
+                            raise RuntimeError("wake failure worker did not stop")
             finally:
                 try:
                     if self.catalog is not None:

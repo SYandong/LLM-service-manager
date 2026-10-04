@@ -358,6 +358,11 @@ class CatalogRuntime:
             from llmsvc.faults import FaultRecoveryController
             probe = old_fault.probe if not isinstance(old_fault.probe, LeaseUnitProbe) else None
             s.faults = FaultRecoveryController(s, probe=probe, monotonic=s.monotonic)
+        if getattr(s, "wake_failures", None) is not None:
+            # The old instance holds the replaced controller/transport/accounting
+            # and its catalog guard; evidence windows restart with the new one.
+            from llmsvc.wake_failure import WakeFailureRecoveryController
+            s.wake_failures = WakeFailureRecoveryController(s, accounting=s.placement, monotonic=s.monotonic)
         s._snapshot = s._unknown("catalog_changed_waiting_for_sample")
         s._sample_bounds = None
         s._sample_source_time_provided = False

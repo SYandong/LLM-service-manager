@@ -118,6 +118,25 @@ systemd `InvocationID` 相符，且已观察到该实例健康服务，或明确
 与实现一并测试、记录，不增加强制撤销接口或收编未知 unit；这些规定不授权生产
 升级、重启或清理。
 
+### 唤醒卡死的轻量恢复（#300）
+
+#130 的证明路径要求 1 秒节奏、相邻观测 ≤ 2 秒以及本进程内见过同一实例健康服务；
+生产采集一轮数秒、15 秒采样，信号 (b) 在那里永远累计不起来。2026-10-04 的事故里
+一次唤醒 OOM 后 llama-swap 标记 ready、daemon 仍报告 sleeping，卡住的请求让在途数
+永远 > 0，普通保护表因此同时挡住 wake 与 stop，模型 7 小时不可用。
+
+为此另设默认关闭的 `wake_failure_recovery_enabled`（还要求 `model_actions_enabled`
+与非只读），只处理信号 (b)：纯函数 `plan_wake_failure` 在 unit active、`/health`
+为 true、`/is_sleeping` 为 true 且数据面 ready 的状态，跨越
+`wake_failure_grace_seconds`（默认 90 秒，30–3600）且至少 3 个不同发布轮次后判定
+`wake_failed`；任一轮不满足、采集有错误或时间倒退都重置窗口。执行沿用普通受保护
+dispatcher 的 stop（reason `wake_failed` 只对 stop 解除在途保护），用既有两轮观测
+确认退出并由既有对账释放租约，然后才向 llama-swap `POST /api/models/unload/{id}`，
+下一次请求走 `/v1/place` 冷启动；unload 有独立预算（`request_timeout_seconds + wake_failure_unload_allowance_seconds`），未完成时在后续采样中有界重试。目录发布时该控制器随模型动作控制器一起重建。它只借用 §4 故障例外里的"在途请求"一项：pin 与
+默认模型仍受保护，只报 `wake_failure_blocked`，默认模型的硬停例外仍只属于 #130
+证明路径。dry-run / 只读只记录 `wake_failure_preview`。细节见
+[FAULTS.md](../llmsvc/FAULTS.md#wedged-warm-wake-recovery-300)。
+
 ## 3. 模型的三种来源
 
 | 来源 | 登记方式 | 预算 | 生命周期 |
@@ -256,7 +275,7 @@ source 被有证据地隔离时，公开快照仍保留未知。仅 bootstrap �
 
 某个分支需要 stop 却只剩受保护的模型时，该分支**放弃动作并回报阻塞**（`blocked_by: [{model, reason}]`），进入事件流和 status；不会退化为违反保护规则的动作。
 
-**唯一例外是故障清理**（§2 的唤醒失败、unit 崩溃）：保护表保护的是一个还在正常服务的模型，而故障模型已经不在服务，它名下的"在途请求"实际上已经失败。因此故障清理的 stop 不受保护表限制，但必须满足：只在 §2 限定的实例与故障证据成立时触发，并遵守其持久化事务与退出确认规则；pin 记录**保留**，模型重新放置后 pin 继续生效；事件流里标明这是故障清理而不是策略驱逐。
+**唯一例外是故障清理**（§2 的唤醒失败、unit 崩溃）：保护表保护的是一个还在正常服务的模型，而故障模型已经不在服务，它名下的"在途请求"实际上已经失败。因此故障清理的 stop 不受保护表限制，但必须满足：只在 §2 限定的实例与故障证据成立时触发，并遵守其持久化事务与退出确认规则；pin 记录**保留**，模型重新放置后 pin 继续生效；事件流里标明这是故障清理而不是策略驱逐。#300 的唤醒卡死恢复只取其中"在途请求"一项：pin 与默认模型仍按保护表处理，只回报阻塞。
 
 ### 4.1 awake → sleeping
 
@@ -907,3 +926,4 @@ native/model effect 已结算、候选可写启动、健康检查、单 writer �
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->
+<!-- Generated-By: Claude Code / claude-opus-5-5 -->

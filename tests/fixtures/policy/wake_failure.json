@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "generated_by": "Claude Code / claude-opus-5-5",
+  "model": "qwen3.8-27b",
+  "grace_seconds": 90,
+  "cases": [
+    {
+      "id": "incident_ready_still_sleeping_with_stuck_requests",
+      "rounds": {"start": 0, "step": 15, "count": 8},
+      "observed": {"swap_state": "ready", "is_sleeping": true, "in_flight": 3},
+      "first_action_at": 90,
+      "expect": {"actions": [["stop", "wake_failed"]], "reasons": []},
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Reconstructed from the #300 incident (llama-swap ready after a failed /wake_up, daemon /is_sleeping true, in_flight never zero) at the production 15 s sample cadence; values are synthetic, not a captured snapshot."
+      }
+    },
+    {
+      "id": "healthy_sleeper_with_stopped_data_plane",
+      "rounds": {"start": 0, "step": 15, "count": 12},
+      "observed": {"swap_state": "stopped", "is_sleeping": true, "in_flight": 0},
+      "expect": {"actions": [], "reasons": []},
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Normal level-1 sleep: llama-swap stopped and the daemon asleep is not a fault."
+      }
+    },
+    {
+      "id": "pinned_wedged_model_is_only_reported",
+      "rounds": {"start": 0, "step": 15, "count": 8},
+      "observed": {"swap_state": "ready", "is_sleeping": true, "in_flight": 3},
+      "pinned": true,
+      "expect": {"actions": [], "reasons": ["pinned_until"]},
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "AGENTS.md section 6: pinned models are never touched by automatic policy."
+      }
+    },
+    {
+      "id": "default_wedged_model_is_only_reported",
+      "rounds": {"start": 0, "step": 15, "count": 8},
+      "observed": {"swap_state": "ready", "is_sleeping": true, "in_flight": 3},
+      "is_default": true,
+      "expect": {"actions": [], "reasons": ["default_model"]},
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "AGENTS.md section 6: the default model is never hard-stopped by this path."
+      }
+    },
+    {
+      "id": "short_ready_sleeping_race_clears",
+      "rounds": {"start": 0, "step": 15, "count": 12},
+      "observed": {"swap_state": "ready", "is_sleeping": true, "in_flight": 1},
+      "awake_from_round": 2,
+      "expect": {"actions": [], "reasons": []},
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "A wake that completes within two rounds never reaches the grace period."
+      }
+    },
+    {
+      "id": "collection_error_restarts_the_window",
+      "rounds": {"start": 0, "step": 15, "count": 8},
+      "observed": {"swap_state": "ready", "is_sleeping": true, "in_flight": 3},
+      "error_rounds": [5],
+      "expect": {"actions": [], "reasons": []},
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "An unknown round is no evidence; the window restarts after it."
+      }
+    },
+    {
+      "id": "two_rounds_across_a_gap_are_not_enough",
+      "rounds": {"start": 0, "step": 120, "count": 2},
+      "observed": {"swap_state": "ready", "is_sleeping": true, "in_flight": 3},
+      "expect": {"actions": [], "reasons": []},
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "The grace period must be covered by at least three distinct published rounds."
+      }
+    }
+  ]
+}

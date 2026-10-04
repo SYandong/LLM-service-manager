@@ -7,8 +7,10 @@ from .placement import PlacementDecision, plan_placement
 from .pressure import plan_pressure_sleep
 from .recovery import plan_relocation, plan_sleeping_recovery
 from .ranking import keep_value
+from .wake_failure import plan_wake_failure
 
 __all__ = [
+    "plan_wake_failure",
     "Decision", "PolicySettings", "keep_value", "plan_free", "plan_idle_sleep",
     "plan_memory_pressure", "plan_reserve", "reload_admission",
     "PlacementDecision", "plan_placement",
