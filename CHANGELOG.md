@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.9.2 — 2026-10-05
+
+Patch release; Python distribution `1.9.2`. One merged PR. #301 fixes a
+production deadlock in which a warm wake that failed on CUDA OOM left a model
+`ready` in llama-swap but still asleep in vLLM, and its own stuck requests kept
+the in-flight gate closed against every wake and stop. The recovery is opt-in.
+Below the normal five-PR cadence, so the release PR records
+`Release-Exception: #256`.
 
 ### Faults
 
