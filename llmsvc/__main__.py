@@ -297,7 +297,7 @@ def main():
             scheduler.faults = FaultRecoveryController(scheduler)
         if config.wake_failure_recovery_enabled:
             from llmsvc.wake_failure import WakeFailureRecoveryController
-            scheduler.wake_failures = WakeFailureRecoveryController(scheduler)
+            scheduler.wake_failures = WakeFailureRecoveryController(scheduler, accounting=scheduler.placement)
         if config.catalog_enabled or (store is not None and store.catalog_checkpoint() is not None):
             build_catalog(config, scheduler)
             checkpoint = store.catalog_checkpoint() if store is not None else None

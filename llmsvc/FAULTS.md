@@ -194,6 +194,7 @@ separate, lighter opt-in covers that one signal at the normal cadence:
 ```yaml
 wake_failure_recovery_enabled: false  # also needs model_actions_enabled and read_only: false
 wake_failure_grace_seconds: 90        # finite, 30..3600
+wake_failure_unload_allowance_seconds: 90  # finite, 0..600; added to request_timeout_seconds
 ```
 
 **Detection** is the pure `plan_wake_failure` (`llmsvc/policy/wake_failure.py`).
@@ -214,9 +215,9 @@ the AGENTS.md §6 rule here; only the #130 proof path may take its exception.
 
 **Recovery**, at most one model per published sample:
 
-1. Re-plan under the action lock against the current snapshot, then require a
-   live unit probe whose `LLMSVC_LEASE_ID` matches the confirmed lease.
-   Otherwise `blocked` with no effect.
+1. Take a fresh sample (as an explicit stop does), re-plan under the action
+   lock against it, then require a live unit probe whose `LLMSVC_LEASE_ID`
+   matches the confirmed lease. Otherwise `blocked` with no effect.
 2. Emit `wake_failure_detected` and submit the stop through the normal protected
    dispatcher with reason `wake_failed`. That reason only lifts the in-flight
    gate for `stop`; pin, default, freshness, unit-shape and memory checks stay.
@@ -224,9 +225,18 @@ the AGENTS.md §6 rule here; only the #130 proof path may take its exception.
    explicitly stopped confirmed lease is reconciled to `released` by the
    existing exit path (positive unit exit), not by this code.
 4. Only after that, `POST /api/models/unload/{id}` outside the lock, so the next
-   request cold-starts through `/v1/place` with fresh placement. llama-swap may
-   hold the request while the model's `cmdStop` helper fails against the gone
-   backend; the remaining budget (`free_timeout_seconds`) bounds it.
+   request cold-starts through `/v1/place` with fresh placement. Steps 1–3 share
+   `free_timeout_seconds`; the unload has its own budget of
+   `request_timeout_seconds + wake_failure_unload_allowance_seconds`, because
+   llama-swap holds the reply while the model's `cmdStop` helper fails against
+   the gone backend (about 60 s in the incident).
+5. If the unload is rejected or its outcome is unknown, the model is remembered
+   in memory with the lease this path released. On a later published sample in
+   which llama-swap still reports it `ready`, its unit is inactive and that
+   lease is still the model's only, released account, the unload is retried —
+   one at a time, at most three attempts in total, each reported as
+   `wake_failure_unload_retry`. A `stopping`/`stopped` proxy, a new lease or
+   instance, or an exhausted budget drops the entry.
 
 `wake_failure_result` reports `model`, `lease_id`, `gpu`, `since`, `samples`,
 `in_flight`, `stop_confirmed`, `proxy_unloaded`, `error` and `status`:
@@ -235,8 +245,33 @@ the AGENTS.md §6 rule here; only the #130 proof path may take its exception.
 attempt restarts the window, so a retry waits a full grace period. Nothing is
 persisted beyond the existing lease row; restart restarts all windows.
 
+**Operator action on `partial`.** The backend is stopped and its lease
+released, but llama-swap may still list the model `ready`. Normally the retry
+in step 5 settles it. If `GET /running` still shows the model `ready` (or
+`stopping` for more than a few minutes) after the retries, unload it by hand
+with llama-swap's per-model unload, check that `systemctl list-units 'vllm-*'`
+shows no unit for it, and record the action in the issue. On `failed` (stop
+submitted, exit not confirmed) do not unload: inspect the unit first, since
+the lease stays charged until the existing reconciliation observes the exit.
+
 `--dry-run`, `--once` and `read_only: true` only log `wake_failure_preview`
 (`{would, blocked_by}`, `dry_run: true`): no events, probes, transport or writes.
+The periodic read-only preview logs each (model, window start) once.
+
+A catalog publication rebuilds this controller together with the model-action
+controller, transport and placement accounting (`CatalogRuntime._publish`);
+evidence windows and pending unload retries restart. An instance still bound
+to a replaced controller refuses to act.
+
+Known limitations, accepted for this slice:
+
+- The grace period is measured on the snapshots' wall-clock `sampled_at`, not a
+  monotonic clock. A backwards step restarts the window; a forward step can
+  shorten it, but the three-distinct-rounds floor still applies.
+- Any collection error anywhere in a round (including another model's probe or
+  `nvidia-smi` timing out) restarts every window, not only the affected model's.
+  Frequent unrelated errors therefore delay detection rather than cause it.
+- Windows, reports and unload retries are volatile; a restart begins again.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: Claude Code / claude-opus-5-5 -->

@@ -131,3 +131,19 @@ def test_dispatcher_keeps_pin_and_default_protection_for_wake_failed(protection,
     with pytest.raises(ActionDispatchError) as exc:
         dispatcher(current, calls).execute(Action("stop", NAME, "wake_failed", 0), dry_run=False)
     assert exc.value.reason == reason and calls == []
+
+
+@pytest.mark.parametrize("swap_state", ["starting", "stopping", "stopped", None])
+def test_non_ready_data_plane_round_restarts_the_window(swap_state):
+    windows = {NAME: (BASE, BASE + 75, 6)}
+    decision = plan_wake_failure(snapshot(BASE + 90, swap_state=swap_state), windows, grace_seconds=GRACE)
+    assert decision.actions == () and decision.windows == {}
+    again = plan_wake_failure(snapshot(BASE + 105), decision.windows, grace_seconds=GRACE)
+    assert again.actions == () and again.windows == {NAME: (BASE + 105, BASE + 105, 1)}
+
+
+def test_dispatcher_refuses_sleep_with_wake_failed_reason_past_in_flight():
+    calls = []
+    with pytest.raises(ActionDispatchError) as exc:
+        dispatcher(snapshot(BASE), calls).execute(Action("sleep", NAME, "wake_failed", 0), dry_run=False)
+    assert exc.value.reason == "in_flight" and calls == []

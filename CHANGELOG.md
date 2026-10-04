@@ -13,8 +13,11 @@
   lets the existing exit reconciliation release the lease, then unloads the
   model in llama-swap so the next request cold-starts. Pinned and default
   models are only reported (`wake_failure_blocked`). Read-only and `--dry-run`
-  log `wake_failure_preview`. Events: `wake_failure_detected`,
-  `wake_failure_result` (#300).
+  log `wake_failure_preview`. The unload has its own budget
+  (`request_timeout_seconds + wake_failure_unload_allowance_seconds`, default
+  90) and an unfinished one is retried on later samples, at most three
+  attempts. Events: `wake_failure_detected`, `wake_failure_blocked`,
+  `wake_failure_result`, `wake_failure_unload_retry` (#300).
 
 ## 1.9.1 — 2026-09-30
 

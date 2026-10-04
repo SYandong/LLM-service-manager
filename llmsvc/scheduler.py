@@ -195,6 +195,7 @@ class Scheduler:
         self._cycle_failures = {
             "catalog_cycle_error": _RepeatLimiter(CYCLE_ERROR_INTERVAL_SECONDS, lambda: self.monotonic()),
             "fault_error": _RepeatLimiter(CYCLE_ERROR_INTERVAL_SECONDS, lambda: self.monotonic()),
+            "wake_failure_error": _RepeatLimiter(CYCLE_ERROR_INTERVAL_SECONDS, lambda: self.monotonic()),
         }
         self.action_lock = store.action_lock if store is not None else threading.RLock()
         self.changed = threading.Condition(self.action_lock)
@@ -822,9 +823,10 @@ class Scheduler:
         # One observation per published sample; read-only mode only previews.
         while not self.stopping.is_set():
             try:
+                # Re-read the attribute: catalog publication rebinds it.
                 self.wake_failures.run_once()
             except Exception as exc:
-                LOG.warning(json.dumps({"kind": "wake_failure_error", "error_type": type(exc).__name__}))
+                self._log_cycle_failure("wake_failure_error", exc)
             with self.changed:
                 seen = self._sample_published
                 self.changed.wait_for(lambda: self.stopping.is_set() or self._sample_published != seen,

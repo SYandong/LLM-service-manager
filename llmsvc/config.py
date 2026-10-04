@@ -92,6 +92,9 @@ class SchedulerConfig:
     # backend still reports is_sleeping for longer than the grace period.
     wake_failure_recovery_enabled: bool = False
     wake_failure_grace_seconds: float = 90.0
+    # Unload budget on top of request_timeout_seconds: llama-swap can hold the
+    # reply while the model's cmdStop helper fails against the stopped backend.
+    wake_failure_unload_allowance_seconds: float = 90.0
     free_timeout_seconds: float = 120.0
     reserve_timeout_seconds: float = 120.0
     wake_timeout_seconds: float = 900.0
@@ -178,6 +181,10 @@ class SchedulerConfig:
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not math.isfinite(value) or not 30 <= value <= 3600):
             raise ValueError("wake_failure_grace_seconds must be a finite number in [30, 3600]")
+        value = self.wake_failure_unload_allowance_seconds
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or not 0 <= value <= 600):
+            raise ValueError("wake_failure_unload_allowance_seconds must be a finite number in [0, 600]")
         if type(self.automation_enabled) is not bool:
             raise ValueError("automation_enabled must be a boolean")
         if type(self.sleeping_recovery_enabled) is not bool:

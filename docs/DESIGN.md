@@ -132,7 +132,7 @@ systemd `InvocationID` 相符，且已观察到该实例健康服务，或明确
 `wake_failed`；任一轮不满足、采集有错误或时间倒退都重置窗口。执行沿用普通受保护
 dispatcher 的 stop（reason `wake_failed` 只对 stop 解除在途保护），用既有两轮观测
 确认退出并由既有对账释放租约，然后才向 llama-swap `POST /api/models/unload/{id}`，
-下一次请求走 `/v1/place` 冷启动。它只借用 §4 故障例外里的"在途请求"一项：pin 与
+下一次请求走 `/v1/place` 冷启动；unload 有独立预算（`request_timeout_seconds + wake_failure_unload_allowance_seconds`），未完成时在后续采样中有界重试。目录发布时该控制器随模型动作控制器一起重建。它只借用 §4 故障例外里的"在途请求"一项：pin 与
 默认模型仍受保护，只报 `wake_failure_blocked`，默认模型的硬停例外仍只属于 #130
 证明路径。dry-run / 只读只记录 `wake_failure_preview`。细节见
 [FAULTS.md](../llmsvc/FAULTS.md#wedged-warm-wake-recovery-300)。

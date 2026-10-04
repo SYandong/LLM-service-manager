@@ -58,6 +58,9 @@ collectors: {}
 # read_only: false; read-only and --dry-run log wake_failure_preview only.
 # wake_failure_recovery_enabled: false
 # wake_failure_grace_seconds: 90 # Finite seconds in [30, 3600]; at least 3 rounds.
+# The unload gets request_timeout_seconds plus this allowance: llama-swap holds
+# the reply while the model's cmdStop helper fails against the stopped backend.
+# wake_failure_unload_allowance_seconds: 90 # Finite seconds in [0, 600].
 
 # Optional registry mount: omitted by default. Uncomment only after configuring
 # the reviewed absolute paths. This enables temporary-model list/dry-run preview
