@@ -29,9 +29,11 @@ blocked and retain the current running instance.
 ## Disposable rehearsal
 
 1. Run the complete Python 3.10 suite, Go patch tests and the CPU-only actual
-   patched-swap/fake-wrapper fixture. Retain 503 status/header/body/elapsed time,
+   patched-swap/unmodified-official-wrapper fixture. Retain 503 status/header/body/elapsed time,
    transient 409 control and normal startup evidence. Test loading SSE separately:
    once HTTP headers are committed, its error is a frame, not a new HTTP status.
+   Include the wrapper's journal-forwarder case: an inherited output pipe must
+   not add the upstream ten-second drain delay to the refusal.
 2. Run the host scanner against injected proc/GPU/metrics fixtures. Rehearse its
    installer/uninstaller in a disposable root; inspect the exact files and
    timer plan. A dry-run must not create files or execute systemctl.
@@ -139,6 +141,7 @@ do not clear fences or replay a start/stop to make the record look complete.
 The next-minor legacy TUI deletion is #311 and needs zero-use evidence or
 maintainer confirmation. #28 target rewriting and #168 closure remain decisions;
 this rollout observes and coordinates, and does not retire another user's
-service. The announcement below is a draft only and makes no deployment claim.
+service. The [announcement](../docs/FLEET_ANNOUNCEMENT.md) is a draft only and
+makes no deployment claim.
 
 <!-- Generated-By: Codex / unknown model -->
