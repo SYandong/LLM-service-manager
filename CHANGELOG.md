@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased — fleet and placement availability
+
+- Known placement blockers that llmsvc cannot clear now have a conservative
+  grace-period 503 path with Retry-After; recoverable/unknown cases retain the
+  existing bounded 409 wait. The launcher and patched llama-swap propagate an
+  explicit no_gpu_available error rather than an unexplained startup 500
+  (#303, #304). Native site replacement remains a separate rollout.
+- Add an opt-in, read-only host fleet observer and independent SQLite activity
+  history. Failed/partial/stale observations remain unknown. Owner claims are
+  bounded metadata, tied to the direct peer's verified container, and never
+  stop workloads (#305–#307).
+- **CLI behavior change:** status defaults to fleet; scripts using the prior
+  state JSON must use status --shared --json. Add fleet, claim, unclaim and
+  history. The default TTY llm/top panel becomes fleet; legacy-tui retains the
+  previous shared-model panel with a deprecation notice (#308, #309).
+- Add explicit scanner enablement, rollback and the requested three-day shadow
+  reconciliation runbook. No site deployment, shadow acceptance or announcement
+  is claimed. Legacy TUI removal is planned for the minor after the first fleet release, with zero-use
+  evidence or maintainer confirmation (#310, #311).
+
+
 ## 1.9.2 — 2026-10-05
 
 Patch release; Python distribution `1.9.2`. One merged PR. #301 fixes a
@@ -1420,3 +1441,5 @@ Release process and cadence: [docs/RELEASING.md](docs/RELEASING.md).
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->
+
+<!-- Generated-By: Codex / unknown model -->
