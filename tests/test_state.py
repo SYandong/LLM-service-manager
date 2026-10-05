@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 # Generated-By: OpenCode / deepseek-v4.1-flash
 """JSON compatibility and explicit unknown observation regression tests."""
 
@@ -7,7 +8,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from llmsvc.state import Activity, GPUState, ModelState, Pin, StateSnapshot
+from llmsvc.state import Activity, Blocker, GPUState, ModelState, Pin, StateSnapshot
 
 
 def test_snapshot_json_preserves_unknown_and_all_public_sections():
@@ -25,6 +26,16 @@ def test_snapshot_json_preserves_unknown_and_all_public_sections():
     assert data["activity"][0]["in_flight"] is None
     assert data["pins"][0] == {"model": "example", "until": 42.0, "by": "container-a"}
     assert all(key in data for key in ("leases", "reserves", "memory", "blocked_by", "errors"))
+
+
+def test_blocker_external_amount_is_optional_and_additive_with_schema_one():
+    assert Blocker(**{"model": None, "reason": "reserved", "gpu": 0}).external_gb is None
+    observed = Blocker(None, "external_pressure", 0, external_gb=60.4)
+    snapshot = StateSnapshot(blocked_by=(observed,))
+    data = json.loads(json.dumps(snapshot.to_dict(), allow_nan=False))
+    assert data["schema_version"] == 1
+    assert data["blocked_by"][0]["external_gb"] == 60.4
+    assert Blocker(**data["blocked_by"][0]) == observed
 
 
 def test_inactive_model_transition_is_omitted_from_json():

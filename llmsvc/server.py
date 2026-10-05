@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 # Generated-By: Claude Code / claude-fable-5-1
 # Generated-By: OpenCode / deepseek-v4.1-flash
 """Standard-library HTTP state endpoint and bounded-history SSE stream."""
@@ -38,13 +39,15 @@ class SchedulerHandler(BaseHTTPRequestHandler):
         # in the structured service log.
         LOG.info(json.dumps({"kind": "http_request", "method": self.command}))
 
-    def _json(self, status, payload):
+    def _json(self, status, payload, headers=None):
         body = json.dumps(payload, allow_nan=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.close_connection = True
         self.wfile.write(body)
@@ -253,7 +256,12 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 error["message"] = exc.message
             if hasattr(exc, "blockers"):
                 error["blockers"] = [asdict(blocker) for blocker in exc.blockers]
-            self._json(exc.status, error)
+            headers = {}
+            retry_after = getattr(exc, "retry_after", None)
+            if retry_after is not None:
+                headers["Retry-After"] = str(retry_after)
+                error.update(retryable=True, retry_after_seconds=retry_after, gpus=list(exc.gpus))
+            self._json(exc.status, error, headers=headers)
         except (ValueError, TypeError, UnicodeError):
             self._json(400, {"error": "invalid_request"})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):

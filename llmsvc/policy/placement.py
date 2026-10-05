@@ -1,19 +1,22 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 """Single-GPU placement over a configurable pool with exhaustive feasible eviction sets (DESIGN §4.2)."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import combinations
 from math import isfinite
 from typing import Mapping, Optional
 
 from llmsvc.state import Action, Blocker, ModelState, StateSnapshot
 from .common import Decision, PolicySettings, Projection, known_number, snapshot_blockers
+from .feasibility import placement_unplaceable
 
 
 @dataclass(frozen=True)
 class PlacementDecision(Decision):
     budget_gb: Optional[float] = None
     eviction_cost: float = 0.0
+    unplaceable: bool = False
 
 
 def _budget(record, total):
@@ -100,14 +103,14 @@ def plan_placement(
     """
     decision = _plan_placement(snapshot, request, waiting=waiting, settings=settings,
                                exclusions=exclusions, gpu_exclusions=gpu_exclusions)
-    if decision.gpu is not None or settings.exclusive_gpu is None:
-        return decision
     current = next((m for m in snapshot.models if m.name == request.name), None)
-    if not (request.is_default or (current is not None and current.is_default)):
-        return decision
-    return _plan_placement(snapshot, request, waiting=waiting, settings=settings,
-                           exclusions=exclusions, gpu_exclusions=gpu_exclusions,
-                           default_fallback=True)
+    if (decision.gpu is None and settings.exclusive_gpu is not None
+            and (request.is_default or (current is not None and current.is_default))):
+        decision = _plan_placement(snapshot, request, waiting=waiting, settings=settings,
+                                   exclusions=exclusions, gpu_exclusions=gpu_exclusions,
+                                   default_fallback=True)
+    return replace(decision, unplaceable=placement_unplaceable(
+        snapshot, decision, settings=settings, gpu_exclusions=gpu_exclusions))
 
 
 def _plan_placement(
@@ -172,11 +175,14 @@ def _plan_placement(
             blockers.append(Blocker(None, "reserved", gpu.index, ", ".join(r.by for r in active_reserves)))
             continue
         if gpu.index != settings.exclusive_gpu and gpu.external_gb >= settings.shared_external_threshold_gb:
-            blockers.append(Blocker(None, "external_pressure", gpu.index))
+            blockers.append(Blocker(None, "external_pressure", gpu.index, external_gb=gpu.external_gb))
             continue
         budget = _budget(request, gpu.total_gb)
         if budget is None:
             blockers.append(Blocker(request.name, "unknown_request_budget", gpu.index))
+            continue
+        if budget > gpu.total_gb:
+            blockers.append(Blocker(request.name, "request_exceeds_gpu_capacity", gpu.index))
             continue
         available = gpu.total_gb - gpu.external_gb - sum(
             amount for index, amount in allocations.values() if index == gpu.index)

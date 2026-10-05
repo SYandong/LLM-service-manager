@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / unknown model
 """Policy-authored outcomes for one unmodified real current-state capture."""
 
 from dataclasses import asdict
@@ -46,7 +47,10 @@ def test_unmodified_real_current_snapshot_policy_outcomes(evaluation):
         args.append(next(m for m in s.models if m.name == evaluation["request_from_model"]))
     decision = getattr(policy, evaluation["policy"])(*args)
     assert [asdict(a) for a in decision.actions] == MANIFEST["expected"]["actions"]
-    assert [asdict(b) for b in decision.blocked_by] == MANIFEST["expected"]["blocked_by"]
+    # The additive occupancy field has no evidence in this frozen capture.
+    expected_blockers = [{**b, "external_gb": None}
+                         for b in MANIFEST["expected"]["blocked_by"]]
+    assert [asdict(b) for b in decision.blocked_by] == expected_blockers
     assert json.loads(json.dumps(s.to_dict())) == exported["snapshot"]
     assert SOURCE.read_bytes() == original
 

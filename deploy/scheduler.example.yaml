@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 # Generated-By: OpenCode / deepseek-v4.1-flash
 # Generated-By: Claude Code / claude-opus-5-5
 # Start with a specific loopback/private container address and an alternate port.
@@ -29,6 +30,15 @@ host_min_available_gb: 150
 # External usage is already subtracted from availability, so keep this well
 # above the residue of neighbours' small processes.
 # shared_external_threshold_gb: 30
+# Placement keeps the ordinary <=120s wait for transient/unknown blockers.
+# Hopeless candidates require this grace and >=2 distinct fresh collector rounds
+# before HTTP 503 no_feasible_gpu. Even zero grace still requires two rounds.
+# placement_unplaceable_grace_seconds: 10 # Finite seconds in [0, 60].
+# placement_retry_after_seconds: 60       # Retry-After integer in [1, 86400].
+# During the hopeless window, request the existing sampler at this cadence.
+# Default 15s periodic sampling and fault-worker evidence rules stay unchanged.
+# Requests coalesce; a collector taking several seconds does not complete at 1Hz.
+# placement_sample_interval_seconds: 1    # Finite seconds in (0, 5].
 # Empty collectors intentionally report unknown. Supply the integrated #4/#5
 # adapter settings before bounded observation/preview checks; unknown is not zero.
 collectors: {}
