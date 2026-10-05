@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from llmsvc.scheduler import IntentWriteError, Scheduler
 from llmsvc.fleet import FleetError
+from llmsvc.fleet.occupants import enrich_unavailable
 
 LOG = logging.getLogger("llmsvc.http")
 
@@ -278,6 +279,9 @@ class SchedulerHandler(BaseHTTPRequestHandler):
             if retry_after is not None:
                 headers["Retry-After"] = str(retry_after)
                 error.update(retryable=True, retry_after_seconds=retry_after, gpus=list(exc.gpus))
+            if exc.status == 503 and exc.error == "no_feasible_gpu" and self.server.scheduler.config.fleet_enabled:
+                error = enrich_unavailable(error, self.server.scheduler.config,
+                    gpu_uuids=getattr(exc, "gpu_uuids", {}), now=self.server.scheduler.clock())
             self._json(exc.status, error, headers=headers)
         except (ValueError, TypeError, UnicodeError):
             self._json(400, {"error": "invalid_request"})
