@@ -2,11 +2,28 @@
 # Generated-By: Codex / gpt-6.1-sol
 # Generated-By: OpenCode / deepseek-v4.1-flash
 # Generated-By: Claude Code / claude-opus-5-5
+# Generated-By: Codex / gpt-6.1-sol
 # Start with a specific loopback/private container address and an alternate port.
 # Do not expose the unauthenticated scheduler on a public or wildcard address.
 listen_host: 127.0.0.1
 listen_port: 8011
 read_only: true
+# Fleet observation is independent of managed-model scheduling, and opt-in.
+# Enabling it writes only its separate history database. --dry-run, --once and
+# --check-config create no fleet database or worker. See docs/FLEET.md.
+fleet_enabled: false
+fleet_snapshot_path: /var/lib/llmsvc-host/export/fleet.json
+fleet_db_path: /var/lib/llmsvc/fleet.sqlite
+fleet_ingest_interval_seconds: 30 # Read cadence; host samples remain one minute.
+fleet_stale_after_seconds: 180
+fleet_active_window_seconds: 900
+fleet_idle_limit_hours: 6 # Display/reminder only; never stop another service.
+fleet_raw_retention_days: 14
+fleet_hourly_retention_days: 180
+# Declarations can be enabled with a read-only scheduler; they never enable
+# model actions. Requires a fresh trusted collectors.ip_containers_path export.
+fleet_claims_enabled: true
+fleet_claim_max_days: 7
 sample_interval_seconds: 15
 request_timeout_seconds: 10
 event_history_size: 1000

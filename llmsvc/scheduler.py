@@ -1,6 +1,7 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Claude Code / claude-fable-5-1
 # Generated-By: OpenCode / deepseek-v4.1-flash
+# Generated-By: Codex / gpt-6.1-sol
 """Sampling, usage and opt-in intent writes under one accounting lock."""
 
 import copy
@@ -213,6 +214,29 @@ class Scheduler:
         self._sample_published = 0
         self._sample_bounds = None  # Private (generation, monotonic start, end).
         self._sample_source_time_provided = False
+        self.fleet = None
+        if config.fleet_enabled:
+            from llmsvc.fleet.controller import FleetController
+            self.fleet = FleetController(config, clock=lambda: self.clock(), emit=self.emit)
+
+    def fleet_report(self, *, source_ip, mine=False):
+        from llmsvc.fleet import FleetError
+        if self.fleet is None:
+            raise FleetError(503, "fleet_disabled")
+        shared = [model.name for model in self.snapshot().models if model.state in ("awake", "sleeping")]
+        return self.fleet.report(source_ip=source_ip, mine=mine, shared=shared)
+
+    def fleet_history(self, service_id, hours):
+        from llmsvc.fleet import FleetError
+        if self.fleet is None:
+            raise FleetError(503, "fleet_disabled")
+        return self.fleet.history(service_id, hours)
+
+    def fleet_claim(self, operation, payload, *, source_ip, dry_run=False):
+        from llmsvc.fleet import FleetError
+        if self.fleet is None:
+            raise FleetError(503, "fleet_disabled")
+        return self.fleet.write_claim(operation, payload, source_ip=source_ip, dry_run=dry_run)
 
     def _unknown(self, reason: str) -> StateSnapshot:
         return StateSnapshot(memory=MemoryState(
@@ -857,6 +881,8 @@ class Scheduler:
             if self.event_bridge is not None:
                 self.event_bridge.start()
             self._thread.start()
+            if not sampling_only and self.fleet is not None:
+                self.fleet.start()
             if not sampling_only and self.automation is not None and self.automation.enabled():
                 self._automation_thread = threading.Thread(target=self._run_automation, name="llmsvc-automation", daemon=True)
                 self._automation_thread.start()
@@ -879,6 +905,8 @@ class Scheduler:
         # section. An already submitted action may finish; no later one starts.
         with self.changed:
             self.stopping.set()
+            if self.fleet is not None:
+                self.fleet.stopping.set()
             self.sample_requested.set()
             self.changed.notify_all()
         try:
@@ -923,7 +951,11 @@ class Scheduler:
                 if close is not None:
                     close()
             finally:
-                # SSE may send its final buffered relay events before closing.
-                self.events_closed.set()
-                with self.changed:
-                    self.changed.notify_all()
+                try:
+                    if self.fleet is not None:
+                        self.fleet.close()
+                finally:
+                    # SSE may send its final buffered relay events before closing.
+                    self.events_closed.set()
+                    with self.changed:
+                        self.changed.notify_all()

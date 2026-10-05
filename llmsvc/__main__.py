@@ -1,5 +1,6 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: OpenCode / deepseek-v4.1-flash
+# Generated-By: Codex / gpt-6.1-sol
 """Scheduler entry point: read-only by default, with opt-in pin intent writes."""
 
 import argparse
@@ -266,7 +267,7 @@ def main():
             print(json.dumps({"would": [{"kind": operation, "model": config.bootstrap["model"]}], "dry_run": True}))
             return 0  # No collector/store/adapter construction, DB creation or socket binding.
         if args.dry_run or args.check_config or args.once:
-            config = replace(config, read_only=True)
+            config = replace(config, read_only=True, fleet_enabled=False)
         config = maintenance_config(config)
         collector = build_collector(config)
         event_relay = build_event_relay(config)

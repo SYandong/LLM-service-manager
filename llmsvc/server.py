@@ -2,6 +2,7 @@
 # Generated-By: Codex / gpt-6.1-sol
 # Generated-By: Claude Code / claude-fable-5-1
 # Generated-By: OpenCode / deepseek-v4.1-flash
+# Generated-By: Codex / gpt-6.1-sol
 """Standard-library HTTP state endpoint and bounded-history SSE stream."""
 
 import json
@@ -12,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from llmsvc.scheduler import IntentWriteError, Scheduler
+from llmsvc.fleet import FleetError
 
 LOG = logging.getLogger("llmsvc.http")
 
@@ -79,6 +81,17 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 self._usage(target.query)
             elif target.path == "/v1/usage/report":
                 self._usage_report(target.query)
+            elif target.path == "/v1/fleet":
+                query = parse_qs(target.query, keep_blank_values=True)
+                if query not in ({}, {"mine": ["1"]}):
+                    raise FleetError(400, "invalid_fleet_query")
+                self._json(200, self.server.scheduler.fleet_report(source_ip=self.client_address[0], mine="mine" in query))
+            elif target.path == "/v1/fleet/history":
+                query = parse_qs(target.query, keep_blank_values=True)
+                if (set(query) != {"service", "hours"} or any(len(values) != 1 for values in query.values())
+                        or not query["service"][0] or query["hours"][0] not in ("24", "168")):
+                    raise FleetError(400, "invalid_fleet_history_query")
+                self._json(200, self.server.scheduler.fleet_history(query["service"][0], int(query["hours"][0])))
             elif target.path == "/v1/events":
                 query = parse_qs(target.query, keep_blank_values=True)
                 values = query.get("since", [self.headers.get("Last-Event-ID", "0")])
@@ -93,7 +106,7 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 self._events(cursor)
             else:
                 self._json(404, {"error": "not_found"})
-        except IntentWriteError as exc:
+        except (IntentWriteError, FleetError) as exc:
             self._json(exc.status, {"error": exc.error, **({"message": exc.message} if hasattr(exc, "message") else {})})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             self.close_connection = True
@@ -168,6 +181,10 @@ class SchedulerHandler(BaseHTTPRequestHandler):
             dry_run = "dry_run" in query
             if query and query != {"dry_run": ["1"]}:
                 raise ValueError("expected dry_run=1")
+            if ((self.command == "POST" and target.path == "/v1/fleet/claims")
+                    or (self.command == "DELETE" and target.path.startswith("/v1/fleet/claims/"))):
+                self._fleet_write(target, dry_run=dry_run)
+                return
             registry_path = None
             if ((self.command == "POST" and target.path == "/v1/models")
                     or (self.command == "DELETE" and target.path.startswith("/v1/models/"))):
@@ -250,7 +267,7 @@ class SchedulerHandler(BaseHTTPRequestHandler):
                 else:
                     result = self.server.scheduler.write_pin(operation, payload, source_ip=self.client_address[0])
             self._json(200, result)
-        except IntentWriteError as exc:
+        except (IntentWriteError, FleetError) as exc:
             error = {"error": exc.error}
             if hasattr(exc, "message"):
                 error["message"] = exc.message
@@ -266,6 +283,32 @@ class SchedulerHandler(BaseHTTPRequestHandler):
             self._json(400, {"error": "invalid_request"})
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             self.close_connection = True
+
+    def _fleet_write(self, target, *, dry_run):
+        if self.headers.get("Transfer-Encoding") is not None:
+            raise ValueError("transfer encoding is not supported")
+        lengths = self.headers.get_all("Content-Length", ["0"])
+        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit():
+            raise ValueError("invalid Content-Length")
+        length = int(lengths[0])
+        if length > 65536:
+            self._json(413, {"error": "request_too_large"})
+            return
+        if self.command == "DELETE":
+            claim_id = unquote(target.path[len("/v1/fleet/claims/"):])
+            if length or not claim_id or len(claim_id) > 512 or "/" in claim_id:
+                raise ValueError("invalid claim delete")
+            operation, payload = "unclaim", {"id": claim_id}
+        else:
+            data = self.rfile.read(length)
+            if len(data) != length:
+                raise ValueError("incomplete request body")
+            def reject_constant(value):
+                raise ValueError("non-finite JSON number")
+            payload = json.loads(data, parse_constant=reject_constant)
+            operation = "claim"
+        result = self.server.scheduler.fleet_claim(operation, payload, source_ip=self.client_address[0], dry_run=dry_run)
+        self._json(200, result)
 
     do_POST = _write_request
     do_DELETE = _write_request
