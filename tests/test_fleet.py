@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6.1-sol
+# Generated-By: Codex / unknown model
 """Synthetic fleet ingestion, durable history, state replay and identity contracts."""
 
 import copy
@@ -123,6 +124,7 @@ def test_replay_status_priority_and_observed_idle():
     ("::ffff:127.0.0.1", {}, [], False, "http://[::ffff:7f00:1]:8010", "local_only"),
     ("192.0.2.10", {}, [], False, "http://192.0.2.10:8010", "direct"),
     ("2001:db8::10", {}, [], False, "http://[2001:db8::10]:8010", "direct"),
+    ("fe80::123", {}, [], False, None, "unknown"),
     ("0.0.0.0", {"192.0.2.10": "ctr-a"}, [], False, "http://192.0.2.10:8010", "shared"),
     ("0.0.0.0", {"::ffff:192.0.2.10": "ctr-a"}, [], False, "http://192.0.2.10:8010", "shared"),
     ("0.0.0.0", {"192.0.2.20": "ctr-a", "192.0.2.10": "ctr-a"}, [], False, "http://192.0.2.10:8010", "shared"),

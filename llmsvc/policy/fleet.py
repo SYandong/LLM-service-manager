@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6.1-sol
+# Generated-By: Codex / unknown model
 """Pure fleet presentation policy; these states never authorize process actions."""
 
 import ipaddress
@@ -19,7 +20,7 @@ def service_endpoint(instance, *, current, stale, owner_addresses=None, host_ips
         address = ipaddress.ip_address(bind)
     except ValueError:
         return result
-    if address.is_multicast:
+    if address.is_multicast or (address.version == 6 and address.is_link_local):
         return result
     effective = getattr(address, "ipv4_mapped", None) or address
     if address.is_unspecified:
