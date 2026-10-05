@@ -2,6 +2,7 @@
 """Headless fleet navigation, selection and snapshot preservation contracts."""
 
 import asyncio
+import copy
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,7 @@ import pytest
 pytest.importorskip("textual")
 from textual import events
 from textual.containers import VerticalScroll
+from textual.widgets import DataTable
 from rich.text import Text
 
 from tui.fleet_app import ClaimDialog, FleetHelpDialog, GpuDetailDialog, GpuOverview
@@ -33,6 +35,18 @@ async def drag(pilot, selector, start, end):
     await pilot.mouse_down(selector, offset=start)
     await pilot.hover(selector, offset=end)
     await pilot.mouse_up(selector, offset=end)
+
+
+def two_service_snapshot(snapshot):
+    first = copy.deepcopy(snapshot["services"][0])
+    first["gpus"] = [0]
+    second = copy.deepcopy(first)
+    second.update(id="second-service", model="second-model", gpu_gb=1)
+    snapshot["services"] = [first, second]
+    snapshot["gpus"][0]["occupants"] = [
+        {"container": service["container"], "kind": "llm", "used_gb": 1,
+         "service_id": service["id"]} for service in snapshot["services"]]
+    return snapshot
 
 
 def test_wheel_burst_uses_the_last_tick_quiet_gap_and_consumes_rejected_ticks(interaction_snapshot):
@@ -419,4 +433,143 @@ def test_control_c_preserves_input_selection_when_supported_without_quitting(int
                     copy.assert_not_called()
             await pilot.press("q")
             assert app.is_running and "q" in field.value
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("panel_name", ["gpu-service-details", "gpu-service-history"])
+@pytest.mark.parametrize("navigation", ["key", "click"])
+def test_nonfirst_modal_service_selection_survives_row_rebuild_and_clears_on_navigation(interaction_snapshot, panel_name, navigation):
+    async def scenario():
+        snapshot = two_service_snapshot(interaction_snapshot)
+        app, client = make_app(snapshot)
+        async with app.run_test(size=(100, 35)) as pilot:
+            await ready(app, pilot)
+            await pilot.press("enter")
+            await ready(app, pilot)
+            table = app.screen.query_one("#gpu-detail-services", DataTable)
+            table.move_cursor(row=1, animate=False)
+            await ready(app, pilot)
+            assert app.selected_service_id() == "second-service"
+            panel = app.screen.query_one("#" + panel_name, SelectableStatic)
+            source = panel.render().plain
+            await drag(pilot, "#" + panel_name, (0, 0), (5, 0))
+            selected = panel.selected_text
+            assert selected
+            client.snapshot["services"][1]["model"] = "refreshed second model"
+            client.snapshot["generated_at"] += 60
+            await app.refresh_fleet().wait()
+            await ready(app, pilot)
+            assert app.selected_service_id() == "second-service" and table.cursor_row == 1
+            assert panel.has_selection and panel.selected_text == selected
+            assert panel.render().plain == source
+            with patch.object(app, "copy_to_clipboard") as clipboard:
+                await pilot.press("ctrl+c")
+                clipboard.assert_called_once_with(selected)
+            table.focus(scroll_visible=False)
+            if navigation == "key":
+                await pilot.press("up")
+            else:
+                await pilot.click("#gpu-detail-services", offset=(2, table.header_height))
+            await ready(app, pilot)
+            assert app.selected_service_id() == snapshot["services"][0]["id"]
+            assert not panel.has_selection
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("panel_name", ["fleet-detail-text", "fleet-history-text"])
+@pytest.mark.parametrize("rebuild", ["reorder", "resize"])
+@pytest.mark.parametrize("navigation", ["key", "click"])
+def test_nonfirst_people_selection_survives_programmatic_rebuild_and_clears_on_navigation(interaction_snapshot, panel_name, rebuild, navigation):
+    async def scenario():
+        app, client = make_app(two_service_snapshot(interaction_snapshot))
+        async with app.run_test(size=(100, 35)) as pilot:
+            await ready(app, pilot)
+            await pilot.press("p")
+            await ready(app, pilot)
+            app._table.move_cursor(row=app.row_keys.index("service:second-service"), animate=False)
+            await ready(app, pilot)
+            assert app.selected_service_id() == "second-service"
+            panel = app.query_one("#" + panel_name, SelectableStatic)
+            panel.scroll_visible(animate=False, top=True)
+            await pilot.pause()
+            source = panel.render().plain
+            await drag(pilot, "#" + panel_name, (0, 0), (5, 0))
+            selected = panel.selected_text
+            assert selected
+            if rebuild == "reorder":
+                client.snapshot["services"][1].update(model="refreshed second model", gpu_gb=100)
+                client.snapshot["generated_at"] += 60
+                await app.refresh_fleet().wait()
+            else:
+                await pilot.resize_terminal(80, 35)
+            await ready(app, pilot)
+            assert app.selected_service_id() == "second-service"
+            assert app.history["service_id"] == "second-service"
+            assert panel.has_selection and panel.selected_text == selected
+            assert panel.render().plain == source
+            with patch.object(app, "copy_to_clipboard") as clipboard:
+                await pilot.press("ctrl+c")
+                clipboard.assert_called_once_with(selected)
+            app._table.focus(scroll_visible=False)
+            if navigation == "key":
+                await pilot.press("down" if rebuild == "reorder" else "up")
+            else:
+                row = app.row_keys.index("service:" + interaction_snapshot["services"][0]["id"])
+                await pilot.click("#fleet-table", offset=(2, app._table.header_height + row))
+            await ready(app, pilot)
+            assert app.selected_service_id() != "second-service"
+            assert not panel.has_selection
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("view", ["person", "modal"])
+@pytest.mark.parametrize("failure", ["stale", "read"])
+@pytest.mark.parametrize("selected", [False, True])
+def test_api_freshness_refresh_hides_old_addresses_after_frozen_selection_clears(interaction_snapshot, view, failure, selected):
+    async def scenario():
+        snapshot = two_service_snapshot(interaction_snapshot)
+        snapshot["services"][0].update(api_access="shared", api_address="http://192.0.2.1:8080")
+        app, client = make_app(snapshot)
+        async with app.run_test(size=(100, 35)) as pilot:
+            await ready(app, pilot)
+            await pilot.press("p" if view == "person" else "enter")
+            await ready(app, pilot)
+            panel_name = "fleet-detail-text" if view == "person" else "gpu-service-details"
+            panel = app.screen.query_one("#" + panel_name, SelectableStatic)
+            source = panel.render().plain
+            assert "API: http://192.0.2.1:8080 · Shared" in source
+            if selected:
+                await drag(pilot, "#" + panel_name, (0, 0), (5, 0))
+                copied = panel.selected_text
+                assert copied
+            if failure == "stale":
+                client.snapshot["stale"] = True
+            else:
+                client.read_error = OSError("fixture read failed")
+            await app.refresh_fleet().wait()
+            await ready(app, pilot)
+            assert app.snapshot["services"][0]["api_address"] == "http://192.0.2.1:8080"
+            if selected:
+                assert panel.has_selection and panel.selected_text == copied
+                assert panel.render().plain == source
+                panel.clear_selection()
+                await pilot.pause()
+            assert "API: Unknown" in panel.render().plain
+            assert "http://192.0.2.1:8080" not in panel.render().plain
+            assert "Shared" not in panel.render().plain
+    asyncio.run(scenario())
+
+
+def test_fresh_api_remains_known_when_activity_is_unknown(interaction_snapshot):
+    async def scenario():
+        snapshot = two_service_snapshot(interaction_snapshot)
+        snapshot["services"][0].update(status="unknown", engine="unsupported",
+                                      api_access="shared", api_address="http://192.0.2.1:8080")
+        app, _ = make_app(snapshot)
+        async with app.run_test(size=(100, 35)) as pilot:
+            await ready(app, pilot)
+            await pilot.press("p")
+            await ready(app, pilot)
+            assert not app.read_error and app.service_status(app.selected_service()) == "unknown"
+            assert "API: http://192.0.2.1:8080 · Shared" in app.query_one("#fleet-detail-text").render().plain
     asyncio.run(scenario())

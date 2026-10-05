@@ -74,6 +74,14 @@ def test_api_label_describes_metadata_without_asserting_reachability(access, add
     assert api_label({"api_access": access, "api_address": address}) == expected
 
 
+@pytest.mark.parametrize("access", ["shared", "local_only", "direct", "unknown"])
+def test_stale_api_metadata_is_unknown_regardless_of_access(access):
+    service = {"api_access": access, "api_address": "http://192.0.2.1:8000"}
+    original = copy.deepcopy(service)
+    assert api_label(service, fresh=False) == "Unknown"
+    assert service == original
+
+
 def test_service_rows_use_durations_token_units_and_api_metadata():
     service = {"id": "example", "model": "Example model", "engine": "vllm",
                "status": "over_limit", "api_access": "shared",
@@ -134,3 +142,49 @@ def test_wrapped_api_metadata_keeps_the_service_hit_and_allocation_anchor(width)
     assert all((row, 0, width, 0, key) in hits for row in rows)
     assert anchors[(0, key)] < min(rows)
     assert all(line.cell_len <= width for line in view.split("\n"))
+
+
+@pytest.mark.parametrize("selected_gpu", [0, 1])
+def test_stale_expanded_rows_hide_all_api_metadata_without_changing_observations(selected_gpu):
+    services = [{"id": "example-%s" % index, "model": "Example model %s" % index,
+                 "status": "active", "api_address": "http://0.0.0.0:%s" % (8000 + index),
+                 "api_access": "shared", "window_24h": {
+                     "active_minutes": .5, "coverage_ratio": .5, "requests": 1200,
+                     "prompt_tokens": 24000, "gen_tokens": 12000}} for index in (0, 1)]
+    cards = [account_gpu({"index": index, "total_gb": 100, "used_gb": 52.0009765625,
+                         "occupants": [{"container": "example", "kind": "llm",
+                                        "used_gb": 52.0009765625, "service_id": service["id"]}]},
+                         services) for index, service in enumerate(services)]
+    original = copy.deepcopy(services)
+    fresh_view = render_expanded(cards, services, 120, selected_gpu=selected_gpu)[0].plain
+    stale_view, hits, anchors, service_hits = render_expanded(
+        cards, services, 120, selected_gpu=selected_gpu, stale=True)
+    assert stale_view.plain.count("API: Unknown") == 2
+    assert "http://" not in stale_view.plain and "Shared" not in stale_view.plain
+    for index, (card, service) in enumerate(zip(cards, services)):
+        assert service["api_address"] + " · Shared" in fresh_view
+        fresh_lines = service_lines(service, card.used_gb, index)
+        stale_lines = service_lines(service, card.used_gb, index, fresh=False)
+        assert all(fresh_lines[row] == stale_lines[row] for row in (0, 2, 3))
+        assert card.used_gb == card.allocations[0].used_gb == 52.0009765625
+        key = card.allocations[0].key
+        rows = [row for row, ident in service_hits.items() if ident == service["id"]]
+        assert anchors[(index, key)] < min(rows)
+        assert all((row, 0, 120, index, key) in hits for row in rows)
+    assert services == original
+
+
+def test_fresh_unknown_activity_keeps_verified_api_metadata():
+    service = {"id": "unsupported-activity", "model": "Example model", "engine": "ollama",
+               "status": "unknown", "idle_time_sensitive": False,
+               "api_address": "http://0.0.0.0:11434", "api_access": "shared"}
+    card = account_gpu({"index": 0, "total_gb": 100, "used_gb": 52, "occupants": [
+        {"container": "example", "kind": "llm", "used_gb": 52, "service_id": service["id"]}]},
+        [service])
+    original = copy.deepcopy(service)
+    view = render_expanded([card], [service], 120, statuses={service["id"]: "unknown"})[0].plain
+    assert "State Unknown" in view
+    assert "active ? · coverage ?" in view
+    assert "API: http://0.0.0.0:11434 · Shared" in view
+    assert "input ? tokens · output ? tokens · total ? tokens" in view
+    assert service == original

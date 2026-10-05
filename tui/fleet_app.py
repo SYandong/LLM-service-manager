@@ -296,12 +296,14 @@ class GpuDetailDialog(ModalScreen):
         table = self.query_one("#gpu-detail-services", DataTable)
         if rows != self._rows:
             selected = self.owner.selected_service_id()
-            table.clear()
-            for ident, label, memory, status in rows:
-                table.add_row(label, memory, status, key=ident)
-            self._rows = rows
-            position = next((index for index, row in enumerate(rows) if row[0] == selected), 0)
-            table.move_cursor(row=position, animate=False)
+            # Rebuilding rows must not masquerade as deliberate service navigation.
+            with table.prevent(DataTable.RowHighlighted):
+                table.clear()
+                for ident, label, memory, status in rows:
+                    table.add_row(label, memory, status, key=ident)
+                self._rows = rows
+                position = next((index for index, row in enumerate(rows) if row[0] == selected), 0)
+                table.move_cursor(row=position, animate=False)
         self.sync_history()
 
     def sync_history(self):
@@ -1010,49 +1012,58 @@ class FleetApp(App):
             columns += [("ratio", "24h", 4), ("tokens", "OUT TOKENS", 10)]
         previous_id = self.selected_service_id()
         previous_key = self.row_keys[self._table.cursor_row] if self.row_keys and self._table.cursor_row < len(self.row_keys) else None
-        if columns != self._columns:
-            self._table.clear(columns=True)
-            self._rows.clear()
-            self.row_keys = []
-            for key, label, width in columns:
-                self._table.add_column(label, key=key, width=width)
-            self._columns = columns
-        desired, metadata = self.display_rows(narrow)
-        desired_keys = [key for key, _ in desired]
-        for key in list(self._rows):
-            if key not in desired_keys:
-                self._table.remove_row(key)
-                del self._rows[key]
-        for key, cells in desired:
-            if key not in self._rows:
-                self._table.add_row(*cells, key=key)
-                self._rows[key] = cells
-            else:
-                old = list(self._rows[key])
-                for index, cell in enumerate(cells):
-                    if old[index] != cell:
-                        self._table.update_cell(key, columns[index][0], cell, update_width=False)
-                        old[index] = cell
-                self._rows[key] = tuple(old)
-        if desired_keys != self.row_keys:
-            ranks = {key: index for index, key in enumerate(desired_keys)}
-            self._table.sort("service", key=lambda label: ranks[label.key])
-        self.row_keys, self.row_services = desired_keys, metadata
-        selected = previous_key if previous_key in metadata else next(
-            (key for key in desired_keys if previous_id is not None and metadata.get(key) == previous_id), None)
-        selected = selected or next((key for key in desired_keys if key in metadata), None)
-        if selected is not None and self._table.cursor_row != desired_keys.index(selected):
-            row = desired_keys.index(selected)
-            self._table.move_cursor(row=row, animate=False)
-            # New rows obtain their cursor bounds on the next layout pass.
-            if self._table.cursor_row != row:
-                self.call_after_refresh(self._table.move_cursor, row=row, animate=False)
+        with self._table.prevent(DataTable.RowHighlighted):
+            if columns != self._columns:
+                self._table.clear(columns=True)
+                self._rows.clear()
+                self.row_keys = []
+                for key, label, width in columns:
+                    self._table.add_column(label, key=key, width=width)
+                self._columns = columns
+            desired, metadata = self.display_rows(narrow)
+            desired_keys = [key for key, _ in desired]
+            for key in list(self._rows):
+                if key not in desired_keys:
+                    self._table.remove_row(key)
+                    del self._rows[key]
+            for key, cells in desired:
+                if key not in self._rows:
+                    self._table.add_row(*cells, key=key)
+                    self._rows[key] = cells
+                else:
+                    old = list(self._rows[key])
+                    for index, cell in enumerate(cells):
+                        if old[index] != cell:
+                            self._table.update_cell(key, columns[index][0], cell, update_width=False)
+                            old[index] = cell
+                    self._rows[key] = tuple(old)
+            if desired_keys != self.row_keys:
+                ranks = {key: index for index, key in enumerate(desired_keys)}
+                self._table.sort("service", key=lambda label: ranks[label.key])
+            self.row_keys, self.row_services = desired_keys, metadata
+            selected = previous_key if previous_key in metadata else next(
+                (key for key in desired_keys if previous_id is not None and metadata.get(key) == previous_id), None)
+            selected = selected or next((key for key in desired_keys if key in metadata), None)
+            if selected is not None and self._table.cursor_row != desired_keys.index(selected):
+                row = desired_keys.index(selected)
+                self._table.move_cursor(row=row, animate=False)
+                # New rows obtain their cursor bounds on the next layout pass.
+                if self._table.cursor_row != row:
+                    self.call_after_refresh(self.restore_service_cursor, selected)
         self.render_details()
         if self.gpu_detail is not None:
             self.gpu_detail.refresh_contents()
 
+    def restore_service_cursor(self, key):
+        if self.alive() and key in self.row_services:
+            with self._table.prevent(DataTable.RowHighlighted):
+                self._table.move_cursor(row=self.row_keys.index(key), animate=False)
+            self.render_details()
+
     def on_data_table_row_highlighted(self, event):
-        if self.alive():
+        if self.alive() and event.data_table is self._table:
+            if self._history_signature is not None and self.selected_service_id() != self._history_signature[0]:
+                self.clear_text_selections()
             self.render_details()
 
     def render_details(self):
@@ -1067,7 +1078,8 @@ class FleetApp(App):
         lines = ["%s · %s · %s · online %s · %s" % (self.clean(service.get("model") or "unknown"),
                  self.clean(owner_name(service)), self.clean(service.get("engine", "?")),
                  duration(service.get("uptime_seconds")), status_label(self.service_status(service))),
-                 "API: " + api_label(service, self.clean)]
+                 "API: " + api_label(service, self.clean, fresh=not bool(
+                     self.read_error or (self.snapshot or {}).get("stale")))]
         for name, label in (("window_24h", "24h"), ("window_7d", "7d")):
             window = service.get(name) or {}
             ratio, coverage = window.get("active_ratio"), window.get("coverage_ratio")

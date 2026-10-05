@@ -60,8 +60,10 @@ def status_label(status):
     return STATUS_LABELS.get(status, STATUS_LABELS["unknown"])
 
 
-def api_label(service, clean=str):
+def api_label(service, clean=str, *, fresh=True):
     """Describe the supplied listener metadata without inferring reachability."""
+    if not fresh:
+        return "Unknown"
     access = service.get("api_access")
     if access == "local_only":
         return "Local only"

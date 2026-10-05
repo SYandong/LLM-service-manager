@@ -298,7 +298,7 @@ def expanded_header(account, selected=False, stale=False):
     return text
 
 
-def service_lines(service, used_gb, index, clean=str, status=None):
+def service_lines(service, used_gb, index, clean=str, status=None, *, fresh=True):
     """Four logical rows; activity and counters describe the whole service."""
     status = status or service.get("status", "unknown")
     if status not in SERVICE_STYLES:
@@ -312,7 +312,7 @@ def service_lines(service, used_gb, index, clean=str, status=None):
     first.append(" · GPU %s VRAM: " % index, style="#98a4b4")
     first.append(gib(used_gb) + " GiB", style="bold #eaf1f7")
     ident = Text("    Service ID: " + clean(service["id"]), style="#98a4b4")
-    ident.append(" · API: " + api_label(service, clean))
+    ident.append(" · API: " + api_label(service, clean, fresh=fresh))
     values = service.get("hourly_active_24h") or [None] * 24
     activity = "".join("·" if not numeric(value) else "▁▂▃▄▅▆▇█"[
         min(7, int(min(value, 60) * 7 / 60))] for value in values)
@@ -382,7 +382,8 @@ def render_expanded(accounts, services, width, bar_rows=3, selected_gpu=None,
             amounts = service_amounts(allocation.members)
             for ident in sorted((ident for ident in amounts if ident in services), key=lambda ident: ranks[ident]):
                 memory = amounts[ident]
-                for line in service_lines(services[ident], memory, account.index, clean, statuses.get(ident)):
+                for line in service_lines(services[ident], memory, account.index, clean,
+                                          statuses.get(ident), fresh=not stale):
                     append(line, account.index, allocation.key, ident, indent=4)
         if account.issues:
             append(Text("  Measured VRAM · Used %s GiB · Total %s GiB" % (gib(account.used_gb), gib(account.total_gb)),
