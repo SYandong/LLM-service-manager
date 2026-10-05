@@ -348,17 +348,185 @@ def test_retention_keeps_hourly_and_does_not_double_count(tmp_path):
             data = snapshot(BASE + offset)
             data["services"][0]["metrics"]["requests_total"] = 100 + offset // 60
             store.ingest(data, settings, data["generated_at"])
+            store.retention_tick(settings, data["generated_at"])
         counts = store.window(BASE - 30, BASE + 121)["instance-a"]
         assert counts["requests"] == 2 and counts["observed_seconds"] == 120
         future = snapshot(BASE + 3 * 86400)
         future["services"][0]["metrics"]["requests_total"] = 110
         store.ingest(future, settings, future["generated_at"])
+        store.retention_tick(settings, future["generated_at"])
         assert len(store.raw("instance-a", BASE - 1, BASE + 3 * 86400)) == 1
         counts = store.window(BASE - 3600, BASE + 3 * 86400 + 1)["instance-a"]
         assert counts["requests"] == 10 and counts["observed_seconds"] == 120
         very_late = snapshot(BASE + 181 * 86400)
         store.ingest(very_late, settings, very_late["generated_at"])
+        store.retention_tick(settings, very_late["generated_at"])
         assert store.hourly(BASE - 3600, BASE + 3600) == []
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("export", ["stale", "missing", "invalid", "duplicate"])
+def test_retention_prunes_during_export_outage_without_rewriting_observations(tmp_path, export):
+    settings = config(tmp_path, fleet_raw_retention_days=1, fleet_hourly_retention_days=2,
+                      fleet_stale_after_seconds=4 * 86400 if export == "duplicate" else 180)
+    now = [BASE]
+    worker = FleetController(settings, clock=lambda: now[0], emit=lambda *args, **kwargs: None)
+    try:
+        write_mapping(settings)
+        ingest(worker, now, snapshot())
+        latest = snapshot(BASE + 60)
+        latest["services"][0]["metrics"]["requests_total"] += 3
+        ingest(worker, now, latest)
+        receipt = worker.write_claim("claim", {"service_id": "instance-a", "until": BASE + 7 * 86400,
+                                               "reason": "evaluation"}, source_ip="127.0.0.1")
+        metadata = worker.store.metadata()
+        instances = worker.store.instances(live=False)
+        claim = worker.store.claim(receipt["claim"]["id"])
+        if export == "missing":
+            Path(settings.fleet_snapshot_path).unlink()
+        elif export == "invalid":
+            write_snapshot(settings, {"schema_version": 0})
+        now[0] = BASE + 3 * 86400 + 123
+        worker.ingest_once()
+        for table in ("fleet_samples", "fleet_gpu_samples", "fleet_hourly"):
+            assert worker.store._db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+        retained = worker.store.metadata()
+        assert retained["generated_at"] == metadata["generated_at"]
+        assert retained["snapshot"] == metadata["snapshot"]
+        assert retained["last_retention"] == now[0]
+        assert retained["raw_cutoff"] == BASE + 2 * 86400
+        assert worker.store.instances(live=False) == instances
+        assert worker.store.claim(claim["id"]) == claim
+        assert worker.last_error == ("fleet_snapshot_unavailable" if export in {"missing", "invalid"} else None)
+        assert worker.report()["services"][0]["status"] == ("claimed" if export == "duplicate" else "unknown")
+    finally:
+        worker.close()
+
+
+def test_retention_hourly_cadence_survives_restart_and_clips_whole_hours(controller):
+    worker, now, _ = controller
+    ingest(worker, now, snapshot())
+    cutoff = BASE - worker.config.fleet_raw_retention_days * 86400
+    hourly_cutoff = BASE - worker.config.fleet_hourly_retention_days * 86400
+    with worker.store._db as db:
+        for ts in (cutoff + 3599, cutoff + 3600):
+            db.execute("INSERT INTO fleet_gpu_samples VALUES(?,?,?,?,?,?)", (ts, 2, 1, 0, 1, 0))
+        for hour in (hourly_cutoff, hourly_cutoff + 3600):
+            db.execute("INSERT INTO fleet_hourly VALUES(?,?,?,?,?,?,?,?,?)", ("instance-a", hour, 1, 1, 1, 1, 1, 1, 60))
+    worker.store.close()
+    worker.store = FleetStore(worker.config.fleet_db_path)
+    now[0] = BASE + 3599
+    worker.ingest_once()
+    assert worker.store.metadata()["last_retention"] == BASE
+    assert worker.store._writable is False
+    assert worker.store._db.execute("SELECT COUNT(*) FROM fleet_gpu_samples WHERE ts<?", (BASE,)).fetchone()[0] == 2
+    now[0] = BASE + 3600 + 123
+    worker.ingest_once()
+    assert worker.store.metadata()["last_retention"] == now[0]
+    assert worker.store.metadata()["raw_cutoff"] == cutoff + 3600
+    assert [row[0] for row in worker.store._db.execute("SELECT ts FROM fleet_gpu_samples WHERE ts<?", (BASE,))] == [cutoff + 3600]
+    assert [row["hour_ts"] for row in worker.store.hourly(hourly_cutoff, hourly_cutoff + 7200)] == [hourly_cutoff + 3600]
+    statements = []
+    worker.store._db.set_trace_callback(statements.append)
+    now[0] += 3599
+    worker.ingest_once()
+    assert worker.store.metadata()["last_retention"] == now[0] - 3599
+    assert not any(sql.startswith(("DELETE", "BEGIN IMMEDIATE")) for sql in statements)
+
+
+@pytest.mark.parametrize("export", ["stale", "missing", "invalid", "future"])
+def test_retention_without_first_ingest_creates_no_database_or_directory(tmp_path, export):
+    settings = config(tmp_path)
+    settings = replace(settings, fleet_db_path=str(tmp_path / "uncreated" / "fleet.sqlite"))
+    worker = FleetController(settings, clock=lambda: BASE, emit=lambda *args, **kwargs: None)
+    try:
+        if export == "stale":
+            write_snapshot(settings, snapshot(BASE - 86400))
+        elif export == "invalid":
+            write_snapshot(settings, {"schema_version": 0})
+        elif export == "future":
+            write_snapshot(settings, snapshot(BASE + 86400))
+        for _ in range(2):
+            worker.ingest_once()
+            assert worker.store.retention_tick(settings, BASE + 86400) is False
+        assert worker.store._db is None
+        assert worker.report()["stale"] is True
+        assert not Path(settings.fleet_db_path).parent.exists()
+    finally:
+        worker.close()
+
+
+@pytest.mark.parametrize("export", ["fresh", "missing"])
+def test_retention_failure_rolls_back_cleanup_and_preserves_ingest_commit(tmp_path, export):
+    settings = config(tmp_path, fleet_raw_retention_days=1, fleet_hourly_retention_days=2)
+    now = [BASE]
+    worker = FleetController(settings, clock=lambda: now[0], emit=lambda *args, **kwargs: None)
+    try:
+        ingest(worker, now, snapshot())
+        with worker.store._db as db:
+            db.execute("""CREATE TRIGGER reject_gpu_retention BEFORE DELETE ON fleet_gpu_samples
+                          BEGIN SELECT RAISE(ABORT, 'retention_failed'); END""")
+        now[0] = BASE + 3 * 86400
+        if export == "fresh":
+            latest = snapshot(now[0])
+            latest["services"][0]["metrics"]["requests_total"] += 5
+            write_snapshot(settings, latest)
+        else:
+            Path(settings.fleet_snapshot_path).unlink()
+        worker.ingest_once()
+        metadata = worker.store.metadata()
+        assert metadata["last_retention"] == BASE
+        assert metadata["raw_cutoff"] == BASE - 86400
+        assert metadata["generated_at"] == (now[0] if export == "fresh" else BASE)
+        for table in ("fleet_samples", "fleet_gpu_samples", "fleet_hourly"):
+            assert worker.store._db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == (2 if export == "fresh" else 1)
+        if export == "fresh":
+            assert worker.store.raw("instance-a", now[0] - 1, now[0])[0]["d_requests"] == 5
+        assert worker.last_error == ("fleet_store_unavailable" if export == "fresh" else "fleet_snapshot_unavailable")
+        with worker.store._db as db:
+            db.execute("DROP TRIGGER reject_gpu_retention")
+        worker.ingest_once()
+        assert worker.store.metadata()["last_retention"] == now[0]
+        assert worker.store.metadata()["generated_at"] == metadata["generated_at"]
+        assert worker.last_error == (None if export == "fresh" else "fleet_snapshot_unavailable")
+        assert len(worker.store.raw("instance-a", BASE - 1, now[0])) == (1 if export == "fresh" else 0)
+    finally:
+        worker.close()
+
+
+@pytest.mark.parametrize("mode", ["disabled", "sampling_only", "check_config", "once", "dry_run"])
+def test_no_worker_modes_do_not_prune_existing_expired_history(tmp_path, mode):
+    import yaml
+    settings = config(tmp_path, fleet_raw_retention_days=1, fleet_hourly_retention_days=2)
+    observed = time.time() - 3 * 86400
+    data = snapshot(observed, [service(started_at=observed - 30 * 86400)])
+    write_snapshot(settings, data)
+    store = FleetStore(settings.fleet_db_path)
+    try:
+        store.ingest(data, settings, observed)
+        store.retention_tick(settings, observed)
+        before = store.metadata()
+    finally:
+        store.close()
+    if mode in {"disabled", "sampling_only"}:
+        scheduler = Scheduler(replace(settings, fleet_enabled=mode != "disabled"), lambda: StateSnapshot())
+        scheduler.start(sampling_only=mode == "sampling_only")
+        scheduler.stop()
+    else:
+        configuration = tmp_path / "scheduler.yaml"
+        configuration.write_text(yaml.safe_dump({"listen_host": "127.0.0.1", "listen_port": 8011,
+            "fleet_enabled": True, "fleet_snapshot_path": settings.fleet_snapshot_path,
+            "fleet_db_path": settings.fleet_db_path, "fleet_raw_retention_days": 1, "fleet_hourly_retention_days": 2}))
+        arguments = {"check_config": ["--check-config"], "once": ["--once"], "dry_run": ["--dry-run", "--once"]}[mode]
+        result = subprocess.run([sys.executable, "-m", "llmsvc", "--config", str(configuration), *arguments],
+                                capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+    store = FleetStore(settings.fleet_db_path)
+    try:
+        assert store.metadata() == before
+        for table in ("fleet_samples", "fleet_gpu_samples", "fleet_hourly"):
+            assert store._db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 1
     finally:
         store.close()
 
