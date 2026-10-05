@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 # Generated-By: OpenCode / deepseek-v4.1-flash
 """Validated scheduler configuration, independent of the legacy proxy config."""
 
@@ -51,6 +52,11 @@ class SchedulerConfig:
     max_snapshot_age_seconds: float = 30.0
     placement_enabled: bool = False
     placement_wait_seconds: float = 120.0
+    placement_unplaceable_grace_seconds: float = 10.0
+    placement_retry_after_seconds: int = 60
+    # Request the existing sampler while all placement candidates are hopeless.
+    # Independent of the opt-in fault worker's cadence and evidence rules.
+    placement_sample_interval_seconds: float = 1.0
     # Base policy settings shared by placement, free/wake and automation.
     # A dedicated GPU for the default model is opt-in and off by default: on a
     # machine the scheduler shares with other tenants it cannot enforce the
@@ -199,6 +205,16 @@ class SchedulerConfig:
             raise ValueError("reserve_timeout_seconds must not exceed 120")
         if self.placement_wait_seconds > 120:
             raise ValueError("placement_wait_seconds must not exceed 120")
+        value = self.placement_unplaceable_grace_seconds
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or not 0 <= value <= 60):
+            raise ValueError("placement_unplaceable_grace_seconds must be a finite number in [0, 60]")
+        if type(self.placement_retry_after_seconds) is not int or not 1 <= self.placement_retry_after_seconds <= 86400:
+            raise ValueError("placement_retry_after_seconds must be an integer in 1..86400")
+        value = self.placement_sample_interval_seconds
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or not 0 < value <= 5):
+            raise ValueError("placement_sample_interval_seconds must be a finite number in (0, 5]")
         if type(self.placement_enabled) is not bool:
             raise ValueError("placement_enabled must be a boolean")
         if type(self.wake_migration_enabled) is not bool:

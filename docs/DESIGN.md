@@ -314,11 +314,49 @@ pinned 或有在途请求 → 不可睡、不可驱逐
 1. 候选卡：只在配置的放置池 `placement_gpus` 里选（默认全部卡；记账仍覆盖所有卡）。独占卡（`exclusive_gpu`，默认 GPU0，必须在池内）永远在；共享卡仅当其外部占用低于 `shared_external_threshold_gb` 且无 `reserve`。外部占用本身已经从可用量里扣掉，阈值只用来挡住真正在大量吃卡的邻居，不应低到把几 GB 的调试进程也当成压力。
 2. 逐卡先判**可行性**：按上面的可用量，放得下直接放。多张卡都放得下时按 `placement_fit` 选：`first_fit` 取序号最小的；`best_fit` 取放下后剩余预算最少的（相同取序号小），把整块空位留给大模型。两种方式都不会为了排列而驱逐。
 3. 都放不下：对每张卡求"最小代价腾位集合"（模型数小，直接穷举），只在代价最低且确定可行的那张卡上驱逐。**代价 = 被驱逐模型的 keep_value 之和**（§4.1），驱逐 = stop；同一决策中最终要 stop 的 awake 模型，其先前 sleep 动作合并为一次 stop，保留 stop 的位置、统一保护检查及 sleep 路径的内存准入与投影记账；独立的 sleep 动作不受影响。这里不假定 `systemctl stop` 会调用 llama-swap 的 `cmdStop` 或保证 wrapper 先执行 sleep，预算只在确认资源退出后释放（设计讨论：#68）。默认模型、pin、在用的不进集合。
-4. 全部在用且放不下：**等最多 2 分钟**，期间一旦有**非默认、非 pin** 的模型空闲超过 30 秒，就按第 3 条的驱逐与动作合并规则腾位；超时返回错误，错误里写明哪张卡被谁的什么模型占着，以及哪些模型因保护规则不能动。
-5. 决策、保护与内存准入校验、动作执行和租约记账持有同一把全局锁，串行完成。等待可用资源时，通过关联这把锁的条件变量释放锁，让采集结果发布、`confirm`、`release` 与 `free` 可以推进；唤醒后重新持锁，读取最新状态并重验可行性、保护规则、内存与租约预算，每次动作前重验，不复用等待前的驱逐计划。整个等待使用同一个单调时钟截止时间，最多 120 秒，唤醒不重置期限。返回放置结果前仍须原子登记租约；`systemd-run` 前确认同名 unit 不存在。（设计讨论：#37；实现验收：#17。）
+4. 可恢复或未知条件下放不下：**等最多 2 分钟**，期间一旦有**非默认、非 pin** 的模型空闲超过 30 秒，就按第 3 条的驱逐与动作合并规则腾位；超时保留 HTTP `409 placement_timeout`，错误里写明哪张卡被谁的什么模型占着，以及哪些模型因保护规则不能动。所有候选卡均被调度器无法自行解除的条件阻塞时，按下述 #303 宽限期返回 `503 no_feasible_gpu`。
+5. 决策、保护与内存准入校验、动作执行和租约记账持有同一把全局锁，串行完成。等待可用资源时，通过关联这把锁的条件变量释放锁，让采集结果发布、`confirm`、`release` 与 `free` 可以推进；唤醒后重新持锁，读取最新状态并重验可行性、保护规则、内存与租约预算，每次动作前重验，不复用等待前的驱逐计划。整个等待使用同一个单调时钟截止时间，最多 120 秒；#303 在确证不可放置后可提前结束，唤醒不重置总期限。返回放置结果前仍须原子登记租约；`systemd-run` 前确认同名 unit 不存在。（设计讨论：#37；实现验收：#17。）
 6. 本版**只做单卡放置**。TP=2 跨卡变体不在本版调度范围内（§8）。
 
 控制器的临时资格排除独立于用户 pin，通过[内部 exclusions 契约](../llmsvc/policy/EXCLUSIONS.md)传入纯策略；真实 pin 的归属和期限不被临时 guard 替代。
+
+#### 放置不可用的快速反馈（#303）
+
+纯策略逐卡分类，只有实际放置池中的**每一张卡**都有 blocker、且全部 blocker
+都无法由放置动作解除，才标记不可放置（`unplaceable`）。此类原因包括
+`external_pressure`、`outside_placement_pool`、显式 GPU 资格排除、
+`default_requires_exclusive_gpu`、`unknown_request_budget` 和
+`request_exceeds_gpu_capacity`（该卡上的模型预算大于该卡总容量）。GPU 排除的
+自定义 reason 仅在明确绑定的该卡上有效；任意陌生 reason 不能因此变成不可恢复。
+`no_feasible_gpu` 汇总本身不构成证据。
+
+`reserved`、daemon/lease 预算、保护与在途请求、故障恢复、未知 GPU/RAM/记账
+和任何未知 reason 都保留原来的等待路径。池中缺卡、全局未知 blocker 或同一卡
+同时含不可恢复及可恢复 blocker 时也继续等待。有 place/stop/sleep 动作可选时
+不提前失败；任何 503 分类都不授权驱逐、修改阈值、释放账户或绕过保护。
+
+控制器以默认 `placement_unplaceable_grace_seconds: 10`（有限数 0–60）累计
+重复发布观测；即使设为零，也至少需要两个不同的真实采集轮次。轮次 ID、
+collector 提供的 `sampled_at` 及本地 monotonic 采集开始/完成时间须严格递增。
+来源时间和完整采集区间须满足 `max_snapshot_age_seconds`，最后一个不同轮次
+的完成时间须到达宽限期末尾；通知、意图覆盖和重复读取旧快照不能推进窗口。
+错误、未知/可恢复状态、过期、来源时间倒退/重复或采集区间失效使窗口重新累计。
+此处使用采集区间与重复发布观测，不能据此声称逐字段同时测量或连续 quiet。
+
+为避免默认 15 秒周期采样拖延反馈，只在不可放置候选期间，以独立的
+`placement_sample_interval_seconds: 1`（有限数 >0 且 ≤5）请求**已有 sampler**。
+请求合并，不在 HTTP handler 内同步采集、不建立新采集器，也不修改 #130 的
+故障 cadence、新鲜度或证据规则。1 秒是请求节奏而非完成频率；默认宽限期下，
+正常新鲜的 3–7 秒采集轮次能够在 20 秒内返回。采集挂起、锁/存储/探测异常、
+窗口被重置或人为提高宽限期时不承诺这个时限，也不使用旧证据补出 503。
+
+确证后发出 `placement_unplaceable` 结构化事件（model、blockers、GPU 摘要、
+重试秒数），并返回 HTTP `503`、`Retry-After: 60`；秒数来自
+`placement_retry_after_seconds`（整数 1–86400，默认 60）。响应包含
+`error: no_feasible_gpu`、`retryable: true`、`retry_after_seconds`、可读 `message`、
+`blockers` 和 `gpus: [{index, free_gb, external_gb}]`。外部占用 blocker 增加可选
+`external_gb`，未测值为 null，公共 state schema 仍为 1。该建议不保证重试后
+资源可用；默认只读/禁用返回、dry-run 零副作用及既有 409 语义保持不变。
 
 ### 4.3 sleeping → stopped（硬停）
 
@@ -529,7 +567,7 @@ usage（客户端可请求 `stream_options.include_usage`）；缺少返回或�
 |---|---|
 | `GET /v1/state` | 卡、模型、pin、reserve、租约、内存预算的完整快照 |
 | `GET /v1/events?since=` | 事件流（SSE） |
-| `POST /v1/place` | vllm-launch 调用：`{model, util}` → `{gpu, lease_id}` 或 `{error, blockers:[{gpu, model, user, in_flight}]}` |
+| `POST /v1/place` | vllm-launch 调用：`{model, util}` → `{gpu, lease_id}`；可恢复条件超时 `409 placement_timeout`，不可放置宽限期后 `503 no_feasible_gpu` + `Retry-After`（§4.2） |
 | `POST /v1/place/{lease_id}/confirm` `POST /v1/place/{lease_id}/release` | 租约确认 / 释放 |
 | `POST /v1/free` | `{gpu?, ram?, need_gb?}` → `{freed_gb, slept[], stopped[], skipped[{model, reason}]}` |
 | `POST /v1/pin` `DELETE /v1/pin/{model}` | `{model, until, by}` |
@@ -927,3 +965,4 @@ native/model effect 已结算、候选可写启动、健康检查、单 writer �
 <!-- Generated-By: Codex / gpt-5.6-luna -->
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->
 <!-- Generated-By: Claude Code / claude-opus-5-5 -->
+<!-- Generated-By: Codex / gpt-6.1-sol -->

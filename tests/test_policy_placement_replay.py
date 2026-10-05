@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 """CPU-only synthetic placement fixtures, never claimed as historical traces."""
 
 import json
@@ -30,14 +31,18 @@ def replay(case):
                              memory=MemoryState(500, sum(m.weights_gb for m in models if m.state=="sleeping")))
     r=case["request"]
     request=ModelState(r["model"], state="stopped", budget_gb=r["budget_gb"], is_default=r.get("is_default", False))
-    exclusive=next(g["index"] for g in case["gpus"] if g.get("exclusive"))
-    decision=plan_placement(snapshot, request, settings=PolicySettings(exclusive_gpu=exclusive))
+    exclusive=next((g["index"] for g in case["gpus"] if g.get("exclusive")), None)
+    settings=PolicySettings(exclusive_gpu=exclusive,
+                            shared_external_threshold_gb=case.get("shared_external_threshold_gb", 1))
+    decision=plan_placement(snapshot, request, settings=settings)
     expected=case["expect"]
     assert decision.gpu == expected["gpu"]
     if "actions" in expected:
         assert [(a.kind,a.model) for a in decision.actions] == expected["actions"]
     if "stopped" in expected:
         assert [a.model for a in decision.actions if a.kind=="stop"] == expected["stopped"]
+    if "unplaceable" in expected:
+        assert decision.unplaceable is expected["unplaceable"]
     if request.is_default and decision.gpu is not None:
         assert decision.gpu == exclusive
 

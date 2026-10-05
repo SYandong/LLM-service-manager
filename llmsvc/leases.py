@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 """Opt-in placement leases with protected, observed victim execution."""
 
 import math
@@ -26,9 +27,13 @@ class UnitObservation:
 
 
 class LeaseError(IntentWriteError):
-    def __init__(self, status, error, blockers=()):
+    def __init__(self, status, error, blockers=(), *, retry_after=None, message=None, gpus=()):
         super().__init__(status, error)
         self.blockers = tuple(blockers)
+        self.retry_after = retry_after
+        if message is not None:
+            self.message = message
+        self.gpus = tuple(gpus)
 
 
 class LeaseUnitProbe:
@@ -260,6 +265,45 @@ class PlacementController:
             return {"would": [] if unchanged else [{"kind": operation, "lease_id": row[0].lease_id}],
                     "blocked_by": [], "requires_observation": not unchanged}
 
+    def _unplaceable_sample(self, snapshot):
+        """Bind capacity evidence to a real, fresh published collector round.
+
+        Overlay changes and notifications are not samples. A sampler-generated
+        wall time cannot establish that a collector made a new measurement.
+        Grace duration uses this process's monotonic collection bounds.
+        """
+        bounds = self.scheduler._sample_bounds
+        if not self.scheduler._sample_source_time_provided or bounds is None:
+            return None
+        generation, started, finished = bounds
+        now = self.monotonic()
+        if (generation != self.scheduler._sample_published or not self._fresh(snapshot)
+                or not all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                           and math.isfinite(value) for value in (started, finished))
+                or not 0 <= now - finished <= now - started <= self.scheduler.config.max_snapshot_age_seconds):
+            return None
+        return generation, snapshot.sampled_at, started, finished
+
+    def _unplaceable_error(self, request, snapshot, blockers):
+        pool = self.settings.placement_gpus
+        gpus = tuple({"index": gpu.index, "free_gb": gpu.free_gb, "external_gb": gpu.external_gb}
+                     for gpu in sorted(snapshot.gpus, key=lambda gpu: gpu.index)
+                     if pool is None or gpu.index in pool)
+        indices = {gpu["index"] for gpu in gpus}
+        reasons = {blocker.reason for blocker in blockers if blocker.gpu in indices}
+        if reasons == {"external_pressure"}:
+            message = "All placement GPUs are occupied by workloads outside llmsvc"
+        elif reasons == {"request_exceeds_gpu_capacity"}:
+            message = "Model budget exceeds the total capacity of every placement GPU"
+        else:
+            message = "No placement GPU can satisfy the model's capacity or placement constraints"
+        retry_after = self.scheduler.config.placement_retry_after_seconds
+        self.scheduler.emit("placement_unplaceable", model=request.name, detail={
+            "blockers": [asdict(blocker) for blocker in blockers], "gpus": list(gpus),
+            "retry_after_seconds": retry_after, "message": message, "dry_run": False})
+        return LeaseError(503, "no_feasible_gpu", blockers, retry_after=retry_after,
+                          message=message, gpus=gpus)
+
     def place(self, payload):
         self._enabled()
         request = self._request(payload)
@@ -269,6 +313,10 @@ class PlacementController:
                 deadline = min(deadline, self.scheduler.sleeping_recovery.deadline)
         waiting = False
         blockers = ()
+        unplaceable_since = None
+        unplaceable_sample = None
+        unplaceable_samples = 0
+        next_sample_request = 0.0
         try:
             while self.monotonic() < deadline and not self.scheduler.stopping.is_set():
                 # Consume published collector rounds; do not start a potentially
@@ -281,6 +329,36 @@ class PlacementController:
                         raise LeaseError(409, "outstanding_lease", (Blocker(request.name, "outstanding_lease"),))
                     decision, blockers = self._decision(current, request, waiting=waiting)
                     action = decision.actions[0] if decision and decision.actions else None
+                    hopeless = decision is not None and decision.unplaceable and action is None
+                    if hopeless:
+                        now = self.monotonic()
+                        # Wake the existing sampler only; no collector I/O is
+                        # performed by this handler or while holding its lock.
+                        if now >= next_sample_request:
+                            self.scheduler.request_sample()
+                            next_sample_request = now + self.scheduler.config.placement_sample_interval_seconds
+                        sample = self._unplaceable_sample(current)
+                        if sample is None:
+                            unplaceable_since, unplaceable_sample, unplaceable_samples = None, None, 0
+                        elif sample != unplaceable_sample:
+                            if unplaceable_sample is not None and any(
+                                    sample[index] <= unplaceable_sample[index] for index in range(4)):
+                                # Duplicate/backward source time or local round
+                                # bounds break the window, even with a new ID.
+                                unplaceable_since, unplaceable_samples = None, 0
+                            elif unplaceable_since is None:
+                                unplaceable_since, unplaceable_samples = now, 1
+                            else:
+                                unplaceable_samples += 1
+                            unplaceable_sample = sample
+                            grace = self.scheduler.config.placement_unplaceable_grace_seconds
+                            if (unplaceable_since is not None and unplaceable_samples >= 2
+                                    and now - unplaceable_since >= grace
+                                    and sample[3] >= unplaceable_since + grace):
+                                raise self._unplaceable_error(request, current, blockers)
+                    else:
+                        unplaceable_since, unplaceable_sample, unplaceable_samples = None, None, 0
+                        next_sample_request = 0.0
                     if action is not None and action.kind == "place":
                         observation = self._inspect(request.name, deadline)
                         self._enabled()
@@ -339,8 +417,10 @@ class PlacementController:
                             controller.pending.discard(action.model)
                             raise
                     if action is None or action.kind == "place":
-                        self.scheduler.changed.wait(timeout=min(self.scheduler.config.action_poll_seconds,
-                                                               max(0, deadline - self.monotonic())))
+                        delay = min(self.scheduler.config.action_poll_seconds, max(0, deadline - self.monotonic()))
+                        if hopeless:
+                            delay = min(delay, max(0, next_sample_request - self.monotonic()))
+                        self.scheduler.changed.wait(timeout=delay)
                         waiting = True
                         continue
                 # Only one chosen action was submitted. Release the action lock

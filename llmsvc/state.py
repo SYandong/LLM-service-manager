@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 # Generated-By: OpenCode / deepseek-v4.1-flash
 """Shared immutable observations and JSON contract for the control plane.
 
@@ -141,6 +142,7 @@ class Blocker:
     gpu: Optional[int] = None
     user: Optional[str] = None
     in_flight: Optional[int] = None
+    external_gb: Optional[float] = None
 
 
 @dataclass(frozen=True)

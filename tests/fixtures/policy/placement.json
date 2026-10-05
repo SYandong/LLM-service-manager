@@ -252,6 +252,53 @@
         "kind": "synthetic_regression",
         "source": "Constructed from docs/DESIGN.md invariants; not a recorded historical trace"
       }
+    },
+    {
+      "id": "all_external_pressure_fast_failure_zero_eviction",
+      "operation": "placement",
+      "shared_external_threshold_gb": 30,
+      "gpus": [
+        {"index": 0, "total_gb": 100, "external_gb": 60},
+        {"index": 1, "total_gb": 100, "external_gb": 60}
+      ],
+      "models": [],
+      "request": {"model": "incoming", "budget_gb": 60},
+      "expect": {"gpu": null, "actions": [], "unplaceable": true},
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed for issue #303; not a recorded historical trace",
+        "generated_by": "Codex / gpt-6.1-sol"
+      }
+    },
+    {
+      "id": "external_pressure_with_feasible_eviction_keeps_plan",
+      "operation": "placement",
+      "shared_external_threshold_gb": 30,
+      "gpus": [
+        {"index": 0, "total_gb": 100, "external_gb": 60},
+        {"index": 1, "total_gb": 100, "external_gb": 0}
+      ],
+      "models": [{"name": "resident", "gpu": 1, "budget_gb": 80}],
+      "request": {"model": "incoming", "budget_gb": 60},
+      "expect": {"gpu": 1, "stopped": ["resident"], "unplaceable": false},
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed for issue #303; not a recorded historical trace",
+        "generated_by": "Codex / gpt-6.1-sol"
+      }
+    },
+    {
+      "id": "oversize_pool_fast_failure_zero_eviction",
+      "operation": "placement",
+      "gpus": [{"index": 0, "total_gb": 100}, {"index": 1, "total_gb": 140}],
+      "models": [],
+      "request": {"model": "incoming", "budget_gb": 150},
+      "expect": {"gpu": null, "actions": [], "unplaceable": true},
+      "provenance": {
+        "kind": "synthetic_regression",
+        "source": "Constructed for issue #303; not a recorded historical trace",
+        "generated_by": "Codex / gpt-6.1-sol"
+      }
     }
   ]
 }

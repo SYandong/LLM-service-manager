@@ -1,6 +1,7 @@
 """Scheduler configuration keys that build the shared PolicySettings."""
 
 # Generated-By: OpenCode / deepseek-v4.1-flash
+# Generated-By: Codex / gpt-6.1-sol
 
 import pytest
 
@@ -14,6 +15,38 @@ def config(**kwargs):
 
 def test_defaults_match_policy_defaults():
     assert config().policy_settings() == PolicySettings()
+
+
+def test_unplaceable_defaults_and_bounded_yaml(tmp_path):
+    defaults = config()
+    assert defaults.placement_unplaceable_grace_seconds == 10
+    assert defaults.placement_retry_after_seconds == 60
+    assert defaults.placement_sample_interval_seconds == 1
+    assert defaults.sample_interval_seconds == 15
+    path = tmp_path / "config.yaml"
+    path.write_text("listen_host: 127.0.0.1\nlisten_port: 19001\n"
+                    "placement_unplaceable_grace_seconds: 0\nplacement_retry_after_seconds: 37\n"
+                    "placement_sample_interval_seconds: 0.5\n")
+    loaded = load_config(str(path))
+    assert loaded.placement_unplaceable_grace_seconds == 0
+    assert loaded.placement_retry_after_seconds == 37
+    assert loaded.placement_sample_interval_seconds == 0.5
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"placement_unplaceable_grace_seconds": -1}, {"placement_unplaceable_grace_seconds": 61},
+    {"placement_unplaceable_grace_seconds": True}, {"placement_unplaceable_grace_seconds": float("nan")},
+    {"placement_unplaceable_grace_seconds": float("inf")}, {"placement_unplaceable_grace_seconds": "10"},
+    {"placement_retry_after_seconds": 0}, {"placement_retry_after_seconds": -1},
+    {"placement_retry_after_seconds": True}, {"placement_retry_after_seconds": 1.5},
+    {"placement_retry_after_seconds": 86401}, {"placement_retry_after_seconds": "60"},
+    {"placement_sample_interval_seconds": 0}, {"placement_sample_interval_seconds": -1},
+    {"placement_sample_interval_seconds": 6}, {"placement_sample_interval_seconds": True},
+    {"placement_sample_interval_seconds": float("nan")}, {"placement_sample_interval_seconds": float("inf")},
+])
+def test_unplaceable_settings_reject_invalid_limits(kwargs):
+    with pytest.raises(ValueError):
+        config(**kwargs)
 
 
 def test_pool_fit_exclusive_and_threshold_flow_into_policy_settings(tmp_path):
