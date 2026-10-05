@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 # Generated-By: OpenCode / deepseek-v4.1-flash
 """Trusted main-CI release publisher. No deployment or PR execution surface."""
 import argparse
@@ -222,7 +223,8 @@ def build(evidence, root):
         for command in ((python, '-I', '-c', 'import llmsvc;print(llmsvc.__version__)'),
                         (str(env / 'bin/llm'), '--version'), (str(env / 'bin/llmsvc-scheduler'), '--version')):
             assert run(*command, cwd=root) == evidence['python_version']
-        code = 'import tui.app' if mode == 'tui' else "import importlib.util;assert importlib.util.find_spec('textual') is None"
+        code = ('from tui.fleet_app import FleetApp; from tui.app import SchedulerApp' if mode == 'tui'
+                else "import importlib.util;assert importlib.util.find_spec('textual') is None")
         run(python, '-I', '-c', code, cwd=root)
     assert run(sys.executable, '-I', '-S', str(artifacts / 'llm'), '--version') == evidence['python_version']
     deployment = {'schema_version': 1, 'tag': evidence['tag'], 'version': evidence['python_version'],
