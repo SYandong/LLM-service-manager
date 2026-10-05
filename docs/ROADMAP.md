@@ -101,6 +101,8 @@ M7 新 fleet TUI 接替默认入口；本节共享模型 TUI 第一阶段保留�
 - #310 运维、回滚和至少三天影子对账；上线操作需本次授权与真实记录
 - #311 fleet 首次发布后的下一个 minor 删除旧 TUI；需零使用证据或维护者确认，本次保持待办
 - #313 用新鲜完整 fleet GPU 归属增强 503 的占用者原因（依赖 #307）
+- #327 Ollama wildcard-listener discovery across IPv4 and IPv6 (PR #329).
+- #328 Expanded GPU panels, complete inline allocations and a compact overview.
 
 依赖：#303 → #304 → 现场 503 验收；#305 → #306 → #307 → #308/#309；
 503 blocker 的 fleet 占用者增强由 #313 在 #307 后接入。#310 汇总现场证据。

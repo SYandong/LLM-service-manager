@@ -10,10 +10,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from rich.cells import cell_len
 
 pytest.importorskip("textual")
 from textual.widgets import Button, DataTable, Input, Sparkline, Static
-from tui.fleet_app import ClaimDialog, FleetApp
+from textual.containers import VerticalScroll
+from tui.fleet_app import ClaimDialog, FleetApp, GpuDetailDialog, GpuOverview
 
 
 @pytest.fixture
@@ -41,6 +43,7 @@ def fleet_snapshot():
     for service in services:
         gpus[service["gpus"][0]]["occupants"].append({"container": service["container"],
             "kind": "inference", "used_gb": service["gpu_gb"], "service_id": service["id"]})
+        gpus[service["gpus"][0]]["used_gb"] = service["gpu_gb"] + 30
     return {"schema_version": 1, "generated_at": 1900000000, "snapshot_age_seconds": 12,
             "stale": False, "config": {"idle_limit_hours": 6, "active_window_seconds": 900},
             "gpus": gpus, "containers": [], "services": services, "errors": []}
@@ -131,6 +134,8 @@ async def ready(app, pilot):
 
 
 async def select(app, pilot, ident):
+    if app.view != "person":
+        await pilot.press("p")
     key = next(key for key in app.row_keys if app.row_services.get(key) == ident)
     app._table.move_cursor(row=app.row_keys.index(key), animate=False)
     await ready(app, pilot)
@@ -144,24 +149,49 @@ def test_layout_views_and_seven_day_details(fleet_snapshot, size, tmp_path):
             await ready(app, pilot)
             table = app.query_one("#fleet-table", DataTable)
             assert app.refresh_seconds == 15
+            overview = app.query_one("#fleet-gpus", GpuOverview)
+            assert app.view == "gpu"
+            assert not table.display and not app.query_one("#fleet-details").display
+            assert not app.compact_gpus
+            assert overview.bar_rows == 3
+            viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
+            assert viewport.virtual_size.height > viewport.size.height
+            assert "training-group · Other · 20 GiB" in str(overview.render())
+            assert "quiet-model" in str(overview.render())
+            assert "sort priority" not in str(app.query_one("#fleet-controls").render())
+            assert "Live changes" not in str(app.query_one("#fleet-controls").render())
+            app.save_screenshot(filename="fleet-expanded-%sx%s.svg" % size, path=str(tmp_path))
+            await pilot.press("z")
+            await ready(app, pilot)
+            assert app.compact_gpus
+            assert overview.bar_rows == (2 if size[0] >= 100 else 1)
+            lines = overview.render().plain.splitlines()
+            assert len(lines) == 6 * (overview.bar_rows + 2)
+            assert all(len(line) <= size[0] for line in lines)
+            assert str(overview.render()).count("GPU ") == 6
+            assert "Other 20" in str(overview.render())
+            assert overview.region.y + len(lines) <= app.query_one("#fleet-notice").region.y
+            app.save_screenshot(filename="fleet-%sx%s.svg" % size, path=str(tmp_path))
+            await pilot.press("enter")
+            assert isinstance(app.screen, GpuDetailDialog)
+            assert "training-group · Other · 20 GiB" in str(app.screen.query_one("#gpu-allocation-text").render())
+            await pilot.press("escape", "p")
+            await ready(app, pilot)
             assert table.size.height >= 3
             assert table.virtual_size.width <= table.size.width
             assert app.query_one("#fleet-footer").region.bottom <= size[1]
-            assert len(str(app.query_one("#fleet-footer").render())) <= size[0]
+            assert cell_len(str(app.query_one("#fleet-footer").render())) <= size[0]
             assert app.query_one("#fleet-details").region.bottom <= app.query_one("#fleet-notice").region.y
-            assert str(app.query_one("#fleet-gpus").render()).count("GPU") == 6
-            assert "(other workload)" in str(app.query_one("#fleet-gpus").render())
             assert app.selected_service_id() == "quiet"
             assert app.history["hours"] == 168
             assert "7d active" in str(app.query_one("#fleet-detail-text").render())
             assert app.query_one("#fleet-active-chart", Sparkline).data
             assert "--max-model-len" in str(app.query_one("#fleet-history-text").render())
             assert table.get_cell("service:own", "activity").plain == "▁▂█·" + "▁" * 20
-            app.save_screenshot(filename="fleet-%sx%s.svg" % size, path=str(tmp_path))
             await pilot.press("g")
             await ready(app, pilot)
             assert app.view == "gpu"
-            assert app.selected_service_id() == "quiet"
+            assert app.selected_gpu == 0
             others = [key for key in app.row_keys if key.startswith("other:")]
             assert len(others) == 6
             for key in others:
@@ -220,6 +250,8 @@ def test_late_history_cannot_replace_new_selection(fleet_snapshot):
 
         async with app.run_test(size=(100, 30)) as pilot:
             await ready(app, pilot)
+            await pilot.press("p")
+            await ready(app, pilot)
             client.request = delayed
             app._table.move_cursor(row=app.row_keys.index("service:own"), animate=False)
             try:
@@ -240,6 +272,8 @@ def test_invalid_snapshot_retains_last_good_observations(fleet_snapshot):
     async def scenario():
         app, client = make_app(fleet_snapshot)
         async with app.run_test(size=(80, 24)) as pilot:
+            await ready(app, pilot)
+            await pilot.press("p")
             await ready(app, pilot)
             client.snapshot = {"schema_version": 1, "services": [{"id": "broken", "window_7d": [1]}],
                                "gpus": [], "errors": []}
@@ -329,6 +363,7 @@ def test_sort_filter_and_mine_keep_selection(fleet_snapshot):
         app, _ = make_app(fleet_snapshot)
         async with app.run_test(size=(100, 30)) as pilot:
             await ready(app, pilot)
+            await pilot.press("p")
             await pilot.press("s", "s")
             assert app.sort_mode == "mem"
             assert app.row_keys[0] == "person:group-a"
@@ -379,6 +414,8 @@ def test_failure_banner_marks_unknown_without_replacing_data(fleet_snapshot, fai
     async def scenario():
         app, client = make_app(fleet_snapshot)
         async with app.run_test(size=(80, 24)) as pilot:
+            await ready(app, pilot)
+            await pilot.press("p")
             await ready(app, pilot)
             if failure == "stale":
                 client.snapshot["stale"] = True

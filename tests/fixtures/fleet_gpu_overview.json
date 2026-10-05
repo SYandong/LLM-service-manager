@@ -1,0 +1,828 @@
+{
+  "schema_version": 1,
+  "generated_at": 1900000000,
+  "snapshot_age_seconds": 12,
+  "stale": false,
+  "config": {
+    "idle_limit_hours": 6,
+    "active_window_seconds": 900
+  },
+  "gpus": [
+    {
+      "index": 0,
+      "total_gb": 140,
+      "used_gb": 123,
+      "util_percent": 61,
+      "occupants": [
+        {
+          "container": "sample-a",
+          "kind": "llm",
+          "used_gb": 52,
+          "service_id": "demo-0-0"
+        },
+        {
+          "container": "sample-a",
+          "kind": "llm",
+          "used_gb": 22,
+          "service_id": "demo-0-1"
+        },
+        {
+          "container": "sample-b",
+          "kind": "inference",
+          "used_gb": 34,
+          "service_id": "demo-0-2"
+        },
+        {
+          "container": "sample-c",
+          "kind": "other",
+          "used_gb": 10,
+          "service_id": null
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "total_gb": 140,
+      "used_gb": 136,
+      "util_percent": 88,
+      "occupants": [
+        {
+          "container": "sample-b",
+          "kind": "llm",
+          "used_gb": 92,
+          "service_id": "demo-1-0"
+        },
+        {
+          "container": "sample-d",
+          "kind": "other",
+          "used_gb": 36,
+          "service_id": null
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "total_gb": 140,
+      "used_gb": 104,
+      "util_percent": 35,
+      "occupants": [
+        {
+          "container": "sample-c",
+          "kind": "llm",
+          "used_gb": 58,
+          "service_id": "demo-2-0"
+        },
+        {
+          "container": "sample-a",
+          "kind": "llm",
+          "used_gb": 42,
+          "service_id": "demo-2-1"
+        },
+        {
+          "container": "sample-a",
+          "kind": "other",
+          "used_gb": 4,
+          "service_id": null
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "total_gb": 140,
+      "used_gb": 128,
+      "util_percent": 72,
+      "occupants": [
+        {
+          "container": "sample-a",
+          "kind": "llm",
+          "used_gb": 88,
+          "service_id": "demo-3-0"
+        },
+        {
+          "container": "sample-d",
+          "kind": "llm",
+          "used_gb": 22,
+          "service_id": "demo-3-1"
+        },
+        {
+          "container": "sample-b",
+          "kind": "other",
+          "used_gb": 14,
+          "service_id": null
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "total_gb": 140,
+      "used_gb": 79,
+      "util_percent": 94,
+      "occupants": [
+        {
+          "container": "sample-c",
+          "kind": "other",
+          "used_gb": 52,
+          "service_id": null
+        },
+        {
+          "container": "sample-d",
+          "kind": "llm",
+          "used_gb": 18,
+          "service_id": "demo-4-1"
+        },
+        {
+          "container": null,
+          "kind": "other",
+          "used_gb": 6,
+          "service_id": null
+        }
+      ]
+    },
+    {
+      "index": 5,
+      "total_gb": 140,
+      "used_gb": 48,
+      "util_percent": 12,
+      "occupants": [
+        {
+          "container": "sample-b",
+          "kind": "llm",
+          "used_gb": 28,
+          "service_id": "demo-5-0"
+        },
+        {
+          "container": "sample-a",
+          "kind": "other",
+          "used_gb": 12,
+          "service_id": null
+        }
+      ]
+    }
+  ],
+  "containers": [],
+  "services": [
+    {
+      "id": "demo-0-0",
+      "container": "sample-a",
+      "model": "demo-model-52",
+      "engine": "vllm",
+      "gpus": [
+        0
+      ],
+      "gpu_gb": 52,
+      "started_at": 1899900000,
+      "uptime_seconds": 100000,
+      "status": "idle",
+      "idle_seconds": 120,
+      "last_active_at": 1899999880,
+      "never_active": false,
+      "window_24h": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "window_7d": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "hourly_active_24h": [
+        0,
+        10,
+        60,
+        null,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "mine": true,
+      "claim": null,
+      "scrape": {
+        "ok": true,
+        "error": null
+      }
+    },
+    {
+      "id": "demo-0-1",
+      "container": "sample-a",
+      "model": "demo-model-22",
+      "engine": "vllm",
+      "gpus": [
+        0
+      ],
+      "gpu_gb": 22,
+      "started_at": 1899900000,
+      "uptime_seconds": 100000,
+      "status": "idle",
+      "idle_seconds": 120,
+      "last_active_at": 1899999880,
+      "never_active": false,
+      "window_24h": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "window_7d": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "hourly_active_24h": [
+        0,
+        10,
+        60,
+        null,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "mine": true,
+      "claim": null,
+      "scrape": {
+        "ok": true,
+        "error": null
+      }
+    },
+    {
+      "id": "demo-0-2",
+      "container": "sample-b",
+      "model": "demo-model-34",
+      "engine": "vllm",
+      "gpus": [
+        0
+      ],
+      "gpu_gb": 34,
+      "started_at": 1899900000,
+      "uptime_seconds": 100000,
+      "status": "idle",
+      "idle_seconds": 120,
+      "last_active_at": 1899999880,
+      "never_active": false,
+      "window_24h": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "window_7d": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "hourly_active_24h": [
+        0,
+        10,
+        60,
+        null,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "mine": false,
+      "claim": null,
+      "scrape": {
+        "ok": true,
+        "error": null
+      }
+    },
+    {
+      "id": "demo-1-0",
+      "container": "sample-b",
+      "model": "demo-model-92",
+      "engine": "vllm",
+      "gpus": [
+        1
+      ],
+      "gpu_gb": 92,
+      "started_at": 1899900000,
+      "uptime_seconds": 100000,
+      "status": "idle",
+      "idle_seconds": 120,
+      "last_active_at": 1899999880,
+      "never_active": false,
+      "window_24h": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "window_7d": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "hourly_active_24h": [
+        0,
+        10,
+        60,
+        null,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "mine": false,
+      "claim": null,
+      "scrape": {
+        "ok": true,
+        "error": null
+      }
+    },
+    {
+      "id": "demo-2-0",
+      "container": "sample-c",
+      "model": "demo-model-58",
+      "engine": "vllm",
+      "gpus": [
+        2
+      ],
+      "gpu_gb": 58,
+      "started_at": 1899900000,
+      "uptime_seconds": 100000,
+      "status": "idle",
+      "idle_seconds": 120,
+      "last_active_at": 1899999880,
+      "never_active": false,
+      "window_24h": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "window_7d": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "hourly_active_24h": [
+        0,
+        10,
+        60,
+        null,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "mine": false,
+      "claim": null,
+      "scrape": {
+        "ok": true,
+        "error": null
+      }
+    },
+    {
+      "id": "demo-2-1",
+      "container": "sample-a",
+      "model": "demo-model-42",
+      "engine": "vllm",
+      "gpus": [
+        2
+      ],
+      "gpu_gb": 42,
+      "started_at": 1899900000,
+      "uptime_seconds": 100000,
+      "status": "idle",
+      "idle_seconds": 120,
+      "last_active_at": 1899999880,
+      "never_active": false,
+      "window_24h": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "window_7d": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "hourly_active_24h": [
+        0,
+        10,
+        60,
+        null,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "mine": true,
+      "claim": null,
+      "scrape": {
+        "ok": true,
+        "error": null
+      }
+    },
+    {
+      "id": "demo-3-0",
+      "container": "sample-a",
+      "model": "demo-model-88",
+      "engine": "vllm",
+      "gpus": [
+        3
+      ],
+      "gpu_gb": 88,
+      "started_at": 1899900000,
+      "uptime_seconds": 100000,
+      "status": "idle",
+      "idle_seconds": 120,
+      "last_active_at": 1899999880,
+      "never_active": false,
+      "window_24h": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "window_7d": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "hourly_active_24h": [
+        0,
+        10,
+        60,
+        null,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "mine": true,
+      "claim": null,
+      "scrape": {
+        "ok": true,
+        "error": null
+      }
+    },
+    {
+      "id": "demo-3-1",
+      "container": "sample-d",
+      "model": "demo-model-22",
+      "engine": "vllm",
+      "gpus": [
+        3
+      ],
+      "gpu_gb": 22,
+      "started_at": 1899900000,
+      "uptime_seconds": 100000,
+      "status": "idle",
+      "idle_seconds": 120,
+      "last_active_at": 1899999880,
+      "never_active": false,
+      "window_24h": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "window_7d": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "hourly_active_24h": [
+        0,
+        10,
+        60,
+        null,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "mine": false,
+      "claim": null,
+      "scrape": {
+        "ok": true,
+        "error": null
+      }
+    },
+    {
+      "id": "demo-4-1",
+      "container": "sample-d",
+      "model": "demo-model-18",
+      "engine": "vllm",
+      "gpus": [
+        4
+      ],
+      "gpu_gb": 18,
+      "started_at": 1899900000,
+      "uptime_seconds": 100000,
+      "status": "idle",
+      "idle_seconds": 120,
+      "last_active_at": 1899999880,
+      "never_active": false,
+      "window_24h": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "window_7d": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "hourly_active_24h": [
+        0,
+        10,
+        60,
+        null,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "mine": false,
+      "claim": null,
+      "scrape": {
+        "ok": true,
+        "error": null
+      }
+    },
+    {
+      "id": "demo-5-0",
+      "container": "sample-b",
+      "model": "demo-model-28",
+      "engine": "vllm",
+      "gpus": [
+        5
+      ],
+      "gpu_gb": 28,
+      "started_at": 1899900000,
+      "uptime_seconds": 100000,
+      "status": "idle",
+      "idle_seconds": 120,
+      "last_active_at": 1899999880,
+      "never_active": false,
+      "window_24h": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "window_7d": {
+        "active_minutes": 90,
+        "requests": 120,
+        "gen_tokens": 12000,
+        "prompt_tokens": 24000,
+        "active_ratio": 0.125,
+        "observed_seconds": 43200,
+        "coverage_ratio": 0.5
+      },
+      "hourly_active_24h": [
+        0,
+        10,
+        60,
+        null,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "mine": false,
+      "claim": null,
+      "scrape": {
+        "ok": true,
+        "error": null
+      }
+    }
+  ],
+  "errors": [],
+  "generated_by": "Codex / gpt-6.1-sol",
+  "fixture_note": "Synthetic GPU allocations; no production telemetry."
+}

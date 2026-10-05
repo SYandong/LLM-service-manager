@@ -1092,28 +1092,70 @@ claims 开关同时开启及服务归属通过校验，不授予 unit、配置�
 `fleet_status_changed` 通过现有 SSE 发布；SSE 仅刷新提示，不作为无丢失活动
 源。503 占用者归属增强由 #313 在 D 完成后接入，陈旧/不完整快照不用于归因。
 
-### 10.4 CLI、TUI 与交付顺序
+### 10.4 CLI and TUI
 
-`llm status` 默认 fleet；`llm status --shared` 保留共享视图，带 `--json`
-保留原结构。`llm fleet` 提供 person/gpu、排序、mine、plain、json；新增
-`claim`、`unclaim`、`history`，共享模型管理仍走原 CLI。未启用 fleet 明确
-提示 unavailable/disabled，不把旧共享视图标成全员快照。
+`llm status` shows the fleet; `llm status --shared` keeps the shared-model view
+and its JSON format. `llm fleet` supports person/GPU grouping, sorting, mine,
+plain and JSON output. `claim`, `unclaim` and `history` use the fleet API.
+Shared-model commands remain available. A disabled fleet returns `fleet_disabled`.
 
-新 `llm`/`top` TUI 按人或按卡展示，默认超限优先再显存降序，含 24h 活动条、
-历史与声明。GET 默认 15 秒、SSE 合并刷新，读取/声明在后台，退出关闭资源；
-按稳定 ID 增量更新，重复快照不重建表。陈旧/错误醒目、未知有文字提示，
-支持 100×30 和 80×24。声明先 dry-run 预览再由用户提交；403 和结果未知均
-明确显示，不自动重放。非 TTY 或未安装 Textual 时走 CLI。
+The `llm` / `llm top` TUI opens the GPU view. P switches to People, grouped by
+container. The People view includes 24-hour activity, history and claims;
+its default sort puts over-limit services first, then sorts by memory.
+GET refreshes every 15 seconds and SSE coalesces changes. Network work stays
+off the UI loop; stable identities preserve selection across refreshes.
+Claims use a dry-run preview followed by submission. Failed or uncertain writes
+are shown without automatic retries. Non-TTY and missing-Textual paths use CLI output.
 
-旧 TUI 第一阶段保留为 `llm legacy-tui` 并提示弃用。第二阶段 #311 在 fleet
-首次发布后的下一个 minor、取得零使用证据或维护者确认后删除，不能在本次
-新 TUI 交付中提前删除。
-M7 分项 issue 记录实现、当前审核/CI、现场验收三个状态。#28 已改写为全组
-GPU 只读观测与人工协调；#168 原 TUI 重做计划由 #309 新 fleet TUI（PR #320）
-替代，按 `not_planned` 关闭，不代表原计划全部验收完成；历史路线图不因
-新设计自动视为已完成。
-本次计划要求现场至少三天影子对账，作为 M7 上线证据；本地开发与 PR 验证
-仍使用确定性测试，不把测试、日历或文件存在宣称为生产完成。
+#### GPU panels (#328)
+
+The GPU view opens expanded panels in a vertical scroll area. Each panel has
+a prominent GPU heading, used/total GiB, compute utilization and a large
+proportional allocation bar, with labels centered horizontally and vertically.
+Bars have three rows, with text on the middle row.
+It lists every owner allocation and individual
+LLM service, including model, engine, state and 24-hour activity. Long fields
+wrap. Per-card memory comes from that card; activity statistics cover the service.
+
+Z switches to the compact overview. GPU 0–5 fit together at 100×30 with
+two bar rows, and at 80×24 with one. Overview amounts use concise formatting;
+expanded allocations and detail retain source values. The VRAM percentage
+appears when space allows.
+
+Each container owner keeps one color across GPUs and refreshes. Solid segments
+are LLM allocations; a subtle texture and explicit `Other` labels identify other tasks.
+Neutral segments show unattributed used memory; the muted track shows free
+memory. Owner keys and numeric labels make the view readable without color.
+Multiple LLM services from the same owner share a segment, with individual
+models listed underneath. Other tasks expose owner and memory.
+
+GPU headings, models and key amounts are bold. Owner text matches the bar color;
+service states use semantic colors. The header shows update age and a plain
+allocation legend. Sorting and event-connection diagnostics stay out of the
+GPU header.
+
+For capacity T, measured use U and attributed sum S, segment totals are
+S + (U−S) + (T−U). Small allocations use proportional cell rounding and retain
+their source values in detail. Filters affect selection and detail;
+they never turn hidden allocations into free memory. If S exceeds U, show
+the measured use with an attribution-conflict marker and list the discrepancy.
+Missing capacity has no percentage bar; stale values remain labelled stale.
+
+Up/Down selects a GPU and scrolls it into view. Left/Right selects an allocation;
+Enter opens detail and Z switches panel size.
+Mouse selection follows the same path. UI text is English and concise: use
+direct labels such as `Stale`, `Unknown` and `Attribution conflict`.
+
+#### Delivery
+
+`llm legacy-tui` retains the old panel with a deprecation notice. #311 removes
+it in the next minor after the first fleet release, following zero-use evidence
+or maintainer confirmation. This layout update retains that entry point.
+
+M7 issues track implementation, review/CI and site acceptance separately. #28
+covers fleet observation and manual coordination; #309 replaced the earlier
+#168 TUI proposal. Fleet rollout includes at least three days of shadow
+reconciliation before shared CLI activation, as recorded in #310.
 
 <!-- Generated-By: Codex / unknown model -->
 <!-- Generated-By: Claude Code / claude-opus-5-5 -->
