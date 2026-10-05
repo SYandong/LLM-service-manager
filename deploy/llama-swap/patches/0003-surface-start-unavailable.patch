@@ -1,0 +1,488 @@
+Generated-By: Codex / gpt-6.1-sol
+
+diff -ruN a/internal/process/process_command.go b/internal/process/process_command.go
+--- a/internal/process/process_command.go	2026-08-31 02:57:20.000000000 +0800
++++ b/internal/process/process_command.go	2026-10-05 11:23:23.867212225 +0800
+@@ -1,3 +1,4 @@
++// Generated-By: Codex / gpt-6.1-sol
+ package process
+ 
+ import (
+@@ -503,8 +504,12 @@
+ 	// process exit (see killProcess).
+ 	cmdCtx, cmdCancel := context.WithCancel(context.Background())
+ 	cmd := exec.CommandContext(cmdCtx, args[0], args[1:]...)
+-	cmd.Stderr = p.processLogger
+-	cmd.Stdout = p.processLogger
++	// Capture synchronously at the monitor's writer seam, not its lossy async
++	// subscribers or history from a previous process. Each stream has its own
++	// partial line; the last valid marker belongs only to this startup.
++	output := &startupOutput{}
++	cmd.Stderr = &startupStream{capture: output, logger: p.processLogger}
++	cmd.Stdout = &startupStream{capture: output, logger: p.processLogger}
+ 	cmd.Env = append(cmd.Environ(), p.config.Env...)
+ 	cmd.Cancel = func() error { return p.sendStopSignal(cmd) }
+ 	cmd.WaitDelay = p.waitDelay
+@@ -544,6 +549,12 @@
+ 	}
+ 	prematureExit := func() startResult {
+ 		cmdCancel()
++		// cmdDone is closed after cmd.Wait has drained both output writers (or
++		// reached its existing inherited-pipe backstop), so the final marker
++		// cannot race the startup failure response.
++		if unavailable := output.failure(p.id); unavailable != nil {
++			return startResult{err: unavailable}
++		}
+ 		return startResult{err: fmt.Errorf("upstream command exited prematurely")}
+ 	}
+ 
+diff -ruN a/internal/process/start_unavailable.go b/internal/process/start_unavailable.go
+--- a/internal/process/start_unavailable.go	1970-01-01 07:30:00.000000000 +0730
++++ b/internal/process/start_unavailable.go	2026-10-05 11:52:12.938702969 +0800
+@@ -0,0 +1,113 @@
++// Generated-By: Codex / gpt-6.1-sol
++package process
++
++import (
++	"bytes"
++	"encoding/json"
++	"io"
++	"strings"
++	"sync"
++	"unicode/utf8"
++
++	"github.com/mostlygeek/llama-swap/internal/swaputil"
++)
++
++// The limit includes the terminating newline. Oversized and unterminated
++// lines are ignored; only a complete JSON object with the fixed protocol
++// fields can turn an ordinary startup failure into a retryable 503.
++const unavailableLineMax = 4096
++
++func parseUnavailableLine(line []byte) *swaputil.UpstreamUnavailableError {
++	if len(line) == 0 || len(line)+1 > unavailableLineMax || !utf8.Valid(line) {
++		return nil
++	}
++	var marker struct {
++		Event      *string
++		Status     *int
++		Code       *string
++		RetryAfter *int
++		Message    *string
++	}
++	fields := map[string]any{"event": &marker.Event, "status": &marker.Status, "code": &marker.Code,
++		"retry_after": &marker.RetryAfter, "message": &marker.Message}
++	decoder := json.NewDecoder(bytes.NewReader(line))
++	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
++		return nil
++	}
++	for decoder.More() {
++		token, err := decoder.Token()
++		key, ok := token.(string)
++		target, exists := fields[key]
++		if err != nil || !ok || !exists || decoder.Decode(target) != nil {
++			return nil
++		}
++		// Removing the exact field also rejects duplicate and case-alias keys.
++		delete(fields, key)
++	}
++	if token, err := decoder.Token(); err != nil || token != json.Delim('}') ||
++		len(fields) != 0 || decoder.Decode(new(any)) != io.EOF {
++		return nil
++	}
++	if marker.Event == nil || *marker.Event != "llmsvc_unavailable" ||
++		marker.Status == nil || *marker.Status != 503 ||
++		marker.Code == nil || *marker.Code != "no_feasible_gpu" ||
++		marker.RetryAfter == nil || *marker.RetryAfter < 1 || *marker.RetryAfter > 86400 ||
++		marker.Message == nil || strings.TrimSpace(*marker.Message) == "" {
++		return nil
++	}
++	message := []rune(*marker.Message)
++	if len(message) > 512 {
++		message = message[:512]
++	}
++	return &swaputil.UpstreamUnavailableError{Message: string(message), RetryAfter: *marker.RetryAfter}
++}
++
++type startupOutput struct {
++	mu   sync.Mutex
++	last *swaputil.UpstreamUnavailableError
++}
++
++func (o *startupOutput) failure(model string) *swaputil.UpstreamUnavailableError {
++	o.mu.Lock()
++	defer o.mu.Unlock()
++	if o.last == nil {
++		return nil
++	}
++	err := *o.last
++	err.Model = model
++	return &err
++}
++
++// Each stdout/stderr drain owns one stream. Their shared lock preserves the
++// order in which complete markers reach the existing process log monitor.
++type startupStream struct {
++	capture   *startupOutput
++	logger    io.Writer
++	line      []byte
++	oversized bool
++}
++
++func (s *startupStream) Write(data []byte) (int, error) {
++	s.capture.mu.Lock()
++	defer s.capture.mu.Unlock()
++	n, err := s.logger.Write(data)
++	for _, b := range data[:n] {
++		if b == '\n' {
++			if !s.oversized {
++				if marker := parseUnavailableLine(s.line); marker != nil {
++					s.capture.last = marker
++				}
++			}
++			s.line = s.line[:0]
++			s.oversized = false
++		} else if !s.oversized {
++			if len(s.line) >= unavailableLineMax-1 {
++				s.line = nil
++				s.oversized = true
++			} else {
++				s.line = append(s.line, b)
++			}
++		}
++	}
++	return n, err
++}
+diff -ruN a/internal/process/start_unavailable_test.go b/internal/process/start_unavailable_test.go
+--- a/internal/process/start_unavailable_test.go	1970-01-01 07:30:00.000000000 +0730
++++ b/internal/process/start_unavailable_test.go	2026-10-05 11:52:13.030702316 +0800
+@@ -0,0 +1,178 @@
++// Generated-By: Codex / gpt-6.1-sol
++package process
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"testing"
++	"time"
++	"unicode/utf8"
++
++	"github.com/mostlygeek/llama-swap/internal/config"
++	"github.com/mostlygeek/llama-swap/internal/logmon"
++	"github.com/mostlygeek/llama-swap/internal/swaputil"
++)
++
++const unavailableMarker = `{"event":"llmsvc_unavailable","status":503,"code":"no_feasible_gpu","retry_after":60,"message":"All placement GPUs are occupied"}`
++
++func TestParseUnavailableLine(t *testing.T) {
++	valid := parseUnavailableLine([]byte(unavailableMarker))
++	if valid == nil || valid.RetryAfter != 60 || valid.Message != "All placement GPUs are occupied" {
++		t.Fatalf("valid marker = %+v", valid)
++	}
++	for name, line := range map[string]string{
++		"truncated":       unavailableMarker[:len(unavailableMarker)-1],
++		"prefix":          "wrapper: " + unavailableMarker,
++		"trailing":        unavailableMarker + " log text",
++		"two objects":     unavailableMarker + unavailableMarker,
++		"array":           "[" + unavailableMarker + "]",
++		"event":           strings.Replace(unavailableMarker, "llmsvc_unavailable", "other", 1),
++		"code":            strings.Replace(unavailableMarker, "no_feasible_gpu", "placement_timeout", 1),
++		"status string":   strings.Replace(unavailableMarker, `"status":503`, `"status":"503"`, 1),
++		"status float":    strings.Replace(unavailableMarker, `"status":503`, `"status":503.0`, 1),
++		"status null":     strings.Replace(unavailableMarker, `"status":503`, `"status":null`, 1),
++		"status missing":  strings.Replace(unavailableMarker, `"status":503,`, "", 1),
++		"retry bool":      strings.Replace(unavailableMarker, `"retry_after":60`, `"retry_after":true`, 1),
++		"retry string":    strings.Replace(unavailableMarker, `"retry_after":60`, `"retry_after":"60"`, 1),
++		"retry zero":      strings.Replace(unavailableMarker, `"retry_after":60`, `"retry_after":0`, 1),
++		"retry negative":  strings.Replace(unavailableMarker, `"retry_after":60`, `"retry_after":-1`, 1),
++		"retry excessive": strings.Replace(unavailableMarker, `"retry_after":60`, `"retry_after":86401`, 1),
++		"message number":  strings.Replace(unavailableMarker, `"All placement GPUs are occupied"`, "123", 1),
++		"message null":    strings.Replace(unavailableMarker, `"All placement GPUs are occupied"`, "null", 1),
++		"message empty":   strings.Replace(unavailableMarker, "All placement GPUs are occupied", "  ", 1),
++		"unknown field":   strings.TrimSuffix(unavailableMarker, "}") + `,"other":1}`,
++		"case alias":      strings.Replace(unavailableMarker, `"event":`, `"EVENT":`, 1),
++		"duplicate field": strings.TrimSuffix(unavailableMarker, "}") + `,"status":503}`,
++		"oversized":       strings.Replace(unavailableMarker, "All placement GPUs are occupied", strings.Repeat("x", 4096), 1),
++		"invalid utf8":    strings.Replace(unavailableMarker, "All placement GPUs are occupied", string([]byte{0xff}), 1),
++	} {
++		t.Run(name, func(t *testing.T) {
++			if got := parseUnavailableLine([]byte(line)); got != nil {
++				t.Fatalf("invalid marker accepted: %+v", got)
++			}
++		})
++	}
++	unicodeMessage := strings.Replace(unavailableMarker, "All placement GPUs are occupied", strings.Repeat("😀", 600), 1)
++	got := parseUnavailableLine([]byte(unicodeMessage))
++	if got == nil || utf8.RuneCountInString(got.Message) != 512 || !utf8.ValidString(got.Message) {
++		t.Fatalf("unicode truncation = %+v", got)
++	}
++	boundary := unavailableMarker + strings.Repeat(" ", unavailableLineMax-1-len(unavailableMarker))
++	if parseUnavailableLine([]byte(boundary)) == nil || parseUnavailableLine([]byte(boundary+" ")) != nil {
++		t.Fatal("line limit must include the terminating newline")
++	}
++}
++
++func TestStartupOutputWholeLinesLastValidAndBounds(t *testing.T) {
++	output := &startupOutput{}
++	var logged bytes.Buffer
++	stdout := &startupStream{capture: output, logger: &logged}
++	stderr := &startupStream{capture: output, logger: &logged}
++	first := []byte(unavailableMarker + "\n")
++	stdout.Write(first[:40])
++	stderr.Write([]byte("ordinary stderr line\n"))
++	if output.failure("model") != nil {
++		t.Fatal("partial marker accepted")
++	}
++	stdout.Write(first[40:])
++	second := strings.Replace(unavailableMarker, `"retry_after":60`, `"retry_after":17`, 1) + "\n"
++	stderr.Write([]byte(second))
++	stderr.Write([]byte("prefix " + unavailableMarker + "\n"))
++	stderr.Write([]byte(strings.Repeat("x", 100000) + unavailableMarker + "\n"))
++	stdout.Write([]byte(unavailableMarker)) // no newline: must not replace last marker
++	got := output.failure("model")
++	if got == nil || got.RetryAfter != 17 || got.Model != "model" {
++		t.Fatalf("last valid marker = %+v", got)
++	}
++	if len(stderr.line) > unavailableLineMax || len(stdout.line) > unavailableLineMax {
++		t.Fatal("partial-line storage exceeded protocol bound")
++	}
++	if !bytes.Contains(logged.Bytes(), []byte(second)) || !bytes.Contains(logged.Bytes(), []byte(strings.Repeat("x", 100000))) {
++		t.Fatal("capture changed the existing monitor's output")
++	}
++	if (&startupOutput{}).failure("model") != nil {
++		t.Fatal("new startup inherited an old failure")
++	}
++}
++
++// A real child exercises os/exec's stdout/stderr drain before cmdDone closes.
++// The same process object retries through unavailable, ordinary failure and
++// successful startup, proving the marker is scoped to its startup incarnation.
++func TestProcessUnavailableRetryAndDrainedOutput(t *testing.T) {
++	executable, err := os.Executable()
++	if err != nil {
++		t.Fatal(err)
++	}
++	health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
++	defer health.Close()
++	parent, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	logger := logmon.NewWriter(io.Discard)
++	p, err := New(parent, "test-model", config.ModelConfig{
++		Cmd:   fmt.Sprintf("%q -test.run=^TestUnavailableCommandHelper$", executable),
++		Proxy: health.URL, CheckEndpoint: "/health",
++		Env: []string{"LLMSVC_UNAVAILABLE_HELPER=" + filepath.Join(t.TempDir(), "attempt")},
++	}, logger, logger)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { p.Stop(time.Second) })
++	ctx, end := context.WithTimeout(context.Background(), 10*time.Second)
++	defer end()
++	err = p.EnsureReady(ctx, 5*time.Second)
++	var unavailable *swaputil.UpstreamUnavailableError
++	if !errors.As(err, &unavailable) || unavailable.Model != "test-model" {
++		t.Fatalf("first startup error = %v", err)
++	}
++	err = p.EnsureReady(ctx, 5*time.Second)
++	if err == nil || errors.As(err, &unavailable) || err.Error() != "upstream command exited prematurely" {
++		t.Fatalf("ordinary retry poisoned by old marker: %v", err)
++	}
++	if err = p.EnsureReady(ctx, 5*time.Second); err != nil {
++		t.Fatalf("healthy retry failed: %v", err)
++	}
++	if err = p.Stop(time.Second); err != nil {
++		t.Fatal(err)
++	}
++	err = p.EnsureReady(ctx, 5*time.Second)
++	if err == nil || errors.As(err, &unavailable) || err.Error() != "upstream command exited prematurely" {
++		t.Fatalf("restart after successful startup inherited old marker: %v", err)
++	}
++}
++
++func TestUnavailableCommandHelper(t *testing.T) {
++	path := os.Getenv("LLMSVC_UNAVAILABLE_HELPER")
++	if path == "" {
++		return
++	}
++	data, _ := os.ReadFile(path)
++	attempt, _ := strconv.Atoi(string(data))
++	attempt++
++	if err := os.WriteFile(path, []byte(strconv.Itoa(attempt)), 0600); err != nil {
++		os.Exit(1)
++	}
++	switch attempt {
++	case 1:
++		// Enough ordinary output to span several pipe reads, followed by a
++		// split final marker immediately before exit on the other stream.
++		fmt.Fprintln(os.Stdout, strings.Repeat("x", 100000))
++		fmt.Fprint(os.Stderr, unavailableMarker[:40])
++		fmt.Fprintln(os.Stderr, unavailableMarker[40:])
++		os.Exit(75)
++	case 2, 4:
++		fmt.Fprintln(os.Stderr, "ordinary startup failure")
++		os.Exit(75)
++	default:
++		time.Sleep(30 * time.Second)
++		os.Exit(0)
++	}
++}
+diff -ruN a/internal/router/loading.go b/internal/router/loading.go
+--- a/internal/router/loading.go	2026-08-31 02:57:20.000000000 +0800
++++ b/internal/router/loading.go	2026-10-05 11:23:24.139210363 +0800
+@@ -1,8 +1,10 @@
++// Generated-By: Codex / gpt-6.1-sol
+ package router
+ 
+ import (
+ 	"context"
+ 	"encoding/json"
++	"errors"
+ 	"fmt"
+ 	"math/rand"
+ 	"net/http"
+@@ -255,12 +257,16 @@
+ //
+ // The frame carries the same envelope as a non-streamed error body (#1038), so
+ // a client sees one error shape either way. The status only selects the
+-// envelope's type/code — 500 matches what this error would have been answered
+-// with had the stream not already committed a 200.
++// envelope's type/code. Typed HTTP errors retain the same body as their
++// non-streamed response; ordinary startup failures keep the existing 500 body.
+ //
+ // Must be called before release, while writes still reach the client.
+ func (s *loadingWriter) sendError(err error) {
+ 	jsonData := swaputil.NewErrorEnvelope(http.StatusInternalServerError, err.Error(), "").JSON()
++	var httpErr swaputil.HTTPError
++	if errors.As(err, &httpErr) {
++		jsonData = httpErr.Body()
++	}
+ 
+ 	s.writeMu.Lock()
+ 	defer s.writeMu.Unlock()
+diff -ruN a/internal/router/loading_unavailable_test.go b/internal/router/loading_unavailable_test.go
+--- a/internal/router/loading_unavailable_test.go	1970-01-01 07:30:00.000000000 +0730
++++ b/internal/router/loading_unavailable_test.go	2026-10-05 11:24:30.322757235 +0800
+@@ -0,0 +1,42 @@
++// Generated-By: Codex / gpt-6.1-sol
++package router
++
++import (
++	"fmt"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/mostlygeek/llama-swap/internal/config"
++	"github.com/mostlygeek/llama-swap/internal/logmon"
++	"github.com/mostlygeek/llama-swap/internal/process"
++	"github.com/mostlygeek/llama-swap/internal/swaputil"
++)
++
++func TestLoadingWriterUnavailableUsesHTTPErrorBody(t *testing.T) {
++	w := httptest.NewRecorder()
++	lw := newLoadingWriter(logmon.NewWriter(io.Discard), "test-model", w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
++	err := &swaputil.UpstreamUnavailableError{Model: "test-model", Message: "All GPUs occupied", RetryAfter: 17}
++	before := w.Body.Len()
++	lw.sendError(fmt.Errorf("start: %w", err))
++	if w.Code != http.StatusOK || w.Body.String()[before:] != "data: "+string(err.Body())+"\n\ndata: [DONE]\n\n" {
++		t.Fatalf("stream status/body = %d / %s", w.Code, w.Body)
++	}
++}
++
++func TestBaseRouterUnavailableLoadingStream(t *testing.T) {
++	sendLoading := true
++	conf := config.Config{HealthCheckTimeout: 5, Models: map[string]config.ModelConfig{"a": {SendLoadingState: &sendLoading}}}
++	err := &swaputil.UpstreamUnavailableError{Model: "a", Message: "All GPUs occupied", RetryAfter: 17}
++	a := newFakeProcess("a")
++	a.ensureErr = err
++	b := newTestBaseWithConfig(t, conf, map[string]process.Process{"a": a}, &stubPlanner{})
++	w := httptest.NewRecorder()
++	b.ServeHTTP(w, newStreamRequest("a"))
++	if w.Code != http.StatusOK || !strings.Contains(extractStreamedContent(w.Body.String()), "llama-swap loading model") ||
++		!strings.Contains(w.Body.String(), "data: "+string(err.Body())+"\n\ndata: [DONE]\n\n") {
++		t.Fatalf("loading stream status/body = %d / %s", w.Code, w.Body)
++	}
++}
+diff -ruN a/internal/swaputil/unavailable.go b/internal/swaputil/unavailable.go
+--- a/internal/swaputil/unavailable.go	1970-01-01 07:30:00.000000000 +0730
++++ b/internal/swaputil/unavailable.go	2026-10-05 11:23:24.055210938 +0800
+@@ -0,0 +1,35 @@
++// Generated-By: Codex / gpt-6.1-sol
++package swaputil
++
++import (
++	"fmt"
++	"net/http"
++	"strconv"
++)
++
++// UpstreamUnavailableError preserves the scheduler's temporary GPU capacity
++// refusal across the launcher's stdout/stderr and the process startup error.
++type UpstreamUnavailableError struct {
++	Model      string
++	Message    string
++	RetryAfter int
++}
++
++var _ HTTPError = (*UpstreamUnavailableError)(nil)
++
++func (e *UpstreamUnavailableError) Error() string {
++	return fmt.Sprintf("No GPU available for %s: %s Retry after %ds.", e.Model, e.Message, e.RetryAfter)
++}
++
++func (e *UpstreamUnavailableError) StatusCode() int { return http.StatusServiceUnavailable }
++
++func (e *UpstreamUnavailableError) Header() http.Header {
++	h := http.Header{}
++	h.Set("Content-Type", "application/json")
++	h.Set("Retry-After", strconv.Itoa(e.RetryAfter))
++	return h
++}
++
++func (e *UpstreamUnavailableError) Body() []byte {
++	return NewErrorEnvelope(e.StatusCode(), e.Error(), "no_gpu_available").JSON()
++}
+diff -ruN a/internal/swaputil/unavailable_test.go b/internal/swaputil/unavailable_test.go
+--- a/internal/swaputil/unavailable_test.go	1970-01-01 07:30:00.000000000 +0730
++++ b/internal/swaputil/unavailable_test.go	2026-10-05 11:24:30.238757811 +0800
+@@ -0,0 +1,29 @@
++// Generated-By: Codex / gpt-6.1-sol
++package swaputil
++
++import (
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++)
++
++func TestUpstreamUnavailableHTTPError(t *testing.T) {
++	err := &UpstreamUnavailableError{Model: "test-model", Message: "GPU0: external 60.4 GiB", RetryAfter: 17}
++	if err.StatusCode() != http.StatusServiceUnavailable || err.Header().Get("Retry-After") != "17" {
++		t.Fatalf("status/header = %d / %v", err.StatusCode(), err.Header())
++	}
++	w := httptest.NewRecorder()
++	SendError(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil), fmt.Errorf("start: %w", err))
++	if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") != "17" || w.Header().Get("Content-Type") != "application/json" {
++		t.Fatalf("rendered status/header = %d / %v", w.Code, w.Header())
++	}
++	var body ErrorEnvelope
++	if json.Unmarshal(w.Body.Bytes(), &body) != nil || body.Src != "llama-swap" || body.Error.Code != "no_gpu_available" ||
++		body.Error.Type != ErrorTypeServer || body.Error.Param != nil || body.Error.Message != err.Error() ||
++		!strings.Contains(body.Error.Message, "Retry after 17s.") {
++		t.Fatalf("body = %s", w.Body)
++	}
++}
