@@ -150,6 +150,7 @@ def test_layout_views_and_seven_day_details(fleet_snapshot, size, tmp_path):
             assert len(str(app.query_one("#fleet-footer").render())) <= size[0]
             assert app.query_one("#fleet-details").region.bottom <= app.query_one("#fleet-notice").region.y
             assert str(app.query_one("#fleet-gpus").render()).count("GPU") == 6
+            assert "(other workload)" in str(app.query_one("#fleet-gpus").render())
             assert app.selected_service_id() == "quiet"
             assert app.history["hours"] == 168
             assert "7d active" in str(app.query_one("#fleet-detail-text").render())
@@ -164,6 +165,7 @@ def test_layout_views_and_seven_day_details(fleet_snapshot, size, tmp_path):
             others = [key for key in app.row_keys if key.startswith("other:")]
             assert len(others) == 6
             for key in others:
+                assert "(other workload)" in table.get_cell(key, "service").plain
                 assert table.get_cell(key, "mem").plain == "20"
                 for column in ("activity", "idle", "status"):
                     assert table.get_cell(key, column).plain == ""
@@ -249,15 +251,20 @@ def test_invalid_snapshot_retains_last_good_observations(fleet_snapshot):
     asyncio.run(scenario())
 
 
-def test_malformed_submit_result_is_unknown_and_not_retried(fleet_snapshot):
+@pytest.mark.parametrize("receipt_patch", [
+    {"instance_id": "another-service"}, {"until": 1900086401}, {"reason": "different"},
+    {"until": 1e300}, {"id": 123},
+])
+def test_malformed_submit_result_is_unknown_and_not_retried(fleet_snapshot, receipt_patch):
     async def scenario():
         app, client = make_app(fleet_snapshot)
         original = client.request
 
         def malformed(method, path, payload=None):
             if method == "POST" and "dry_run" not in path:
-                client.calls.append((method, path, payload))
-                return {"ok": True, "claim": {"instance_id": "another-service"}}
+                result = copy.deepcopy(original(method, path, payload))
+                result["claim"].update(receipt_patch)
+                return result
             return original(method, path, payload)
 
         client.request = malformed
@@ -274,6 +281,46 @@ def test_malformed_submit_result_is_unknown_and_not_retried(fleet_snapshot):
             assert "Result unknown" in str(dialog.query_one("#claim-status").render())
             assert "own" in app.uncertain_services
             assert dialog.query_one("#claim-submit", Button).disabled
+            for _ in range(3):
+                await pilot.click("#claim-submit")
+            assert len([call for call in client.calls if call[0] == "POST" and "dry_run" not in call[1]]) == 1
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("receipt_patch", [
+    {"revoked_at": None}, {"revoked_at": 0}, {"revoked_at": 1e300}, {"until": 1e300},
+])
+def test_invalid_revocation_receipt_is_unknown_and_not_retried(fleet_snapshot, receipt_patch):
+    async def scenario():
+        app, client = make_app(fleet_snapshot)
+        next(item for item in client.snapshot["services"] if item["id"] == "own")["claim"] = {
+            "id": "claim-own", "instance_id": "own", "service_id": "own", "container": "group-c",
+            "reason": "Working session", "until": 1900086400}
+        original = client.request
+
+        def malformed(method, path, payload=None):
+            result = copy.deepcopy(original(method, path, payload))
+            if method == "DELETE" and "dry_run" not in path:
+                result["claim"].update(receipt_patch)
+            return result
+
+        client.request = malformed
+        async with app.run_test(size=(80, 24)) as pilot:
+            await ready(app, pilot)
+            await select(app, pilot, "own")
+            await pilot.press("u")
+            dialog = app.screen
+            await pilot.click("#claim-preview")
+            await ready(app, pilot)
+            assert not dialog.query_one("#claim-submit", Button).disabled
+            await pilot.click("#claim-submit")
+            await ready(app, pilot)
+            assert "Result unknown" in str(dialog.query_one("#claim-status").render())
+            assert "own" in app.uncertain_services
+            assert dialog.query_one("#claim-submit", Button).disabled
+            for _ in range(3):
+                await pilot.click("#claim-submit")
+            assert len([call for call in client.calls if call[0] == "DELETE" and "dry_run" not in call[1]]) == 1
     asyncio.run(scenario())
 
 
@@ -390,7 +437,7 @@ def test_claim_preview_edit_submit_and_revoke(fleet_snapshot):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("status", [403, None])
+@pytest.mark.parametrize("status", [403, None, 500, 503])
 def test_claim_failure_is_visible_and_never_retried(fleet_snapshot, status):
     async def scenario():
         app, client = make_app(fleet_snapshot)
@@ -412,7 +459,7 @@ def test_claim_failure_is_visible_and_never_retried(fleet_snapshot, status):
                 app.update_events()
             await ready(app, pilot)
             assert len([call for call in client.calls if call[0] == "POST" and "dry_run" not in call[1]]) == 1
-            if status is None:
+            if status != 403:
                 await pilot.click("#claim-close")
                 await pilot.press("c")
                 assert app.screen is app.dashboard

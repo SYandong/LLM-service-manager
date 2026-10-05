@@ -204,11 +204,18 @@ class ClaimDialog(ModalScreen):
                 raise ValueError("The claim result does not identify this service.")
             if claim.get("service_id", self.service_id) != self.service_id:
                 raise ValueError("The claim result identifies a different service.")
+            if (not numeric(claim.get("until")) or claim["until"] <= 0
+                    or timestamp(claim["until"]) == "?"):
+                raise ValueError("The claim result does not provide a valid deadline.")
             if self.revoke:
-                if claim.get("id") != self.claim.get("id") or not numeric(claim.get("revoked_at")):
+                if (not isinstance(claim.get("id"), str) or not claim["id"]
+                        or claim["id"] != self.claim.get("id")
+                        or not numeric(claim.get("revoked_at")) or claim["revoked_at"] <= 0
+                        or timestamp(claim["revoked_at"]) == "?"):
                     raise ValueError("The service did not confirm this claim's revocation.")
             elif (claim.get("until") != payload["until"] or claim.get("reason") != payload["reason"]
-                  or (not preview and not claim.get("id")) or (preview and "id" in claim)):
+                  or (not preview and (not isinstance(claim.get("id"), str) or not claim["id"]))
+                  or (preview and "id" in claim)):
                 raise ValueError("The service did not confirm the submitted claim.")
             if preview:
                 self.preview_payload = {} if self.revoke else dict(payload)
@@ -508,7 +515,7 @@ class FleetApp(App):
                         if self.filter_text and self.filter_text.casefold() not in name.casefold():
                             continue
                         key = "other:%s:%s:%s" % (index, name, number)
-                        values = [name + " (training/other)", str(index), amount(occupant.get("used_gb")),
+                        values = [name + " (other workload)", str(index), amount(occupant.get("used_gb")),
                                   "", "", ""] + ([] if narrow else ["", ""])
                         result.append((key, tuple([RowLabel(values[0], key)] + [Text(value) for value in values[1:]])))
         return result, metadata
@@ -547,7 +554,7 @@ class FleetApp(App):
             used, total = gpu.get("used_gb"), gpu.get("total_gb")
             filled = min(10, int(used / total * 10)) if numeric(used) and numeric(total) and total > 0 else None
             bar = "?" * 10 if filled is None else "█" * filled + "░" * (10 - filled)
-            others = ["%s (training/other) %sG" % (self.clean(item.get("container") or "unknown"),
+            others = ["%s (other workload) %sG" % (self.clean(item.get("container") or "unknown"),
                                                  amount(item.get("used_gb")))
                       for item in gpu.get("occupants", []) if item.get("service_id") is None]
             line = "GPU%s %s %s/%sG %s" % (gpu["index"], bar, amount(used), amount(total), " · ".join(others))
@@ -780,7 +787,7 @@ class FleetApp(App):
             field.display = True
             field.focus()
         else:
-            self.notice("15s refresh; live changes prompt reads. Choose person/GPU, filter, sort, or your service's claim. Dots mean unknown activity; training/other rows show memory only.")
+            self.notice("15s refresh; live changes prompt reads. Choose person/GPU, filter, sort, or your service's claim. Dots mean unknown activity; other workload rows show memory only.")
 
     def on_input_changed(self, event):
         if event.input.id == "fleet-filter":
