@@ -1,0 +1,18 @@
+# Generated-By: Codex / gpt-6.1-sol
+[Unit]
+Description=Export a bounded read-only host inference fleet snapshot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 -I -S /usr/local/lib/llmsvc/llmsvc-fleet-scan.py --config /etc/llmsvc/fleet-scan.json
+TimeoutStartSec=22s
+KillMode=control-group
+UMask=0022
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=llmsvc-fleet-scan
+# nsenter requires the host PID view and CAP_SYS_ADMIN. Do not hide /proc or
+# create a private network namespace: the scanner verifies each target itself.

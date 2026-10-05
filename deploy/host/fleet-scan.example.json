@@ -1,0 +1,36 @@
+{
+  "_generated_by": "Codex / gpt-6.1-sol",
+  "_comments": {
+    "format": "Valid JSON; this _comments object documents settings and is ignored by the scanner.",
+    "paths": "Use absolute host paths. The scanner needs root /proc and GPU visibility; do not run it inside a workload container.",
+    "sample_interval_seconds": "Nominal host sample interval, 30 through 300 seconds. The installer sets the timer OnUnitActiveSec to match this value.",
+    "scan_budget_seconds": "Monotonic budget for discovery, commands, ownership checks, parsing and scraping. Maximum 20 seconds.",
+    "target_timeout_seconds": "Each command/GET uses the remaining scan budget and at most this value; maximum 2 seconds.",
+    "limits": "Limits may be lowered. Discovery limits mark inventory incomplete; oversized snapshots retain the previous file.",
+    "max_services": "Accepts 1 through 256, default 256. Exceeding the cap sets inventory_complete=false; omitted services remain unknown to the consumer.",
+    "match_rules": "Each rule matches exact case-insensitive argv tokens (and command basenames), with every all token required. No shell or regular expressions are evaluated.",
+    "managed_container": "A vllm-*.service process in this container is labeled managed_by=llmsvc; this label grants no control authority."
+  },
+  "proc_root": "/proc",
+  "output_path": "/var/lib/llmsvc-host-export/fleet.json",
+  "nvidia_smi_path": "/usr/bin/nvidia-smi",
+  "nsenter_path": "/usr/bin/nsenter",
+  "python_path": "/usr/bin/python3",
+  "managed_container": "llmsvc",
+  "sample_interval_seconds": 60,
+  "scan_budget_seconds": 20,
+  "target_timeout_seconds": 2,
+  "max_response_bytes": 4194304,
+  "max_snapshot_bytes": 2097152,
+  "max_processes": 65536,
+  "max_services": 256,
+  "max_gpu_processes": 4096,
+  "max_proc_bytes": 67108864,
+  "match_rules": [
+    {"engine": "vllm", "all": ["vllm", "serve"]},
+    {"engine": "vllm", "all": ["vllm.entrypoints.openai.api_server"]},
+    {"engine": "sglang", "all": ["sglang.launch_server"]},
+    {"engine": "llama-server", "all": ["llama-server"]},
+    {"engine": "ollama", "all": ["ollama", "serve"]}
+  ]
+}
