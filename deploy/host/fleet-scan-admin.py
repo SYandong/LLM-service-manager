@@ -4,7 +4,7 @@
 
 import argparse
 import base64
-import hashlib
+import fcntl
 import importlib.util
 import json
 import os
@@ -24,6 +24,19 @@ FILES = {
 TIMER = "llmsvc-fleet-scan.timer"
 SERVICE = "llmsvc-fleet-scan.service"
 RECEIPT = "/var/lib/llmsvc-fleet-install/receipt.json"
+UNIT_KEYS = ("Id", "LoadState", "ActiveState", "UnitFileState", "FragmentPath", "DropInPaths", "InvocationID", "Job")
+EFFECTS = {
+    "install_stop_timer": ["stop", TIMER],
+    "install_stop_service": ["stop", SERVICE],
+    "install_reload": ["daemon-reload"],
+    "install_enable_timer": ["enable", "--now", TIMER],
+    "restore_stop_timer": ["disable", "--now", TIMER],
+    "restore_stop_service": ["stop", SERVICE],
+    "restore_reload": ["daemon-reload"],
+    "restore_enable_timer": ["enable", TIMER],
+    "restore_start_timer": ["start", TIMER],
+}
+FILE_STATES = {"pending", "install_submitted", "installed", "restore_submitted", "restored"}
 
 
 def target(root, absolute):
@@ -49,18 +62,89 @@ def write_atomic(path, data, mode):
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        sync_directory(path.parent)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
 
 
-def systemctl(args, check=True):
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def remove_durable(path):
+    path.unlink()
+    sync_directory(path.parent)
+
+
+def systemctl(args):
     result = subprocess.run(["/usr/bin/systemctl", *args], stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            timeout=10, shell=False, check=False)
-    if check and result.returncode:
-        raise ValueError("systemctl_failed")
-    return result.returncode == 0
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            timeout=10, shell=False, check=False,
+                            env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"})
+    # A nonzero exit is an error, never evidence of an inactive/absent unit.
+    if result.returncode != 0 or not isinstance(result.stdout, bytes) or len(result.stdout) > 8192:
+        raise ValueError("systemctl_result_unknown")
+    try:
+        return result.stdout.decode("utf-8", "strict")
+    except UnicodeError:
+        raise ValueError("systemctl_result_unknown") from None
+
+
+def unit_state(unit):
+    keys = UNIT_KEYS + (("MainPID", "ControlPID", "ControlGroup") if unit == SERVICE else ())
+    raw = systemctl(["show", unit, "--no-pager", "--all", "--property=" + ",".join(keys)])
+    values = {}
+    for line in raw.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key in values or key not in keys:
+            raise ValueError("systemctl_properties_unknown")
+        values[key] = value
+    if set(values) != set(keys) or values["Id"] != unit or values["Job"] not in {"", "0"}:
+        raise ValueError("systemctl_properties_unknown")
+    if values["LoadState"] == "not-found":
+        if values["ActiveState"] != "inactive" or values["FragmentPath"] or values["DropInPaths"] or values["UnitFileState"] not in {"", "not-found"}:
+            raise ValueError("systemctl_properties_unknown")
+    elif values["LoadState"] == "loaded":
+        if values["FragmentPath"] != "/etc/systemd/system/" + unit or values["DropInPaths"]:
+            raise ValueError("systemctl_unit_identity_changed")
+        if values["ActiveState"] not in {"active", "inactive", "failed"} or values["UnitFileState"] not in {"enabled", "disabled", "static", "indirect"}:
+            raise ValueError("systemctl_properties_unknown")
+    else:
+        raise ValueError("systemctl_properties_unknown")
+    invocation = values["InvocationID"]
+    if invocation and (len(invocation) != 32 or any(char not in "0123456789abcdef" for char in invocation)):
+        raise ValueError("systemctl_properties_unknown")
+    if values["ActiveState"] == "active" and (not invocation or int(invocation, 16) == 0):
+        raise ValueError("systemctl_properties_unknown")
+    if unit == SERVICE:
+        if any(not values[key].isascii() or not values[key].isdecimal() or int(values[key]) > 2 ** 31 - 1 for key in ("MainPID", "ControlPID")):
+            raise ValueError("systemctl_properties_unknown")
+        if values["ActiveState"] in {"inactive", "failed"} and (values["MainPID"] != "0" or values["ControlPID"] != "0" or values["ControlGroup"]):
+            raise ValueError("systemctl_service_presence_unknown")
+    return values
+
+
+def assert_no_pending_effect(receipt):
+    if any(effect["state"] == "submitted" for effect in receipt["effects"].values()):
+        raise ValueError("systemctl_action_outcome_unknown")
+
+
+def effect(receipt_path, receipt, name, binding=None):
+    mark = receipt["effects"].get(name)
+    if mark:
+        if mark["state"] != "acknowledged":
+            raise ValueError("systemctl_action_outcome_unknown")
+        return
+    receipt["effects"][name] = {"state": "submitted", "binding": binding}
+    save_receipt(receipt_path, receipt)
+    systemctl(EFFECTS[name])
+    receipt["effects"][name]["state"] = "acknowledged"
+    save_receipt(receipt_path, receipt)
 
 
 def scanner_module(source):
@@ -107,49 +191,122 @@ def save_receipt(path, receipt):
     write_atomic(path, json.dumps(receipt, sort_keys=True).encode(), 0o600)
 
 
-def restore(root, receipt, live):
+def file_record(path):
+    if not path.exists():
+        return None
+    if not path.is_file() or path.stat().st_size > 1024 * 1024:
+        raise ValueError("installed_file_changed")
+    return {"data": base64.b64encode(path.read_bytes()).decode(), "mode": stat.S_IMODE(path.stat().st_mode)}
+
+
+def check_files(root, receipt):
+    for absolute, state in receipt["files"].items():
+        current = file_record(target(root, absolute))
+        allowed = []
+        if state in {"pending", "install_submitted", "restore_submitted", "restored"}:
+            allowed.append(receipt["previous"][absolute])
+        if state in {"install_submitted", "installed", "restore_submitted"}:
+            allowed.append(receipt["installed"][absolute])
+        if current not in allowed:
+            raise ValueError("installed_file_changed")
+
+
+def validate_receipt(receipt):
+    if not isinstance(receipt, dict) or receipt.get("schema_version") != 2 or receipt.get("phase") not in {"installing", "installed", "restoring", "restored"}:
+        raise ValueError("invalid_install_receipt")
+    for group in ("previous", "installed", "files"):
+        if not isinstance(receipt.get(group), dict) or set(receipt[group]) != set(FILES):
+            raise ValueError("invalid_install_receipt")
+    for absolute in FILES:
+        if receipt["files"][absolute] not in FILE_STATES:
+            raise ValueError("invalid_install_receipt")
+        for group in ("previous", "installed"):
+            record = receipt[group][absolute]
+            if record is None and group == "previous":
+                continue
+            if not isinstance(record, dict) or set(record) != {"data", "mode"} or not isinstance(record["data"], str) or len(record["data"]) > 2 * 1024 * 1024 or isinstance(record["mode"], bool) or not isinstance(record["mode"], int) or not 0 <= record["mode"] <= 0o7777:
+                raise ValueError("invalid_install_receipt")
+            base64.b64decode(record["data"], validate=True)
+    if not isinstance(receipt.get("timer_enabled"), bool) or not isinstance(receipt.get("timer_active"), bool) or not isinstance(receipt.get("effects"), dict):
+        raise ValueError("invalid_install_receipt")
+    for name, mark in receipt["effects"].items():
+        if name not in EFFECTS or not isinstance(mark, dict) or set(mark) != {"state", "binding"} or mark["state"] not in {"submitted", "acknowledged"} or mark["binding"] is not None and not isinstance(mark["binding"], dict):
+            raise ValueError("invalid_install_receipt")
+
+
+def read_receipt(path):
+    if not path.is_file() or path.stat().st_size > 4 * 1024 * 1024:
+        raise ValueError("invalid_install_receipt")
+    receipt = json.loads(path.read_bytes())
+    validate_receipt(receipt)
+    return receipt
+
+
+def stop_units(receipt_path, receipt, prefix):
+    assert_no_pending_effect(receipt)
+    # Read both identities before submitting any stop/disable command.
+    timer, service = unit_state(TIMER), unit_state(SERVICE)
+    if timer["ActiveState"] == "active" or prefix == "restore" and timer["UnitFileState"] == "enabled":
+        timer = unit_state(TIMER)
+        effect(receipt_path, receipt, prefix + "_stop_timer", timer)
+    timer = unit_state(TIMER)
+    if timer["ActiveState"] not in {"inactive", "failed"} or prefix == "restore" and timer["UnitFileState"] == "enabled":
+        raise ValueError("scanner_stop_not_confirmed")
+    if service["ActiveState"] == "active":
+        service = unit_state(SERVICE)
+        effect(receipt_path, receipt, prefix + "_stop_service", service)
+    service = unit_state(SERVICE)
+    if service["ActiveState"] not in {"inactive", "failed"}:
+        raise ValueError("scanner_stop_not_confirmed")
+
+
+def restore(root, receipt_path, receipt, live):
+    assert_no_pending_effect(receipt)
+    check_files(root, receipt)
+    if receipt["phase"] not in {"restoring", "restored"}:
+        receipt["phase"] = "restoring"
+        save_receipt(receipt_path, receipt)
+    if any(state != "restored" for state in receipt["files"].values()):
+        if live:
+            stop_units(receipt_path, receipt, "restore")
+        for absolute in sorted(FILES):
+            check_files(root, receipt)
+            if receipt["files"][absolute] == "restored":
+                continue
+            path = target(root, absolute)
+            previous = receipt["previous"][absolute]
+            receipt["files"][absolute] = "restore_submitted"
+            save_receipt(receipt_path, receipt)
+            # A previous attempt may already have applied the exact registered
+            # bytes/mode or removal. Do not repeat a known completed file effect.
+            if file_record(path) != previous:
+                if previous is None:
+                    remove_durable(path)
+                else:
+                    write_atomic(path, base64.b64decode(previous["data"], validate=True), previous["mode"])
+            receipt["files"][absolute] = "restored"
+            save_receipt(receipt_path, receipt)
     if live:
-        disabled = systemctl(["disable", "--now", TIMER], check=False)
-        stopped = systemctl(["stop", SERVICE], check=False)
-        # A first/partially installed unit may be absent. An active unit after
-        # a failed stop remains a rollback failure with the receipt retained.
-        if not disabled and systemctl(["is-active", "--quiet", TIMER], check=False) or not stopped and systemctl(["is-active", "--quiet", SERVICE], check=False):
-            raise ValueError("scanner_stop_failed")
-    for absolute, previous in receipt["previous"].items():
-        path = target(root, absolute)
-        if previous is None:
-            if path.exists():
-                path.unlink()
-        else:
-            write_atomic(path, base64.b64decode(previous["data"], validate=True), previous["mode"])
-    if live:
-        systemctl(["daemon-reload"])
+        effect(receipt_path, receipt, "restore_reload")
+        timer = unit_state(TIMER)
+        unit_state(SERVICE)
         if receipt["timer_enabled"]:
-            systemctl(["enable", TIMER])
+            effect(receipt_path, receipt, "restore_enable_timer", timer)
         if receipt["timer_active"]:
-            systemctl(["start", TIMER])
+            effect(receipt_path, receipt, "restore_start_timer", unit_state(TIMER))
+        timer = unit_state(TIMER)
+        if (timer["UnitFileState"] == "enabled") != receipt["timer_enabled"] or (timer["ActiveState"] == "active") != receipt["timer_active"]:
+            raise ValueError("timer_restore_not_confirmed")
+    receipt["phase"] = "restored"
+    save_receipt(receipt_path, receipt)
 
 
-def administer(action, root, source, config_path=None, dry_run=False):
-    if not root.is_absolute() or root != root.resolve() or root.is_symlink():
-        raise ValueError("invalid_install_root")
+def administer_locked(action, root, source, config_path, dry_run):
     live = root == Path("/")
     receipt_path = target(root, RECEIPT)
     receipt = None
     if receipt_path.exists():
-        if receipt_path.stat().st_size > 4 * 1024 * 1024:
-            raise ValueError("invalid_install_receipt")
-        receipt = json.loads(receipt_path.read_bytes())
-        if not isinstance(receipt, dict) or receipt.get("schema_version") != 1 or set(receipt.get("previous", {})) != set(FILES) or set(receipt.get("installed", {})) != set(FILES):
-            raise ValueError("invalid_install_receipt")
-        for absolute, previous in receipt["previous"].items():
-            if previous is not None and (not isinstance(previous, dict) or set(previous) != {"data", "mode"} or not isinstance(previous["data"], str) or len(previous["data"]) > 2 * 1024 * 1024 or not isinstance(previous["mode"], int) or not 0 <= previous["mode"] <= 0o7777):
-                raise ValueError("invalid_install_receipt")
-            digest = receipt["installed"][absolute]
-            if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
-                raise ValueError("invalid_install_receipt")
-        if not isinstance(receipt.get("timer_enabled"), bool) or not isinstance(receipt.get("timer_active"), bool):
-            raise ValueError("invalid_install_receipt")
+        receipt = read_receipt(receipt_path)
     if action == "install":
         payloads, config = prepare(root, source, config_path)
         if receipt is not None:
@@ -167,44 +324,73 @@ def administer(action, root, source, config_path=None, dry_run=False):
                 backup_bytes += path.stat().st_size
                 if backup_bytes > 1024 * 1024:
                     raise ValueError("previous_files_too_large")
-            previous[absolute] = {"data": base64.b64encode(path.read_bytes()).decode(), "mode": stat.S_IMODE(path.stat().st_mode)} if path.exists() else None
-        receipt = {"schema_version": 1, "previous": previous,
-                   "installed": {absolute: hashlib.sha256(data).hexdigest() for absolute, (data, _) in payloads.items()},
-                   "timer_enabled": systemctl(["is-enabled", "--quiet", TIMER], check=False) if live else False,
-                   "timer_active": systemctl(["is-active", "--quiet", TIMER], check=False) if live else False}
+            previous[absolute] = file_record(path)
+        timer = unit_state(TIMER) if live else None
+        if live:
+            unit_state(SERVICE)
+        receipt = {"schema_version": 2, "phase": "installing", "previous": previous,
+                   "installed": {absolute: {"data": base64.b64encode(data).decode(), "mode": mode} for absolute, (data, mode) in payloads.items()},
+                   "files": {absolute: "pending" for absolute in FILES}, "effects": {},
+                   "timer_enabled": timer["UnitFileState"] == "enabled" if live else False,
+                   "timer_active": timer["ActiveState"] == "active" if live else False}
         # Persist recovery bytes before changing any installed file or timer.
         save_receipt(receipt_path, receipt)
         try:
-            if live and receipt["timer_active"]:
-                systemctl(["stop", TIMER])
             if live:
-                stopped = systemctl(["stop", SERVICE], check=False)
-                if not stopped and systemctl(["is-active", "--quiet", SERVICE], check=False):
-                    raise ValueError("scanner_stop_failed")
+                stop_units(receipt_path, receipt, "install")
             for absolute, (data, mode) in payloads.items():
+                check_files(root, receipt)
+                receipt["files"][absolute] = "install_submitted"
+                save_receipt(receipt_path, receipt)
                 write_atomic(target(root, absolute), data, mode)
+                receipt["files"][absolute] = "installed"
+                save_receipt(receipt_path, receipt)
             output_directory.mkdir(parents=True, exist_ok=True)
             if live:
-                systemctl(["daemon-reload"])
-                systemctl(["enable", "--now", TIMER])
+                effect(receipt_path, receipt, "install_reload")
+                unit_state(SERVICE)
+                effect(receipt_path, receipt, "install_enable_timer", unit_state(TIMER))
+                timer = unit_state(TIMER)
+                if timer["UnitFileState"] != "enabled" or timer["ActiveState"] != "active":
+                    raise ValueError("timer_install_not_confirmed")
+            receipt["phase"] = "installed"
+            save_receipt(receipt_path, receipt)
         except (OSError, ValueError, subprocess.SubprocessError):
-            restore(root, receipt, live)
-            receipt_path.unlink()
+            # In-memory progress may be ahead of a failed checkpoint. Recover
+            # only from the on-disk receipt; a lost action ACK stays submitted.
+            receipt = read_receipt(receipt_path)
+            restore(root, receipt_path, receipt, live)
+            remove_durable(receipt_path)
             raise
         return {"event": "fleet_install_complete", "action": action, "activate_timer": live}
     if receipt is None:
         raise ValueError("installation_receipt_missing")
-    # Refuse to overwrite changes made after installation, including config edits.
-    # The operator can save those files before using this bounded rollback path.
-    for absolute, digest in receipt["installed"].items():
-        path = target(root, absolute)
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
-            raise ValueError("installed_file_changed")
+    check_files(root, receipt)
     if dry_run:
         return {"event": "fleet_install_dry_run", "action": action, "files": list(FILES), "activate_timer": live}
-    restore(root, receipt, live)
-    receipt_path.unlink()
+    restore(root, receipt_path, receipt, live)
+    remove_durable(receipt_path)
     return {"event": "fleet_install_complete", "action": action, "activate_timer": live}
+
+
+def administer(action, root, source, config_path=None, dry_run=False):
+    if not root.is_absolute() or root != root.resolve() or root.is_symlink():
+        raise ValueError("invalid_install_root")
+    if dry_run:
+        return administer_locked(action, root, source, config_path, True)
+    lock = target(root, RECEIPT + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("invalid_install_lock")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError("installation_busy") from None
+        return administer_locked(action, root, source, config_path, False)
+    finally:
+        os.close(fd)
 
 
 def main(argv=None):

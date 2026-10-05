@@ -74,6 +74,7 @@ CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 SAMPLE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+([^\s]+)(?:\s+[^\s]+)?$")
 LABEL = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\[\\"n])*)"')
+URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
 
 class ScanError(Exception):
@@ -98,17 +99,31 @@ class Budget:
             raise BudgetExceeded("scan_budget_exceeded")
 
 
+def redact_url(match):
+    try:
+        parsed = urllib.parse.urlsplit(match.group(0))
+        hostname = parsed.hostname
+        if not hostname or "%" in hostname or len(hostname) > 253:
+            return parsed.scheme + "://[REDACTED]" + parsed.path
+        authority = f"[{hostname}]" if ":" in hostname else hostname
+        if parsed.port is not None:
+            authority += ":" + str(parsed.port)
+        return urllib.parse.urlunsplit((parsed.scheme, authority, parsed.path, "", ""))
+    except ValueError:
+        return "[REDACTED-URL]"
+
+
 def safe_text(value, limit=256):
     if not isinstance(value, str):
         return ""
     value = ANSI.sub("", value[: max(limit * 4, 1024)])
     value = CONTROL.sub("", value)
     value = "".join(char for char in value if unicodedata.category(char) not in {"Cc", "Cf", "Cs"})
+    # Rebuild URLs from their parsed scheme/host/path. Userinfo, including
+    # encoded credentials, and the entire query/fragment never survive export.
+    value = URL.sub(redact_url, value)
     value = SECRET.sub("[REDACTED]", value)
     value = re.sub(r"(?i)([a-z0-9_-]*(?:token|key|secret|password)[a-z0-9_-]*=)[^\s&]+", r"\1[REDACTED]", value)
-    # URLs in argv/model fields may carry credentials or query-string secrets.
-    value = re.sub(r"(https?://)[^/\s]+@", r"\1[REDACTED]@", value)
-    value = re.sub(r"(https?://[^\s?#]+)[?#][^\s]*", r"\1", value)
     return value[:limit]
 
 

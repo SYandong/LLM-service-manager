@@ -166,8 +166,12 @@ sudo journalctl -t llmsvc-fleet-scan
 Live installation persists a recovery receipt, installs the scanner/config/
 units, runs `daemon-reload`, then `enable --now llmsvc-fleet-scan.timer`.
 The only service state it changes belongs to this scanner. Receipt backups
-include prior file bytes/modes and prior timer enabled/active state; an install
-failure restores them. To restore a prior installation or remove a first
+include exact prior/installed file bytes and modes and prior timer enabled/active
+state. The private receipt uses schema 2; the exported fleet snapshot remains
+schema 1. File phases and submitted/acknowledged systemctl actions are persisted
+with file and directory fsync. An installation lock serializes receipt changes.
+An install failure restores registered files when external actions are settled.
+To restore a prior installation or remove a first
 installation, use either bounded path:
 
 ```bash
@@ -175,14 +179,24 @@ sudo python3 -I -B fleet-scan-admin.py rollback
 sudo ./uninstall-fleet-scan.sh
 ```
 
-Rollback/uninstall verifies installed hashes, disables/stops this timer and its
+Rollback/uninstall verifies registered bytes and modes, disables/stops this timer and its
 own scan service, restores previous files and timer state, and removes its
-receipt. Operator edits
-after installation are preserved by refusing to overwrite changed files; save
-those edits and restore the reviewed installed bytes before rollback. Exports
+receipt. A failed file restoration can be retried: a completed restoration is
+recognized from its exact registered bytes/mode, and remaining file phases
+resume. Unknown edits after installation or during restoration are preserved by
+refusing to overwrite them. Save those edits and restore the registered bytes
+before rollback. Exports
 and the IP map are retained, and shared directories are left in place. A prior
 receipt must be rolled back before installing a different scanner revision.
 Keep this administration script or checkout available for rollback.
+
+Systemctl queries require successful, complete property output, the exact unit
+ID and fragment path, no drop-ins, and known state values. Errors and unsupported
+observations never count as an absent/inactive unit. A command is marked
+submitted before execution and acknowledged only after successful return; an
+uncertain command keeps its receipt and blocks automatic resubmission or file
+restoration. The tool provides no force-clear path for an uncertain external
+action. Unsupported receipt versions also fail without guessing prior state.
 
 Verification uses fake proc/GPU data and temporary local HTTP servers. It does
 not establish real-host inventory completeness, production enablement or

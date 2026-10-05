@@ -276,6 +276,21 @@ def test_sanitizes_terminal_labels_models_and_argv(scanner):
     assert "secret-one" not in raw and "secret-two" not in raw and "8000" in raw
 
 
+@pytest.mark.parametrize("url", [
+    "HTTP://synthetic-user:synthetic-pass@example.invalid/model?credential=synthetic-query",
+    "hTtPs://synthetic-user:synthetic-pass@example.invalid/model#synthetic-fragment",
+    "HTTP://synthetic%2Duser:synthetic%2Dpass@example.invalid/model?credential=synthetic%2Dquery",
+    "HTTP://synthetic-user%3Asynthetic-pass%40example.invalid/model?credential=synthetic-query",
+])
+def test_url_redaction_is_scheme_aware_and_handles_encoded_userinfo(scanner, url):
+    redacted = scanner.safe_text(url, 512)
+    argv = scanner.redact_argv(["vllm", "serve", url])
+    for output in (redacted, argv):
+        for private in ("synthetic-user", "synthetic-pass", "synthetic-query", "synthetic-fragment", "synthetic%2Duser", "synthetic%2Dpass", "synthetic%2Dquery"):
+            assert private not in output
+        assert "?" not in output and "#" not in output
+
+
 def test_response_limit_and_untrusted_container_names_become_unknown(scanner, tmp_path):
     root = fake_root(tmp_path)
     make_process(root, 100, ["vllm", "serve", "demo"], port=8000)
