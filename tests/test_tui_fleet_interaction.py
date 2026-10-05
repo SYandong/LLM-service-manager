@@ -298,6 +298,10 @@ def test_modal_selection_copy_is_exact_across_refresh_and_clears_on_close(intera
             await pilot.press("question_mark" if dialog == "help" else "enter")
             await ready(app, pilot)
             assert isinstance(app.screen, FleetHelpDialog if dialog == "help" else GpuDetailDialog)
+            if dialog == "help":
+                help_text = app.screen.query_one("#fleet-help-text", SelectableStatic).render().plain
+                assert "Shared APIs have no idle reminder" in help_text
+                assert "use the proxy" not in help_text
             name = "fleet-help-text" if dialog == "help" else "gpu-service-details"
             panel = app.screen.query_one("#" + name, SelectableStatic)
             source = panel.render().plain

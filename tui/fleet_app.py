@@ -108,7 +108,7 @@ class FleetHelpDialog(ModalScreen):
                     "Unattributed: used VRAM with no matched workload\n"
                     "Free: available VRAM\n\n"
                     "Running · inactive means still running, beyond the idle limit.\n"
-                    "Local only APIs accept local access; Shared APIs use the proxy.\n"
+                    "Local only means loopback access. Shared APIs have no idle reminder.\n"
                     "Activity and tokens cover the whole service, across all its GPUs.\n"
                     "Dots mean unknown hours; coverage is observed time.\n"
                     "Search and Mine filter services; bars show all allocations.\n"
