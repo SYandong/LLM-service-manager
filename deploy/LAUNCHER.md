@@ -62,6 +62,7 @@ permission to enable the path in production.
 
 | Response field/value | Meaning |
 |---|---|
+| HTTP503 `no_feasible_gpu` | The scheduler's grace period confirmed no locally recoverable placement; the patched llama-swap reports `no_gpu_available` with `Retry-After`. |
 | HTTP503 `placement_action_blocked` | Current unit/lease identity did not authorize the proposed victim stop. |
 | HTTP503 `placement_action_failed` | The action attempt reported a sanitized failure; inspect its blocker reason. |
 | HTTP503 `placement_no_progress` | Victim exit and durable account release could not be confirmed. |
@@ -78,6 +79,35 @@ the failure immediately instead of after the wrapper's whole `--wait-timeout`.
 Set `terminate_wrapper_on_placement_failure: false` in the launcher config to
 keep the wrapper waiting (the value must be a JSON boolean). Lock timeouts,
 preexisting units and other parents never trigger the signal.
+
+For HTTP503 `no_feasible_gpu`, the launcher first flushes exactly one marker
+line to stderr, bounded to 4096 UTF-8 bytes including its newline:
+
+```json
+{"event":"llmsvc_unavailable","status":503,"code":"no_feasible_gpu","retry_after":60,"message":"All placement GPUs are occupied; GPU0: external 60.4 GiB, free 82.7 GiB"}
+```
+
+These five fields are fixed: event/code/message are strings, status is the
+integer 503, and retry_after is an integer in 1–86400 seconds (invalid/missing
+scheduler values fall back to 60). The message uses the scheduler's reason and
+available per-card external/free summaries, capped at 512 Unicode characters.
+Dry-run, HTTP409 and other error codes do not produce the marker.
+The [patched llama-swap build](llama-swap/README.md) maps only a valid marker
+from the failed startup to HTTP503, `Retry-After` and OpenAI error code
+`no_gpu_available`; an already-started loading SSE stream carries that same
+error envelope followed by `[DONE]`.
+
+When this refusal comes through a wrapper using `--journal-unit`, the launcher
+also settles that wrapper's exact `journalctl --follow` child before terminating
+the wrapper. It checks children across all wrapper threads, then verifies the
+direct parent, owner, command arguments and process
+start time, then binds the child with a pidfd and rechecks its identity. Cleanup
+allows one second for SIGTERM and another half-second after SIGKILL. This keeps
+the journal helper from holding llama-swap's inherited output pipes open through
+its additional 10-second drain timeout. Other placement failures retain their
+existing signaling behavior. Ambiguous identities are never signaled; if pidfd
+support or access is unavailable, the launcher logs the cleanup limitation and
+still follows the existing wrapper termination path.
 
 Blocker reasons can also appear in previews or the final HTTP409
 `placement_timeout`; they are not separate stop commands. On a placement-stage
@@ -104,3 +134,4 @@ The tests use fake systemd responses, an actual concurrent flock test and a
 local fake HTTP server; they do not constitute a live GPU/cold-start benchmark.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+<!-- Generated-By: Codex / gpt-6.1-sol -->

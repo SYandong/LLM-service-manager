@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 """Thin vLLM launcher for llama-swap cmd integration."""
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import json
 import math
 import os
 import re
+import select
 import shlex
 import signal
 import subprocess
@@ -96,12 +98,14 @@ class Placement:
 
 
 class LaunchError(RuntimeError):
-    def __init__(self, message: str, exit_code: int = 1, *, placement_rejected: bool = False) -> None:
+    def __init__(self, message: str, exit_code: int = 1, *, placement_rejected: bool = False,
+                 placement_unavailable: bool = False) -> None:
         super().__init__(message)
         self.exit_code = exit_code
         # Only a scheduler placement refusal justifies terminating the waiting
         # wrapper; lock timeouts and preexisting units keep the normal path.
         self.placement_rejected = placement_rejected
+        self.placement_unavailable = placement_unavailable
 
 
 def log(event: str, **fields: Any) -> None:
@@ -250,6 +254,36 @@ def scheduler_url(config: dict[str, Any], path: str, dry_run: bool = False) -> s
     return url
 
 
+def log_placement_unavailable(body: dict[str, Any]) -> None:
+    """Flush a bounded, whole-line marker before terminating the wrapper."""
+    retry_after = body.get("retry_after_seconds")
+    if type(retry_after) is not int or not 1 <= retry_after <= 86400:
+        retry_after = 60
+    message = body.get("message")
+    if not isinstance(message, str) or not message.strip():
+        message = "No placement GPU is currently available"
+    message = " ".join(message.split()).encode("utf-8", errors="replace").decode("utf-8")[:512]
+    summaries = []
+    gpus = body.get("gpus")
+    if isinstance(gpus, list):
+        for gpu in gpus[:16]:
+            if not isinstance(gpu, dict) or type(gpu.get("index")) is not int or not 0 <= gpu["index"] <= 65535:
+                continue
+            fields = []
+            for name, label in (("external_gb", "external"), ("free_gb", "free")):
+                value = gpu.get(name)
+                if type(value) in (int, float) and 0 <= value <= sys.float_info.max:
+                    fields.append(f"{label} {value:.1f} GiB")
+            if fields:
+                summaries.append(f"GPU{gpu['index']}: {', '.join(fields)}")
+    if summaries:
+        message += "; " + "; ".join(summaries)
+    record = {"event": "llmsvc_unavailable", "status": 503, "code": "no_feasible_gpu",
+              "retry_after": retry_after, "message": message[:512]}
+    # UTF-8 avoids six/twelve-byte JSON escapes expanding the bounded message.
+    print(json.dumps(record, ensure_ascii=False, separators=(",", ":")), file=sys.stderr, flush=True)
+
+
 def request_placement(
     config: dict[str, Any],
     model: str,
@@ -275,6 +309,10 @@ def request_placement(
     if status == 409:
         log("place_conflict", status=status, response=body)
         raise LaunchError("scheduler rejected placement with 409", 75, placement_rejected=True)
+    if status == 503 and body.get("error") == "no_feasible_gpu":
+        log_placement_unavailable(body)
+        raise LaunchError("scheduler placement failed with HTTP 503", 75,
+                          placement_rejected=True, placement_unavailable=True)
     if status >= 400:
         log("place_failed", status=status, response=body)
         raise LaunchError(f"scheduler placement failed with HTTP {status}", 75, placement_rejected=True)
@@ -489,18 +527,127 @@ def parent_command_name(pid: int) -> str:
         return ""
 
 
-def fail_fast_wrapper(config: dict[str, Any]) -> bool:
+def proc_identity(pid: int) -> tuple[int, str]:
+    fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(") ", 1)[1].split()
+    return int(fields[1]), fields[19]
+
+
+def stop_wrapper_journal(ppid: int) -> None:
+    """Close only the verified wrapper's own journal reader after a 503.
+
+    The official wrapper starts this direct child before placement. It can hold
+    inherited output pipes for cmd.WaitDelay after its parent exits, adding ten
+    seconds to the refusal. Bind the precise helper with pidfd before signalling;
+    an unknown identity or unsupported platform keeps the ordinary safe path.
+    """
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        log("wrapper_journal_cleanup_unavailable", reason="pidfd_required")
+        return
+    try:
+        parent_identity = proc_identity(ppid)
+        parent_argv = Path(f"/proc/{ppid}/cmdline").read_bytes().decode().rstrip("\0").split("\0")
+        wrapper_args = parent_argv[:parent_argv.index("--")] if "--" in parent_argv else parent_argv
+        units = [arg.split("=", 1)[1] for arg in wrapper_args if arg.startswith("--journal-unit=")]
+        units.extend(wrapper_args[index + 1] for index, arg in enumerate(wrapper_args[:-1])
+                     if arg == "--journal-unit")
+        if not units:
+            return
+        if len(units) != 1 or not units[0] or len(units[0]) > 256:
+            log("wrapper_journal_cleanup_unavailable", reason="journal_unit_ambiguous")
+            return
+        expected = [f"--user-unit={units[0]}", "--follow", "--lines=0", "--output=cat", "--no-pager"]
+
+        def matches(child: int) -> bool:
+            args = Path(f"/proc/{child}/cmdline").read_bytes().decode().rstrip("\0").split("\0")
+            return (proc_identity(child)[0] == ppid and Path(f"/proc/{child}").stat().st_uid == os.geteuid()
+                    and parent_command_name(child) == "journalctl" and args[-5:] == expected
+                    and any(Path(arg).name == "journalctl" for arg in args[:-5]))
+
+        # Linux records children under the thread that created them. A Go
+        # wrapper can fork journalctl from a nonleader runtime thread.
+        children = set()
+        for child_file in Path(f"/proc/{ppid}/task").glob("*/children"):
+            try:
+                children.update(child_file.read_text().split())
+            except FileNotFoundError:
+                continue  # A parent thread may exit during the observation.
+        candidates = []
+        for value in children:
+            child = int(value)
+            if child == os.getpid():
+                continue
+            try:
+                identity = proc_identity(child)
+                # A script installed as journalctl can have an interpreter
+                # prefix; the official wrapper's five arguments still match.
+                if matches(child):
+                    candidates.append((child, identity))
+            except (OSError, ValueError, IndexError, UnicodeError):
+                continue
+        if len(candidates) != 1:
+            if candidates:
+                log("wrapper_journal_cleanup_unavailable", reason="journal_child_ambiguous")
+            return
+        child, identity = candidates[0]
+        fd = os.pidfd_open(child, 0)
+        try:
+            if proc_identity(ppid) != parent_identity or proc_identity(child) != identity or not matches(child):
+                log("wrapper_journal_cleanup_unavailable", reason="journal_identity_changed")
+                return
+            poller = select.poll()
+            poller.register(fd, select.POLLIN)
+            signal.pidfd_send_signal(fd, signal.SIGTERM)
+            if not poller.poll(1000):
+                if proc_identity(child) != identity or not matches(child):
+                    log("wrapper_journal_cleanup_unavailable", reason="journal_identity_changed")
+                    return
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+                if not poller.poll(500):
+                    log("wrapper_journal_cleanup_unavailable", reason="journal_exit_unconfirmed")
+                    return
+            log("wrapper_journal_stopped", pid=child, reason="placement_unavailable")
+        finally:
+            os.close(fd)
+    except (OSError, ValueError, IndexError, UnicodeError) as exc:
+        log("wrapper_journal_cleanup_unavailable", reason="journal_probe_failed", error=str(exc))
+
+
+def fail_fast_wrapper(config: dict[str, Any], *, unavailable: bool = False) -> bool:
     """Terminate a waiting vllm-wrapper parent so llama-swap fails the request now."""
     if config.get("terminate_wrapper_on_placement_failure", True) is not True:
         return False
     ppid = os.getppid()
     if parent_command_name(ppid) != "vllm-wrapper":
         return False
+    parent_fd = None
     try:
-        os.kill(ppid, signal.SIGTERM)
-    except OSError as exc:
+        if unavailable and hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal"):
+            identity = proc_identity(ppid)
+            try:
+                parent_fd = os.pidfd_open(ppid, 0)
+            except OSError as exc:
+                # Keep the existing fast parent termination on kernels that
+                # reject pidfd; never use a numeric PID for journal cleanup.
+                log("wrapper_journal_cleanup_unavailable", reason="pidfd_required", error=str(exc))
+            if (os.getppid() != ppid or proc_identity(ppid) != identity
+                    or parent_command_name(ppid) != "vllm-wrapper"):
+                log("wrapper_terminate_failed", pid=ppid, error="parent identity changed")
+                return False
+            if parent_fd is None:
+                os.kill(ppid, signal.SIGTERM)
+            else:
+                stop_wrapper_journal(ppid)
+                signal.pidfd_send_signal(parent_fd, signal.SIGTERM)
+        else:
+            if unavailable:
+                log("wrapper_journal_cleanup_unavailable", reason="pidfd_required")
+            os.kill(ppid, signal.SIGTERM)
+    except (OSError, ValueError, IndexError) as exc:
         log("wrapper_terminate_failed", pid=ppid, error=str(exc))
         return False
+    finally:
+        if parent_fd is not None:
+            os.close(parent_fd)
     log("wrapper_terminated", pid=ppid, reason="placement_failed")
     return True
 
@@ -557,7 +704,7 @@ def _main(argv: list[str] | None = None) -> int:
     except LaunchError as exc:
         log("launch_error", error=str(exc), exit_code=exc.exit_code)
         if exc.placement_rejected and not args_dry_run:
-            fail_fast_wrapper(config)
+            fail_fast_wrapper(config, unavailable=exc.placement_unavailable)
         return exc.exit_code
     except (ValueError, TypeError, KeyError) as exc:
         log("invalid_input", error=str(exc))
