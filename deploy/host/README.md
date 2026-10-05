@@ -103,8 +103,11 @@ share a monotonic budget of at most 20 seconds. Each external command/GET uses
 at most two seconds and the remaining budget. Responses are limited to 4 MiB;
 the final JSON is limited to 2 MiB. Limits also cover processes, socket FDs,
 services, GPU rows, proc bytes and metric line/label lengths. Remaining targets
-are marked `scrape_skipped`. `max_services` accepts 1 through 256 and defaults
-to 256. Exceeding this cap adds `service_limit` and sets
+are marked `scrape_skipped`. Discovery accepts up to 256 KiB and 4096 arguments
+per command line, within the global 64 MiB proc-byte and 20-second scan budgets.
+Exceeding either command-line limit leaves inventory incomplete; exported
+`argv_redacted` remains limited to 1024 characters. `max_services` accepts
+1 through 256 and defaults to 256. Exceeding this cap adds `service_limit` and sets
 `inventory_complete=false`; omitted instances remain unknown and must not be
 ended by the consumer. Service start timestamps require the canonical `btime`
 from `/proc/stat`; an unavailable or invalid value fails the scan with
