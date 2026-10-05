@@ -1,5 +1,6 @@
 # Generated-By: Claude Code / claude-fable-5-1
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 name: ci
 on:
   pull_request:
@@ -20,4 +21,4 @@ jobs:
       - run: llmsvc-scheduler --config tests/fixtures/core_scheduler.yaml --check-config
       - name: Import installed optional TUI outside the checkout
         working-directory: ${{ runner.temp }}
-        run: python -c "from tui.app import SchedulerApp"
+        run: python -c "from tui.fleet_app import FleetApp; from tui.app import SchedulerApp"
