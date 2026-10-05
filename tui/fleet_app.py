@@ -6,25 +6,29 @@ import asyncio
 from datetime import datetime, timezone
 import math
 import threading
+from time import monotonic
 from types import SimpleNamespace
 from urllib.parse import quote, urlencode
 
 from rich.text import Text
 from textual import work
 from textual.app import App
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Sparkline, Static
 
-from .fleet_gpu import (MEASURED_KEY, account_gpu, compact_gib, detail_lines, fit,
-                        gib, render_expanded, render_overview)
+from .fleet_format import api_label, count, duration, gib, status_label, total_tokens
+from .fleet_gpu import (MEASURED_KEY, account_gpu, compact_gib, detail_lines, expanded_header,
+                        fit, render_expanded, render_overview)
+from .fleet_selection import SelectableStatic
 
 
 STATUS_STYLE = {"active": "green", "idle": "", "over_limit": "bold yellow",
                 "claimed": "cyan", "unknown": "dim"}
-HINT = "↑↓ service  S sort  M mine  C claim  U revoke  G GPUs  ? help  Q quit"
-GPU_HINT = "↑↓ GPU  ←→ owner  Enter details  Z compact  P people  ? help  Q quit"
+HINT = "↑↓ service  S sort  M mine  C claim  U revoke  G GPU  Ctrl+C copy  ? help Q quit"
+GPU_HINT = "↑↓ GPU  ←→ owner  Enter details  Z compact  P people  Ctrl+C copy  ? help Q quit"
 
 
 def numeric(value):
@@ -33,26 +37,6 @@ def numeric(value):
 
 def amount(value):
     return "?" if not numeric(value) else ("%.1f" % value).rstrip("0").rstrip(".")
-
-
-def count(value):
-    if not numeric(value):
-        return "—"
-    if value >= 1000000:
-        return "%.1fM" % (value / 1000000)
-    if value >= 1000:
-        return "%.1fk" % (value / 1000)
-    return str(int(value))
-
-
-def duration(seconds):
-    if not numeric(seconds):
-        return "?"
-    if seconds >= 86400:
-        return "%dd%dh" % (seconds // 86400, seconds % 86400 // 3600)
-    if seconds >= 3600:
-        return "%dh%02dm" % (seconds // 3600, seconds % 3600 // 60)
-    return "%dm" % (seconds // 60)
 
 
 def timestamp(value):
@@ -98,7 +82,7 @@ class FleetHelpDialog(ModalScreen):
     #fleet-help-text { height: auto; }
     #fleet-help-close { height: 3; width: 100%; }
     """
-    BINDINGS = [("escape", "close", "Close")]
+    BINDINGS = [("escape", "close", "Close"), ("q", "app.quit", "Quit")]
 
     def __init__(self, owner):
         super().__init__()
@@ -106,31 +90,35 @@ class FleetHelpDialog(ModalScreen):
 
     def compose(self):
         with Vertical(id="fleet-help-dialog"):
-            yield Static("Fleet help", id="fleet-help-title")
+            yield SelectableStatic("Fleet help", id="fleet-help-title")
             with VerticalScroll(id="fleet-help-scroll"):
-                yield Static(
+                yield SelectableStatic(
                     "G  GPU panels     P  People / containers\n"
-                    "Z  Expanded panels / compact overview\n"
-                    "Up / Down  Select GPU or service\n"
-                    "Left / Right  Select owner allocation\n"
-                    "Enter  Details and history\n\n"
-                    "Press / to search\n"
-                    "S  Sort services: State, Idle time, Memory, Output\n"
-                    "M  My services     R  Refresh     Q  Quit\n"
-                    "C  Claim service   U  Revoke claim\n\n"
+                    "Z  Expanded / compact GPU view\n"
+                    "Up / Down or wheel  Select GPU\n"
+                    "Shift + wheel or Page Up / Down  Scroll freely\n"
+                    "Left / Right  Select owner; keep the chart in place\n"
+                    "Enter  Details and history\n"
+                    "Drag text, then Ctrl+C to copy     Q  Quit\n\n"
+                    "/  Search     M  Mine     R  Refresh\n"
+                    "S  Sort: State, Idle time, Memory, Output tokens\n"
+                    "C  Claim service     U  Revoke claim\n\n"
                     "LLM: inference models, solid fill\n"
                     "Other: other GPU jobs, dotted fill\n"
                     "Unattributed: used VRAM with no matched workload\n"
                     "Free: available VRAM\n\n"
-                    "24h activity describes the whole service on every GPU.\n"
-                    "Dots in activity mean unknown hours. Coverage is observed time.\n"
-                    "Search and Mine filter service rows; memory bars keep all allocations.\n"
-                    "State sort puts over-limit services first, then larger memory use.\n"
-                    "Updated every 15 seconds; service changes refresh sooner.",
+                    "Running · inactive means still running, beyond the idle limit.\n"
+                    "Local only means loopback access. Shared APIs have no idle reminder.\n"
+                    "Activity and tokens cover the whole service, across all its GPUs.\n"
+                    "Dots mean unknown hours; coverage is observed time.\n"
+                    "Search and Mine filter services; bars show all allocations.\n"
+                    "Selected text stays fixed until cleared or navigation changes.\n"
+                    "Refresh every 15s and on service changes.",
                     id="fleet-help-text", markup=False)
             yield Button("Close", id="fleet-help-close")
 
     def action_close(self):
+        self.owner.clear_text_selections()
         self.dismiss()
         self.owner.focus_view()
 
@@ -138,16 +126,86 @@ class FleetHelpDialog(ModalScreen):
         event.stop()
         self.action_close()
 
+    def on_key(self, event):
+        if event.key in ("pageup", "pagedown"):
+            event.stop()
+            event.prevent_default()
+            self.owner.clear_text_selections()
+            viewport = self.query_one("#fleet-help-scroll", VerticalScroll)
+            viewport.scroll_to(y=viewport.scroll_y +
+                               (-1 if event.key == "pageup" else 1) * viewport.size.height,
+                               animate=False)
 
-class GpuOverview(Static, can_focus=True):
-    """The overview keeps its mouse targets in terminal cell coordinates."""
+
+class FleetGpuScroll(VerticalScroll):
+    """Route wheel gestures from the GPU viewport's padding as well as its text."""
+
+    def on_mouse_scroll_up(self, event):
+        self.app.handle_gpu_wheel(event, -1)
+
+    def on_mouse_scroll_down(self, event):
+        self.app.handle_gpu_wheel(event, 1)
+
+
+class GpuOverview(SelectableStatic):
+    """Selection, heading styles and click targets share one displayed snapshot."""
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
         self.hits = []
         self.service_hits = {}
+        self.anchors = {}
+        self.heading_rows = {}
+        self.heading_gpu = None
         self.bar_rows = 1
+        self.marker_bright = True
+        self._pending_view = None
+        super().__init__(*args, **kwargs)
+
+    def update_view(self, content, hits, service_hits, anchors, headings, selected, bar_rows):
+        payload = (content.copy(), list(hits), dict(service_hits), dict(anchors),
+                   dict(headings), selected, bar_rows)
+        if self.dragging or self.has_selection:
+            self._pending_view = payload
+            return
+        text, self.hits, self.service_hits, self.anchors, self.heading_rows, self.heading_gpu, self.bar_rows = payload
+        if self._source_text != text:
+            self.update(text)
+        else:
+            self.refresh()
+        if self.is_attached:
+            self.app._gpu_anchors = self.anchors
+
+    def clear_selection(self):
+        payload, self._pending_view = self._pending_view, None
+        super().clear_selection()
+        if payload is not None and not self._selection_closed:
+            self.update_view(*payload)
+
+    def render(self):
+        text = super().render()
+        heading = self.heading_rows.get(self.heading_gpu)
+        if heading is not None:
+            row, count_rows = heading
+            lines = text.plain.splitlines(keepends=True)
+            start = sum(map(len, lines[:row]))
+            end = sum(map(len, lines[:row + count_rows]))
+            text.stylize("bold #f2f8ff on #325573", start, end)
+            text.stylize("bold #ffffff on " + ("#67c8ef" if self.marker_bright else "#3a7995"),
+                         start, min(end, start + 2))
+        return text
+
+    def pulse_marker(self):
+        self.marker_bright = not self.marker_bright
+        self.refresh()
+
+    def on_mouse_scroll_up(self, event):
+        self.app.handle_gpu_wheel(event, -1)
+
+    def on_mouse_scroll_down(self, event):
+        self.app.handle_gpu_wheel(event, 1)
 
     def on_click(self, event):
+        if self.consume_selection_click(event):
+            return
         if self.app.view != "gpu":
             return
         x = event.screen_offset.x - self.content_region.x
@@ -155,8 +213,9 @@ class GpuOverview(Static, can_focus=True):
         for row, left, right, index, key in self.hits:
             if row == y and left <= x < right:
                 event.stop()
+                event.prevent_default()
                 self.app.select_gpu(index, key, self.service_hits.get(row))
-                self.focus()
+                self.focus(scroll_visible=False)
                 if key is not None:
                     self.app.open_gpu_details()
                 break
@@ -170,14 +229,14 @@ class GpuDetailDialog(ModalScreen):
     #gpu-allocation-scroll { height: auto; max-height: 6; }
     #gpu-allocation-text { height: auto; }
     #gpu-detail-services { height: 1fr; min-height: 3; }
-    #gpu-service-details { height: auto; max-height: 5; }
+    #gpu-service-details { height: auto; max-height: 9; }
     #gpu-service-history { height: 1; }
     #gpu-service-history-bars { height: auto; max-height: 2; }
     #gpu-active-chart, #gpu-token-chart { height: 1; }
     #gpu-detail-buttons { height: 3; }
     #gpu-detail-buttons Button { width: 1fr; min-width: 0; }
     """
-    BINDINGS = [("escape", "close", "Close")]
+    BINDINGS = [("escape", "close", "Close"), ("q", "app.quit", "Quit")]
 
     def __init__(self, owner):
         super().__init__()
@@ -187,11 +246,11 @@ class GpuDetailDialog(ModalScreen):
     def compose(self):
         with Vertical(id="gpu-detail-dialog"):
             with VerticalScroll(id="gpu-allocation-scroll"):
-                yield Static("", id="gpu-allocation-text", markup=False)
+                yield SelectableStatic("", id="gpu-allocation-text", markup=False)
             yield DataTable(id="gpu-detail-services", cursor_type="row", cell_padding=1)
-            yield Static("", id="gpu-service-details", markup=False)
-            yield Static("", id="gpu-service-history", markup=False)
-            yield Static("", id="gpu-service-history-bars", markup=False)
+            yield SelectableStatic("", id="gpu-service-details", markup=False)
+            yield SelectableStatic("", id="gpu-service-history", markup=False)
+            yield SelectableStatic("", id="gpu-service-history-bars", markup=False)
             yield Sparkline([], id="gpu-active-chart")
             yield Sparkline([], id="gpu-token-chart")
             with Horizontal(id="gpu-detail-buttons"):
@@ -211,6 +270,7 @@ class GpuDetailDialog(ModalScreen):
             self.owner.gpu_detail = None
 
     def action_close(self):
+        self.owner.clear_text_selections()
         self.dismiss()
         self.owner.focus_view()
 
@@ -232,16 +292,18 @@ class GpuDetailDialog(ModalScreen):
                  self.owner.clean(service.get("model") or "unknown"),
                  gib(sum(amounts[service["id"]])) if all(numeric(value) for value in
                      amounts.get(service["id"], [None])) else "?",
-                 self.owner.service_status(service)) for service in services]
+                 status_label(self.owner.service_status(service))) for service in services]
         table = self.query_one("#gpu-detail-services", DataTable)
         if rows != self._rows:
             selected = self.owner.selected_service_id()
-            table.clear()
-            for ident, label, memory, status in rows:
-                table.add_row(label, memory, status, key=ident)
-            self._rows = rows
-            position = next((index for index, row in enumerate(rows) if row[0] == selected), 0)
-            table.move_cursor(row=position, animate=False)
+            # Rebuilding rows must not masquerade as deliberate service navigation.
+            with table.prevent(DataTable.RowHighlighted):
+                table.clear()
+                for ident, label, memory, status in rows:
+                    table.add_row(label, memory, status, key=ident)
+                self._rows = rows
+                position = next((index for index, row in enumerate(rows) if row[0] == selected), 0)
+                table.move_cursor(row=position, animate=False)
         self.sync_history()
 
     def sync_history(self):
@@ -264,7 +326,10 @@ class GpuDetailDialog(ModalScreen):
     def on_data_table_row_highlighted(self, event):
         if event.data_table.id == "gpu-detail-services":
             event.stop()
-            self.owner._gpu_detail_service = event.row_key.value
+            selected = event.row_key.value
+            if selected != self.owner._gpu_detail_service:
+                self.owner.clear_text_selections()
+            self.owner._gpu_detail_service = selected
             self.owner.render_details()
             self.sync_history()
 
@@ -273,12 +338,14 @@ class GpuDetailDialog(ModalScreen):
         if event.button.id == "gpu-detail-close":
             self.action_close()
         else:
+            self.owner.clear_text_selections()
             self.owner.action_claim(revoke=event.button.id == "gpu-detail-revoke")
 
     def on_key(self, event):
         if event.key.lower() in ("c", "u"):
             event.stop()
             event.prevent_default()
+            self.owner.clear_text_selections()
             self.owner.action_claim(revoke=event.key.lower() == "u")
 
 
@@ -292,7 +359,7 @@ class ClaimDialog(ModalScreen):
     #claim-buttons { height: 3; }
     #claim-buttons Button { width: 1fr; min-width: 0; }
     """
-    BINDINGS = [("escape", "close", "Close")]
+    BINDINGS = [("escape", "close", "Close"), ("q", "app.quit", "Quit")]
 
     def __init__(self, owner, service, revoke=False):
         super().__init__()
@@ -308,18 +375,18 @@ class ClaimDialog(ModalScreen):
 
     def compose(self):
         with Vertical(id="claim-dialog"):
-            yield Static(("Revoke claim" if self.revoke else "Claim service") + " · " +
+            yield SelectableStatic(("Revoke claim" if self.revoke else "Claim service") + " · " +
                          self.owner.clean(self.model), id="claim-title", markup=False)
             if not self.revoke:
-                yield Static("Until (+3d or YYYY-MM-DDTHH:MM):", id="claim-until-label")
+                yield SelectableStatic("Until (+3d or YYYY-MM-DDTHH:MM):", id="claim-until-label")
                 yield Input(value="+1d", id="claim-until")
-                yield Static("Reason (1–200 characters):", id="claim-reason-label")
+                yield SelectableStatic("Reason (1–200 characters):", id="claim-reason-label")
                 yield Input(placeholder="Why this service is needed", max_length=200,
                             id="claim-reason")
             else:
-                yield Static("Until %s · %s" % (timestamp(self.claim.get("until")),
+                yield SelectableStatic("Until %s · %s" % (timestamp(self.claim.get("until")),
                              self.owner.clean(self.claim.get("reason", ""))), markup=False)
-            yield Static("Preview first. A preview does not save or revoke a claim.",
+            yield SelectableStatic("Preview first. A preview does not save or revoke a claim.",
                          id="claim-status", markup=False)
             with Horizontal(id="claim-buttons"):
                 yield Button("Preview", id="claim-preview")
@@ -340,6 +407,7 @@ class ClaimDialog(ModalScreen):
         if self.busy:
             self.say("Request pending; wait for its result.")
         else:
+            self.owner.clear_text_selections()
             self.dismiss()
 
     def on_button_pressed(self, event):
@@ -476,7 +544,8 @@ class FleetApp(App):
     .gpu #fleet-banner, .gpu #fleet-notice { max-height: 1; }
     DataTable > .datatable--header { background: #2b2823; color: #d8ae7b; }
     """
-    BINDINGS = [("ctrl+c", "quit", "Quit")]
+    BINDINGS = [Binding("ctrl+c", "copy_selection", "Copy", show=False, priority=True),
+                Binding("q", "quit", "Quit", show=False)]
 
     def __init__(self, client, api, event_reader=None, **kwargs):
         super().__init__(**kwargs)
@@ -491,6 +560,8 @@ class FleetApp(App):
         self.compact_gpus = False
         self._gpu_anchors = {}
         self._gpu_scroll_pending = True
+        self._gpu_wheel_at = None
+        self._selection_widget = None
         self.selected_gpu = None
         self.selected_segment = None
         self._gpu_detail_service = None
@@ -529,21 +600,21 @@ class FleetApp(App):
         return self.api.clean_text(value)
 
     def compose(self):
-        yield Static("GPU inference services · loading…", id="fleet-title", markup=False)
-        yield Static("", id="fleet-banner", markup=False)
-        yield Static("", id="fleet-controls", markup=False)
-        with VerticalScroll(id="fleet-gpu-scroll"):
+        yield SelectableStatic("GPU inference services · loading…", id="fleet-title", markup=False)
+        yield SelectableStatic("", id="fleet-banner", markup=False)
+        yield SelectableStatic("", id="fleet-controls", markup=False)
+        with FleetGpuScroll(id="fleet-gpu-scroll"):
             yield GpuOverview("GPU observations unavailable", id="fleet-gpus", markup=False)
         yield Input(placeholder="Filter container, model, engine or status", id="fleet-filter")
         yield DataTable(id="fleet-table", cursor_type="row", zebra_stripes=False, cell_padding=1)
         with VerticalScroll(id="fleet-details"):
-            yield Static("Select a service to see its last 7 days.", id="fleet-detail-text", markup=False)
-            yield Static("", id="fleet-history-text", markup=False)
-            yield Static("", id="fleet-history-bars", markup=False)
+            yield SelectableStatic("Select a service to see its last 7 days.", id="fleet-detail-text", markup=False)
+            yield SelectableStatic("", id="fleet-history-text", markup=False)
+            yield SelectableStatic("", id="fleet-history-bars", markup=False)
             yield Sparkline([], id="fleet-active-chart")
             yield Sparkline([], id="fleet-token-chart")
-        yield Static("", id="fleet-notice", markup=False)
-        yield Static(HINT, id="fleet-footer", markup=False)
+        yield SelectableStatic("", id="fleet-notice", markup=False)
+        yield SelectableStatic(HINT, id="fleet-footer", markup=False)
 
     def on_mount(self):
         self._table = self.dashboard.query_one("#fleet-table", DataTable)
@@ -552,6 +623,7 @@ class FleetApp(App):
         self._ui_timers.append(self.set_interval(self.refresh_seconds, self.refresh_fleet))
         self._event_timer = self.set_interval(0.25, self.update_events, pause=self._event_driven)
         self._ui_timers.append(self._event_timer)
+        self._ui_timers.append(self.set_interval(.6, self.pulse_gpu_marker))
         if self._event_driven:
             self.event_reader.set_notify(self.notify_events)
         self.event_reader.start()
@@ -562,6 +634,7 @@ class FleetApp(App):
         if self._ui_closed:
             return
         self._ui_closed = True
+        self.clear_text_selections()
         if self._event_driven:
             self.event_reader.set_notify(None)
         for timer in self._ui_timers:
@@ -573,20 +646,68 @@ class FleetApp(App):
 
     def on_resize(self, event):
         self.dashboard.set_class(event.size.width < 100, "narrow")
-        self._gpu_scroll_pending = True
         if self.snapshot is not None and self.alive():
             self.render_snapshot()
 
     def focus_view(self):
         if self.alive():
-            self.dashboard.query_one("#fleet-gpus" if self.view == "gpu" else "#fleet-table").focus()
-            if self.view == "gpu":
-                self.call_after_refresh(self.scroll_gpu_selection)
+            self.dashboard.query_one("#fleet-gpus" if self.view == "gpu" else "#fleet-table").focus(scroll_visible=False)
+
+    def clear_text_selections(self, except_widget=None):
+        for screen in self.screen_stack:
+            for panel in screen.query(SelectableStatic):
+                if panel is not except_widget and (panel.dragging or panel.has_selection):
+                    panel.clear_selection()
+        if self._selection_widget is not except_widget:
+            self._selection_widget = None
+
+    def on_selectable_static_selection_changed(self, event):
+        panel = event.selection
+        if panel.dragging or panel.has_selection:
+            self.clear_text_selections(except_widget=panel)
+            self._selection_widget = panel
+        elif self._selection_widget is panel:
+            self._selection_widget = None
+
+    def action_copy_selection(self):
+        panel = self._selection_widget
+        if panel is not None and panel.is_attached and panel.has_selection:
+            self.copy_to_clipboard(panel.selected_text)
+        elif isinstance(self.focused, Input):
+            selected = getattr(self.focused, "selected_text", "")
+            if selected:
+                self.copy_to_clipboard(selected)
+        elif isinstance(self.focused, DataTable) and self.focused.display:
+            table = self.focused
+            if 0 <= table.cursor_row < table.row_count:
+                cells = table.get_row_at(table.cursor_row)
+                self.copy_to_clipboard("\t".join(
+                    cell.plain if isinstance(cell, Text) else self.clean(cell) for cell in cells))
+
+    def pulse_gpu_marker(self):
+        if self.alive() and self.view == "gpu":
+            self.dashboard.query_one("#fleet-gpus", GpuOverview).pulse_marker()
+
+    def handle_gpu_wheel(self, event, step):
+        if self.view != "gpu" or self.screen is not self.dashboard:
+            return
+        if event.shift:
+            event.stop()
+            event.prevent_default()
+            self.clear_text_selections()
+            self.dashboard.query_one("#fleet-gpu-scroll", VerticalScroll).scroll_relative(
+                y=step * 3, animate=False)
+            return
+        event.stop()
+        event.prevent_default()
+        now, previous = monotonic(), self._gpu_wheel_at
+        self._gpu_wheel_at = now
+        if previous is None or now - previous >= .25:
+            self.move_gpu(step)
 
     def scroll_gpu_selection(self):
         if self.alive() and self.view == "gpu":
-            target = 0 if self.compact_gpus else self._gpu_anchors.get(
-                (self.selected_gpu, self.selected_segment), self._gpu_anchors.get(self.selected_gpu, 0))
+            target = 0 if self.compact_gpus else self._gpu_anchors.get(self.selected_gpu, 0)
             self.dashboard.query_one("#fleet-gpu-scroll", VerticalScroll).scroll_to(y=target, animate=False)
 
     def selected_gpu_account(self):
@@ -603,9 +724,11 @@ class FleetApp(App):
         return sorted((service for service in self.services() if service["id"] in ids), key=self.sort_key)
 
     def select_gpu(self, index, segment=None, service_id=None):
+        changed = index != self.selected_gpu
+        self.clear_text_selections()
         self.selected_gpu, self.selected_segment = index, segment
         self._gpu_detail_service = service_id
-        self._gpu_scroll_pending = True
+        self._gpu_scroll_pending = self._gpu_scroll_pending or changed
         self.render_snapshot()
 
     def move_gpu(self, step):
@@ -623,6 +746,7 @@ class FleetApp(App):
 
     def open_gpu_details(self):
         if self.selected_gpu_account() is not None:
+            self.clear_text_selections()
             self.push_screen(GpuDetailDialog(self))
 
     def update_static(self, name, value):
@@ -717,10 +841,10 @@ class FleetApp(App):
         ratio = window.get("active_ratio")
         values = ["  " + self.clean(service.get("model") or "unknown"),
                   ",".join(str(gpu) for gpu in service.get("gpus", [])) or "?",
-                  amount(service.get("gpu_gb")),
+                  gib(service.get("gpu_gb")),
                   activity_bar(service.get("hourly_active_24h") or [None] * 24),
                   "?" if status == "unknown" else duration(service.get("idle_seconds")),
-                  "OVER" if status == "over_limit" else status]
+                  "Inactive" if status == "over_limit" else status_label(status)]
         if not narrow:
             values += ["—" if not numeric(ratio) else "%d%%" % (ratio * 100), count(window.get("gen_tokens"))]
         cells = [RowLabel(values[0], key)]
@@ -742,8 +866,8 @@ class FleetApp(App):
                 members = groups[name]
                 key = "person:" + name
                 over = sum(self.service_status(item) == "over_limit" for item in members)
-                values = [name + " · %dsvc" % len(members), "", amount(total_memory(members)),
-                          "", "", "%d over" % over if over else ""] + ([] if narrow else ["", ""])
+                values = [name + " · %dsvc" % len(members), "", gib(total_memory(members)),
+                          "", "", "%d inactive" % over if over else ""] + ([] if narrow else ["", ""])
                 result.append((key, tuple([RowLabel(self.clean(values[0]), key, "bold #d8ae7b")] +
                                          [Text(value) for value in values[1:]])))
                 for service in members:
@@ -754,8 +878,8 @@ class FleetApp(App):
             for gpu in sorted((self.snapshot or {}).get("gpus", []), key=lambda gpu: gpu["index"]):
                 index = gpu["index"]
                 key = "gpu:" + str(index)
-                values = ["GPU" + str(index), "", amount(gpu.get("used_gb")),
-                          "%s/%s GiB · %s%%" % (amount(gpu.get("used_gb")), amount(gpu.get("total_gb")),
+                values = ["GPU" + str(index), "", gib(gpu.get("used_gb")),
+                          "%s/%s GiB · %s%%" % (gib(gpu.get("used_gb")), gib(gpu.get("total_gb")),
                                                 amount(gpu.get("util_percent"))), "", ""] + ([] if narrow else ["", ""])
                 result.append((key, tuple([RowLabel(values[0], key, "bold #d8ae7b")] +
                                          [Text(value) for value in values[1:]])))
@@ -768,7 +892,7 @@ class FleetApp(App):
                         # Per-card occupants are measured independently of a service's total.
                         occupant = next((item for item in gpu.get("occupants", [])
                                          if item.get("service_id") == service["id"]), None)
-                        cells[2] = Text(amount(occupant.get("used_gb")) if occupant else "?")
+                        cells[2] = Text(gib(occupant.get("used_gb")) if occupant else "?")
                         result.append((key, tuple(cells)))
                         metadata[key] = service["id"]
                 if not self.mine_only:
@@ -779,7 +903,7 @@ class FleetApp(App):
                         if self.filter_text and self.filter_text.casefold() not in name.casefold():
                             continue
                         key = "other:%s:%s:%s" % (index, name, number)
-                        values = [name + " (other workload)", str(index), amount(occupant.get("used_gb")),
+                        values = [name + " (other workload)", str(index), gib(occupant.get("used_gb")),
                                   "", "", ""] + ([] if narrow else ["", ""])
                         result.append((key, tuple([RowLabel(values[0], key)] + [Text(value) for value in values[1:]])))
         return result, metadata
@@ -812,7 +936,6 @@ class FleetApp(App):
         if self.selected_gpu not in indices:
             self.selected_gpu = indices[0] if indices else None
             self.selected_segment, self._gpu_detail_service = None, None
-            self._gpu_scroll_pending = True
         account = self.selected_gpu_account()
         if account and self.selected_segment not in (None, MEASURED_KEY, *account.selection_keys()):
             self.selected_segment, self._gpu_detail_service = None, None
@@ -841,25 +964,30 @@ class FleetApp(App):
             stale = bool(snapshot.get("stale") or self.read_error)
             if self.compact_gpus:
                 available = self.size.height - 4 - bool(errors) - (3 if self.dashboard.query_one("#fleet-filter").display else 0)
-                overview.bar_rows = 2 if self.size.width >= 100 and available >= len(self.gpu_accounts) * 4 else 1
-                view, overview.hits = render_overview(self.gpu_accounts, self.size.width, overview.bar_rows,
+                bar_rows = 2 if self.size.width >= 100 and available >= len(self.gpu_accounts) * 4 else 1
+                view, hits = render_overview(self.gpu_accounts, self.size.width, bar_rows,
                     self.selected_gpu, self.selected_segment, stale, self.clean,
                     show_legends=available >= len(self.gpu_accounts) * 3)
-                overview.service_hits, self._gpu_anchors = {}, {}
+                service_hits, anchors = {}, {}
+                headings = {index: (row, 1) for row, _, _, index, key in hits if key is None}
             else:
-                overview.bar_rows = 3
-                view, overview.hits, self._gpu_anchors, overview.service_hits = render_expanded(
+                bar_rows = 3
+                width = max(1, self.size.width - 1)
+                view, hits, anchors, service_hits = render_expanded(
                     self.gpu_accounts, sorted(self.services(), key=self.sort_key), self.size.width - 1,
-                    overview.bar_rows, self.selected_gpu, self.selected_segment, stale, self.clean,
+                    bar_rows, self.selected_gpu, self.selected_segment, stale, self.clean,
                     {service["id"]: self.service_status(service) for service in self.services()})
-            self.update_static("fleet-gpus", view)
-            if self._gpu_scroll_pending:
+                headings = {account.index: (anchors[account.index], len(expanded_header(
+                    account, account.index == self.selected_gpu, stale).wrap(
+                        self.console, width, overflow="fold", no_wrap=False))) for account in self.gpu_accounts}
+            overview.update_view(view, hits, service_hits, anchors, headings, self.selected_gpu, bar_rows)
+            self._rendered["fleet-gpus"] = view
+            if self._gpu_scroll_pending and not (overview.dragging or overview.has_selection):
                 self._gpu_scroll_pending = False
                 self.call_after_refresh(self.scroll_gpu_selection)
         else:
-            overview.hits = []
-            overview.service_hits = {}
-            self.update_static("fleet-gpus", summary)
+            overview.update_view(Text(summary), [], {}, {}, {}, None, 1)
+            self._rendered["fleet-gpus"] = summary
         if self.view == "gpu":
             controls = Text("LLM · Other · Unattributed · Free", style="#98a4b4")
             controls.append(" · Updated " + age_label + " ago", style="#98a4b4")
@@ -879,54 +1007,63 @@ class FleetApp(App):
         narrow = self.size.width < 100
         columns = [("service", "OWNER / SERVICE", 16 if narrow else 19), ("gpu", "GPU", 4),
                    ("mem", "GiB", 5), ("activity", "ACTIVITY · 24h", 24),
-                   ("idle", "IDLE", 6), ("status", "STATE", 7)]
+                   ("idle", "IDLE", 8), ("status", "STATE", 8)]
         if not narrow:
-            columns += [("ratio", "24h", 4), ("tokens", "OUTPUT", 6)]
+            columns += [("ratio", "24h", 4), ("tokens", "OUT TOKENS", 10)]
         previous_id = self.selected_service_id()
         previous_key = self.row_keys[self._table.cursor_row] if self.row_keys and self._table.cursor_row < len(self.row_keys) else None
-        if columns != self._columns:
-            self._table.clear(columns=True)
-            self._rows.clear()
-            self.row_keys = []
-            for key, label, width in columns:
-                self._table.add_column(label, key=key, width=width)
-            self._columns = columns
-        desired, metadata = self.display_rows(narrow)
-        desired_keys = [key for key, _ in desired]
-        for key in list(self._rows):
-            if key not in desired_keys:
-                self._table.remove_row(key)
-                del self._rows[key]
-        for key, cells in desired:
-            if key not in self._rows:
-                self._table.add_row(*cells, key=key)
-                self._rows[key] = cells
-            else:
-                old = list(self._rows[key])
-                for index, cell in enumerate(cells):
-                    if old[index] != cell:
-                        self._table.update_cell(key, columns[index][0], cell, update_width=False)
-                        old[index] = cell
-                self._rows[key] = tuple(old)
-        if desired_keys != self.row_keys:
-            ranks = {key: index for index, key in enumerate(desired_keys)}
-            self._table.sort("service", key=lambda label: ranks[label.key])
-        self.row_keys, self.row_services = desired_keys, metadata
-        selected = previous_key if previous_key in metadata else next(
-            (key for key in desired_keys if previous_id is not None and metadata.get(key) == previous_id), None)
-        selected = selected or next((key for key in desired_keys if key in metadata), None)
-        if selected is not None and self._table.cursor_row != desired_keys.index(selected):
-            row = desired_keys.index(selected)
-            self._table.move_cursor(row=row, animate=False)
-            # New rows obtain their cursor bounds on the next layout pass.
-            if self._table.cursor_row != row:
-                self.call_after_refresh(self._table.move_cursor, row=row, animate=False)
+        with self._table.prevent(DataTable.RowHighlighted):
+            if columns != self._columns:
+                self._table.clear(columns=True)
+                self._rows.clear()
+                self.row_keys = []
+                for key, label, width in columns:
+                    self._table.add_column(label, key=key, width=width)
+                self._columns = columns
+            desired, metadata = self.display_rows(narrow)
+            desired_keys = [key for key, _ in desired]
+            for key in list(self._rows):
+                if key not in desired_keys:
+                    self._table.remove_row(key)
+                    del self._rows[key]
+            for key, cells in desired:
+                if key not in self._rows:
+                    self._table.add_row(*cells, key=key)
+                    self._rows[key] = cells
+                else:
+                    old = list(self._rows[key])
+                    for index, cell in enumerate(cells):
+                        if old[index] != cell:
+                            self._table.update_cell(key, columns[index][0], cell, update_width=False)
+                            old[index] = cell
+                    self._rows[key] = tuple(old)
+            if desired_keys != self.row_keys:
+                ranks = {key: index for index, key in enumerate(desired_keys)}
+                self._table.sort("service", key=lambda label: ranks[label.key])
+            self.row_keys, self.row_services = desired_keys, metadata
+            selected = previous_key if previous_key in metadata else next(
+                (key for key in desired_keys if previous_id is not None and metadata.get(key) == previous_id), None)
+            selected = selected or next((key for key in desired_keys if key in metadata), None)
+            if selected is not None and self._table.cursor_row != desired_keys.index(selected):
+                row = desired_keys.index(selected)
+                self._table.move_cursor(row=row, animate=False)
+                # New rows obtain their cursor bounds on the next layout pass.
+                if self._table.cursor_row != row:
+                    self.call_after_refresh(self.restore_service_cursor, selected)
         self.render_details()
         if self.gpu_detail is not None:
             self.gpu_detail.refresh_contents()
 
+    def restore_service_cursor(self, key):
+        if self.alive() and key in self.row_services:
+            with self._table.prevent(DataTable.RowHighlighted):
+                self._table.move_cursor(row=self.row_keys.index(key), animate=False)
+            self.render_details()
+
     def on_data_table_row_highlighted(self, event):
-        if self.alive():
+        if self.alive() and event.data_table is self._table:
+            if self._history_signature is not None and self.selected_service_id() != self._history_signature[0]:
+                self.clear_text_selections()
             self.render_details()
 
     def render_details(self):
@@ -940,14 +1077,16 @@ class FleetApp(App):
             return
         lines = ["%s · %s · %s · online %s · %s" % (self.clean(service.get("model") or "unknown"),
                  self.clean(owner_name(service)), self.clean(service.get("engine", "?")),
-                 duration(service.get("uptime_seconds")), self.service_status(service))]
+                 duration(service.get("uptime_seconds")), status_label(self.service_status(service))),
+                 "API: " + api_label(service, self.clean, fresh=not bool(
+                     self.read_error or (self.snapshot or {}).get("stale")))]
         for name, label in (("window_24h", "24h"), ("window_7d", "7d")):
             window = service.get(name) or {}
             ratio, coverage = window.get("active_ratio"), window.get("coverage_ratio")
-            lines.append("%s active %s (%s) · requests %s · output %s · input %s · observed %s" %
+            lines.append("%s active %s (%s) · requests %s · input %s tokens · output %s tokens · total %s tokens · observed %s" %
                          (label, duration(None if window.get("active_minutes") is None else window["active_minutes"] * 60),
                           "—" if not numeric(ratio) else "%d%%" % (ratio * 100), count(window.get("requests")),
-                          count(window.get("gen_tokens")), count(window.get("prompt_tokens")),
+                          count(window.get("prompt_tokens")), count(window.get("gen_tokens")), count(total_tokens(window)),
                           "?" if not numeric(coverage) else "%d%%" % (coverage * 100)))
         claim = service.get("claim")
         lines.append("Started %s · claim %s" % (timestamp(service.get("started_at")),
@@ -994,7 +1133,7 @@ class FleetApp(App):
         samples = (self.history or {}).get("samples", [])
         summary = (self.history or {}).get("service") or {}
         self.update_static("fleet-history-text", self.history_error or
-                           ("7d hourly active / output · %d hour records · parameters: %s" %
+                           ("7d hourly active / output tokens · %d hour records · parameters: %s" %
                             (len(samples), self.clean(summary.get("argv_redacted") or "unavailable")) if self.history else ""))
         fallback = []
         for name, field, label in (("fleet-active-chart", "active_minutes", "Active"),
@@ -1070,6 +1209,7 @@ class FleetApp(App):
         elif revoke and not (service.get("claim") or {}).get("id"):
             self.notice("This service has no claim to revoke.")
         else:
+            self.clear_text_selections()
             self.push_screen(ClaimDialog(self, service, revoke=revoke))
 
     def on_key(self, event):
@@ -1080,11 +1220,29 @@ class FleetApp(App):
                 self.render_snapshot()
             return
         key = event.key.lower()
+        if self.view == "gpu" and key in ("pageup", "pagedown"):
+            event.stop()
+            event.prevent_default()
+            self.clear_text_selections()
+            viewport = self.dashboard.query_one("#fleet-gpu-scroll", VerticalScroll)
+            viewport.scroll_to(y=viewport.scroll_y +
+                               (-1 if key == "pageup" else 1) * viewport.size.height,
+                               animate=False)
+            return
+        if self.view == "person" and key in ("up", "down"):
+            event.stop()
+            event.prevent_default()
+            self.clear_text_selections()
+            self._table.move_cursor(row=max(0, min(len(self.row_keys) - 1,
+                                    self._table.cursor_row + (-1 if key == "up" else 1))), animate=False)
+            return
         gpu_key = self.view == "gpu" and key in ("up", "down", "left", "right", "enter")
         if not gpu_key and key not in ("p", "g", "z", "s", "m", "c", "u", "r", "q", "slash", "question_mark"):
             return
         event.stop()
         event.prevent_default()
+        if key not in ("r", "q"):
+            self.clear_text_selections()
         if gpu_key:
             if key in ("up", "down"):
                 self.move_gpu(-1 if key == "up" else 1)
@@ -1094,7 +1252,7 @@ class FleetApp(App):
                 self.open_gpu_details()
         elif key in ("p", "g"):
             self.view = "person" if key == "p" else "gpu"
-            self._gpu_scroll_pending = True
+            self._gpu_scroll_pending = key == "g"
             self.render_snapshot()
             self.focus_view()
         elif key == "z":

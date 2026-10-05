@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6.1-sol
+# Generated-By: Codex / unknown model
 """Synthetic fleet ingestion, durable history, state replay and identity contracts."""
 
 import copy
@@ -104,7 +105,9 @@ def test_replay_status_priority_and_observed_idle():
                  "idle_observed_seconds": case["observed_idle"]}
         if "last_active_offset" in case:
             state["last_active_at"] = now - case["last_active_offset"]
-        instance = {**service(), "metadata": service(), "state": state, "first_seen": BASE,
+        row = service(bind=case.get("bind", "127.0.0.1"), host=case.get("host", False),
+                      container=None if case.get("host") else "ctr-a")
+        instance = {**row, "metadata": row, "state": state, "first_seen": BASE,
                     "last_seen": now - 60 if case.get("missing") else now}
         claim = {"until": now + 100, "revoked_at": None} if case.get("claim") else None
         result = service_status(instance, claim, settings, now, stale=case.get("stale", False), generated_at=now)
@@ -113,6 +116,105 @@ def test_replay_status_priority_and_observed_idle():
             assert result["last_active_at"] is None and result["idle_seconds"] == 0
             assert result["never_active"] is True
     assert time.monotonic() - started < 2
+
+
+@pytest.mark.parametrize("bind,mapping,host_ips,host,address,access", [
+    ("127.0.0.1", {}, [], False, "http://127.0.0.1:8010", "local_only"),
+    ("::1", {}, [], False, "http://[::1]:8010", "local_only"),
+    ("::ffff:127.0.0.1", {}, [], False, "http://[::ffff:7f00:1]:8010", "local_only"),
+    ("192.0.2.10", {}, [], False, "http://192.0.2.10:8010", "direct"),
+    ("2001:db8::10", {}, [], False, "http://[2001:db8::10]:8010", "direct"),
+    ("fe80::123", {}, [], False, None, "unknown"),
+    ("0.0.0.0", {"192.0.2.10": "ctr-a"}, [], False, "http://192.0.2.10:8010", "shared"),
+    ("0.0.0.0", {"::ffff:192.0.2.10": "ctr-a"}, [], False, "http://192.0.2.10:8010", "shared"),
+    ("0.0.0.0", {"192.0.2.20": "ctr-a", "192.0.2.10": "ctr-a"}, [], False, "http://192.0.2.10:8010", "shared"),
+    ("::", {"192.0.2.10": "ctr-a", "2001:db8::10": "ctr-a"}, [], False, "http://[2001:db8::10]:8010", "shared"),
+    ("::", {"192.0.2.10": "ctr-a"}, [], False, None, "shared"),
+    ("0.0.0.0", {"192.0.2.10": "ctr-b", "127.0.0.1": "ctr-a"}, [], False, None, "shared"),
+    ("0.0.0.0", {}, ["127.0.0.1", "::1", "192.0.2.20", "192.0.2.10"], True, "http://192.0.2.20:8010", "shared"),
+    ("::", {}, ["127.0.0.1", "::1", "2001:db8::10"], True, "http://[2001:db8::10]:8010", "shared"),
+    ("0.0.0.0", {}, ["127.0.0.1", "::1"], True, None, "shared"),
+    ("0.0.0.0", {}, ["::ffff:127.0.0.1", "::ffff:192.0.2.20"], True, "http://192.0.2.20:8010", "shared"),
+    ("::", {}, ["::ffff:192.0.2.20"], True, None, "shared"),
+])
+def test_service_invocation_metadata_uses_verified_listener_and_owner_addresses(
+        controller, bind, mapping, host_ips, host, address, access):
+    worker, now, _ = controller
+    worker.config = replace(worker.config, collectors={**worker.config.collectors, "host_ips": host_ips})
+    write_mapping(worker.config, containers=mapping)
+    row = service(bind=bind, host=host, container=None if host else "ctr-a", listener_observation_complete=True,
+                  model="http://198.51.100.99:9999/do-not-use", api_address="http://198.51.100.99:9999",
+                  api_access="shared", idle_time_sensitive=False)
+    ingest(worker, now, snapshot(services=[row]))
+    result = worker.report()["services"][0]
+    assert (result["api_address"], result["api_access"]) == (address, access)
+    assert result["idle_time_sensitive"] is (access != "shared")
+    assert result["status"] == "idle"
+
+
+@pytest.mark.parametrize("failure", ["missing", "stale", "future", "conflict", "unreadable"])
+def test_unavailable_owner_map_keeps_wildcard_address_unknown(controller, failure):
+    worker, now, _ = controller
+    ingest(worker, now, snapshot(services=[service(bind="0.0.0.0", listener_observation_complete=True)]))
+    path = Path(worker.config.collectors["ip_containers_path"])
+    if failure == "missing":
+        path.unlink()
+    elif failure == "unreadable":
+        path.write_text("invalid-json")
+    elif failure == "conflict":
+        write_mapping(worker.config, containers={"192.0.2.10": "ctr-a", "::ffff:192.0.2.10": "ctr-b"})
+    else:
+        write_mapping(worker.config, now=BASE - 181 if failure == "stale" else BASE + 1,
+                      containers={"192.0.2.10": "ctr-a"})
+    result = worker.report()["services"][0]
+    assert result["api_address"] is None
+    assert result["api_access"] == "shared" and result["idle_time_sensitive"] is False
+    assert result["status"] == "idle"
+
+
+@pytest.mark.parametrize("failure", ["unverified", "stale", "missing_discovery", "legacy_failed_scrape"])
+def test_unavailable_listener_metadata_is_unknown(controller, failure):
+    worker, now, _ = controller
+    row = service(bind="0.0.0.0", listener_observation_complete=failure != "unverified")
+    if failure == "legacy_failed_scrape":
+        row.pop("listener_observation_complete")
+        row["scrape"] = {"ok": False, "error": "scrape_unavailable"}
+    ingest(worker, now, snapshot(services=[row]))
+    if failure == "stale":
+        now[0] += worker.config.fleet_stale_after_seconds + 1
+    elif failure == "missing_discovery":
+        ingest(worker, now, snapshot(BASE + 60, services=[], inventory_complete=False))
+    result = worker.report()["services"][0]
+    assert result["api_address"] is None and result["api_access"] == "unknown"
+    assert result["idle_time_sensitive"] is True
+
+
+def test_legacy_successful_schema_one_listener_remains_compatible(controller):
+    worker, now, _ = controller
+    ingest(worker, now, snapshot())
+    result = worker.report()["services"][0]
+    assert result["api_address"] == "http://127.0.0.1:8010"
+    assert result["api_access"] == "local_only" and result["idle_time_sensitive"] is True
+    with pytest.raises(ValueError, match="invalid_fleet_listener_observation"):
+        validate_snapshot(snapshot(services=[service(listener_observation_complete="true")]))
+
+
+@pytest.mark.parametrize("ipv6_only,address", [
+    (False, "http://192.0.2.10:8010"), (True, None), (None, None),
+])
+@pytest.mark.parametrize("host", [False, True])
+@pytest.mark.parametrize("host_ip", ["192.0.2.10", "::ffff:192.0.2.10"])
+def test_ipv6_wildcard_ipv4_uri_requires_observed_dual_stack(controller, ipv6_only, address, host, host_ip):
+    worker, now, _ = controller
+    worker.config = replace(worker.config, collectors={**worker.config.collectors, "host_ips": [host_ip]})
+    write_mapping(worker.config, containers={"192.0.2.10": "ctr-a"})
+    ingest(worker, now, snapshot(services=[service(bind="::", host=host, container=None if host else "ctr-a",
+        listener_observation_complete=True, listener_ipv6_only=ipv6_only)]))
+    result = worker.report()["services"][0]
+    assert result["api_address"] == address
+    assert result["api_access"] == "shared" and result["idle_time_sensitive"] is False
+    with pytest.raises(ValueError, match="invalid_fleet_listener_ipv6_only"):
+        validate_snapshot(snapshot(services=[service(listener_ipv6_only=0)]))
 
 
 def test_ingestion_deltas_durable_dedupe_and_rollups(controller):
@@ -724,6 +826,9 @@ def test_http_shape_read_only_independent_claims_and_socket_peer(http_service):
     assert scheduler.config.read_only is True
     status, result = request(address, "GET", "/v1/fleet")
     assert status == 200 and result["schema_version"] == 1
+    assert result["services"][0]["api_address"] == "http://127.0.0.1:8010"
+    assert result["services"][0]["api_access"] == "local_only"
+    assert result["services"][0]["idle_time_sensitive"] is True
     assert result["services"][0]["mine"] is True and result["services"][1]["mine"] is False
     assert request(address, "GET", "/v1/fleet?mine=1")[1]["containers"][0]["services"] == 1
     assert request(address, "GET", "/v1/fleet/history?service=instance-a&hours=168")[1]["resolution"] == "hourly"

@@ -12,6 +12,7 @@ import configparser
 from datetime import datetime, timezone
 from http.client import HTTPException
 import importlib
+import ipaddress
 import json
 import math
 import os
@@ -1436,6 +1437,18 @@ def fleet_number(value):
     return number(value)
 
 
+def fleet_tokens(value):
+    return (format(int(value), ",") if value is not None else "—") + " tokens"
+
+
+def fleet_total_tokens(window):
+    prompt, generated = window.get("prompt_tokens"), window.get("gen_tokens")
+    if prompt is None or generated is None:
+        return None
+    total = prompt + generated
+    return total if math.isfinite(total) else None
+
+
 def fleet_age(seconds):
     if seconds is None:
         return "—"
@@ -1456,6 +1469,20 @@ def fleet_activity_bar(values):
 def validate_fleet(result):
     def amount(value):
         return value is None or (type(value) in (int, float) and math.isfinite(value) and value >= 0)
+
+    def api_address(value):
+        if value is None:
+            return True
+        if not isinstance(value, str) or len(value) > 512 or any(c.isspace() or ord(c) < 32 for c in value):
+            return False
+        try:
+            parsed = urlsplit(value)
+            return (parsed.scheme == "http" and parsed.username is None and parsed.password is None
+                    and parsed.path in ("", "/") and not parsed.query and not parsed.fragment
+                    and parsed.port is not None and 1 <= parsed.port <= 65535
+                    and "%" not in parsed.hostname and bool(ipaddress.ip_address(parsed.hostname)))
+        except (ValueError, TypeError):
+            return False
 
     valid = (
         type(result.get("schema_version")) is int and result["schema_version"] == 1
@@ -1482,6 +1509,9 @@ def validate_fleet(result):
             and isinstance(item.get("hourly_active_24h"), list) and len(item["hourly_active_24h"]) == 24
             and all(amount(value) and (value is None or value <= 60) for value in item["hourly_active_24h"])
             and (item.get("claim") is None or isinstance(item["claim"], dict))
+            and ("api_address" not in item or api_address(item["api_address"]))
+            and ("api_access" not in item or item["api_access"] in ("shared", "local_only", "direct", "unknown"))
+            and ("idle_time_sensitive" not in item or type(item["idle_time_sensitive"]) is bool)
         )
         if not valid:
             break
@@ -1534,20 +1564,28 @@ def format_fleet(result, width=100, *, by="person", sort=None, color=False):
 
     def service(item, gpu=None, memory=None):
         status = "unknown" if result.get("stale") else item["status"]
-        label = "OVER LIMIT" if status == "over_limit" else status
+        label = "Running · inactive" if status == "over_limit" else status
+        access = None if result.get("stale") else item.get("api_access")
+        address = None if result.get("stale") else item.get("api_address")
+        endpoint = "Local only" if access == "local_only" else address or "Unknown"
+        if access == "shared":
+            endpoint += " · Shared"
         observed_gpus = item["gpus"] if gpu is None else [gpu]
         memory = item.get("gpu_gb") if gpu is None else memory
         suffix = "  %s  %s  %sG  %s" % (
             item["engine"], ",".join("GPU%s" % index for index in observed_gpus) or "GPU—",
             number(memory), label)
-        model_width = max(1, width - 2 - cell_width(clean_text(suffix)))
-        add("  " + fit(item.get("model") or "unknown", model_width).rstrip() + suffix, status)
+        add("  " + (item.get("model") or "unknown") + suffix, status)
+        add("    API: " + endpoint)
         window = item.get("window_24h", {})
         ratio = window.get("active_ratio")
         active = window.get("active_minutes")
-        add("    24h %s  active %s(%s)  output %s" % (
+        add("    24h %s  active %s(%s)" % (
             fleet_activity_bar(item["hourly_active_24h"]), fleet_age(None if active is None else active * 60),
-            "—" if ratio is None else "%s%%" % number(ratio * 100), fleet_number(window.get("gen_tokens"))))
+            "—" if ratio is None else "%s%%" % number(ratio * 100)))
+        add("    input %s · output %s · total %s" % (
+            fleet_tokens(window.get("prompt_tokens")), fleet_tokens(window.get("gen_tokens")),
+            fleet_tokens(fleet_total_tokens(window))))
         add("    idle %s · uptime %s · id %s" % (
             "—" if status == "unknown" else fleet_age(item.get("idle_seconds")),
             fleet_age(item.get("uptime_seconds")), item["id"]))
@@ -1586,7 +1624,7 @@ def format_fleet(result, width=100, *, by="person", sort=None, color=False):
             items = [item for item in services if owner(item) == label]
             memory = None if any(item.get("gpu_gb") is None for item in items) else sum(item["gpu_gb"] for item in items)
             over = sum(item["status"] == "over_limit" for item in items) if not result.get("stale") else 0
-            add("%s · %s services · %sG%s" % (label, len(items), number(memory), " · %s over limit" % over if over else ""))
+            add("%s · %s services · %sG%s" % (label, len(items), number(memory), " · %s running inactive" % over if over else ""))
             for item in sorted(items, key=order):
                 service(item)
     if not services:

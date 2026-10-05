@@ -18,9 +18,12 @@ dotted segments labelled `Other` are other tasks, neutral segments are unattribu
 and the remaining track is free memory. Compute utilization has its own label.
 The default GPU view uses large, scrolling panels with every owner and model
 allocation listed underneath. Bar labels are centered in each segment.
-Use Up/Down to select a GPU, Left/Right to select
-an allocation, and Enter for details. Z switches to the compact six-GPU overview,
-which fits 100×30 and 80×24 terminals. P opens People.
+Use Up/Down or the wheel to select a GPU. Left/Right selects an allocation;
+the GPU chart stays in place. Shift+wheel and Page Up/Page Down scroll freely.
+Drag to select text, then Ctrl+C to copy. Enter opens details; Q quits.
+Z switches to the compact six-GPU overview, which fits 100×30 and 80×24 terminals.
+P opens People. Each model includes its API address or `Local only`.
+Wildcard listeners default to `Shared` and have no idle-limit reminder.
 
 Fleet collection is enabled by the deployment operator. A disabled fleet returns
 `fleet_disabled`. Without a TTY or Textual, `llm` prints fleet status.
@@ -38,7 +41,9 @@ llm history SERVICE_ID --hours 24
 ```
 
 Claims apply to your container's services, for up to seven days. The six-hour
-idle limit is informational. Activity is sampled every minute; gaps stay unknown.
+idle reminder is informational; the TUI calls it `Running · inactive`.
+Activity is sampled every minute; gaps stay unknown. Coverage describes how much
+of the statistical interval has valid activity data.
 `llm legacy-tui` opens the old panel, retained until the next minor under #311.
 
 See [CLI](docs/CLI.md) for commands and [fleet rollout](deploy/FLEET_ROLLOUT.md)

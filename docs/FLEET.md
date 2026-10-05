@@ -33,6 +33,15 @@ command line and model path. History contains a `service` detail with only the
 redacted `argv_redacted` summary. Host services have `host: true` and a null
 container; unknown models and other-process ownership may also be null.
 `mine` is false for host or unmapped services.
+Services also expose `api_address` (HTTP base URI or null), `api_access`
+(`shared`, `local_only`, `direct`, `unknown`) and `idle_time_sensitive`.
+Loopback bindings are Local only. Fresh verified wildcard bindings are Shared
+and use a trusted advertised container/host IP with the observed port. Container
+IPs come from the fresh owner export; host IPs use configured `collectors.host_ips`.
+A verified dual-stack IPv6 listener may use an IPv4 owner address. Specific
+nonloopback bindings expose their direct address. Missing or stale listener
+observations have unknown access. Address metadata adds no routing or process actions.
+
 History includes `start_at` / `end_at` epoch bounds. Hourly output pads gaps
 and includes partial calendar-hour boundaries, so a 168-hour interval has up
 to 169 points; `partial` and observed coverage describe each boundary bucket.
@@ -74,8 +83,9 @@ The presentation policy is pure. Priority is `unknown`, `claimed`, `active`,
 `over_limit`, `idle`. A stale/unreadable export, unsupported activity engine,
 failed latest scrape, missing discovery, or an interval whose activity cannot
 be localized yields `unknown` even with a declaration. Three failed scrapes
-also satisfy the unknown rule. The idle limit is a reminder, never permission
-to act on a service.
+also satisfy the unknown rule. The idle limit is an informational reminder,
+shown as `Running · inactive` in the TUI. Fresh verified wildcard services default
+to Shared and are exempt from this reminder.
 
 Counter baselines and the `generated_at` watermark commit atomically with
 instance metadata, raw samples and hourly rollups. Duplicate and older exports
@@ -148,3 +158,4 @@ tests establish code behavior, not a production shadow-run or live accuracy
 receipt.
 
 <!-- Generated-By: Codex / gpt-6.1-sol -->
+<!-- Generated-By: Codex / unknown model -->

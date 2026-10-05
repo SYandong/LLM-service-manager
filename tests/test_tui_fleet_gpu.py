@@ -94,9 +94,10 @@ def test_proportional_rounding_keeps_tiny_amounts_without_forcing_a_cell():
         proportional_cells([90, 30], 100, 80)
     card = account_gpu({"index": 0, "total_gb": 100, "used_gb": 50.0001,
                         "occupants": [{"container": "tiny", "kind": "other", "used_gb": .0001}]})
-    assert gib(.0001) == "0.0001"
-    assert "tiny Other 0.0001" in allocation_legend(card, 100)[0].plain
-    assert "tiny · Other · 0.0001 GiB" in detail_lines(card)
+    assert gib(.0001) == "<0.01"
+    assert "tiny Other <0.01" in allocation_legend(card, 100)[0].plain
+    assert "tiny · Other · <0.01 GiB" in detail_lines(card)
+    assert card.allocations[0].used_gb == .0001
 
 
 @pytest.mark.parametrize("field", ["total_gb", "used_gb"])
@@ -155,15 +156,18 @@ def test_legend_continuation_and_selection_retain_exact_details(gpu_snapshot):
     assert "sample-b · LLM · 34 GiB" in detail_lines(card)
 
 
-def test_fractional_overview_is_compact_and_details_retain_source_precision():
+def test_fractional_displays_are_compact_and_accounting_retains_source_precision():
     card = account_gpu({"index": 5, "total_gb": 140.1201171875, "used_gb": 123.03125,
                         "util_percent": 61.125, "occupants": [
                             {"container": "sample-a", "kind": "llm", "used_gb": 100.0009765625}]})
     header = card_header(card, 80, selected=True).plain
     assert "123.03/140.12 GiB" in header
     assert "VRAM 88%" in header and "compute 61.12%" in header
-    assert "123.03125/140.1201171875 GiB" in detail_lines(card)
-    assert "100.0009765625 GiB" in detail_lines(card)
+    assert "123.03/140.12 GiB" in detail_lines(card)
+    assert "100 GiB" in detail_lines(card)
+    assert card.total_gb == 140.1201171875
+    assert card.used_gb == 123.03125
+    assert card.allocations[0].used_gb == 100.0009765625
     assert compact_gib(0) == "0"
     assert compact_gib(.0009765625) != "0"
     assert compact_gib(20.0) == "20"
@@ -176,11 +180,11 @@ def test_fractional_conflict_keeps_compute_visible_with_a_stale_label():
     header = card_header(card, 80, selected=True, stale=True).plain
     assert "STALE" in header
     assert "compute 61.12%" in header
-    assert "conflict +17.96875 GiB" in header
-    assert "attribution conflict +17.96875 GiB" in detail_lines(card)
+    assert "conflict +17.97 GiB" in header
+    assert "attribution conflict +17.97 GiB" in detail_lines(card)
 
 
-def test_expanded_cards_wrap_full_labels_and_source_values(gpu_snapshot):
+def test_expanded_cards_wrap_full_labels_with_concise_per_card_values(gpu_snapshot):
     service = gpu_snapshot["services"][0]
     old_id = service["id"]
     service["id"] = "synthetic-service-" + "identifier-" * 16
@@ -194,7 +198,7 @@ def test_expanded_cards_wrap_full_labels_and_source_values(gpu_snapshot):
     view, hits, anchors, service_hits = render_expanded([card], gpu_snapshot["services"], 79)
     joined = "".join(view.plain.split())
     assert owner in joined and service["id"] in joined and service["model"] in joined
-    assert "GPU0VRAM:52.0009765625GiB" in joined
+    assert "GPU0VRAM:52GiB" in joined
     assert "GPU0VRAM:999" not in joined
     assert "+1 · Enter" not in view.plain and "…" not in view.plain
     assert all(line.cell_len <= 79 for line in view.split("\n"))
@@ -218,11 +222,11 @@ def test_expanded_typography_retains_owner_and_state_semantics(gpu_snapshot):
     assert first.get_style_at_offset(console, first.plain.index("demo-model")).bold
     assert not first.get_style_at_offset(console, first.plain.index("Model")).bold
     assert not first.get_style_at_offset(console, first.plain.index("Engine")).bold
-    assert first.get_style_at_offset(console, first.plain.index("active")).color.get_truecolor().hex == "#71c695"
+    assert first.get_style_at_offset(console, first.plain.index("Active")).color.get_truecolor().hex == "#71c695"
     assert "Service ID:" in ident.plain
     assert "24h service activity" in activity.plain and "coverage 50%" in activity.plain
     assert activity.cell_len <= 79
-    assert "24h service requests 120 · input 24000 · output 12000" in counters.plain
+    assert "24h service requests 120 · input 24,000 tokens · output 12,000 tokens · total 36,000 tokens" in counters.plain
     view, _, anchors, _ = render_expanded([card], [], 100)
     row = view.split("\n")[anchors[(0, card.allocations[0].key)]]
     assert row.get_style_at_offset(console, 2).color.get_truecolor().hex == owner_color(card.allocations[0].identity)
@@ -302,7 +306,8 @@ def test_fractional_gpu_measurements_keep_compute_visible_at_80_columns(gpu_snap
             assert all("VRAM" in line and "compute" in line and "140.12" in line for line in headers)
             await pilot.press("enter")
             await ready(app, pilot)
-            assert "140.1201171875" in str(app.screen.query_one("#gpu-allocation-text").render())
+            detail = str(app.screen.query_one("#gpu-allocation-text").render())
+            assert "140.12" in detail and "140.1201171875" not in detail
     asyncio.run(scenario())
 
 
@@ -333,7 +338,7 @@ def test_gpu_keyboard_segment_details_and_individual_services(gpu_snapshot, size
             assert app.selected_gpu == 2
             viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
             assert viewport.scroll_y > 0
-            anchor = app._gpu_anchors[(app.selected_gpu, app.selected_segment)]
+            anchor = app._gpu_anchors[app.selected_gpu]
             assert viewport.scroll_y <= anchor < viewport.scroll_y + viewport.size.height
             assert app._exception is None
     asyncio.run(scenario())
@@ -398,7 +403,7 @@ def test_expanded_selection_scroll_refresh_and_compact_roundtrip(gpu_snapshot, s
             await pilot.press("down", "down", "right")
             await ready(app, pilot)
             selected = app.selected_gpu, app.selected_segment
-            anchor = app._gpu_anchors[selected]
+            anchor = app._gpu_anchors[app.selected_gpu]
             assert viewport.scroll_y <= anchor < viewport.scroll_y + viewport.size.height
             viewport.scroll_to(y=viewport.scroll_y + 3, animate=False)
             await pilot.pause()
@@ -414,7 +419,7 @@ def test_expanded_selection_scroll_refresh_and_compact_roundtrip(gpu_snapshot, s
             assert (app.selected_gpu, app.selected_segment) == selected
             await pilot.press("z")
             await ready(app, pilot)
-            anchor = app._gpu_anchors[selected]
+            anchor = app._gpu_anchors[app.selected_gpu]
             assert not app.compact_gpus
             assert viewport.scroll_y <= anchor < viewport.scroll_y + viewport.size.height
             assert "Q quit" in str(app.query_one("#fleet-footer").render())
@@ -461,11 +466,13 @@ def test_help_scrolls_at_80_columns_and_restores_gpu_focus(gpu_snapshot):
             assert isinstance(app.screen, FleetHelpDialog)
             content = app.screen.query_one("#fleet-help-text")
             text = str(content.render())
-            assert "Press / to search" in text
+            assert "/  Search" in text
             assert "LLM: inference models, solid fill" in text
             assert "Other: other GPU jobs, dotted fill" in text
             assert "Unattributed: used VRAM with no matched workload" in text
-            assert "24h activity describes the whole service" in text
+            assert "Activity and tokens cover the whole service" in text
+            assert "Shift + wheel or Page Up / Down" in text
+            assert "Ctrl+C to copy" in text
             viewport = app.screen.query_one("#fleet-help-scroll", VerticalScroll)
             assert viewport.virtual_size.height > viewport.size.height
             assert content.region.width <= 80
@@ -531,7 +538,7 @@ def test_stale_and_conflict_are_visible_in_the_compact_overview(gpu_snapshot):
             assert "sample-a · LLM · 74 GiB" in str(app.screen.query_one("#gpu-allocation-text").render())
             assert app.screen.query_one("#gpu-detail-claim", Button).disabled
             assert app.selected_service()["status"] == "idle"
-            assert "unknown" in str(app.screen.query_one("#gpu-service-details").render())
+            assert "Unknown" in str(app.screen.query_one("#gpu-service-details").render())
     asyncio.run(scenario())
 
 

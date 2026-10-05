@@ -280,7 +280,7 @@ def test_invalid_snapshot_retains_last_good_observations(fleet_snapshot):
             await app.refresh_fleet().wait()
             assert app.snapshot["services"] == fleet_snapshot["services"]
             assert app.read_error
-            assert app._table.get_cell("service:quiet", "status").plain == "unknown"
+            assert app._table.get_cell("service:quiet", "status").plain == "Unknown"
             assert app.selected_service_id() == "quiet"
     asyncio.run(scenario())
 
@@ -425,7 +425,7 @@ def test_failure_banner_marks_unknown_without_replacing_data(fleet_snapshot, fai
                 client.read_error = OSError("connection lost")
             await app.refresh_fleet().wait()
             assert app.query_one("#fleet-banner").display
-            assert app._table.get_cell("service:quiet", "status").plain == "unknown"
+            assert app._table.get_cell("service:quiet", "status").plain == "Unknown"
             assert app._table.get_cell("service:quiet", "idle").plain == "?"
             assert app.snapshot["services"][1]["status"] == "over_limit"
             assert app.selected_service_id() == "quiet"
