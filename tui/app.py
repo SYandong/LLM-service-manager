@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 # Generated-By: Codex / gpt-5.6-luna
 # Generated-By: Claude Code / claude-fable-5-1
 # Generated-By: OpenCode / deepseek-v4.1-flash
@@ -524,6 +525,8 @@ class SchedulerApp(App):
         typed = args is not None
         try:
             args = args or self.api.build_parser(UIParser).parse_args(["status"])
+            # The deprecated dashboard always consumes the shared-model schema.
+            args.shared = True
             snapshot = await asyncio.to_thread(self.api.execute_command, args, self.client)
             if not self.is_running or generation != self._state_generation:
                 return
@@ -603,6 +606,7 @@ class SchedulerApp(App):
             self._progress["stage"] = "response received; refreshing state"
             try:
                 status_args = self.api.build_parser(UIParser).parse_args(["status"])
+                status_args.shared = True
                 snapshot = await asyncio.to_thread(self.api.execute_command, status_args, self.client)
                 if not self.is_running:
                     return
