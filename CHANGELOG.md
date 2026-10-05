@@ -20,7 +20,6 @@
   is claimed. Legacy TUI removal is deferred to a later minor with zero-use
   evidence or maintainer confirmation (#310, #311).
 
-<!-- Generated-By: Codex / unknown model -->
 
 ## 1.9.2 — 2026-10-05
 
@@ -1442,3 +1441,5 @@ Release process and cadence: [docs/RELEASING.md](docs/RELEASING.md).
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->
+
+<!-- Generated-By: Codex / unknown model -->

@@ -258,7 +258,8 @@ SIGHUP。生产策略、TTL/reaper、宿主来源及其他用户服务的变更�
 先 issue、再 PR，当前提交须通过独立审核与 CI。
 
 <!-- Generated-By: Codex / gpt-6-astra -->
-<!-- Generated-By: Codex / unknown model -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
 <!-- Generated-By: Claude Code / claude-fable-5-1 -->
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->
+
+<!-- Generated-By: Codex / unknown model -->

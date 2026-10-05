@@ -474,7 +474,6 @@ any retirement action.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
-<!-- Generated-By: Codex / unknown model -->
 
 ## Watcher-only native generation evidence (#60)
 
@@ -523,3 +522,5 @@ current account releases; it does not recreate a removed model's old lease.
 <!-- Generated-By: Codex / gpt-5.6-luna -->
 
 <!-- Generated-By: Codex / gpt-5.6-luna -->
+
+<!-- Generated-By: Codex / unknown model -->
