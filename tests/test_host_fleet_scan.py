@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6.1-sol
+# Generated-By: Codex / unknown model
 import importlib.util
 import json
 import os
@@ -38,6 +39,12 @@ def proc_stat(pid, ppid, start, comm="python"):
 def tcp_row(port, inode, bind="0.0.0.0"):
     address = socket.inet_aton(bind)[::-1].hex().upper()
     return f"0: {address}:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000 0 0 {inode} 1\n"
+
+
+def tcp6_row(port, inode, bind="::"):
+    raw = socket.inet_pton(socket.AF_INET6, bind)
+    address = b"".join(raw[index:index + 4][::-1] for index in range(0, 16, 4)).hex().upper()
+    return f"0: {address}:{port:04X} {'0' * 32}:0000 0A 00000000:00000000 00:00000000 00000000 0 0 {inode} 1\n"
 
 
 def make_process(root, pid, argv, *, ppid=1, start=100, container="team-a", port=None, comm="python", cgroup=None, bind="0.0.0.0"):
@@ -235,6 +242,84 @@ def test_ollama_host_only_and_ipv6_socket_decode(scanner, tmp_path):
     assert result["services"][0]["scrape"]["ok"]
     assert "do-not-read-out" not in json.dumps(result)
     assert scanner.decode_address("00000000000000000000000001000000:1F40", socket.AF_INET6) == ("::1", 8000)
+
+
+@pytest.mark.parametrize("explicit_port", [False, True])
+@pytest.mark.parametrize("configured,observed,endpoint", [
+    ("0.0.0.0", "::", "[::1]"),
+    ("[::]", "0.0.0.0", "127.0.0.1"),
+])
+def test_ollama_cross_family_wildcard_uses_actual_owned_listener(
+        scanner, tmp_path, explicit_port, configured, observed, endpoint):
+    root = fake_root(tmp_path)
+    path = make_process(root, 100, ["ollama", "serve"], port=11434)
+    host = configured + (":11434" if explicit_port else "")
+    (path / "environ").write_bytes(f"OLLAMA_HOST={host}\0".encode())
+    if observed == "::":
+        (path / "net/tcp").write_text("header\n")
+        (path / "net/tcp6").write_text("header\n" + tcp6_row(11434, 5100))
+    runner = FakeRunner()
+    result = scanner.scan(fixture_config(scanner, root, tmp_path), runner)
+    row = result["services"][0]
+    assert row["bind"] == observed and row["port"] == 11434
+    assert row["scrape"]["ok"] and row["scrape"]["error"] is None
+    assert runner.calls[-1][0][8] == f"http://{endpoint}:11434/api/ps"
+    assert row["ollama"]["models"][0]["name"] == "demo-ollama"
+    assert row["metrics"] == {}
+
+
+@pytest.mark.parametrize("failure", ["different_port", "specific_ipv4", "specific_ipv6", "two_wildcards", "unowned"])
+def test_ollama_wildcard_selection_keeps_endpoint_identity_checks(scanner, tmp_path, failure):
+    root = fake_root(tmp_path)
+    path = make_process(root, 100, ["ollama", "serve"], port=11434)
+    (path / "environ").write_bytes(b"OLLAMA_HOST=0.0.0.0:11434\0")
+    (path / "net/tcp").write_text("header\n")
+    observed = "::1" if failure == "specific_ipv6" else "::"
+    port = 9000 if failure == "different_port" else 11434
+    (path / "net/tcp6").write_text("header\n" + tcp6_row(port, 5100, observed))
+    if failure == "specific_ipv4":
+        (path / "net/tcp6").write_text("header\n")
+        (path / "net/tcp").write_text("header\n" + tcp_row(11434, 5100, "127.0.0.1"))
+    elif failure == "two_wildcards":
+        (path / "fd/6").symlink_to("socket:[5101]")
+        (path / "net/tcp").write_text("header\n" + tcp_row(11434, 5101))
+    elif failure == "unowned":
+        (path / "fd/5").unlink()
+    runner = FakeRunner()
+    row = scanner.scan(fixture_config(scanner, root, tmp_path), runner)["services"][0]
+    assert not row["scrape"]["ok"]
+    assert row["scrape"]["error"] == "listener_identity_unavailable"
+    assert len(runner.calls) == 2
+
+
+def test_ollama_wildcard_listener_identity_change_discards_response(scanner, tmp_path):
+    root = fake_root(tmp_path)
+    path = make_process(root, 100, ["ollama", "serve"], port=11434)
+    (path / "environ").write_bytes(b"OLLAMA_HOST=0.0.0.0:11434\0")
+    (path / "net/tcp").write_text("header\n")
+    (path / "net/tcp6").write_text("header\n" + tcp6_row(11434, 5100))
+    runner = FakeRunner()
+    runner.after_get = lambda argv: (path / "net/tcp6").write_text("header\n")
+    row = scanner.scan(fixture_config(scanner, root, tmp_path), runner)["services"][0]
+    assert row["scrape"]["error"] == "process_identity_changed"
+    assert not row["scrape"]["ok"] and row["ollama"] is None
+
+
+def test_ollama_cross_family_wildcard_empty_model_list_is_success(scanner, tmp_path):
+    root = fake_root(tmp_path)
+    path = make_process(root, 100, ["ollama", "serve"], port=11434)
+    (path / "environ").write_bytes(b"OLLAMA_HOST=0.0.0.0\0")
+    (path / "net/tcp").write_text("header\n")
+    (path / "net/tcp6").write_text("header\n" + tcp6_row(11434, 5100))
+    runner = FakeRunner()
+
+    def empty_models(argv, timeout, max_output, pass_fds=()):
+        response = runner(argv, timeout, max_output, pass_fds)
+        return b'{"models":[]}' if any(arg.endswith("/api/ps") for arg in argv) else response
+
+    row = scanner.scan(fixture_config(scanner, root, tmp_path), empty_models)["services"][0]
+    assert row["scrape"]["ok"] and row["ollama"] == {"models": []}
+    assert row["model"] is None and row["metrics"] == {}
 
 
 def test_whitelist_series_identity_created_epochs_and_worker_gauges(scanner):
