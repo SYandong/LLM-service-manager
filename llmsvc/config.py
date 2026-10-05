@@ -1,6 +1,7 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Codex / gpt-6.1-sol
 # Generated-By: OpenCode / deepseek-v4.1-flash
+# Generated-By: Codex / gpt-6.1-sol
 """Validated scheduler configuration, independent of the legacy proxy config."""
 
 import ipaddress
@@ -33,6 +34,17 @@ class SchedulerConfig:
     memory_budget_gb: float = 200.0
     host_min_available_gb: float = 150.0
     read_only: bool = True
+    fleet_enabled: bool = False
+    fleet_snapshot_path: str = "/var/lib/llmsvc-host/export/fleet.json"
+    fleet_db_path: str = "/var/lib/llmsvc/fleet.sqlite"
+    fleet_ingest_interval_seconds: float = 30.0
+    fleet_stale_after_seconds: float = 180.0
+    fleet_active_window_seconds: float = 900.0
+    fleet_idle_limit_hours: float = 6.0
+    fleet_raw_retention_days: int = 14
+    fleet_hourly_retention_days: int = 180
+    fleet_claims_enabled: bool = True
+    fleet_claim_max_days: int = 7
     collectors: dict[str, Any] = field(default_factory=dict)
     registry: dict[str, Any] = field(default_factory=dict)
     native_witness: dict[str, Any] = field(default_factory=dict)
@@ -108,6 +120,28 @@ class SchedulerConfig:
     action_poll_seconds: float = 0.2
 
     def __post_init__(self):
+        for name in ("fleet_enabled", "fleet_claims_enabled"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be a boolean")
+        for name in ("fleet_snapshot_path", "fleet_db_path"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not Path(value).is_absolute() or "\x00" in value:
+                raise ValueError(f"{name} must be an absolute path")
+        if Path(self.fleet_snapshot_path) == Path(self.fleet_db_path):
+            raise ValueError("fleet snapshot and database paths must differ")
+        for name in ("fleet_ingest_interval_seconds", "fleet_stale_after_seconds",
+                     "fleet_active_window_seconds", "fleet_idle_limit_hours"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be a finite positive number")
+        for name in ("fleet_raw_retention_days", "fleet_hourly_retention_days"):
+            value = getattr(self, name)
+            if type(value) is not int or not 1 <= value <= 3650:
+                raise ValueError(f"{name} must be an integer in 1..3650")
+        if self.fleet_hourly_retention_days < self.fleet_raw_retention_days:
+            raise ValueError("fleet hourly retention must cover raw retention")
+        if type(self.fleet_claim_max_days) is not int or not 1 <= self.fleet_claim_max_days <= 7:
+            raise ValueError("fleet_claim_max_days must be an integer in 1..7")
         from llmsvc.native_binding import validate_settings as validate_witness_settings
         validate_witness_settings(self.native_witness)
         if type(self.bootstrap_enabled) is not bool or not isinstance(self.bootstrap, dict):
@@ -239,6 +273,8 @@ class SchedulerConfig:
             raise ValueError("read_only must be a boolean")
         if not isinstance(self.state_db_path, str):
             raise ValueError("state_db_path must be a string")
+        if self.state_db_path and Path(self.fleet_db_path) == Path(self.state_db_path):
+            raise ValueError("fleet database must be independent of the intent store")
         if not self.read_only and not self.state_db_path.strip():
             raise ValueError("writable pin intent mode requires state_db_path")
         if not isinstance(self.collectors, dict):

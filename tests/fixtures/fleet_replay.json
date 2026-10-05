@@ -1,0 +1,14 @@
+{
+  "generated_by": "Codex / gpt-6.1-sol",
+  "scenarios": [
+    {"name": "continuous_activity", "offset": 60, "active": 1, "last_active_offset": 0, "observed_idle": 0, "expected": "active"},
+    {"name": "newly_observed_long_uptime", "offset": 0, "active": 0, "observed_idle": 0, "expected": "idle"},
+    {"name": "observed_idle_over_limit", "offset": 21600, "active": 0, "observed_idle": 21600, "expected": "over_limit"},
+    {"name": "counter_reset_is_not_activity", "offset": 120, "active": 0, "counter_reset": 1, "observed_idle": 0, "expected": "idle"},
+    {"name": "failed_scrapes_are_unknown", "offset": 180, "active": null, "scrape_ok": 0, "failure_streak": 3, "observed_idle": 0, "expected": "unknown"},
+    {"name": "declaration_covers_idle", "offset": 21600, "active": 0, "observed_idle": 21600, "claim": true, "expected": "claimed"},
+    {"name": "stale_overrides_declaration", "offset": 21600, "active": 0, "observed_idle": 21600, "claim": true, "stale": true, "expected": "unknown"},
+    {"name": "missing_discovery_is_unknown", "offset": 60, "active": 0, "observed_idle": 60, "missing": true, "expected": "unknown"},
+    {"name": "unsupported_engine_is_unknown", "offset": 60, "active": 0, "observed_idle": 60, "supported": false, "expected": "unknown"}
+  ]
+}
