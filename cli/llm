@@ -1641,24 +1641,47 @@ def resolve_fleet_service(target, result):
     return matches[0]["id"]
 
 
-def validate_fleet_claim(args, result, service_id=None):
-    claim = result.get("claim")
-    valid = result.get("ok") is True and isinstance(claim, dict)
-    if valid:
-        valid = (
-            isinstance(claim.get("service_id"), str) and bool(claim["service_id"])
-            and claim.get("instance_id", claim["service_id"]) == claim["service_id"]
-            and isinstance(claim.get("reason"), str) and 1 <= len(claim["reason"]) <= 200
-            and type(claim.get("until")) in (int, float) and math.isfinite(claim["until"])
-            and claim["until"] > 0 and result.get("dry_run", False) is args.dry_run
-        )
-    if valid and args.command == "claim":
-        valid = claim["service_id"] == service_id
-        valid = valid and ("id" not in claim if args.dry_run else isinstance(claim.get("id"), str) and bool(claim["id"]))
-    if valid and args.command == "unclaim":
-        valid = claim.get("id") == args.id
-    if not valid:
-        raise ClientError("Invalid fleet claim response; check the server API version")
+def validate_fleet_claim(args, result, service_id=None, *, payload=None):
+    def timestamp(value):
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError
+        datetime.fromtimestamp(value, timezone.utc)
+
+    try:
+        if (not isinstance(result, dict) or result.get("ok") is not True
+                or result.get("dry_run") is not args.dry_run or not isinstance(result.get("claim"), dict)):
+            raise ValueError
+        claim = result["claim"]
+        if (not isinstance(claim.get("service_id"), str) or not claim["service_id"].strip()
+                or clean_text(claim["service_id"]) != claim["service_id"]
+                or claim.get("instance_id", claim["service_id"]) != claim["service_id"]
+                or not isinstance(claim.get("reason"), str) or not 1 <= len(claim["reason"]) <= 200
+                or not claim["reason"].strip() or clean_text(claim["reason"]) != claim["reason"]):
+            raise ValueError
+        timestamp(claim["until"])
+        for key in ("created_at", "revoked_at"):
+            if claim.get(key) is not None:
+                timestamp(claim[key])
+        if args.command == "claim":
+            if (payload is None or claim["service_id"] != service_id
+                    or claim["until"] != payload["until"] or claim["reason"] != payload["reason"]
+                    or claim.get("revoked_at") is not None or (args.dry_run and "id" in claim)):
+                raise ValueError
+        elif args.command == "unclaim":
+            if claim.get("id") != args.id:
+                raise ValueError
+            if not args.dry_run:
+                timestamp(claim["revoked_at"])
+        else:
+            raise ValueError
+        if not args.dry_run or args.command == "unclaim":
+            if (not isinstance(claim.get("id"), str) or not claim["id"].strip()
+                    or clean_text(claim["id"]) != claim["id"]):
+                raise ValueError
+        # Reject unusable JSON before either output path reports write success.
+        json.dumps(result, allow_nan=False)
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        raise ClientError("Invalid fleet claim response; check the server API version") from None
     return result
 
 
@@ -1841,11 +1864,14 @@ def execute_command(args, client, *, now=None):
             payload = None
         try:
             result = client.request(method, path + ("?dry_run=1" if args.dry_run else ""), payload)
-            return validate_fleet_claim(args, result, service_id)
-        except ClientError as exc:
-            if exc.status is not None or args.dry_run:
+            return validate_fleet_claim(args, result, service_id, payload=payload)
+        except (ClientError, OSError, HTTPException) as exc:
+            status = getattr(exc, "status", None)
+            if status is not None and 400 <= status < 500:
                 raise
-            raise ClientError(str(exc) + "; claim outcome unknown: inspect llm fleet --json before retrying; no automatic write retry") from None
+            label = "claim preview" if args.dry_run else "claim"
+            raise ClientError(str(exc) + "; %s outcome unknown: inspect llm fleet --json before retrying; no automatic write retry" % label,
+                              status=status, payload=getattr(exc, "payload", None)) from None
     if args.command == "registry":
         return validate_registry_result(args, client.request("GET", "/v1/registry"))
     if args.command == "models":
@@ -2016,7 +2042,8 @@ def main(argv=None):
         config = load_config(path=args.config, url=args.url, timeout=args.timeout)
         client = SchedulerClient(**config)
         if args.command == "legacy-tui":
-            print("Deprecated: legacy-tui will be removed in a later minor release; use llm/top for fleet or shared CLI commands.", file=sys.stderr)
+            print("Deprecated: legacy-tui; planned removal is the next minor after the fleet release (Refs #311). "
+                  "Use llm/top for fleet or shared CLI commands.", file=sys.stderr)
         if args.command in (None, "top", "legacy-tui") and sys.stdout.isatty():
             app = tui_app() if args.command == "legacy-tui" else fleet_tui_app()
             if app is not None:

@@ -2,6 +2,7 @@
 """Standalone fleet client behavior through bounded loopback HTTP fixtures."""
 
 import copy
+import io
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
@@ -46,12 +48,24 @@ def fleet():
 
 
 @pytest.fixture
-def fleet_service(fleet):
+def write_response():
+    return {}
+
+
+@pytest.fixture
+def fleet_service(fleet, write_response):
     requests, claims = [], {}
 
     class Handler(BaseHTTPRequestHandler):
         def send(self, status, data):
-            body = json.dumps(data).encode()
+            body = None
+            if self.command in ("POST", "DELETE"):
+                status = write_response.get("status", status)
+                if "rewrite" in write_response:
+                    data = write_response["rewrite"](copy.deepcopy(data))
+                body = write_response.get("raw")
+            if body is None:
+                body = json.dumps(data).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -324,7 +338,116 @@ def test_foreign_service_403_remains_authoritative(fleet_api, fleet_service):
     with pytest.raises(fleet_api["ClientError"], match="forbidden_container") as exc:
         fleet_api["execute_command"](args, fleet_api["SchedulerClient"](address))
     assert exc.value.status == 403
+    assert "outcome unknown" not in str(exc.value)
     assert [item[0] for item in requests] == ["GET", "POST"]
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize("field,value", [("until", "different"), ("reason", "different"), ("until", 1e300)])
+def test_claim_receipt_must_match_the_submitted_request_before_success(
+        fleet_api, fleet_service, write_response, monkeypatch, capsys, json_output, dry_run, field, value):
+    address, requests, claims = fleet_service
+
+    def rewrite(result):
+        result["claim"][field] = result["claim"][field] + 3600 if field == "until" and value == "different" else value
+        return result
+
+    write_response["rewrite"] = rewrite
+    monkeypatch.setitem(fleet_api["main"].__globals__, "load_config", lambda **kwargs: {"url": address})
+    command = ["claim", "id-a", "--until", "+1d", "--reason", "experiment"]
+    command += ["--json"] if json_output else []
+    command += ["--dry-run"] if dry_run else []
+    assert fleet_api["main"](command) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "outcome unknown" in output.err and "llm fleet --json" in output.err
+    assert "no automatic write retry" in output.err
+    assert len([item for item in requests if item[0] == "POST"]) == 1
+    assert len(claims) == (0 if dry_run else 1)
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("field,value,dry_run", [
+    ("revoked_at", None, False), ("revoked_at", True, False), ("revoked_at", 1e300, False),
+    ("until", 1e300, False), ("revoked_at", 1e300, True),
+])
+def test_unclaim_requires_valid_receipt_and_actual_revocation_before_success(
+        fleet_api, fleet_service, write_response, monkeypatch, capsys, json_output, field, value, dry_run):
+    address, requests, claims = fleet_service
+    claims["claim-a"] = {"id": "claim-a", "service_id": "id-a", "instance_id": "id-a",
+                         "until": 1800259200, "reason": "experiment", "revoked_at": None}
+
+    def rewrite(result):
+        result["claim"][field] = value
+        return result
+
+    write_response["rewrite"] = rewrite
+    monkeypatch.setitem(fleet_api["main"].__globals__, "load_config", lambda **kwargs: {"url": address})
+    command = ["unclaim", "claim-a"] + (["--json"] if json_output else [])
+    command += ["--dry-run"] if dry_run else []
+    assert fleet_api["main"](command) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "outcome unknown" in output.err and "llm fleet --json" in output.err
+    assert "no automatic write retry" in output.err
+    assert len([item for item in requests if item[0] == "DELETE"]) == 1
+    assert len(claims) == (1 if dry_run else 0)
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("command", ["claim", "unclaim"])
+@pytest.mark.parametrize("failure", ["http_503", "invalid_json"])
+def test_failed_write_response_reports_unknown_without_resubmitting(
+        fleet_api, fleet_service, write_response, monkeypatch, capsys, json_output, command, failure):
+    address, requests, claims = fleet_service
+    if command == "unclaim":
+        claims["claim-a"] = {"id": "claim-a", "service_id": "id-a", "instance_id": "id-a",
+                             "until": 1800259200, "reason": "experiment", "revoked_at": None}
+        arguments = ["unclaim", "claim-a"]
+    else:
+        arguments = ["claim", "id-a", "--until", "+1d", "--reason", "experiment"]
+    if failure == "http_503":
+        write_response.update(status=503, rewrite=lambda result: {"error": "response_failure"})
+    else:
+        write_response["raw"] = b"{"
+    monkeypatch.setitem(fleet_api["main"].__globals__, "load_config", lambda **kwargs: {"url": address})
+    assert fleet_api["main"](arguments + (["--json"] if json_output else [])) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "outcome unknown" in output.err and "llm fleet --json" in output.err
+    assert "no automatic write retry" in output.err
+    assert len([item for item in requests if item[0] in ("POST", "DELETE")]) == 1
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("command", ["claim", "unclaim"])
+def test_failed_http_error_body_preserves_unknown_write_outcome(
+        fleet_api, fleet, monkeypatch, capsys, json_output, command):
+    requests = []
+
+    class ErrorBody(io.BytesIO):
+        def read(self, *args):
+            raise TimeoutError("Error response body timed out")
+
+    def open_request(request, **kwargs):
+        requests.append(request.method)
+        if request.method == "GET":
+            return io.BytesIO(json.dumps(fleet).encode())
+        raise HTTPError(request.full_url, 503, "Unavailable", {}, ErrorBody())
+
+    client = fleet_api["SchedulerClient"]("http://scheduler:8011", opener=open_request)
+    globals_ = fleet_api["main"].__globals__
+    monkeypatch.setitem(globals_, "load_config", lambda **kwargs: {})
+    monkeypatch.setitem(globals_, "SchedulerClient", lambda **kwargs: client)
+    arguments = (["claim", "id-a", "--until", "+1d", "--reason", "experiment"]
+                 if command == "claim" else ["unclaim", "claim-a"])
+    assert fleet_api["main"](arguments + (["--json"] if json_output else [])) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "outcome unknown" in output.err and "llm fleet --json" in output.err
+    assert "no automatic write retry" in output.err
+    assert requests == (["GET", "POST"] if command == "claim" else ["DELETE"])
 
 
 @pytest.mark.parametrize("command", [["claim", "id-a", "--until", "+1d", "--reason", "test"], ["unclaim", "claim-id"]])
@@ -377,8 +500,10 @@ def test_claim_receipt_must_bind_both_service_identifiers(fleet_api):
     args = fleet_api["build_parser"]().parse_args(["claim", "id-a", "--until", "+1d", "--reason", "test"])
     result = {"ok": True, "claim": {"id": "claim-a", "service_id": "id-a", "instance_id": "id-b",
                                    "until": 1800003600, "reason": "test"}}
+    result["dry_run"] = False
     with pytest.raises(fleet_api["ClientError"], match="Invalid fleet claim response"):
-        fleet_api["validate_fleet_claim"](args, result, "id-a")
+        fleet_api["validate_fleet_claim"](args, result, "id-a",
+                                         payload={"until": 1800003600, "reason": "test"})
 
 
 @pytest.mark.parametrize("patch", [{"schema_version": 2}, {"services": [{}]}, {"gpus": [None]}, {"stale": "false"}])
