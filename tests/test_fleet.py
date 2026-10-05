@@ -132,6 +132,8 @@ def test_replay_status_priority_and_observed_idle():
     ("0.0.0.0", {}, ["127.0.0.1", "::1", "192.0.2.20", "192.0.2.10"], True, "http://192.0.2.20:8010", "shared"),
     ("::", {}, ["127.0.0.1", "::1", "2001:db8::10"], True, "http://[2001:db8::10]:8010", "shared"),
     ("0.0.0.0", {}, ["127.0.0.1", "::1"], True, None, "shared"),
+    ("0.0.0.0", {}, ["::ffff:127.0.0.1", "::ffff:192.0.2.20"], True, "http://192.0.2.20:8010", "shared"),
+    ("::", {}, ["::ffff:192.0.2.20"], True, None, "shared"),
 ])
 def test_service_invocation_metadata_uses_verified_listener_and_owner_addresses(
         controller, bind, mapping, host_ips, host, address, access):
@@ -199,9 +201,10 @@ def test_legacy_successful_schema_one_listener_remains_compatible(controller):
     (False, "http://192.0.2.10:8010"), (True, None), (None, None),
 ])
 @pytest.mark.parametrize("host", [False, True])
-def test_ipv6_wildcard_ipv4_uri_requires_observed_dual_stack(controller, ipv6_only, address, host):
+@pytest.mark.parametrize("host_ip", ["192.0.2.10", "::ffff:192.0.2.10"])
+def test_ipv6_wildcard_ipv4_uri_requires_observed_dual_stack(controller, ipv6_only, address, host, host_ip):
     worker, now, _ = controller
-    worker.config = replace(worker.config, collectors={**worker.config.collectors, "host_ips": ["192.0.2.10"]})
+    worker.config = replace(worker.config, collectors={**worker.config.collectors, "host_ips": [host_ip]})
     write_mapping(worker.config, containers={"192.0.2.10": "ctr-a"})
     ingest(worker, now, snapshot(services=[service(bind="::", host=host, container=None if host else "ctr-a",
         listener_observation_complete=True, listener_ipv6_only=ipv6_only)]))

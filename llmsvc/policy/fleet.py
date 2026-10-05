@@ -31,6 +31,7 @@ def service_endpoint(instance, *, current, stale, owner_addresses=None, host_ips
             if "%" in value:
                 continue
             candidate = ipaddress.ip_address(value)
+            candidate = getattr(candidate, "ipv4_mapped", None) or candidate
             compatible = (candidate.version == address.version
                           or (address.version == 6 and candidate.version == 4 and meta.get("listener_ipv6_only") is False))
             if (compatible and not candidate.is_loopback
