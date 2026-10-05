@@ -847,7 +847,7 @@ class FleetApp(App):
                     show_legends=available >= len(self.gpu_accounts) * 3)
                 overview.service_hits, self._gpu_anchors = {}, {}
             else:
-                overview.bar_rows = 4 if self.size.width >= 100 else 3
+                overview.bar_rows = 5 if self.size.width >= 100 else 3
                 view, overview.hits, self._gpu_anchors, overview.service_hits = render_expanded(
                     self.gpu_accounts, sorted(self.services(), key=self.sort_key), self.size.width - 1,
                     overview.bar_rows, self.selected_gpu, self.selected_segment, stale, self.clean,

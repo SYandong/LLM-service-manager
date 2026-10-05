@@ -18,7 +18,7 @@ from tui.fleet_app import ClaimDialog, FleetHelpDialog, GpuDetailDialog, GpuOver
 from tui.fleet_gpu import (FREE_KEY, MEASURED_KEY, RESIDUAL_KEY, account_gpu,
                            allocation_legend, card_header, compact_gib, detail_lines,
                            drawing_segments, expanded_header, gib, owner_color,
-                           proportional_cells, render_bar, render_expanded, service_lines)
+                           proportional_cells, render_bar, render_expanded, render_overview, service_lines)
 from test_tui_fleet import fleet_snapshot, make_app, ready
 
 
@@ -64,6 +64,26 @@ def test_owner_color_is_stable_across_cards_kinds_and_order(gpu_snapshot):
     assert owner_color("container:sample-a") != owner_color("container:sample-b")
     assert len({owner_color("container:sample-" + suffix) for suffix in "abcd"}) == 4
     assert owner_color("unknown") != owner_color("container:unknown")
+
+
+@pytest.mark.parametrize("rows", [1, 3, 5])
+@pytest.mark.parametrize("expanded", [False, True], ids=["compact", "expanded"])
+def test_bar_labels_have_equal_padding_on_all_sides(rows, expanded):
+    card = account_gpu({"index": 0, "total_gb": 100, "used_gb": 52,
+                        "occupants": [{"container": "sample-a", "kind": "llm", "used_gb": 52}]})
+    if expanded:
+        view, hits, _, _ = render_expanded([card], [], 100, bar_rows=rows)
+    else:
+        view, hits = render_overview([card], 100, rows)
+    bars = view.plain.splitlines()[1:rows + 1]
+    for label, key in (("sample-a LLM 52", ("container:sample-a", "llm")), ("Free 48", FREE_KEY)):
+        labeled_rows = [index for index, line in enumerate(bars) if label in line]
+        assert len(labeled_rows) == 1
+        row = labeled_rows[0]
+        assert row == len(bars) - row - 1
+        _, left, right, _, _ = next(hit for hit in hits if hit[0] == row + 1 and hit[4] == key)
+        start = bars[row].index(label)
+        assert abs((start - left) - (right - start - len(label))) <= 1
 
 
 def test_proportional_rounding_keeps_tiny_amounts_without_forcing_a_cell():

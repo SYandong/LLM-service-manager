@@ -17,7 +17,8 @@ Each owner keeps the same color across cards. Solid segments are LLMs,
 dotted segments labelled `Other` are other tasks, neutral segments are unattributed memory,
 and the remaining track is free memory. Compute utilization has its own label.
 The default GPU view uses large, scrolling panels with every owner and model
-allocation listed underneath. Use Up/Down to select a GPU, Left/Right to select
+allocation listed underneath. Bar labels are centered in each segment.
+Use Up/Down to select a GPU, Left/Right to select
 an allocation, and Enter for details. Z switches to the compact six-GPU overview,
 which fits 100×30 and 80×24 terminals. P opens People.
 

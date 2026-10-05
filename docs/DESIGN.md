@@ -1111,7 +1111,9 @@ are shown without automatic retries. Non-TTY and missing-Textual paths use CLI o
 
 The GPU view opens expanded panels in a vertical scroll area. Each panel has
 a prominent GPU heading, used/total GiB, compute utilization and a large
-proportional allocation bar. It lists every owner allocation and individual
+proportional allocation bar, with labels centered horizontally and vertically.
+Bars have five rows at 100 columns or wider and three on narrower terminals.
+It lists every owner allocation and individual
 LLM service, including model, engine, state and 24-hour activity. Long fields
 wrap. Per-card memory comes from that card; activity statistics cover the service.
 

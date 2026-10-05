@@ -280,7 +280,7 @@ def render_overview(accounts, width, bar_rows, selected_gpu=None, selected_segme
         hits.append((header_y, 0, width, account.index, None))
         selected = selected_segment if account.index == selected_gpu else None
         for row in range(bar_rows):
-            bar, ranges = render_bar(account, width, selected, labels=row == 0, clean=clean)
+            bar, ranges = render_bar(account, width, selected, labels=row == (bar_rows - 1) // 2, clean=clean)
             hits.extend((len(lines), left, right, account.index, key) for left, right, key in ranges)
             lines.append(bar)
         if show_legends or account.index == selected_gpu:
@@ -340,7 +340,7 @@ def service_lines(service, used_gb, index, clean=str, status=None):
     return first, ident, third, fourth
 
 
-def render_expanded(accounts, services, width, bar_rows=4, selected_gpu=None,
+def render_expanded(accounts, services, width, bar_rows=5, selected_gpu=None,
                     selected_segment=None, stale=False, clean=str, statuses=None):
     """Wrap complete cards and return anchors and mouse targets for scrolling."""
     width = max(1, width)
@@ -371,7 +371,7 @@ def render_expanded(accounts, services, width, bar_rows=4, selected_gpu=None,
             append(Text("  " + " · ".join(account.issues), style="bold #e0b568"), account.index)
         selected = selected_segment if account.index == selected_gpu else None
         for row in range(bar_rows):
-            bar, ranges = render_bar(account, width, selected, labels=row == 0, clean=clean)
+            bar, ranges = render_bar(account, width, selected, labels=row == (bar_rows - 1) // 2, clean=clean)
             hits.extend((len(lines), left, right, account.index, key) for left, right, key in ranges)
             lines.append(bar)
         for allocation in account.allocations:
