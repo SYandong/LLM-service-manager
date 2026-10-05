@@ -14,6 +14,7 @@ from rich.cells import cell_len
 
 pytest.importorskip("textual")
 from textual.widgets import Button, DataTable, Input, Sparkline, Static
+from textual.containers import VerticalScroll
 from tui.fleet_app import ClaimDialog, FleetApp, GpuDetailDialog, GpuOverview
 
 
@@ -151,6 +152,18 @@ def test_layout_views_and_seven_day_details(fleet_snapshot, size, tmp_path):
             overview = app.query_one("#fleet-gpus", GpuOverview)
             assert app.view == "gpu"
             assert not table.display and not app.query_one("#fleet-details").display
+            assert not app.compact_gpus
+            assert overview.bar_rows == (4 if size[0] >= 100 else 3)
+            viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
+            assert viewport.virtual_size.height > viewport.size.height
+            assert "training-group · Other · 20 GiB" in str(overview.render())
+            assert "quiet-model" in str(overview.render())
+            assert "sort priority" not in str(app.query_one("#fleet-controls").render())
+            assert "Live changes" not in str(app.query_one("#fleet-controls").render())
+            app.save_screenshot(filename="fleet-expanded-%sx%s.svg" % size, path=str(tmp_path))
+            await pilot.press("z")
+            await ready(app, pilot)
+            assert app.compact_gpus
             assert overview.bar_rows == (2 if size[0] >= 100 else 1)
             lines = overview.render().plain.splitlines()
             assert len(lines) == 6 * (overview.bar_rows + 2)

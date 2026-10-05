@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6.1-sol
+# Generated-By: Codex / unknown model
 """Synthetic accounting, visible GPU selection, detail, and claim contracts."""
 
 import asyncio
@@ -7,15 +8,17 @@ import json
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 
 pytest.importorskip("textual")
 from textual.widgets import Button, DataTable, Input
+from textual.containers import VerticalScroll
 
-from tui.fleet_app import ClaimDialog, GpuDetailDialog, GpuOverview
+from tui.fleet_app import ClaimDialog, FleetHelpDialog, GpuDetailDialog, GpuOverview
 from tui.fleet_gpu import (FREE_KEY, MEASURED_KEY, RESIDUAL_KEY, account_gpu,
                            allocation_legend, card_header, compact_gib, detail_lines,
-                           drawing_segments, gib, owner_color,
-                           proportional_cells, render_bar)
+                           drawing_segments, expanded_header, gib, owner_color,
+                           proportional_cells, render_bar, render_expanded, service_lines)
 from test_tui_fleet import fleet_snapshot, make_app, ready
 
 
@@ -57,8 +60,9 @@ def test_owner_color_is_stable_across_cards_kinds_and_order(gpu_snapshot):
         matches = [segment for card in cards for segment in drawing_segments(card)
                    if segment.key[0] == "container:sample-a"]
         assert {segment.color for segment in matches} == {owner_color("container:sample-a")}
-        assert {segment.pattern for segment in matches} == {" ", "╱"}
+        assert {segment.pattern for segment in matches} == {" ", "·"}
     assert owner_color("container:sample-a") != owner_color("container:sample-b")
+    assert len({owner_color("container:sample-" + suffix) for suffix in "abcd"}) == 4
     assert owner_color("unknown") != owner_color("container:unknown")
 
 
@@ -105,7 +109,8 @@ def test_conflict_draws_measurement_and_preserves_supplied_allocations(gpu_snaps
     segments = drawing_segments(card)
     assert [(item.key, item.used_gb) for item in segments] == [(MEASURED_KEY, 100), (FREE_KEY, 40)]
     assert proportional_cells([item.used_gb for item in segments], 140, 80) == [57, 23]
-    assert "attribution conflict +18 GiB" in card_header(card, 80).plain
+    assert "conflict +18 GiB" in card_header(card, 80).plain
+    assert "attribution conflict +18 GiB" in detail_lines(card)
     assert "sample-a · LLM · 74 GiB" in detail_lines(card)
     assert "Unattributed: ?" in detail_lines(card)
 
@@ -144,6 +149,116 @@ def test_fractional_overview_is_compact_and_details_retain_source_precision():
     assert compact_gib(20.0) == "20"
 
 
+def test_fractional_conflict_keeps_compute_visible_with_a_stale_label():
+    card = account_gpu({"index": 0, "total_gb": 140.1201171875, "used_gb": 100.03125,
+                        "util_percent": 61.125, "occupants": [
+                            {"container": "sample-a", "kind": "llm", "used_gb": 118}]})
+    header = card_header(card, 80, selected=True, stale=True).plain
+    assert "STALE" in header
+    assert "compute 61.12%" in header
+    assert "conflict +17.96875 GiB" in header
+    assert "attribution conflict +17.96875 GiB" in detail_lines(card)
+
+
+def test_expanded_cards_wrap_full_labels_and_source_values(gpu_snapshot):
+    service = gpu_snapshot["services"][0]
+    old_id = service["id"]
+    service["id"] = "synthetic-service-" + "identifier-" * 16
+    service["model"] = "synthetic-model-" + "long-label-" * 12
+    service["gpu_gb"] = 999
+    owner = "synthetic-owner-" + "long-name-" * 12
+    occupant = gpu_snapshot["gpus"][0]["occupants"][0]
+    occupant.update(container=owner, service_id=service["id"], used_gb=52.0009765625)
+    assert occupant["service_id"] != old_id
+    card = accounts(gpu_snapshot)[0]
+    view, hits, anchors, service_hits = render_expanded([card], gpu_snapshot["services"], 79)
+    joined = "".join(view.plain.split())
+    assert owner in joined and service["id"] in joined and service["model"] in joined
+    assert "GPU0VRAM:52.0009765625GiB" in joined
+    assert "GPU0VRAM:999" not in joined
+    assert "+1 · Enter" not in view.plain and "…" not in view.plain
+    assert all(line.cell_len <= 79 for line in view.split("\n"))
+    owner_key = ("container:" + owner, "llm")
+    owner_row = anchors[(0, owner_key)]
+    assert (owner_row, 0, 79, 0, owner_key) in hits
+    id_rows = [row for row, ident in service_hits.items() if ident == service["id"]]
+    assert len(id_rows) > 4
+    assert all((row, 0, 79, 0, owner_key) in hits for row in id_rows)
+    assert all(service["id"] not in service_hits.get(row, "") for row in range(owner_row))
+
+
+def test_expanded_typography_retains_owner_and_state_semantics(gpu_snapshot):
+    card = accounts(gpu_snapshot)[0]
+    header = expanded_header(card, selected=True)
+    assert "123 used of 140 GiB" in header.plain and "Compute 61%" in header.plain
+    console = Console()
+    assert header.get_style_at_offset(console, header.plain.index("GPU")).bold
+    assert not header.get_style_at_offset(console, header.plain.index("VRAM")).bold
+    first, ident, activity, counters = service_lines(gpu_snapshot["services"][0], 52, 0, status="active")
+    assert first.get_style_at_offset(console, first.plain.index("demo-model")).bold
+    assert not first.get_style_at_offset(console, first.plain.index("Model")).bold
+    assert not first.get_style_at_offset(console, first.plain.index("Engine")).bold
+    assert first.get_style_at_offset(console, first.plain.index("active")).color.get_truecolor().hex == "#71c695"
+    assert "Service ID:" in ident.plain
+    assert "24h service activity" in activity.plain and "coverage 50%" in activity.plain
+    assert activity.cell_len <= 79
+    assert "24h service requests 120 · input 24000 · output 12000" in counters.plain
+    view, _, anchors, _ = render_expanded([card], [], 100)
+    row = view.split("\n")[anchors[(0, card.allocations[0].key)]]
+    assert row.get_style_at_offset(console, 2).color.get_truecolor().hex == owner_color(card.allocations[0].identity)
+
+
+def test_expanded_conflicts_and_unknowns_keep_allocations_readable(gpu_snapshot):
+    gpu_snapshot["gpus"][0]["used_gb"] = 100
+    gpu_snapshot["gpus"][1]["total_gb"] = None
+    cards = accounts(gpu_snapshot)[:2]
+    view, _, _, _ = render_expanded(cards, gpu_snapshot["services"], 79, stale=True)
+    assert "attribution conflict +18 GiB" in view.plain
+    assert "sample-a · LLM · 74 GiB" in view.plain
+    assert "Unattributed used · ? GiB" in view.plain
+    assert "Free VRAM · 40 GiB" in view.plain
+    assert "capacity unknown" in view.plain
+    assert "Measured VRAM · Used 136 GiB · Total ? GiB" in view.plain
+    assert view.plain.count("STALE") == 2
+
+
+@pytest.mark.parametrize("service_id", [[], {}, 0, "", False])
+def test_malformed_gpu_service_id_preserves_the_last_good_snapshot(gpu_snapshot, service_id):
+    async def scenario():
+        app, client = make_app(gpu_snapshot)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await ready(app, pilot)
+            original = app.snapshot
+            original_accounts = app.gpu_accounts.copy()
+            client.snapshot["gpus"][0]["occupants"][0]["service_id"] = service_id
+            await app.refresh_fleet().wait()
+            await ready(app, pilot)
+            assert app.snapshot is original
+            assert app.gpu_accounts == original_accounts
+            assert "Invalid GPU service ID" in app.read_error
+            assert "STALE" in app.query_one("#fleet-gpus").render().plain
+            assert app._exception is None
+    asyncio.run(scenario())
+
+
+def test_accounting_overflow_preserves_the_last_good_snapshot(gpu_snapshot):
+    async def scenario():
+        app, client = make_app(gpu_snapshot)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await ready(app, pilot)
+            original = app.snapshot
+            original_accounts = app.gpu_accounts.copy()
+            for occupant in client.snapshot["gpus"][0]["occupants"][:2]:
+                occupant["used_gb"] = 1e308
+            await app.refresh_fleet().wait()
+            await ready(app, pilot)
+            assert app.snapshot is original
+            assert app.gpu_accounts == original_accounts
+            assert app.read_error
+            assert app._exception is None
+    asyncio.run(scenario())
+
+
 def test_fractional_gpu_measurements_keep_compute_visible_at_80_columns(gpu_snapshot):
     async def scenario():
         for gpu in gpu_snapshot["gpus"]:
@@ -152,6 +267,8 @@ def test_fractional_gpu_measurements_keep_compute_visible_at_80_columns(gpu_snap
             gpu["util_percent"] += .125
         app, _ = make_app(gpu_snapshot)
         async with app.run_test(size=(80, 24)) as pilot:
+            await ready(app, pilot)
+            await pilot.press("z")
             await ready(app, pilot)
             overview = app.query_one("#fleet-gpus", GpuOverview)
             headers = [line for line in overview.render().plain.splitlines() if "GPU " in line]
@@ -188,8 +305,10 @@ def test_gpu_keyboard_segment_details_and_individual_services(gpu_snapshot, size
             assert app.selected_segment == ("container:sample-a", "llm")
             await pilot.press("p", "g")
             assert app.selected_gpu == 2
-            overview = app.query_one("#fleet-gpus", GpuOverview)
-            assert overview.region.y + len(overview.render().plain.splitlines()) <= app.query_one("#fleet-notice").region.y
+            viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
+            assert viewport.scroll_y > 0
+            anchor = app._gpu_anchors[(app.selected_gpu, app.selected_segment)]
+            assert viewport.scroll_y <= anchor < viewport.scroll_y + viewport.size.height
             assert app._exception is None
     asyncio.run(scenario())
 
@@ -198,6 +317,8 @@ def test_mouse_targets_gpu_headers_and_owner_segments(gpu_snapshot):
     async def scenario():
         app, _ = make_app(gpu_snapshot)
         async with app.run_test(size=(100, 30)) as pilot:
+            await ready(app, pilot)
+            await pilot.press("z")
             await ready(app, pilot)
             overview = app.query_one("#fleet-gpus", GpuOverview)
             header = next(hit for hit in overview.hits if hit[3:] == (5, None))
@@ -235,6 +356,110 @@ def test_refresh_keeps_owner_selection_and_colors(gpu_snapshot):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("size", [(100, 30), (80, 24)])
+def test_expanded_selection_scroll_refresh_and_compact_roundtrip(gpu_snapshot, size):
+    async def scenario():
+        app, client = make_app(gpu_snapshot)
+        async with app.run_test(size=size) as pilot:
+            await ready(app, pilot)
+            viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
+            overview = app.query_one("#fleet-gpus", GpuOverview)
+            assert not app.compact_gpus
+            assert viewport.virtual_size.height > viewport.size.height
+            for service in gpu_snapshot["services"]:
+                assert service["id"] in overview.render().plain
+                assert service["model"] in overview.render().plain
+            await pilot.press("down", "down", "right")
+            await ready(app, pilot)
+            selected = app.selected_gpu, app.selected_segment
+            anchor = app._gpu_anchors[selected]
+            assert viewport.scroll_y <= anchor < viewport.scroll_y + viewport.size.height
+            viewport.scroll_to(y=viewport.scroll_y + 3, animate=False)
+            await pilot.pause()
+            manual_scroll = viewport.scroll_y
+            client.snapshot["services"].reverse()
+            await app.refresh_fleet().wait()
+            await ready(app, pilot)
+            assert (app.selected_gpu, app.selected_segment) == selected
+            assert viewport.scroll_y == manual_scroll
+            await pilot.press("z")
+            await ready(app, pilot)
+            assert app.compact_gpus and viewport.scroll_y == 0
+            assert (app.selected_gpu, app.selected_segment) == selected
+            await pilot.press("z")
+            await ready(app, pilot)
+            anchor = app._gpu_anchors[selected]
+            assert not app.compact_gpus
+            assert viewport.scroll_y <= anchor < viewport.scroll_y + viewport.size.height
+            assert "Q quit" in str(app.query_one("#fleet-footer").render())
+            assert "/ filter" not in str(app.query_one("#fleet-footer").render())
+    asyncio.run(scenario())
+
+
+def test_mouse_on_wrapped_inline_service_selects_that_service(gpu_snapshot):
+    async def scenario():
+        service = gpu_snapshot["services"][1]
+        ident = "synthetic-service-" + "long-identifier-" * 12
+        service["id"] = ident
+        gpu_snapshot["gpus"][0]["occupants"][1]["service_id"] = ident
+        app, _ = make_app(gpu_snapshot)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await ready(app, pilot)
+            overview = app.query_one("#fleet-gpus", GpuOverview)
+            rows = overview.render().plain.splitlines()
+            id_start = next(row for row in overview.service_hits if overview.service_hits[row] == ident
+                            and rows[row].strip().startswith("Service ID:"))
+            continuation = id_start + 1
+            assert overview.service_hits[continuation] == ident
+            viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
+            viewport.scroll_to(y=continuation - 2, animate=False)
+            await pilot.pause()
+            await pilot.click("#fleet-gpus", offset=(2, continuation))
+            await ready(app, pilot)
+            assert isinstance(app.screen, GpuDetailDialog)
+            assert app.selected_service_id() == ident
+            assert app.history["service_id"] == ident
+            assert app.selected_segment == ("container:sample-a", "llm")
+            await pilot.press("escape")
+            assert app.focused is overview
+    asyncio.run(scenario())
+
+
+def test_help_scrolls_at_80_columns_and_restores_gpu_focus(gpu_snapshot):
+    async def scenario():
+        app, _ = make_app(gpu_snapshot)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await ready(app, pilot)
+            await pilot.press("down", "right", "question_mark")
+            await pilot.pause()
+            assert isinstance(app.screen, FleetHelpDialog)
+            content = app.screen.query_one("#fleet-help-text")
+            text = str(content.render())
+            assert "Press / to search" in text
+            assert "LLM: inference models, solid fill" in text
+            assert "Other: other GPU jobs, dotted fill" in text
+            assert "Unattributed: used VRAM with no matched workload" in text
+            assert "24h activity describes the whole service" in text
+            viewport = app.screen.query_one("#fleet-help-scroll", VerticalScroll)
+            assert viewport.virtual_size.height > viewport.size.height
+            assert content.region.width <= 80
+            viewport.scroll_end(animate=False)
+            await pilot.pause()
+            assert viewport.scroll_y > 0
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.screen is app.dashboard
+            assert app.focused is app.query_one("#fleet-gpus")
+            assert app.selected_gpu == 1 and app.selected_segment == ("container:sample-b", "llm")
+            await pilot.press("p")
+            assert "sort State" in str(app.query_one("#fleet-controls").render())
+            await pilot.press("s")
+            assert "sort Idle time" in str(app.query_one("#fleet-controls").render())
+            await pilot.press("z")
+            assert app.screen is app.dashboard and not app.compact_gpus
+    asyncio.run(scenario())
+
+
 def test_filter_and_mine_never_turn_hidden_allocations_into_free_memory(gpu_snapshot):
     async def scenario():
         app, _ = make_app(gpu_snapshot)
@@ -247,7 +472,9 @@ def test_filter_and_mine_never_turn_hidden_allocations_into_free_memory(gpu_snap
             await pilot.press("enter", "m")
             assert app.gpu_accounts == original
             assert render_bar(app.gpu_accounts[0], 80)[0] == original_bar
-            assert "sample-b LLM 34" in str(app.query_one("#fleet-gpus").render())
+            assert "sample-b · LLM · 34 GiB" in str(app.query_one("#fleet-gpus").render())
+            assert "demo-model-34" not in str(app.query_one("#fleet-gpus").render())
+            assert "demo-model-52" in str(app.query_one("#fleet-gpus").render())
             assert app.selected_gpu_account().free_gb == 17
             await pilot.press("right", "right", "enter")
             await ready(app, pilot)
@@ -261,13 +488,16 @@ def test_stale_and_conflict_are_visible_in_the_compact_overview(gpu_snapshot):
         app, client = make_app(gpu_snapshot)
         async with app.run_test(size=(80, 24)) as pilot:
             await ready(app, pilot)
+            await pilot.press("z")
             client.snapshot["stale"] = True
             client.snapshot["gpus"][0]["used_gb"] = 100
             await app.refresh_fleet().wait()
             await ready(app, pilot)
             overview = app.query_one("#fleet-gpus", GpuOverview)
             assert "STALE" in str(overview.render())
-            assert "attribution conflict +18 GiB" in str(overview.render())
+            assert "conflict +18 GiB" in str(overview.render())
+            header = overview.render().plain.splitlines()[0]
+            assert "compute 61%" in header
             assert str(overview.render()).count("GPU ") == 6
             assert overview.region.y + len(overview.render().plain.splitlines()) <= app.query_one("#fleet-notice").region.y
             await pilot.press("right", "enter")
@@ -286,6 +516,7 @@ def test_six_gpu_headers_fit_with_filter_and_failure_banner(gpu_snapshot, size, 
         app, client = make_app(gpu_snapshot)
         async with app.run_test(size=size) as pilot:
             await ready(app, pilot)
+            await pilot.press("z")
             if failure == "stale":
                 client.snapshot["stale"] = True
             else:

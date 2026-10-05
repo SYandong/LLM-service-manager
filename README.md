@@ -11,14 +11,15 @@ pin 与 GPU reserve，并提供可选终端面板。llama-swap 和 vllm-wrapper
 ## Fleet view
 
 `llm status` shows inference services, GPU memory, recent activity and claims.
-Run `llm` or `llm top` to open the TUI. The default GPU view shows six large
-allocation bars; P switches to People, grouped by container.
+Run `llm` or `llm top` to open the TUI.
 
 Each owner keeps the same color across cards. Solid segments are LLMs,
-patterned segments are other tasks, neutral segments are unattributed memory,
+dotted segments labelled `Other` are other tasks, neutral segments are unattributed memory,
 and the remaining track is free memory. Compute utilization has its own label.
-Use Up/Down to select a card, Left/Right to select an allocation, and Enter for
-details. The overview fits 100×30 and 80×24 terminals.
+The default GPU view uses large, scrolling panels with every owner and model
+allocation listed underneath. Use Up/Down to select a GPU, Left/Right to select
+an allocation, and Enter for details. Z switches to the compact six-GPU overview,
+which fits 100×30 and 80×24 terminals. P opens People.
 
 Fleet collection is enabled by the deployment operator. A disabled fleet returns
 `fleet_disabled`. Without a TTY or Textual, `llm` prints fleet status.

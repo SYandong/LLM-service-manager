@@ -1107,21 +1107,30 @@ off the UI loop; stable identities preserve selection across refreshes.
 Claims use a dry-run preview followed by submission. Failed or uncertain writes
 are shown without automatic retries. Non-TTY and missing-Textual paths use CLI output.
 
-#### GPU overview (#328)
+#### GPU panels (#328)
 
-The approved layout shows GPU 0–5 as six full-width rows. Each row has a GPU
-index, used/total GiB, VRAM percentage, a separately labelled compute percentage,
-and a proportional allocation bar. Overview amounts use concise formatting;
-details retain source values. At 100×30 the
-bar occupies two terminal rows; at 80×24 it occupies one. Detail opens on
-selection so all six GPUs fit in the overview.
+The GPU view opens expanded panels in a vertical scroll area. Each panel has
+a prominent GPU heading, used/total GiB, compute utilization and a large
+proportional allocation bar. It lists every owner allocation and individual
+LLM service, including model, engine, state and 24-hour activity. Long fields
+wrap. Per-card memory comes from that card; activity statistics cover the service.
+
+Z switches to the compact overview. GPU 0–5 fit together at 100×30 with
+two bar rows, and at 80×24 with one. Overview amounts use concise formatting;
+expanded allocations and detail retain source values. The VRAM percentage
+appears when space allows.
 
 Each container owner keeps one color across GPUs and refreshes. Solid segments
-are LLM allocations; patterned segments in the same color are other tasks.
+are LLM allocations; a subtle texture and explicit `Other` labels identify other tasks.
 Neutral segments show unattributed used memory; the muted track shows free
 memory. Owner keys and numeric labels make the view readable without color.
 Multiple LLM services from the same owner share a segment, with individual
-models listed in detail. Other tasks expose owner and memory.
+models listed underneath. Other tasks expose owner and memory.
+
+GPU headings, models and key amounts are bold. Owner text matches the bar color;
+service states use semantic colors. The header shows update age and a plain
+allocation legend. Sorting and event-connection diagnostics stay out of the
+GPU header.
 
 For capacity T, measured use U and attributed sum S, segment totals are
 S + (U−S) + (T−U). Small allocations use proportional cell rounding and retain
@@ -1130,7 +1139,8 @@ they never turn hidden allocations into free memory. If S exceeds U, show
 the measured use with an attribution-conflict marker and list the discrepancy.
 Missing capacity has no percentage bar; stale values remain labelled stale.
 
-Up/Down selects a GPU, Left/Right selects an allocation and Enter opens detail.
+Up/Down selects a GPU and scrolls it into view. Left/Right selects an allocation;
+Enter opens detail and Z switches panel size.
 Mouse selection follows the same path. UI text is English and concise: use
 direct labels such as `Stale`, `Unknown` and `Attribution conflict`.
 
