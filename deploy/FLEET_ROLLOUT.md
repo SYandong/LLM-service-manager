@@ -139,9 +139,13 @@ current account state. A failed or unknown side effect remains unresolved;
 do not clear fences or replay a start/stop to make the record look complete.
 
 Legacy TUI deletion in the minor after the first fleet release is #311 and needs zero-use evidence or
-maintainer confirmation. #28 target rewriting and #168 closure remain decisions;
-this rollout observes and coordinates, and does not retire another user's
-service. The [announcement](../docs/FLEET_ANNOUNCEMENT.md) is a draft only and
-makes no deployment claim.
+maintainer confirmation. #28 now tracks group-wide read-only GPU observation
+and manual coordination. #168's original TUI redesign was superseded by the
+#309 fleet TUI (PR #320) and closed as `not_planned`; the original plan's full
+acceptance is not claimed. This rollout observes and coordinates, and does not
+retire another user's service. The
+[announcement](../docs/FLEET_ANNOUNCEMENT.md) is a draft only and makes no
+deployment claim.
 
 <!-- Generated-By: Codex / unknown model -->
+<!-- Generated-By: Codex / gpt-6.1-sol -->
