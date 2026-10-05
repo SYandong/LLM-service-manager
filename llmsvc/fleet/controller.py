@@ -121,8 +121,8 @@ class FleetController:
                 stale = generated is None or now < generated or age > self.config.fleet_stale_after_seconds or self.last_error is not None
                 instances = self.store.instances()
                 claims = self.store.claims(now)
-                windows = {"24h": self.store.window(now - 86400, now + 0.000001),
-                           "7d": self.store.window(now - 604800, now + 0.000001)}
+                windows = {"24h": self.store.window(now - 86400, now, include_end=True),
+                           "7d": self.store.window(now - 604800, now, include_end=True)}
                 hour = math.floor(now / 3600) * 3600
                 start_hour = hour - 23 * 3600
                 hourly = {}
@@ -201,7 +201,7 @@ class FleetController:
                         row["ts"] = hour
                         lower, upper = max(hour, window_start), min(hour + 3600, now)
                         if lower != hour or upper != hour + 3600:
-                            counts = self.store.window(lower, upper + 0.000001).get(instance_id, {})
+                            counts = self.store.window(lower, upper, include_end=upper == now).get(instance_id, {})
                             row.update({key: counts.get(key) for key in ("active_minutes", "requests", "gen_tokens", "prompt_tokens", "cached_tokens")})
                             row["observed_seconds"] = counts.get("observed_seconds", 0)
                         row["coverage_ratio"] = min(1, row["observed_seconds"] / (upper - lower)) if upper > lower else None

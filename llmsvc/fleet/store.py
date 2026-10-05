@@ -7,7 +7,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from llmsvc.fleet.ingest import sample, validate_snapshot
+from llmsvc.fleet.ingest import MAX_SAMPLE_GAP_SECONDS, sample, validate_snapshot
 
 SCHEMA = """
 CREATE TABLE fleet_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -258,7 +258,7 @@ class FleetStore:
             with db:
                 db.execute("UPDATE fleet_claims SET revoked_at=COALESCE(revoked_at,?) WHERE id=?", (now, claim_id))
 
-    def window(self, start, end):
+    def window(self, start, end, *, include_end=False):
         """Aggregate in SQLite, never load the raw time series to serve a fleet GET."""
         with self.lock:
             db = self._connection()
@@ -277,8 +277,12 @@ class FleetStore:
             if first >= end:
                 boundaries = [(start, end)]
             for lower, upper in boundaries:
-                if lower >= upper:
+                inclusive = include_end and upper == end
+                if lower > upper or (lower == upper and not inclusive):
                     continue
+                # Keep coverage exactly clipped. Only the final counter endpoint
+                # may be inclusive; an hour boundary belongs to the next bucket.
+                counter_upper = math.nextafter(upper, math.inf) if inclusive else upper
                 for row in db.execute("""SELECT instance_id,
                     SUM(CASE WHEN active=1 THEN MAX(0,MIN(ts,?)-MAX(ts-observed_seconds,?))/60 ELSE 0 END) active_minutes,
                     SUM(MAX(0,MIN(ts,?)-MAX(ts-observed_seconds,?))) observed_seconds,
@@ -287,7 +291,8 @@ class FleetStore:
                     SUM(CASE WHEN ts>=? AND ts<? THEN d_prompt_tokens END) prompt_tokens,
                     SUM(CASE WHEN ts>=? AND ts<? THEN d_cached_tokens END) cached_tokens
                     FROM fleet_samples WHERE ts>=? AND ts<? GROUP BY instance_id""",
-                    (upper, lower, upper, lower, lower, upper, lower, upper, lower, upper, lower, upper, lower, upper + 120)):
+                    (upper, lower, upper, lower, lower, counter_upper, lower, counter_upper, lower, counter_upper,
+                     lower, counter_upper, lower, upper + MAX_SAMPLE_GAP_SECONDS)):
                     target = result.setdefault(row["instance_id"], {"instance_id": row["instance_id"]})
                     for key in ("active_minutes", "observed_seconds", "requests", "gen_tokens", "prompt_tokens", "cached_tokens"):
                         value = row[key]

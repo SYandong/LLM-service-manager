@@ -226,6 +226,25 @@ def test_partial_discovery_never_ends_missing_instance(controller):
     assert worker.store.instance("instance-a")["ended_at"] == BASE + 120
 
 
+@pytest.mark.parametrize("missing", [False, True])
+def test_missing_or_stale_discovery_does_not_certify_old_gpu_memory(controller, missing):
+    worker, now, _ = controller
+    ingest(worker, now, snapshot())
+    initial = worker.report()["services"][0]
+    assert initial["gpu_gb"] == 10 and initial["gpu_observation_complete"] is True
+    if missing:
+        ingest(worker, now, snapshot(BASE + 60, [], inventory_complete=False,
+            gpu_inventory_complete=False, gpu_attribution_complete=False, gpus=[]))
+    else:
+        now[0] += worker.config.fleet_stale_after_seconds + 1
+    result = worker.report()
+    row = result["services"][0]
+    assert row["status"] == "unknown"
+    assert row["last_seen"] == BASE
+    assert row["gpu_gb"] is None and row["gpu_observation_complete"] is False
+    assert result["containers"][0]["gpu_gb"] is None
+
+
 def test_identity_collision_rolls_back_watermark_and_counts(controller):
     worker, now, _ = controller
     ingest(worker, now, snapshot())
@@ -362,6 +381,56 @@ def test_actual_interval_split_across_hour_and_capped(controller):
     ingest(worker, now, data)
     last = worker.history("instance-a", 24)["samples"][-1]
     assert last["observed_seconds"] == 120
+
+
+@pytest.mark.parametrize("interval", [180, 240, 300])
+def test_long_observation_intervals_clip_hour_boundaries_exactly(controller, interval):
+    worker, now, _ = controller
+    start = BASE + 3500
+    first = snapshot(start, sample_interval_seconds=interval)
+    ingest(worker, now, first)
+    second = copy.deepcopy(first)
+    second["generated_at"] += interval
+    second["services"][0]["metrics"].update(requests_total=101, generation_tokens_total=1100)
+    ingest(worker, now, second)
+    before = worker.store.window(start, BASE + 3600)["instance-a"]
+    assert before["observed_seconds"] == 100
+    assert before["active_minutes"] == pytest.approx(100 / 60)
+    assert before["requests"] == 0
+    after = worker.store.window(BASE + 3600, second["generated_at"] + 0.000001)["instance-a"]
+    assert after["observed_seconds"] == interval - 100
+    assert after["active_minutes"] == pytest.approx((interval - 100) / 60)
+    assert after["requests"] == 1
+    combined = worker.store.window(start, BASE + 7200)["instance-a"]
+    assert combined["observed_seconds"] == interval
+    assert combined["active_minutes"] == pytest.approx(interval / 60)
+    assert combined["requests"] == 1
+    hourly = worker.store.hourly(BASE, BASE + 7200, instance_id="instance-a")
+    assert [row["observed_seconds"] for row in hourly] == [100, interval - 100]
+    now[0] = start + 168 * 3600
+    history = worker.history("instance-a", 168)
+    assert history["samples"][0]["partial"] is True
+    assert history["samples"][0]["observed_seconds"] == 100
+    assert history["samples"][0]["active_minutes"] == pytest.approx(100 / 60)
+    assert history["samples"][1]["observed_seconds"] == interval - 100
+    assert sum(row["requests"] or 0 for row in history["samples"]) == 1
+
+
+def test_hourly_history_boundary_counter_is_not_counted_twice(controller):
+    worker, now, _ = controller
+    start = BASE + 3500
+    first = snapshot(start)
+    ingest(worker, now, first)
+    second = copy.deepcopy(first)
+    second["generated_at"] = BASE + 3600
+    second["services"][0]["metrics"]["requests_total"] += 1
+    ingest(worker, now, second)
+    now[0] = start + 168 * 3600
+    history = worker.history("instance-a", 168)
+    assert history["samples"][0]["observed_seconds"] == 100
+    assert history["samples"][0]["requests"] == 0
+    assert history["samples"][1]["requests"] == 1
+    assert sum(row["requests"] or 0 for row in history["samples"]) == 1
 
 
 def test_claims_socket_identity_dry_run_revoke_restart(controller, monkeypatch):

@@ -43,7 +43,8 @@ def service_status(instance, claim, config, now, *, stale, generated_at, hourly=
         status = "over_limit"
     else:
         status = "idle"
-    gpu_known = meta.get("gpu_observation_complete") is not False and all(gpu.get("used_mib") is not None for gpu in meta["gpus"])
+    gpu_known = (current and not stale and meta.get("gpu_observation_complete") is not False
+                 and all(gpu.get("used_mib") is not None for gpu in meta["gpus"]))
     windows = windows or {}
     return {
         "id": instance["id"], "container": instance["container"], "engine": instance["engine"],

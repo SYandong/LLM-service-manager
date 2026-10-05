@@ -8,6 +8,7 @@ import os
 import stat
 
 MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024
+MAX_SAMPLE_GAP_SECONDS = 300
 COUNTERS = {
     "requests": "requests_total",
     "gen_tokens": "generation_tokens_total",
@@ -53,7 +54,7 @@ def validate_snapshot(payload):
         raise ValueError("unsupported_fleet_schema")
     if not number(payload.get("generated_at")):
         raise ValueError("invalid_fleet_timestamp")
-    if "sample_interval_seconds" in payload and (not number(payload["sample_interval_seconds"]) or not 30 <= payload["sample_interval_seconds"] <= 300):
+    if "sample_interval_seconds" in payload and (not number(payload["sample_interval_seconds"]) or not 30 <= payload["sample_interval_seconds"] <= MAX_SAMPLE_GAP_SECONDS):
         raise ValueError("invalid_fleet_sample_interval")
     for key, cap in (("services", 256), ("gpus", 128), ("other_gpu_processes", 4096), ("errors", 256)):
         if not isinstance(payload.get(key), list) or len(payload[key]) > cap:
@@ -145,7 +146,7 @@ def sample(service, previous, ts, nominal_seconds=60):
     row = {"instance_id": service["id"], "ts": ts, "running": None, "waiting": None,
            "kv_perc": None, "active": None, "scrape_ok": int(service["scrape"]["ok"]),
            "interval_seconds": interval, "observed_seconds": 0, "active_seconds": 0,
-           "gap": int(interval > 300), "counter_reset": 0}
+           "gap": int(interval > MAX_SAMPLE_GAP_SECONDS), "counter_reset": 0}
     row.update({"d_" + key: None for key in COUNTERS})
     reliable_delta = False
     gauge_active = False
@@ -154,7 +155,7 @@ def sample(service, previous, ts, nominal_seconds=60):
         metrics = service.get("metrics") or {}
         row.update(running=metrics.get("num_requests_running"), waiting=metrics.get("num_requests_waiting"),
                    kv_perc=metrics.get("kv_cache_usage_perc"))
-        contiguous = bool(state.get("observed") and 0 < interval <= 300)
+        contiguous = bool(state.get("observed") and 0 < interval <= MAX_SAMPLE_GAP_SECONDS)
         for key, metric in COUNTERS.items():
             value = metrics.get(metric)
             if value is None:
@@ -168,7 +169,7 @@ def sample(service, previous, ts, nominal_seconds=60):
             if key in ("requests", "gen_tokens"):
                 contiguous &= bool(baseline is not None and baseline["ts"] == last_ts and not reset)
                 if delta > 0:
-                    reliable_delta |= bool(baseline is not None and baseline["ts"] == last_ts and 0 < interval <= 300 and not reset)
+                    reliable_delta |= bool(baseline is not None and baseline["ts"] == last_ts and 0 < interval <= MAX_SAMPLE_GAP_SECONDS and not reset)
             baselines[key] = {"value": value, "ts": ts, "epoch": epoch}
         supported = (row["running"] is not None and row["waiting"] is not None
                      and metrics.get("requests_total") is not None)
@@ -199,7 +200,7 @@ def sample(service, previous, ts, nominal_seconds=60):
             supported = bool(expiries) or models == []
             if supported:
                 row["active"] = int(old is not None and any(expiry > old.get(name, expiry) for name, expiry in expiries.items()))
-                reliable_delta = bool(state.get("observed") and 0 < interval <= 300)
+                reliable_delta = bool(state.get("observed") and 0 < interval <= MAX_SAMPLE_GAP_SECONDS)
                 if reliable_delta:
                     row["observed_seconds"] = min(interval, 2 * nominal_seconds)
                 state["expiries"] = expiries

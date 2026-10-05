@@ -117,6 +117,8 @@ Only snapshots with `inventory_complete: true` may end a missing instance.
 `gpu_inventory_complete`, `gpu_attribution_complete` and per-service
 `gpu_observation_complete` preserve partial/failed GPU observations separately;
 an empty failed GPU query does not assert zero memory use.
+Missing discovery or a stale snapshot makes per-service `gpu_gb` null and
+`gpu_observation_complete` false, including retained instance metadata.
 
 ## Storage and verification
 
@@ -128,6 +130,10 @@ once; overview windows combine complete hourly buckets with raw boundary
 intervals, avoiding overlap and loading only aggregate rows. Claims and the
 successful counter baselines survive raw retention. History is bounded to
 24/168 hours; raw reads have a row limit.
+Boundary queries include the maximum accepted five-minute observation
+interval. Coverage is clipped to exact interval bounds; an hour-boundary
+counter belongs to the next bucket, while the requested final counter endpoint
+is included once.
 
 `tests/test_fleet.py` uses synthetic inputs and the host scanner's actual
 synthetic schema fixture. It covers state replays, counter and identity epochs,
