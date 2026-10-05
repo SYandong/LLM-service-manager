@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 """Real mounted #112 API compatibility; core fixtures simulate managed-unit effects."""
 
 import concurrent.futures
@@ -55,7 +56,7 @@ def test_mounted_client_receipt_owner_outcomes_and_idempotent_delete(pin_api, mo
     assert result['evacuation']['status'] == outcome and result['evacuation']['stopped'] == stopped
     assert pin_api['result_exit_code'](args, result) == (0 if outcome == 'complete' else 1)
     assert service.scheduler.store.reserve(result['id']).by == 'actual-owner'
-    current = pin_api['execute_command'](command(pin_api, 'status'), service.client)
+    current = pin_api['execute_command'](command(pin_api, 'status', '--shared'), service.client)
     assert [record['id'] for record in current['reserves']] == [result['id']]
     text = pin_api['format_result'](args, result)
     for expected in ['Reservation saved', result['id'], 'owner actual-owner', 'Evacuation status: '+outcome]:
@@ -67,7 +68,7 @@ def test_mounted_client_receipt_owner_outcomes_and_idempotent_delete(pin_api, mo
     for _ in range(2):
         deleted = service.client.request('DELETE', '/v1/reserve/'+result['id'])
         assert deleted == {'id':result['id'], 'by':'actual-owner'}
-    assert pin_api['execute_command'](command(pin_api, 'status'), service.client)['reserves'] == []
+    assert pin_api['execute_command'](command(pin_api, 'status', '--shared'), service.client)['reserves'] == []
     assert service.state['calls'] == stopped
     assert [r for r in service.requests if r[0] == 'POST'] == [('POST','/v1/reserve')]
 

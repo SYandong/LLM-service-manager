@@ -1,5 +1,6 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: OpenCode / deepseek-v4.1-flash
+# Generated-By: Codex / gpt-6.1-sol
 """The copied CLI must remain usable without an installed project or extras."""
 
 import ast
@@ -287,7 +288,7 @@ def test_copy_alone_status_over_http(tmp_path, server, snapshot, json_output):
     shutil.copyfile(CLI, script)
     address, paths = server
     env = dict(os.environ, LLM_URL=address, LLM_CONFIG=str(tmp_path / "missing"), COLUMNS="80")
-    command = [sys.executable, "-I", "-S", str(script), "status"]
+    command = [sys.executable, "-I", "-S", str(script), "status", "--shared"]
     if json_output:
         command.append("--json")
     result = subprocess.run(command, cwd=tmp_path, env=env, text=True,
@@ -311,7 +312,7 @@ def test_python_310_copy_alone_status(tmp_path, server):
     address, paths = server
     result = subprocess.run(
         [python, "-I", "-S", str(script), "--config", str(tmp_path / "missing"),
-         "--url", address, "status"],
+         "--url", address, "status", "--shared"],
         cwd=tmp_path, text=True, capture_output=True, timeout=5,
     )
     assert result.returncode == 0, result.stderr
@@ -319,10 +320,11 @@ def test_python_310_copy_alone_status(tmp_path, server):
     assert paths == ["/v1/state"]
 
 
-def test_non_tty_without_command_uses_status(tmp_path, server):
+def test_non_tty_shared_status_preserves_original_snapshot(tmp_path, server):
     address, paths = server
     result = subprocess.run(
-        [sys.executable, "-I", "-S", str(CLI), "--config", str(tmp_path / "missing"), "--url", address],
+        [sys.executable, "-I", "-S", str(CLI), "--config", str(tmp_path / "missing"), "--url", address,
+         "status", "--shared"],
         cwd=tmp_path, text=True, capture_output=True, timeout=5,
     )
     assert result.returncode == 0, result.stderr
@@ -340,7 +342,7 @@ def test_invalid_state_is_reported_without_traceback(llm, monkeypatch, capsys):
 
     monkeypatch.setitem(llm["main"].__globals__, "load_config", lambda **kwargs: {})
     monkeypatch.setitem(llm["main"].__globals__, "SchedulerClient", BadClient)
-    assert llm["main"](["status"]) == 1
+    assert llm["main"](["status", "--shared"]) == 1
     assert "Invalid scheduler state response" in capsys.readouterr().err
 
 

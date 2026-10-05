@@ -1,11 +1,12 @@
 # CLI 使用说明
 
-`cli/llm` 是 Python 3.10+ 标准库脚本。只复制这一个文件即可运行，无需安装仓库、`rich` 或 `textual`。提供只读 `status`、`usage`、pin/unpin 记录、free/wake、按模型的 sleep/stop/preload、reserve 预览与结果客户端和可选全屏面板；所有请求都发给配置的 scheduler。
+`cli/llm` 是 Python 3.10+ 标准库脚本。只复制这一个文件即可运行，无需安装仓库、`rich` 或 `textual`。默认展示全员推理服务 fleet，提供活动历史和占用声明；原共享模型的状态、usage、pin/free/wake/reserve 等命令继续通过同一 scheduler 使用。
 
 ```sh
 python3 llm --help
 LLM_URL=http://scheduler:8011 python3 llm status
 LLM_URL=http://scheduler:8011 python3 llm status --json
+LLM_URL=http://scheduler:8011 python3 llm status --shared --json
 ```
 
 上面的主机与端口是示例，需替换为部署方提供的 scheduler 地址。不要填 llama-swap 的 OpenAI API 地址。脚本没有内置服务地址。
@@ -20,7 +21,7 @@ LLM_URL=http://scheduler:8011 python3 llm status --json
 url = http://scheduler:8011
 # 普通 HTTP 请求超时秒数，必须为正数；默认 10。free/wake/reserve 单独使用 --wait。
 timeout = 10
-# 可选：共享 llama-swap OpenAI 兼容推理地址，仅用于 TUI 的 endpoint 复制。
+# 可选：共享 llama-swap OpenAI 兼容推理地址，仅用于旧共享 TUI 的 endpoint 复制。
 # 根路径会规范化为 /v1；显式非根 base path 原样保留。它不是 scheduler 地址。
 # api_url = https://data-plane.example.invalid/v1
 ```
@@ -35,7 +36,7 @@ python3 llm --url http://scheduler:8011 status --json
 LLM_API_URL='https://data-plane.example.invalid' python3 llm
 ```
 
-`api_url` / `LLM_API_URL` 是**可选**的独立推理地址，只被 TUI 的「Copy model
+`api_url` / `LLM_API_URL` 是**可选**的独立推理地址，只被旧共享 TUI 的「Copy model
 endpoint address」使用，绝不等于 scheduler 管理地址、也不从管理端口推断。
 地址必须是 http(s)、不带凭据/query/fragment 或控制字符；根路径规范化为 `/v1`，
 显式非根 base path 保留。省略时旧配置与所有 CLI 行为不变（复制的菜单项在 TUI
@@ -43,9 +44,75 @@ endpoint address」使用，绝不等于 scheduler 管理地址、也不从管�
 
 缺少地址、连接失败、HTTP 错误和无效响应会在 stderr 输出解释，并返回退出码 1；参数错误返回 2，Ctrl-C 返回 130。HTTP 重定向不会自动跟随，配置应使用最终服务地址。
 
-## 状态输出
+## 全员推理服务状态
 
-以下是由测试中的合成 `StateSnapshot` 生成的 100 列示例，**不是服务器实测**：
+`llm status` 默认读取 `/v1/fleet`，与显式 `llm fleet` 等价，TTY 中也输出文本。
+`status --shared` 读取原 `/v1/state`；已有脚本要保留原 JSON 结构时使用
+`status --shared --json`。无参数 `llm` 和 `llm top` 在 TTY 且可导入 Textual 时
+进入新 fleet TUI，否则输出 fleet 文本及可选 TUI 安装提示。显式 `status` /
+`fleet` 不附加安装提示，`--json` 保留完整后端响应，包括 null 和扩展字段。
+
+```sh
+LLM_URL=http://scheduler:8011 python3 llm fleet --plain
+LLM_URL=http://scheduler:8011 python3 llm fleet --by gpu --sort mem
+LLM_URL=http://scheduler:8011 python3 llm fleet --mine --sort idle --json
+```
+
+- `--by person` 为默认，按容器展示服务数、显存合计与服务明细；`--by gpu` 按卡
+  展示占用量、利用率、推理服务及训练等其他占用者。分组标签描述容器，不代表已认证的个人。
+- 默认排序为超限优先、再按显存降序；`--sort idle|mem|tokens` 分别按空闲时长、
+  显存、24 小时输出 token 降序排列，未知值排在已知值之后。
+- `--mine` 发送 `?mine=1`，由服务端按实际连接来源映射筛选自己的容器。
+  客户端不读取本机容器名，也不使用转发头声明身份。
+- 每条服务显示模型、引擎、GPU、显存、状态、在线时间、空闲时间和服务 ID。
+  24 个字符的活动条每格一小时，`▁▂▃▄▅▆▇█` 表示已知的 0–60 活跃分钟，
+  `·` 表示未知；未知 token 和时长显示 `—`。活跃比例以窗口与在线时长的较小值为
+  分母；覆盖不完整时另示观测覆盖率，后端提供时也显示以已观测时间为分母的活跃
+  比例。它们不能解释成全天流量完整性。宿主服务显示 host，模型未识别时显示 unknown。
+- 服务 ID 保留在文本明细中；长模型名按终端显示宽度以 `~` 截断，80 列使用多行
+  明细，中文和组合字符也按显示宽度处理。完整名称和原始统计可用 `--json` 查看。
+- 状态用文字表示；颜色仅在 TTY 且没有设置 `NO_COLOR` 时启用，`--plain` 关闭颜色。
+  陈旧快照保留告警，当前活动和空闲状态显示 unknown。fleet 未启用、不可用或接口版本
+  不匹配时明确报错、返回 1；不会用共享状态代替 fleet。
+
+### 占用声明与撤销
+
+```sh
+LLM_URL=http://scheduler:8011 python3 llm claim SERVICE_ID --until +3d --reason 'timing experiment' --dry-run
+LLM_URL=http://scheduler:8011 python3 llm claim SERVICE_ID --until +3d --reason 'timing experiment'
+LLM_URL=http://scheduler:8011 python3 llm unclaim CLAIM_ID --dry-run
+LLM_URL=http://scheduler:8011 python3 llm unclaim CLAIM_ID
+```
+
+`claim` 接受服务 ID 或唯一匹配的完整模型名；模型重名时列出候选 ID 并拒绝写入。
+`--until` 必填，支持未来的本地时区 `YYYY-MM-DD`（当天零点）、
+`YYYY-MM-DDTHH:MM` 或正整数天数 `+Nd`。客户端转成 Unix 秒发送；最长期限由
+服务端配置控制（默认 7 天）。`--reason` 必须为 1–200 字符且不含终端控制字符。
+
+两个命令支持 `--dry-run` 和 `--json`。预览不写记录，新的 claim 预览不分配 ID；
+实际保存后才返回供 `unclaim` 使用的 claim ID。服务端按 socket 对端 IP 的容器
+映射校验归属，仅允许声明或撤销本容器服务，未知来源或其他容器返回 403。
+请求中没有可覆盖归属的标签。声明只用于协调展示，超限也只提示，不自动停止进程。
+claims 是否允许由独立配置开关决定，不由客户端启用。
+
+写请求不自动重试。连接中断、无效或丢失回执时，客户端提示结果未知，先用
+`fleet --json` 核对当前声明，再决定下一次操作。dry-run 成功不保证后续提交时
+归属、服务存在或期限仍有效。
+
+### 服务活动历史
+
+```sh
+LLM_URL=http://scheduler:8011 python3 llm history SERVICE_ID
+LLM_URL=http://scheduler:8011 python3 llm history SERVICE_ID --hours 168 --json
+```
+
+`history` 只接受服务 ID，读取 `/v1/fleet/history`。`--hours` 仅允许 24（默认）
+或 168；24 小时为采样序列，7 天为小时汇总。文本时间为 UTC，未知活动或 token
+保持 `—`，详情中的参数摘要使用服务端提供的脱敏文本。`--json` 保留完整序列。
+
+## 共享模型状态输出
+
+以下是 `llm status --shared` 由测试中的合成 `StateSnapshot` 生成的 100 列示例，**不是服务器实测**：
 
 ```text
 GPU0  87/144 GiB  llmsvc 77  external 10  free 57
@@ -67,8 +134,7 @@ WARNING GPU1 probe unavailable
 - `*` 表示默认模型，`?` 表示探测未知；未知不会被当成零或 stopped。停止模型的冷启动时长来自后端估计或测量。
 - 停止模型下一行的 `cold start estimate` 标出来源：`(measured)` 为调度器实测，`(configured)` 为配置里的估计值，`? (policy default 120s)` 表示两者都缺省、策略用默认冷启动兜底。
 - PIN 显示 UTC 到期时间及设置者；有效 reserve、未完成或 stale 的租约、策略阻塞与采集错误显示在表后。
-- 小于 100 列时收窄模型表，将活动与 pin 详情放在模型下一行；超长标识符以 `~` 标出截断。更窄的输出会折行。`--json` 保留完整字段，适用于脚本与排查长名称。
-- 无参数且 stdout 是 TTY、可选 TUI 可导入时启动全屏面板；否则输出 `status`，末尾提示 `pip install 'llmsvc[tui]'`。非 TTY 不导入或启动 TUI。显式 `status` / `status --json` 不附加提示，便于脚本读取。
+- 小于 100 列时收窄模型表，将活动与 pin 详情放在模型下一行；超长标识符以 `~` 标出截断。更窄的输出会折行。`status --shared --json` 保留完整字段，适用于脚本与排查长名称。
 
 ### keep_value 兜底配置键
 
@@ -155,7 +221,7 @@ LLM_URL=http://scheduler:8011 python3 llm unpin model
 - 成功结果中的 owner（pin）或 actor（unpin）来自服务器对连接来源的判断。客户端按协议提供兼容 `body.by`，但它不决定实际归属；没有映射时保留服务器返回的 `ip:...` 标记。
 - Dry-run 不改变记录，输出计划或阻塞原因；阻塞计划返回退出码 1。预览 JSON 的 `by` 是假设标签，不是经服务器确认的实际操作者。
 - 模型名作为原样 JSON 值或 URL 编码路径段发送。带空格、斜杠、Unicode 或 `?/#/%` 的名称用 shell 引号包住；以 `-` 开头的名称可写为 `pin --for 8h -- '-model'` 或 `unpin -- '-model'`。
-- 写入成功表示 pin 记录已保存；不会预热模型。实际 TTL/reaper 接入、reserve 及完整保护验收仍是后续部署事项。请求不会自动重试；遇到不确定的连接/响应错误时先用 `status` 核对。
+- 写入成功表示 pin 记录已保存；不会预热模型。实际 TTL/reaper 接入、reserve 及完整保护验收仍是后续部署事项。请求不会自动重试；遇到不确定的连接/响应错误时先用 `status --shared` 核对。
 
 ## Free / wake
 
@@ -173,9 +239,9 @@ LLM_URL=http://scheduler:8011 python3 llm wake --wait 1200 -- '-model'
 - `wake MODEL` 使用 URL 编码的模型路径和空请求体，显示服务器返回的 `ready`、`cold_start` 与耗时。状态 `ready` 才作为干净成功；即使 `partial` 同时带 `ready: true`，仍保留错误并返回非零退出码。
 - 两个命令均支持 `--dry-run` 与 `--json`。预览显示 `would` / `blocked_by`，明确把 `estimated_freed_gb` 标为策略估算；无模型动作、额外采集或持久化写入。阻塞预览返回退出码 1。
 - **HTTP 200 不等于操作成功。** Free 的 `complete`、wake 的 `ready` 返回 0；`blocked`、`partial`、`failed`、`timeout`、`no_progress` 返回 1。保留已确认的 slept/stopped、全部 skipped 原因与附带来源/在途字段，以及 error/error_model；`--json` 保留完整响应。
-- Free 显示的是所选 GPU 空闲显存或宿主 MemAvailable 的**实测净变化**，包括同期外部活动，不是逐模型释放归因或给用户保留的容量。`freed_gb: null` 显示 unknown；不以估计值或预算替代。`measurement_complete: false` 明确表示不是最终/当前总量，即使保留了此前已确认的部分实测值。采样时刻显示为 Unix 秒。模型可能先睡后停而出现在两份列表中；最新状态以 `status` 为准。
+- Free 显示的是所选 GPU 空闲显存或宿主 MemAvailable 的**实测净变化**，包括同期外部活动，不是逐模型释放归因或给用户保留的容量。`freed_gb: null` 显示 unknown；不以估计值或预算替代。`measurement_complete: false` 明确表示不是最终/当前总量，即使保留了此前已确认的部分实测值。采样时刻显示为 Unix 秒。模型可能先睡后停而出现在两份列表中；最新状态以 `status --shared` 为准。
 
-响应等待独立于普通 `--timeout` / `LLM_TIMEOUT`：free 默认 `--wait 150` 秒，wake 默认 `--wait 930` 秒，为服务器默认 120/900 秒动作期限各留 30 秒返回余量。`--wait` 是客户端 HTTP 等待时间，不修改服务器期限；部署方延长期限时需相应调整。显式缩短等待、断线或退出客户端不能撤销已受理的操作。未知结果会提示先检查 `status` 与事件；客户端不自动重试，刷新失败也不重放写入。
+响应等待独立于普通 `--timeout` / `LLM_TIMEOUT`：free 默认 `--wait 150` 秒，wake 默认 `--wait 930` 秒，为服务器默认 120/900 秒动作期限各留 30 秒返回余量。`--wait` 是客户端 HTTP 等待时间，不修改服务器期限；部署方延长期限时需相应调整。显式缩短等待、断线或退出客户端不能撤销已受理的操作。未知结果会提示先检查 `status --shared` 与事件；客户端不自动重试，刷新失败也不重放写入。
 
 唤醒 stopped 模型时，客户端仍只消费同一个 scheduler `/v1/events` 订阅；服务端可把该模型的
 llama-swap `ProcessLogger` 中少量固定启动阶段转成 `wake_progress`。这些阶段是带
@@ -226,7 +292,7 @@ LLM_URL=http://scheduler:8011 python3 llm reserve --gpu 0 --size 80G --for 4h --
 - 采用 #112 接口的 scheduler 在 `read_only: false` 且有可写状态库时接受实际预约；默认只读仍返回 405。意图写入与 `model_actions_enabled` 分开：关闭模型动作也可保存意图，但不能据此认为清理完成。客户端显示服务器的 `read_only` / 旧版本 `operation_not_enabled`，不会自动改走预览、重试或更改服务器配置。
 - 去掉 `--dry-run` 才发送实际预约。成功保存返回 `{id,gpu,size_gb,until,by,evacuation:{status,stopped,skipped,error?}}`。客户端显示服务端权威 owner 和保存回执，单独显示 evacuation 的 complete/blocked/partial 及全部确认停止、阻塞与错误详情。
 - **HTTP 200、保存成功与清理完成是不同结果。** blocked/partial 返回退出码 1，但不撤销或隐藏已保存的 ID/意图，也不重发 POST。`size_gb` 只是请求的预约注记；有效预约从调度器放置中排除整张 GPU，不代表实测释放容量。complete 也不保证 GPU 物理使用为零或没有其他用户进程。
-- 回执说明保存时的事实；到达客户端前可能已过期或被其他调用删除。用 `status` 查询当前状态。客户端采用 150 秒的独立 `--wait` 响应等待，覆盖服务端默认/上限 120 秒的 reserve 期限并留出返回余量，可显式调整；它不改变后端期限。超时或丢失响应时意图可能已保存，先核对状态，不能以自动重试解决歧义。
+- 回执说明保存时的事实；到达客户端前可能已过期或被其他调用删除。用 `status --shared` 查询当前状态。客户端采用 150 秒的独立 `--wait` 响应等待，覆盖服务端默认/上限 120 秒的 reserve 期限并留出返回余量，可显式调整；它不改变后端期限。超时或丢失响应时意图可能已保存，先核对状态，不能以自动重试解决歧义。
 
 TUI 输入框支持同一 reserve 命令与选项，沿用单写请求、迟到响应保护和执行后即时 GET 状态。有效预约的 GPU 标记为 `reserved for placement`；blocked/partial 回执仍显示并刷新当前预约。模型登记/删除接口和相关快捷键另行交付；完整 #11 的 live 预约/清理、TTL/reaper 与运行期验收继续单独跟进。
 
@@ -237,7 +303,7 @@ LLM_URL=http://scheduler:8011 python3 llm unreserve RESERVATION_ID --dry-run
 LLM_URL=http://scheduler:8011 python3 llm unreserve RESERVATION_ID --json
 ```
 
-ID 来自 reserve 回执或 `status --json` 中的 reserves。命令发送 URL 编码 ID 的空 body `DELETE /v1/reserve/{id}`；重复解除不存在的 ID 也可成功。返回 actor 使用服务器对连接来源的判断，不是预约最初的 owner。解除不唤醒、重启或停止模型；已提交的清理动作不会因解除而被声称撤销。默认只读服务拒绝实际删除，dry-run 不写数据库或调用 transport。连接丢失不自动重试，先检查当前预约状态。
+ID 来自 reserve 回执或 `status --shared --json` 中的 reserves。命令发送 URL 编码 ID 的空 body `DELETE /v1/reserve/{id}`；重复解除不存在的 ID 也可成功。返回 actor 使用服务器对连接来源的判断，不是预约最初的 owner。解除不唤醒、重启或停止模型；已提交的清理动作不会因解除而被声称撤销。默认只读服务拒绝实际删除，dry-run 不写数据库或调用 transport。连接丢失不自动重试，先检查当前预约状态。
 
 TUI 使用相同的 `unreserve ID` 命令；确认回复后立即刷新，并移除服务器已不再报告的预约标记。`--dry-run` 保留标记和预约。缺失/空/控制字符 ID 在请求前拒绝，`--json` 保留完整回执。
 
@@ -302,7 +368,7 @@ LLM_URL=http://scheduler:8011 python3 llm models
 - 老版本 scheduler 不返回 `discovered`；此时 `models` 仍正常工作，只显示配置侧内容。
 - TUI 命令框使用相同的 `models`；`import` / `add` / `rm` 已不是命令，输入它们按未知命令处理。
 
-`models` 读取同一个 scheduler 的 `/v1/models`，返回配置文件中的 **temporary registry records**，不是全部常驻模型发现，也不是当前 proxy 已采用配置的证明。常驻/运行状态看 `status`。输出保留 records、writes_enabled、blocked_by 与 `reconcile`（`enabled` 表示是否挂载了目录 reconciler，`last` 是它最近一次 `run_once` 的小结果，尚未运行时为 null）。
+`models` 读取同一个 scheduler 的 `/v1/models`，返回配置文件中的 **temporary registry records**，不是全部常驻模型发现，也不是当前 proxy 已采用配置的证明。常驻/运行状态看 `status --shared`。输出保留 records、writes_enabled、blocked_by 与 `reconcile`（`enabled` 表示是否挂载了目录 reconciler，`last` 是它最近一次 `run_once` 的小结果，尚未运行时为 null）。
 
 - 支持 #152 详情的服务还返回 inventory：可包含永久配置模型与临时模型，但 records 仍只含临时记录。CLI/TUI 显示 source=config、temporary 标志、配置 base/port、独立观测的 runtime_state、last-use 和 model-level removable/protection。未知观测、端口或时间保留 unknown/null。removable 仅表示模型级资格，不代替顶层 quiet/故障/恢复/写禁用等全局阻塞。
 - 未配置 registry 返回 503 registry_not_configured；配置不可安全读取返回 503 registry_unavailable；`--json` 保留结构化错误 body 并返回非零；普通输出与 TUI 同样保留详情。
@@ -326,13 +392,48 @@ LLM_URL=http://scheduler:8011 python3 llm registry --json
 
 ## 可选 TUI
 
+包含 TUI 的发布包使用 `pip install 'llmsvc[tui]'` 安装，也可复制实际 `tui/`
+目录到独立 `llm` 旁边并安装 `textual>=0.70`。只有 stdout 是 TTY 时才启动界面。
+
+```sh
+python -m pip install '.[tui]'
+LLM_URL=http://scheduler:8011 python cli/llm
+LLM_URL=http://scheduler:8011 python cli/llm top
+```
+
+默认界面是全员 fleet：顶部显示各 GPU 的显存及全部占用者，中部按人或卡展示
+推理服务，详情展示活动历史和参数摘要。`/v1/fleet` 每 15 秒读取一次，
+scheduler `/v1/events` 的 fleet 状态变化触发刷新；详情按需读取 history。
+陈旧或采集错误保持醒目的横幅，未知活动不补成空闲。
+
+| 键 | 作用 |
+|---|---|
+| P / G | 按人 / 按 GPU 分组 |
+| s | 切换排序 |
+| m | 切换仅显示自己的服务 |
+| / | 过滤服务 |
+| c / u | 声明 / 撤销当前服务的占用声明 |
+| r | 刷新 |
+| ? | 帮助 |
+| q | 退出 |
+
+声明入口按 API 的 `mine` 标记开放，先 dry-run 展示预览，再由明确提交动作写入。
+服务器仍核对实际连接归属；403 和不确定写入结果在界面显示，写入不自动重试。
+共享模型的管理操作继续使用 CLI 子命令，例如 `pin`、`free`、`wake`、`reserve`。
+
+## 旧共享 TUI（已弃用）
+
+旧界面保留为 `llm legacy-tui`，启动时提示将在后续 minor release 删除；具体
+版本与时点由维护者另行决定。非 TTY 或可选依赖缺失时输出原共享状态与安装提示。
+以下记录该旧界面的操作方式，默认 `llm` / `top` 使用上面的 fleet 界面。
+
 包含 TUI 的发布包使用 `pip install 'llmsvc[tui]'` 安装。也可将仓库中的实际 `tui/` 目录复制到独立 `llm` 脚本旁，再安装 `textual>=0.70`。仅复制 `llm` 仍可使用全部 CLI 命令。
 
 从源代码目录试用：
 
 ```sh
 python -m pip install '.[tui]'
-LLM_URL=http://scheduler:8011 python cli/llm
+LLM_URL=http://scheduler:8011 python cli/llm legacy-tui
 ```
 
 界面以命令行为中心：启动就聚焦底部的 `› ` 输入框。`/v1/state` 每 0.5 秒刷新一次（用 `LLM_TUI_REFRESH` 指定秒数可改，非法或非正值回落 0.5 秒），收到任何 scheduler 事件也立刻再读一次状态；在途请求不会叠加轮询，也不会阻塞按键。顶部是每张卡一行的 GPU 行（`GPU0 used … 87/144G llmsvc … ext 10 free 57`，颜色随占用，未知量显示 `?` 并暗显；数值字段右对齐到同一宽度，一/二/三位数与分数、未知值都不会让占用条和标签错位）和内存预算行。中部左侧是模型表、右侧是事件面板；100×30 时并排，小于 100 列时改为上下排列。结果区在命令行上方，可滚动。底栏最前面固定显示当前运行版本（如 `v1.1.0`），其后是连接状态、最近一次后台读取结果、最近一次界面操作提示和队列，最后是 `Enter run · Tab complete · Ctrl+O menu · /help`；长提示只会挤掉尾部的快捷键，不会挤掉版本。
@@ -381,10 +482,10 @@ LLM_URL=http://scheduler:8011 python cli/llm
 
 - 输入框复用 CLI 解析器与执行路径，支持 `status`、`usage`、`pin MODEL --for 8h`、`unpin MODEL`、`unreserve ID`、`models`、`registry`、`free`、`wake MODEL`、`sleep MODEL`、`stop MODEL`、`preload MODEL`、`reserve --gpu N --size 80G --for 4h` 及各自选项。连接参数固定为启动时的配置；修改地址需退出后重新运行。`import` / `add` / `rm` 已不是命令，输入后按未知命令处理。
 - 同一时刻只执行一个写请求（pin/unpin/free/wake/reserve/unreserve/sleep/stop/preload），不会把重复提交排队。写请求完成后立即读取新状态并选中目标模型，PIN 标记与详情同步更新；写入前的旧查询不会覆盖该状态，刷新失败会单独说明，已成功的写入不会因此重试。
-- 后台轮询只写底栏，不覆盖命令结果；显式 `status` / `status --json` 才写结果区。刷新失败保留上一份快照，并在底栏显示错误和 UTC 时间。
+- 后台轮询只写底栏，不覆盖命令结果；显式 `status` / `status --shared --json` 才写结果区。刷新失败保留上一份快照，并在底栏显示错误和 UTC 时间。
 - 实际 `free --ram` 仍先弹出二次确认窗口，显示原命令与停止/冷启动影响，默认聚焦取消；Esc 或取消按钮不发送写请求。`--dry-run` 直接显示预览。
 - usage 视图用 `/usage`、`/usage 30`、`/usage 30 model` 或 `/usage model 30` 进入（窗口与分组可任意顺序，默认 7 天与 user），按钮行是 `1 day` / `7 days` / `30 days` / `By user` / `By model` / `By day` / `Status`：天数按钮只换窗口、分组按钮只换分组，`status` 命令或 Status 按钮返回。按同一刷新间隔刷新当前选择；快速切换时只排队读取最新选择，迟到结果不会覆盖新窗口。渲染直接复用 CLI 的 `format_usage`，因此列、响应式收窄、脚注与不可用显示规则和 CLI 完全相同。
-- 活动读取失败在底栏显示 `Partial update · activity unavailable` 和受限安全原因（预算、锁、schema、parse 等）；旧版 `ValueError` 或未知原因只显示 `reason unavailable`。该轮活动数值按未知显示，不沿用旧计数；完整当前 snapshot/errors 保留在 `status --json`，不会被人类文案改写。读取成功而来源为 unknown/空时仍保留已读取的计数，不据此推断“未记录来源”、容器身份或数据库读取失败；模型名与 `source unavailable` 的冗余详情行已去掉，诊断保留在底栏与 `status --json`。
+- 活动读取失败在底栏显示 `Partial update · activity unavailable` 和受限安全原因（预算、锁、schema、parse 等）；旧版 `ValueError` 或未知原因只显示 `reason unavailable`。该轮活动数值按未知显示，不沿用旧计数；完整当前 snapshot/errors 保留在 `status --shared --json`，不会被人类文案改写。读取成功而来源为 unknown/空时仍保留已读取的计数，不据此推断“未记录来源”、容器身份或数据库读取失败；模型名与 `source unavailable` 的冗余详情行已去掉，诊断保留在底栏与 `status --shared --json`。
 - Reserve 的预览、只读拒绝与实际回执语义见上节；模型登记/注销是目录驱动、由 scheduler 自己提交的，客户端没有对应的写命令，queued 不等于 applied 或全局动作可用。不能用本客户端命令启用生产调度。
 
 ### 紧凑界面与真实进度（#168）
@@ -395,7 +496,7 @@ LLM_URL=http://scheduler:8011 python cli/llm
 MEM / BUDGET / USED / 10m / PIN，窄终端保留 MODEL / STATE / GPU / MEM / PIN，默认
 模型标 `*`。模型增删或源排序变化保留当前有效选择；窗口宽度变化才重排列。
 窄终端上下排列，结果滚动与 RAM 确认行为保留。原先表格下方的模型名/`source
-unavailable` 详情行已删除并归还空间；诊断在底栏与 `status --json` 中保留。
+unavailable` 详情行已删除并归还空间；诊断在底栏与 `status --shared --json` 中保留。
 
 提交模型操作（点击菜单或手输）后，STATE 单元立即显示本次命令的目标过渡相
 （`SSDtoMEM` / `SSDtoGPU` / `MEMtoGPU` / `GPUtoMEM`，stop 为 `GPUtoSSD` /
@@ -498,3 +599,4 @@ Reserve 测试直接请求当前 SchedulerHTTPServer 的预览/默认只读 405 
 <!-- Generated-By: Codex / gpt-5.6-luna -->
 <!-- Generated-By: Claude Code / claude-fable-5-1 -->
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->
+<!-- Generated-By: Codex / gpt-6.1-sol -->

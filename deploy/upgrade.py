@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: Codex / gpt-5.6-luna
+# Generated-By: Codex / gpt-6.1-sol
 """Versioned, offline read-only upgrades preserving site configuration and clients."""
 import argparse
 import base64
@@ -396,7 +397,10 @@ print(json.dumps(frames))
         result=self.run([self.cfg['python'],str(self.cli),'--version'],timeout=5).stdout.strip()
         if version and result!=version:raise Error('shared CLI health version mismatch')
         if self.root==Path('/'):
-            self.run([str(self.cli_run),'status','--json'],timeout=15)
+            # Rollback may restore a CLI from before the fleet default existed.
+            help_text=self.run([str(self.cli_run),'status','--help'],timeout=5).stdout
+            flags=['status','--shared','--json'] if '--shared' in help_text.split() else ['status','--json']
+            self.run([str(self.cli_run),*flags],timeout=15)
         return result
 
     def unit_candidate(self):
