@@ -94,18 +94,23 @@ when no `--config` is supplied.
 
 The default timer starts after 60 seconds, repeats at 60 seconds and uses
 `AccuracySec=5s`. The installer sets its repeat period from
-`sample_interval_seconds`; reinstall through the rollback path when changing
-that value. Timing is nominal rather than a promise that every sample completes
-at exactly that interval.
+`sample_interval_seconds`, which accepts 30 through 300 seconds; reinstall
+through the rollback path when changing that value. Timing is nominal rather
+than a promise that every sample completes at exactly that interval.
 
 Discovery, proc reads, process-tree traversal, subprocess waits and parsing
 share a monotonic budget of at most 20 seconds. Each external command/GET uses
 at most two seconds and the remaining budget. Responses are limited to 4 MiB;
 the final JSON is limited to 2 MiB. Limits also cover processes, socket FDs,
 services, GPU rows, proc bytes and metric line/label lengths. Remaining targets
-are marked `scrape_skipped`. A complete scan/export failure, including an
-oversized snapshot, returns nonzero and retains the previous export. Its old
-timestamp allows the consumer to identify stale data.
+are marked `scrape_skipped`. `max_services` accepts 1 through 256 and defaults
+to 256. Exceeding this cap adds `service_limit` and sets
+`inventory_complete=false`; omitted instances remain unknown and must not be
+ended by the consumer. Service start timestamps require the canonical `btime`
+from `/proc/stat`; an unavailable or invalid value fails the scan with
+`boot_time_unavailable`. A complete scan/export failure, including an oversized
+snapshot, returns nonzero and retains the previous export. Its old timestamp
+allows the consumer to identify stale data.
 
 Only the target's network namespace is entered. The scanner pins an open
 namespace FD, checks process start ticks and cgroup, verifies that the target

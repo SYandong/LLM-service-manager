@@ -49,7 +49,7 @@ DEFAULTS = {
     "max_response_bytes": MAX_RESPONSE,
     "max_snapshot_bytes": MAX_SNAPSHOT,
     "max_processes": 65536,
-    "max_services": 512,
+    "max_services": 256,
     "max_gpu_processes": 4096,
     "max_proc_bytes": 64 * MIB,
     "match_rules": DEFAULT_RULES,
@@ -168,10 +168,10 @@ def load_config(path=None):
         if not isinstance(value, str) or not value.startswith("/") or CONTROL.search(value) or ".." in Path(value).parts:
             raise ScanError("invalid_config_path")
     bounds = {
-        "sample_interval_seconds": (1, 86400), "scan_budget_seconds": (0.1, 20),
+        "sample_interval_seconds": (30, 300), "scan_budget_seconds": (0.1, 20),
         "target_timeout_seconds": (0.01, 2), "max_response_bytes": (1, MAX_RESPONSE),
         "max_snapshot_bytes": (1, MAX_SNAPSHOT), "max_processes": (1, 65536),
-        "max_services": (1, 512), "max_gpu_processes": (1, 4096),
+        "max_services": (1, 256), "max_gpu_processes": (1, 4096),
         "max_proc_bytes": (1024, 64 * MIB),
     }
     for key, (low, high) in bounds.items():
@@ -751,18 +751,16 @@ def scan(config, runner=run_bounded, clock=time.monotonic, wall_clock=time.time)
     budget = Budget(config["scan_budget_seconds"], clock)
     generated_at = wall_clock()
     reader = ProcReader(config["proc_root"], budget, config["max_proc_bytes"])
-    boot_time = None
     try:
-        match = re.search(r"^btime\s+(\d+)\s*$", reader.text("stat", 65536), re.M)
-        if match:
-            boot_time = int(match.group(1))
-    except (OSError, ScanError):
-        pass
-    if boot_time is None:
-        try:
-            boot_time = generated_at - number(reader.text("uptime", 128).split()[0])
-        except (OSError, ValueError, ScanError, IndexError):
+        match = re.search(r"^btime[ \t]+([0-9]{1,20})[ \t]*$", reader.text("stat", 65536), re.M)
+        if match is None:
+            raise ScanError("boot_time_unavailable")
+        boot_time = int(match.group(1))
+        if not 0 < boot_time <= generated_at:
             raise ScanError("boot_time_unavailable") from None
+    except (OSError, ValueError, ScanError):
+        # Uptime approximations drift between scans and change instance identity.
+        raise ScanError("boot_time_unavailable") from None
     processes, complete, errors = discover(reader, config)
     candidates = {}
     for pid, process in processes.items():

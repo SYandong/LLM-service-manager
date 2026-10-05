@@ -305,16 +305,51 @@ def test_response_limit_and_untrusted_container_names_become_unknown(scanner, tm
     assert result["other_gpu_processes"][0]["comm"] == "unknown"
 
 
-def test_created_timestamp_fallback_or_total_failure(scanner, tmp_path):
+@pytest.mark.parametrize("stat_state", ["missing", "unreadable", "nonnumeric", "negative", "zero", "future"])
+def test_boot_time_requires_canonical_stat_and_retains_previous(scanner, tmp_path, monkeypatch, capsys, stat_state):
     root = fake_root(tmp_path)
-    (root / "stat").unlink()
-    (root / "uptime").write_text("500.0 0\n")
     make_process(root, 100, ["vllm", "serve", "demo"], port=8000)
-    result = scanner.scan(fixture_config(scanner, root, tmp_path), FakeRunner(), wall_clock=lambda: 1700000500)
-    assert result["services"][0]["started_at"] == 1700000000 + 100 / os.sysconf("SC_CLK_TCK")
-    (root / "uptime").unlink()
-    with pytest.raises(scanner.ScanError, match="boot_time_unavailable"):
-        scanner.scan(fixture_config(scanner, root, tmp_path), FakeRunner())
+    config = fixture_config(scanner, root, tmp_path)
+    previous = scanner.scan(config, FakeRunner(), wall_clock=lambda: 1700000500)
+    scanner.atomic_write(config["output_path"], previous)
+    path = Path(config["output_path"])
+    previous_bytes = path.read_bytes()
+    stat = root / "stat"
+    if stat_state in {"missing", "unreadable"}:
+        stat.unlink()
+        if stat_state == "unreadable":
+            stat.mkdir()
+    else:
+        invalid_values = {"nonnumeric": "unknown", "negative": "-1", "zero": "0", "future": "1700000600"}
+        stat.write_text(f"cpu 1 2 3\nbtime {invalid_values[stat_state]}\n")
+    (root / "uptime").write_text("500.01 0\n")
+    runner = FakeRunner()
+    original_scan = scanner.scan
+    monkeypatch.setattr(scanner, "scan", lambda config: original_scan(config, runner, wall_clock=lambda: 1700000500))
+    with pytest.raises(scanner.ScanError, match="^boot_time_unavailable$"):
+        scanner.scan(config)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config))
+    assert scanner.main(["--config", str(config_path)]) == 1
+    assert path.read_bytes() == previous_bytes
+    assert path.stat().st_mode & 0o777 == 0o644
+    assert list(tmp_path.glob(".fleet-*.tmp")) == []
+    assert runner.calls == []
+    assert json.loads(capsys.readouterr().err)["snapshot_retained"] is True
+
+
+def test_service_start_identity_is_stable_across_scans(scanner, tmp_path):
+    root = fake_root(tmp_path)
+    make_process(root, 100, ["vllm", "serve", "demo"], port=8000)
+    config = fixture_config(scanner, root, tmp_path)
+    (root / "uptime").write_text("500.01 0\n")
+    first = scanner.scan(config, FakeRunner(), wall_clock=lambda: 1700000500.005)
+    (root / "uptime").write_text("560.02 0\n")
+    second = scanner.scan(config, FakeRunner(), wall_clock=lambda: 1700000560.019)
+    assert first["generated_at"] != second["generated_at"]
+    assert first["services"][0]["started_at"] == 1700000000 + 100 / os.sysconf("SC_CLK_TCK")
+    for key in ("id", "pid", "started_at"):
+        assert first["services"][0][key] == second["services"][0][key]
 
 
 @pytest.mark.parametrize("failure", ["gpus", "apps", "unmapped"])
@@ -410,6 +445,8 @@ def test_overall_failure_and_dry_run_write_nothing(scanner, tmp_path, monkeypatc
 
 def test_config_is_valid_json_bounded_and_rules_configurable(scanner, tmp_path):
     assert scanner.load_config(EXAMPLE)["sample_interval_seconds"] == 60
+    assert scanner.load_config(EXAMPLE)["max_services"] == 256
+    assert scanner.load_config()["max_services"] == 256
     for overrides in ({"scan_budget_seconds": 21}, {"target_timeout_seconds": 3}, {"max_response_bytes": 5 * 1024 * 1024}, {"output_path": "/tmp/../escape"}, {"match_rules": [{"engine": "vllm", "all": "bad"}]}, {"other": 1}):
         path = tmp_path / "bad.json"
         path.write_text(json.dumps(overrides))
@@ -417,6 +454,44 @@ def test_config_is_valid_json_bounded_and_rules_configurable(scanner, tmp_path):
             scanner.load_config(path)
     process = scanner.Process(1, 0, 1, ["custom-server"], "", None, "server")
     assert scanner.engine_for(process, [{"engine": "vllm", "all": ["custom-server"]}]) == "vllm"
+
+
+@pytest.mark.parametrize("overrides", [
+    {"sample_interval_seconds": 1},
+    {"sample_interval_seconds": 29},
+    {"sample_interval_seconds": 301},
+    {"sample_interval_seconds": 86400},
+    {"max_services": 257},
+    {"max_services": 512},
+])
+def test_config_rejects_values_outside_consumer_bounds(scanner, tmp_path, overrides):
+    path = tmp_path / "out-of-contract.json"
+    path.write_text(json.dumps(overrides))
+    with pytest.raises(scanner.ScanError, match="invalid_config_bound"):
+        scanner.load_config(path)
+
+
+@pytest.mark.parametrize("overrides", [
+    {"sample_interval_seconds": 30},
+    {"sample_interval_seconds": 300},
+    {"max_services": 256},
+])
+def test_config_accepts_inclusive_consumer_bounds(scanner, tmp_path, overrides):
+    path = tmp_path / "boundary.json"
+    path.write_text(json.dumps(overrides))
+    config = scanner.load_config(path)
+    assert all(config[key] == value for key, value in overrides.items())
+
+
+def test_service_inventory_cap_marks_truncated_export_incomplete(scanner, tmp_path):
+    root = fake_root(tmp_path)
+    for pid in range(100, 357):
+        make_process(root, pid, ["vllm", "serve", "demo"], port=8000)
+    result = scanner.scan(fixture_config(scanner, root, tmp_path), FakeRunner())
+    assert len(result["services"]) == 256
+    assert result["inventory_complete"] is False
+    assert result["gpu_attribution_complete"] is False
+    assert "service_limit" in result["errors"]
 
 
 def test_command_runner_is_no_shell_bounds_output_and_timeout(scanner, monkeypatch):
