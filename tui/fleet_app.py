@@ -82,7 +82,7 @@ class FleetHelpDialog(ModalScreen):
     #fleet-help-text { height: auto; }
     #fleet-help-close { height: 3; width: 100%; }
     """
-    BINDINGS = [("escape", "close", "Close")]
+    BINDINGS = [("escape", "close", "Close"), ("q", "app.quit", "Quit")]
 
     def __init__(self, owner):
         super().__init__()
@@ -236,7 +236,7 @@ class GpuDetailDialog(ModalScreen):
     #gpu-detail-buttons { height: 3; }
     #gpu-detail-buttons Button { width: 1fr; min-width: 0; }
     """
-    BINDINGS = [("escape", "close", "Close")]
+    BINDINGS = [("escape", "close", "Close"), ("q", "app.quit", "Quit")]
 
     def __init__(self, owner):
         super().__init__()
@@ -357,7 +357,7 @@ class ClaimDialog(ModalScreen):
     #claim-buttons { height: 3; }
     #claim-buttons Button { width: 1fr; min-width: 0; }
     """
-    BINDINGS = [("escape", "close", "Close")]
+    BINDINGS = [("escape", "close", "Close"), ("q", "app.quit", "Quit")]
 
     def __init__(self, owner, service, revoke=False):
         super().__init__()

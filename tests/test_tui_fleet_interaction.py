@@ -13,7 +13,7 @@ from textual import events
 from textual.containers import VerticalScroll
 from rich.text import Text
 
-from tui.fleet_app import FleetHelpDialog, GpuDetailDialog, GpuOverview
+from tui.fleet_app import ClaimDialog, FleetHelpDialog, GpuDetailDialog, GpuOverview
 from tui.fleet_selection import SelectableStatic
 from test_tui_fleet import make_app, ready
 
@@ -345,11 +345,22 @@ def test_people_and_modal_show_literal_api_friendly_state_and_token_units(intera
     asyncio.run(scenario())
 
 
-def test_control_c_without_a_selection_does_not_quit_and_q_does(interaction_snapshot):
+@pytest.mark.parametrize("view", ["gpu", "help", "gpu_details", "claim"])
+def test_control_c_without_a_selection_does_not_quit_and_q_does(interaction_snapshot, view):
     async def scenario():
         app, _ = make_app(interaction_snapshot)
         async with app.run_test(size=(80, 24)) as pilot:
             await ready(app, pilot)
+            if view == "help":
+                await pilot.press("question_mark")
+                app.screen.query_one("#fleet-help-title").focus(scroll_visible=False)
+            elif view == "gpu_details":
+                await pilot.press("enter")
+                app.screen.query_one("#gpu-allocation-text").focus(scroll_visible=False)
+            elif view == "claim":
+                app.push_screen(ClaimDialog(app, app.selected_service()))
+                await pilot.pause()
+                app.screen.query_one("#claim-title").focus(scroll_visible=False)
             with patch.object(app, "copy_to_clipboard") as copy:
                 await pilot.press("ctrl+c")
                 assert app.is_running
@@ -402,4 +413,6 @@ def test_control_c_preserves_input_selection_when_supported_without_quitting(int
                     assert field.selected_text == "alpha"
                 else:
                     copy.assert_not_called()
+            await pilot.press("q")
+            assert app.is_running and "q" in field.value
     asyncio.run(scenario())
