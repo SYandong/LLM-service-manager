@@ -125,6 +125,14 @@ namespaces. Process argv is redacted before export; HTTP bodies and exception
 texts never enter error messages. The service's outer timeout also cleans up
 its own command/helper processes.
 
+For Ollama, a configured wildcard bind may use either IPv4 or IPv6 in the
+process-owned socket table. With a known configured port, the scanner accepts
+one owned wildcard listener across these families and connects through that
+listener's actual numeric loopback address. Multiple matching listeners,
+different ports, and mismatched specific addresses remain unavailable. A
+successful `/api/ps` response with an empty model list means no models are loaded;
+it does not supply request, in-flight or token counters.
+
 The schema is version 1 and includes explicit unknown/completeness markers:
 
 | Field | Meaning |
@@ -211,3 +219,4 @@ not establish real-host inventory completeness, production enablement or
 long-term sampling reliability.
 
 <!-- Generated-By: Codex / gpt-6.1-sol -->
+<!-- Generated-By: Codex / unknown model -->

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Generated-By: Codex / gpt-6.1-sol
+# Generated-By: Codex / unknown model
 """Bounded, observation-only host fleet export. Python 3.10, standard library."""
 
 import argparse
@@ -575,7 +576,14 @@ def choose_listener(reader, process, engine):
             raise ScanError("invalid_endpoint") from None
     candidates = owned_listeners(reader, process.pid)
     preferred = port or (11434 if engine == "ollama" else 8000)
-    matching = [item for item in candidates if (port is None or item[1] == port) and (bind is None or item[0] == bind)]
+    # Ollama can configure an IPv4 wildcard but own an IPv6 wildcard socket.
+    # Keep the configured port and actual owned address; ambiguity still fails.
+    wildcard_bind = engine == "ollama" and port is not None and bind in {"0.0.0.0", "::"}
+    matching = [
+        item for item in candidates
+        if (port is None or item[1] == port)
+        and (bind is None or item[0] == bind or (wildcard_bind and item[0] in {"0.0.0.0", "::"}))
+    ]
     defaults = [item for item in matching if item[1] == preferred]
     if defaults:
         matching = defaults
