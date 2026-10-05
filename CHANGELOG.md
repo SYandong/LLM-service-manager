@@ -17,7 +17,7 @@
   previous shared-model panel with a deprecation notice (#308, #309).
 - Add explicit scanner enablement, rollback and the requested three-day shadow
   reconciliation runbook. No site deployment, shadow acceptance or announcement
-  is claimed. Legacy TUI removal is deferred to a later minor with zero-use
+  is claimed. Legacy TUI removal is planned for the minor after the first fleet release, with zero-use
   evidence or maintainer confirmation (#310, #311).
 
 

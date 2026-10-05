@@ -138,7 +138,7 @@ with the same fresh identity/quiet/protection gates. A stale backup is not
 current account state. A failed or unknown side effect remains unresolved;
 do not clear fences or replay a start/stop to make the record look complete.
 
-The next-minor legacy TUI deletion is #311 and needs zero-use evidence or
+Legacy TUI deletion in the minor after the first fleet release is #311 and needs zero-use evidence or
 maintainer confirmation. #28 target rewriting and #168 closure remain decisions;
 this rollout observes and coordinates, and does not retire another user's
 service. The [announcement](../docs/FLEET_ANNOUNCEMENT.md) is a draft only and

@@ -29,8 +29,9 @@ llm history SERVICE_ID --hours 24
 只能声明自己容器的服务，默认最多七天。声明不预留容量，也不改变进程。
 六小时空闲上限只做展示，不会自动停止服务。指标每分钟采样，活动条是
 采样估计；未知、陈旧或缺失不算空闲，也不代表没有请求。
-旧面板第一阶段可用 `llm legacy-tui` 打开并提示弃用，后续 minor 的删除
-需要零使用证据或维护者确认。原共享模型管理命令继续可用。
+旧面板第一阶段可用 `llm legacy-tui` 打开并提示弃用，计划在 fleet 首次发布
+后的下一个 minor 按 #311 删除，需要零使用证据或维护者确认。
+原共享模型管理命令继续可用。
 
 完整命令见 [CLI](docs/CLI.md)，启用、回滚与影子对账见
 [fleet 操作手册](deploy/FLEET_ROLLOUT.md)。后文 v1.9.2 下载示例仍是该已发布
@@ -83,9 +84,12 @@ PYREQUEST
 默认启动窗口为 900 秒；这些不是所有模型的首 token 时延上限。
 遇到错误或超时，先检查状态与部署方日志，不循环重发写操作或自行停模型。
 
-## 用户：CLI、状态与可选 TUI
+## 用户：已发布的共享 CLI 与旧面板
 
-从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v1.3.1)
+以下为 v1.9.2 的共享接口与面板；fleet 版本用 `status --shared` 和
+`legacy-tui` 访问这些视图。新面板操作见前面的 fleet 节和 CLI 文档。
+
+从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v1.9.2)
 下载 `llm` 和 `SHA256SUMS`，核对对应 SHA-256 后，将脚本放在当前目录：
 
 ```sh
@@ -96,7 +100,7 @@ python3 llm usage --days 7 --by model
 ```
 
 单文件 `llm` 仅需 Python 标准库，不必安装仓库、rich 或 Textual。
-源码目录中的等价命令是 `python3 cli/llm status`。`LLM_URL` 使用上面设置的
+fleet 源码目录中的共享命令是 `python3 cli/llm status --shared`。`LLM_URL` 使用上面设置的
 scheduler 地址；参数/配置优先级及完整命令见 [CLI 使用说明](docs/CLI.md)。
 
 TUI 的「Copy model endpoint address」复制的是**共享 llama-swap OpenAI 地址**，
@@ -125,7 +129,7 @@ RAM   llmsvc 86/200 GiB budget  host available 823 GiB
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install './llmsvc-1.1.1-py3-none-any.whl[tui]'
+.venv/bin/python -m pip install './llmsvc-1.9.2-py3-none-any.whl[tui]'
 .venv/bin/llm
 ```
 
