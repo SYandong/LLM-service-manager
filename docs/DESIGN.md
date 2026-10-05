@@ -758,6 +758,10 @@ fsync 失败、恢复 marker 再次失败，都保持不可操作的恢复状态
 
 ## 6. CLI 与 TUI
 
+本节记录共享模型 CLI 与已弃用的共享模型 TUI。M7 默认入口和全员状态视图
+见 [全组推理服务观测](#10-全组推理服务观测fleet305)；旧 TUI 暂以
+`llm legacy-tui` 保留，共享管理命令继续使用。
+
 `cli/llm` 是单文件、仅标准库，用户复制到自己容器即可。子命令：`status` `top` `free` `wake` `sleep` `stop` `preload` `pin` `unpin` `reserve` `add` `rm` `usage`。
 
 `llm status` 一屏：
@@ -982,5 +986,133 @@ native/model effect 已结算、候选可写启动、健康检查、单 writer �
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->
+
+## 10. 全组推理服务观测（fleet，#305）
+
+fleet 观察自建推理服务及全部 GPU 占用，给服务主人提供占用声明。共享模型
+仍走既有调度器；fleet 不代理推理、不放置自建模型、不停止其他容器的进程。
+空闲超过约定上限只展示，实际协调由使用者和管理员完成。
+
+### 10.1 数据来源与默认值
+
+宿主机 `llmsvc-fleet-scan.timer` 每 60 秒运行标准库 Python 采集器。它从
+`/proc` 发现 vLLM、ollama、sglang、llama-server，按 cgroup 取得容器归属，
+按进程树把 EngineCore 等子进程的显存归并给 API 服务。实例 ID 绑定容器、
+宿主 PID 和进程启动 ticks；PID 复用产生新实例。没有推理服务祖先的 GPU
+进程只导出归属、显存、PID 和短 comm，不导出命令行。
+
+采集器仅进入目标网络命名空间，向已核实监听器发 GET，不进入 mount/pid/user
+命名空间，不执行目标进程的命令。每次抓取至多 2 秒/4 MiB，禁止重定向与
+环境代理，整轮预算 20 秒。抓取前后核对 PID/start、网络命名空间和监听器
+归属；进程变化或无法绑定端点时保持未知。vLLM 只保留指定计数器/gauge 和
+模型标签；ollama 只抓 `/api/ps`，没有 token 统计。其他引擎 v1 仅记录存在与
+显存，活动未知。原始命令行、指标和凭据不进入 journal 或公开 fixture。
+
+快照 `schema_version: 1` 原子写入现有宿主导出目录的 `fleet.json`，权限
+0644、大小上限 2 MiB。配置路径与规则可修改；复用现有只读目录挂载。快照
+包含 `generated_at`、GPU、服务、其他 GPU 占用和有界错误，并单列
+`inventory_complete`、`gpu_inventory_complete`、`gpu_attribution_complete`
+及每服务的 `gpu_observation_complete`。采集失败不等于空机器；发现不完整
+时不能把缺失服务记成已退出。整轮失败保留旧文件，陈旧性由消费者判断。
+
+| 配置 | 默认 | 作用 |
+|---|---|---|
+| `fleet_enabled` | false | 显式启用摄取与独立历史库 |
+| `fleet_snapshot_path` | `/var/lib/llmsvc-host/export/fleet.json` | 容器内只读快照 |
+| `fleet_db_path` | `/var/lib/llmsvc/fleet.sqlite` | 与 scheduler 账本分离 |
+| `fleet_ingest_interval_seconds` | 30 | 重复快照不重复摄取 |
+| `fleet_stale_after_seconds` | 180 | 超时显示 unknown |
+| `fleet_active_window_seconds` | 900 | 最近活动窗口 |
+| `fleet_idle_limit_hours` | 6 | 仅展示空闲超限 |
+| `fleet_raw_retention_days` | 14 | 分钟样本保留 |
+| `fleet_hourly_retention_days` | 180 | 小时汇总保留 |
+| `fleet_claims_enabled` | true | fleet 启用后独立控制声明写入 |
+| `fleet_claim_max_days` | 7 | 声明期限上限 |
+
+`fleet_enabled: false` 不创建数据库或摄取 worker。显式启用后的历史摄取只写
+fleet 数据库；`read_only` 继续禁止模型/共享调度意图动作。fleet 声明是单独
+的观测注记：按本次设计允许在 `read_only: true` 下使用，但仍要求 fleet 和
+claims 开关同时开启及服务归属通过校验，不授予 unit、配置或模型操作能力。
+
+### 10.2 摄取、窗口与未知
+
+独立 SQLite 使用 WAL 和单写者。保存实例、样本、GPU 样本、小时汇总和
+声明；每小时清理一次超期数据。快照时间、实例和计数器基线持久化，重复、
+乱序、未知 schema 或无效数字不能形成新观察；重启不重复计算同一快照。
+只有完整的新鲜发现明确不再含实例时，才记 `ended_at`。
+
+请求、输入/输出及 cached token 取相邻有效计数器差分。首次基线不回填历史
+流量；复位用新的计数器代际，负差分不算活动。失败样本不覆盖最后有效基线。
+大于五分钟的抓取间断可保留已知流量差值，但不能把整个间断摊成活跃分钟。
+缺失计数器、抓取失败与不支持引擎的统计为 null，不补零。
+
+样本活动信号为 running/waiting 非零，或请求/输出 token 有正差分；活跃分钟
+表示采样区间估计，按实际间隔且封顶两倍标称间隔。它不证明整个区间连续
+推理。ollama 的模型过期时间延后只作弱活动信号，没有 token 数或精确请求数。
+状态与聚合均由纯函数计算，不做 I/O。
+
+状态按 unknown、claimed、active、over_limit、idle 的优先级展示。陈旧、连续
+失败、活动不支持或不足以判断时为 unknown；有效声明不遮盖未知。声明仍附
+活动/空闲参考，六小时上限不触发动作。活动与空闲分别保留观测覆盖：尚未开始
+观测的运行时间、缺失样本和抓取失败不能被当作已空闲；`never_active` 只说明
+没有观测到活动，不证明从启动起未被使用。
+
+24h/7d 流量及活跃分钟的 raw 与 hourly 区间不重叠，避免双计。返回实际观测
+时长/覆盖率/间断；`active_ratio` 的分母为窗口长度与实例在线时长的较小值，
+`observed_active_ratio` 的分母为实际观测时长，两者同时给出覆盖率。
+24 格小时活动条为 0–60 分钟，
+无观测或活动未知的小时为 null。不能用首次出现时读到的累计计数器伪造
+最近 24h/7d 流量，也不能用补零让采集器宕机看起来空闲。
+
+字段、计数器复位与窗口边界细则见 [FLEET.md](FLEET.md)，随 #307 交付。
+
+### 10.3 API 与声明归属
+
+| 方法路径 | 说明 |
+|---|---|
+| `GET /v1/fleet` | 新鲜度、配置、GPU 占用、容器/服务及共享模型摘要 |
+| `GET /v1/fleet?mine=1` | 按真实连接对端容器过滤；归属无法确认则拒绝 |
+| `GET /v1/fleet/history?service=ID&hours=24\|168` | 分钟或小时序列，保留 gap/null |
+| `POST /v1/fleet/claims` | `{service_id, until, reason}`；仅本容器服务 |
+| `DELETE /v1/fleet/claims/ID` | 仅本容器声明；支持 dry-run |
+
+对端身份仅来自 HTTP socket peer，经新鲜可信的 `ip-containers.json` 映射。
+请求体、`X-Forwarded-For` 等转发头不能指定归属。映射缺失、陈旧、地址重分配
+或无法确认时拒绝声明/撤销；服务 ID 不是身份凭证。显示的“按人”实际按容器
+归属分组，不宣称识别真实个人或认证用户。
+
+声明期限必须有限、尚未到期且至多七天；理由 1–200 字符。校验服务仍存在、
+当前归属一致和快照新鲜后才保存。`?dry_run=1` 不生成 ID、不创建或改写库、
+不产生状态迁移，只返回预览。实际提交写结构化日志，理由文本按有界数据处理。
+响应丢失意味着结果未知；客户端不自动重试写请求。v1 不提供管理员冒用、
+强制撤销、SQL 修改捷径或声明驱逐能力。
+
+`GET /v1/fleet` 不输出完整 argv 或训练命令；详情/history 可给出脱敏后的
+推理参数摘要。服务携带 `mine` 以控制 UI 操作，但 API 每次仍重新校验。
+`fleet_status_changed` 通过现有 SSE 发布；SSE 仅刷新提示，不作为无丢失活动
+源。503 占用者归属增强由 #313 在 D 完成后接入，陈旧/不完整快照不用于归因。
+
+### 10.4 CLI、TUI 与交付顺序
+
+`llm status` 默认 fleet；`llm status --shared` 保留共享视图，带 `--json`
+保留原结构。`llm fleet` 提供 person/gpu、排序、mine、plain、json；新增
+`claim`、`unclaim`、`history`，共享模型管理仍走原 CLI。未启用 fleet 明确
+提示 unavailable/disabled，不把旧共享视图标成全员快照。
+
+新 `llm`/`top` TUI 按人或按卡展示，默认超限优先再显存降序，含 24h 活动条、
+历史与声明。GET 默认 15 秒、SSE 合并刷新，读取/声明在后台，退出关闭资源；
+按稳定 ID 增量更新，重复快照不重建表。陈旧/错误醒目、未知有文字提示，
+支持 100×30 和 80×24。声明先 dry-run 预览再由用户提交；403 和结果未知均
+明确显示，不自动重放。非 TTY 或未安装 Textual 时走 CLI。
+
+旧 TUI 第一阶段保留为 `llm legacy-tui` 并提示弃用。第二阶段 #311 在 fleet
+首次发布后的下一个 minor、取得零使用证据或维护者确认后删除，不能在本次
+新 TUI 交付中提前删除。
+M7 分项 issue 记录实现、当前审核/CI、现场验收三个状态。#28 的目标改写和
+#168 的关单保留维护者决定；历史路线图不因新设计自动视为已完成。
+本次计划要求现场至少三天影子对账，作为 M7 上线证据；本地开发与 PR 验证
+仍使用确定性测试，不把测试、日历或文件存在宣称为生产完成。
+
+<!-- Generated-By: Codex / unknown model -->
 <!-- Generated-By: Claude Code / claude-opus-5-5 -->
 <!-- Generated-By: Codex / gpt-6.1-sol -->

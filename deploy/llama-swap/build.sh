@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Generated-By: OpenCode / deepseek-v4.1-flash
+# Generated-By: Codex / gpt-6.1-sol
 #
 # Reproducible build of the patched llama-swap used for usage attribution.
 #
 # The source tarball is pinned by tag and sha256. Every patch under
 # deploy/llama-swap/patches/ is applied in name order. Building requires Docker
-# (Node for the UI bundle, Go for the static binary); the resulting binary is
+# (Node for the UI bundle, Go for tests and the static binary); the resulting binary is
 # printed together with its sha256.
 #
 # Usage: ./build.sh [work-directory]
@@ -44,10 +45,14 @@ done
 # Node bundle: the Go build embeds ui/dist via the embed_ui tag.
 docker run --rm -v "$src":/src -w /src/ui node:22-slim sh -c 'npm ci && npm run build'
 
-docker run --rm -v "$src":/src -w /src -e GOFLAGS=-buildvcs=false golang:1.26 \
-    go build -tags embed_ui \
-    -ldflags "-X main.version=${VERSION}-llmsvc.2 -X main.commit=e31a1ad -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    -o build/llama-swap-linux-amd64 .
+# An init process reaps orphaned grandchildren from the upstream fork tests.
+docker run --rm --init -v "$src":/src -w /src -e GOFLAGS=-buildvcs=false golang:1.26 \
+    sh -e -c '
+        go build -o build/simple-responder_linux_amd64 ./cmd/simple-responder
+        go build -o build/vllm-wrapper ./cmd/vllm-wrapper
+        go test ./...
+        go build -tags embed_ui -ldflags "$1" -o build/llama-swap-linux-amd64 .
+    ' _ "-X main.version=${VERSION}-llmsvc.3 -X main.commit=e31a1ad -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 out="$src/build/llama-swap-linux-amd64"
 echo "built: $out"

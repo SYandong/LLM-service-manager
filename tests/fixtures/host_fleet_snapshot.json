@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "generated_at": 1700000500.0,
+  "sample_interval_seconds": 60,
+  "scan_duration_ms": 10,
+  "inventory_complete": true,
+  "gpu_inventory_complete": true,
+  "gpu_attribution_complete": false,
+  "host": {
+    "gpu_count": 2
+  },
+  "gpus": [
+    {
+      "index": 0,
+      "uuid": "GPU-one",
+      "total_mib": 140000,
+      "used_mib": 100000,
+      "util_percent": 70
+    },
+    {
+      "index": 1,
+      "uuid": "GPU-two",
+      "total_mib": 140000,
+      "used_mib": 1000,
+      "util_percent": 0
+    }
+  ],
+  "services": [
+    {
+      "id": "92a15f7170806825",
+      "engine": "vllm",
+      "engine_version": null,
+      "container": null,
+      "host": true,
+      "managed_by": null,
+      "pid": 400,
+      "started_at": 1700000001.0,
+      "bind": "0.0.0.0",
+      "port": 8000,
+      "model": "host-demo",
+      "model_path": "host-demo",
+      "gpus": [],
+      "gpu_observation_complete": false,
+      "argv_redacted": "vllm serve host-demo",
+      "metrics": {
+        "generation_tokens_total": 100,
+        "prompt_tokens_total": 200,
+        "prompt_tokens_cached_total": 20,
+        "requests_total": 10,
+        "num_requests_running": 0,
+        "num_requests_waiting": 1,
+        "generation_tokens_created": 1700000001,
+        "kv_cache_usage_perc": 0.5
+      },
+      "ollama": null,
+      "scrape": {
+        "ok": true,
+        "error": null,
+        "duration_ms": 0
+      },
+      "metrics_series_id": "7a0f73561e61d30f4f2cf42b3490850b"
+    },
+    {
+      "id": "eb6cb5e38bf48c27",
+      "engine": "ollama",
+      "engine_version": null,
+      "container": "team-b",
+      "host": false,
+      "managed_by": null,
+      "pid": 200,
+      "started_at": 1700000001.0,
+      "bind": "127.0.0.1",
+      "port": 11434,
+      "model": null,
+      "model_path": null,
+      "gpus": [],
+      "gpu_observation_complete": false,
+      "argv_redacted": "ollama serve",
+      "metrics": {},
+      "ollama": {
+        "models": [
+          {
+            "name": "demo-ollama",
+            "size_vram": 2048,
+            "expires_at": "2026-10-05T12:00:00Z"
+          }
+        ]
+      },
+      "scrape": {
+        "ok": true,
+        "error": null,
+        "duration_ms": 0
+      }
+    },
+    {
+      "id": "ee74e29f68ee4ef5",
+      "engine": "vllm",
+      "engine_version": null,
+      "container": "team-a",
+      "host": false,
+      "managed_by": null,
+      "pid": 100,
+      "started_at": 1700000001.0,
+      "bind": "0.0.0.0",
+      "port": 8000,
+      "model": "demo-model",
+      "model_path": "/models/demo",
+      "gpus": [
+        {
+          "index": 0,
+          "used_mib": 95000
+        }
+      ],
+      "gpu_observation_complete": false,
+      "argv_redacted": "vllm serve /models/demo --served-model-name demo-model",
+      "metrics": {
+        "generation_tokens_total": 100,
+        "prompt_tokens_total": 200,
+        "prompt_tokens_cached_total": 20,
+        "requests_total": 10,
+        "num_requests_running": 0,
+        "num_requests_waiting": 1,
+        "generation_tokens_created": 1700000001,
+        "kv_cache_usage_perc": 0.5
+      },
+      "ollama": null,
+      "scrape": {
+        "ok": true,
+        "error": null,
+        "duration_ms": 0
+      },
+      "metrics_series_id": "7a0f73561e61d30f4f2cf42b3490850b"
+    }
+  ],
+  "other_gpu_processes": [
+    {
+      "container": "team-c",
+      "pid": 300,
+      "gpu": 1,
+      "used_mib": 900,
+      "comm": "python"
+    },
+    {
+      "container": null,
+      "pid": 99999,
+      "gpu": 0,
+      "used_mib": 200,
+      "comm": "unknown"
+    }
+  ],
+  "errors": [
+    "gpu_attribution_incomplete"
+  ],
+  "_generated_by": "Codex / gpt-6.1-sol"
+}
