@@ -29,6 +29,8 @@ from pathlib import Path
 MIB = 1024 * 1024
 MAX_SNAPSHOT = 2 * MIB
 MAX_RESPONSE = 4 * MIB
+MAX_CMDLINE_BYTES = 256 * 1024
+MAX_ARGC = 4096
 DEFAULT_RULES = [
     {"engine": "vllm", "all": ["vllm", "serve"]},
     {"engine": "vllm", "all": ["vllm.entrypoints.openai.api_server"]},
@@ -273,9 +275,9 @@ def discover(reader, config):
                 status_ppid = re.search(r"^PPid:\s*(\d+)\s*$", status, re.M)
                 if status_ppid is None or int(status_ppid.group(1)) != ppid:
                     raise ScanError("proc_identity_changed")
-                raw = reader.read(f"{pid}/cmdline", 65536)
+                raw = reader.read(f"{pid}/cmdline", MAX_CMDLINE_BYTES)
                 argv = raw.rstrip(b"\0").decode("utf-8", "replace").split("\0") if raw else []
-                if len(argv) > 256:
+                if len(argv) > MAX_ARGC:
                     raise ScanError("proc_argv_limit")
                 cgroup = reader.text(f"{pid}/cgroup")
                 comm = reader.text(f"{pid}/comm", 512).strip()
