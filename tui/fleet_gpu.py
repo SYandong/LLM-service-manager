@@ -95,6 +95,16 @@ class GpuAccount:
         return keys
 
 
+def service_amounts(members):
+    """Compute the per-card service totals used in expanded model rows."""
+    groups = {}
+    for ident, value in members:
+        if ident is not None:
+            groups.setdefault(ident, []).append(value)
+    return {ident: math.fsum(values) if all(numeric(value) for value in values) else None
+            for ident, values in groups.items()}
+
+
 def account_gpu(gpu, services=()):
     services = {service["id"]: service for service in services}
     groups = {}
@@ -118,6 +128,7 @@ def account_gpu(gpu, services=()):
     allocations = []
     for (identity, kind), group in sorted(groups.items()):
         members = tuple(group["members"])
+        service_amounts(members)
         values = [value for _, value in members]
         used = math.fsum(values) if all(numeric(value) for value in values) else None
         allocations.append(Allocation(identity, group["owner"], kind, used, members))
@@ -371,13 +382,9 @@ def render_expanded(accounts, services, width, bar_rows=4, selected_gpu=None,
             append(Text(label, style=owner_style), account.index, allocation.key, indent=2)
             if allocation.kind != "llm":
                 continue
-            amounts = {}
-            for ident, memory in allocation.members:
-                if ident in services:
-                    amounts.setdefault(ident, []).append(memory)
-            for ident in sorted(amounts, key=lambda ident: ranks[ident]):
-                values = amounts[ident]
-                memory = math.fsum(values) if all(numeric(value) for value in values) else None
+            amounts = service_amounts(allocation.members)
+            for ident in sorted((ident for ident in amounts if ident in services), key=lambda ident: ranks[ident]):
+                memory = amounts[ident]
                 for line in service_lines(services[ident], memory, account.index, clean, statuses.get(ident)):
                     append(line, account.index, allocation.key, ident, indent=4)
         if (account.issues or gib(account.used_gb) != compact_gib(account.used_gb)

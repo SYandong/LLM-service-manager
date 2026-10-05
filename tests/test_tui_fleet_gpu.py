@@ -241,15 +241,21 @@ def test_malformed_gpu_service_id_preserves_the_last_good_snapshot(gpu_snapshot,
     asyncio.run(scenario())
 
 
-def test_accounting_overflow_preserves_the_last_good_snapshot(gpu_snapshot):
+@pytest.mark.parametrize("mixed_unknown", [False, True], ids=["owner-total", "service-subtotal"])
+def test_accounting_overflow_preserves_the_last_good_snapshot(gpu_snapshot, mixed_unknown):
     async def scenario():
         app, client = make_app(gpu_snapshot)
         async with app.run_test(size=(80, 24)) as pilot:
             await ready(app, pilot)
             original = app.snapshot
             original_accounts = app.gpu_accounts.copy()
-            for occupant in client.snapshot["gpus"][0]["occupants"][:2]:
-                occupant["used_gb"] = 1e308
+            occupants = client.snapshot["gpus"][0]["occupants"]
+            occupants[0]["used_gb"] = 1e308
+            if mixed_unknown:
+                occupants[1]["used_gb"] = None
+                occupants.append(copy.deepcopy(occupants[0]))
+            else:
+                occupants[1]["used_gb"] = 1e308
             await app.refresh_fleet().wait()
             await ready(app, pilot)
             assert app.snapshot is original
