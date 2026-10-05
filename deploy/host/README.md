@@ -141,6 +141,8 @@ The schema is version 1 and includes explicit unknown/completeness markers:
 | `gpu_inventory_complete` | The full global GPU query succeeded. Failure produces `gpus: []`, `host.gpu_count: null` and an error. |
 | `gpu_attribution_complete` | Compute-app enumeration and checked process/tree ownership were complete. |
 | Service `gpu_observation_complete` | The service's GPU assignment is a complete observation. An empty list with false is unknown. |
+| Service `listener_observation_complete` | The numeric bind/port passed process, namespace and socket-ownership checks. Activity for unsupported engines remains unknown. |
+| Service `listener_ipv6_only` | An exact-inode kernel socket diagnostic for an IPv6 wildcard listener. False permits an IPv4 URI; null leaves address-family support unknown. |
 | `sample_interval_seconds` | Nominal host sampling interval, independent of the consumer's read cadence. |
 | Service `metrics_series_id` | Fingerprint of counter series identities; a change invalidates consumer counter baselines. |
 
@@ -152,6 +154,32 @@ KV-cache usage gauges. Conflicting sleep-state gauges remain unknown. It does
 not calculate idle state, historical deltas, claims or policy decisions.
 `tests/fixtures/host_fleet_snapshot.json` is a synthetic producer-generated
 example with host/container/unknown ownership and an ollama model unknown.
+
+The consumer's `/v1/fleet` service metadata includes an HTTP base URI in
+`api_address`, `api_access` (`shared`, `local_only`, `direct` or `unknown`) and
+`idle_time_sensitive`. A verified wildcard listener (`0.0.0.0` or `::`) defaults
+to Shared and is exempt from idle-time over-limit display. Its URI uses a fresh
+same-family address from `collectors.ip_containers_path` for that container.
+Multiple valid addresses use stable numeric order. For an IPv6 wildcard, the
+scanner queries `NETLINK_SOCK_DIAG` in the same pinned network namespace and
+matches the returned LISTEN socket bind, port and inode. A known false
+`INET_DIAG_SKV6ONLY` permits a trusted IPv4 URI too; a true value only permits
+IPv6. The existing IP exporter currently supplies IPv4. The diagnostic requires
+Linux IPv6 socket-diagnostic support and permission to enter the target network
+namespace; it does not clone workload FDs or enter another namespace type.
+Permission failures, timeouts, mismatched sockets and missing attributes retain
+null; they never imply dual-stack support. The extra helper is bounded to
+250 ms within the existing scan budget. Unknown or stale addresses leave the
+URI null.
+
+For host wildcard listeners, add the host's known nonloopback addresses to the
+consumer's existing `collectors.host_ips`; the first usable same-family address
+is selected. The default loopback-only list does not invent a host address.
+Loopback listeners retain a local HTTP URI and `local_only` access; a specific
+nonloopback listener supplies its observed address with `direct` access. IPv6
+URIs use brackets. Fresh listener evidence is independent of activity support,
+and stale or unverified listeners expose `unknown` access with a null URI.
+These metadata and idle display rules do not control workload processes.
 
 ### Inspect, install and remove
 

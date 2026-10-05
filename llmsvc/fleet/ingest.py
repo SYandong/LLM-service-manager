@@ -110,6 +110,10 @@ def validate_snapshot(payload):
         gpu_rows(service.get("gpus"), "service")
         if "gpu_observation_complete" in service and type(service["gpu_observation_complete"]) is not bool:
             raise ValueError("invalid_fleet_gpu_observation")
+        if "listener_observation_complete" in service and type(service["listener_observation_complete"]) is not bool:
+            raise ValueError("invalid_fleet_listener_observation")
+        if service.get("listener_ipv6_only") is not None and type(service["listener_ipv6_only"]) is not bool:
+            raise ValueError("invalid_fleet_listener_ipv6_only")
         ollama = service.get("ollama")
         if ollama is not None and not isinstance(ollama, (dict, list)):
             raise ValueError("invalid_fleet_ollama")

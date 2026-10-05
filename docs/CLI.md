@@ -60,8 +60,9 @@ LLM_URL=http://scheduler:8011 python3 llm fleet --mine --sort idle --json
 
 - `--by person` 为默认，按容器展示服务数、显存合计与服务明细；`--by gpu` 按卡
   展示占用量、利用率、推理服务及训练等其他占用者。分组标签描述容器，不代表已认证的个人。
-- 默认排序为超限优先、再按显存降序；`--sort idle|mem|tokens` 分别按空闲时长、
-  显存、24 小时输出 token 降序排列，未知值排在已知值之后。
+- Default sorting puts inactive services first, then larger memory use. `--sort
+  idle|mem|tokens` sorts by idle duration, memory or 24-hour output tokens;
+  unknown values follow known values.
 - `--mine` 发送 `?mine=1`，由服务端按实际连接来源映射筛选自己的容器。
   客户端不读取本机容器名，也不使用转发头声明身份。
 - 每条服务显示模型、引擎、GPU、显存、状态、在线时间、空闲时间和服务 ID。
@@ -69,8 +70,8 @@ LLM_URL=http://scheduler:8011 python3 llm fleet --mine --sort idle --json
   `·` 表示未知；未知 token 和时长显示 `—`。活跃比例以窗口与在线时长的较小值为
   分母；覆盖不完整时另示观测覆盖率，后端提供时也显示以已观测时间为分母的活跃
   比例。它们不能解释成全天流量完整性。宿主服务显示 host，模型未识别时显示 unknown。
-- 服务 ID 保留在文本明细中；长模型名按终端显示宽度以 `~` 截断，80 列使用多行
-  明细，中文和组合字符也按显示宽度处理。完整名称和原始统计可用 `--json` 查看。
+- Full model names, API addresses and service IDs wrap to the terminal width.
+  `--json` preserves original measurements and extension fields.
 - 状态用文字表示；颜色仅在 TTY 且没有设置 `NO_COLOR` 时启用，`--plain` 关闭颜色。
   陈旧快照保留告警，当前活动和空闲状态显示 unknown。fleet 未启用、不可用或接口版本
   不匹配时明确报错、返回 1；不会用共享状态代替 fleet。
@@ -403,21 +404,34 @@ LLM_URL=http://scheduler:8011 python cli/llm
 LLM_URL=http://scheduler:8011 python cli/llm top
 ```
 
-默认界面是全员 fleet：顶部显示各 GPU 的显存及全部占用者，中部按人或卡展示
-推理服务，详情展示活动历史和参数摘要。`/v1/fleet` 每 15 秒读取一次，
-scheduler `/v1/events` 的 fleet 状态变化触发刷新；详情按需读取 history。
-陈旧或采集错误保持醒目的横幅，未知活动不补成空闲。
+The default fleet TUI opens large GPU panels with all owner/model allocations
+inline. The selected GPU has a highlighted heading and pulsing marker. P opens
+People; G returns to GPUs. Fleet refreshes every 15 seconds and on service changes.
 
-| 键 | 作用 |
+| Control | Action |
 |---|---|
-| P / G | 按人 / 按 GPU 分组 |
-| s | 切换排序 |
-| m | 切换仅显示自己的服务 |
-| / | 过滤服务 |
-| c / u | 声明 / 撤销当前服务的占用声明 |
-| r | 刷新 |
-| ? | 帮助 |
-| q | 退出 |
+| Up / Down, wheel | Select GPU; one selection per wheel gesture |
+| Left / Right | Select allocation while keeping the viewport in place |
+| Shift+wheel, Page Up / Page Down | Scroll freely |
+| Drag, Ctrl+C | Select and copy text |
+| Enter | Open details and history |
+| Z | Expanded panels / compact six-GPU overview |
+| P / G | People / GPUs |
+| S / M | Sort / Mine |
+| / | Search |
+| C / U | Claim / revoke |
+| R / ? / Q | Refresh / Help / Quit |
+
+Durations use integer time units; input, output and total include `tokens`.
+VRAM displays up to two decimals without trailing zeros. `Running · inactive`
+replaces the `over_limit` display label; API enums remain compatible.
+Coverage is valid activity observation time divided by the eligible interval.
+
+Each model shows an API base address. Loopback listeners show `Local only`;
+verified wildcard listeners show the container or host address and `Shared`.
+Shared services have no idle-limit reminder. A selected text panel holds its
+content through refresh until the selection is cleared. Ctrl+C requests a copy
+through the terminal clipboard; Q quits.
 
 声明入口按 API 的 `mine` 标记开放，先 dry-run 展示预览，再由明确提交动作写入。
 服务器仍核对实际连接归属；403 和不确定写入结果在界面显示，写入不自动重试。
@@ -603,3 +617,4 @@ Reserve 测试直接请求当前 SchedulerHTTPServer 的预览/默认只读 405 
 <!-- Generated-By: Claude Code / claude-fable-5-1 -->
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->
 <!-- Generated-By: Codex / gpt-6.1-sol -->
+<!-- Generated-By: Codex / unknown model -->

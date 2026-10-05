@@ -30,6 +30,9 @@ def fleet_api():
 def fleet():
     def service(id_, model, owner, status, memory, idle, tokens):
         return {"id": id_, "model": model, "container": owner, "engine": "vllm", "mine": owner == "ctr-a",
+                "api_address": "http://192.0.2.10:8000" if id_ == "id-a" else "http://127.0.0.1:8000" if id_ == "id-b" else None,
+                "api_access": "shared" if id_ == "id-a" else "local_only" if id_ == "id-b" else "unknown",
+                "idle_time_sensitive": id_ != "id-a",
                 "gpus": [1], "gpu_gb": memory, "status": status, "idle_seconds": idle,
                 "uptime_seconds": 864000, "window_24h": {"active_minutes": 200, "active_ratio": 0.14,
                 "gen_tokens": tokens, "prompt_tokens": None, "requests": 1500, "coverage_ratio": 0.5},
@@ -147,7 +150,9 @@ def test_copied_stdlib_cli_defaults_to_fleet_without_tty(tmp_path, fleet_service
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""
     assert "GPU inference services" in result.stdout and "small-model" in result.stdout
-    assert "OVER LIMIT" in result.stdout and "·▁▂█" in result.stdout
+    assert "Running · inactive" in result.stdout and "·▁▂█" in result.stdout
+    assert "API: http://192.0.2.10:8000 · Shared" in result.stdout and "API: Local only" in result.stdout
+    assert "OVER LIMIT" not in result.stdout
     assert "\x1b" not in result.stdout
     assert requests == [("GET", "/v1/fleet", None)]
     assert ("pip install" in result.stdout) == (command in ([], ["top"]))
@@ -187,6 +192,44 @@ def test_unknown_coverage_stale_and_other_occupants_are_visible(fleet_api, fleet
     stale = fleet_api["format_fleet"](fleet, width=80)
     assert "WARNING stale" in stale and "OVER LIMIT" not in stale
     assert "idle 19h" not in stale
+
+
+@pytest.mark.parametrize("by", ["person", "gpu"])
+def test_model_rows_show_api_access_and_running_inactive_label(fleet_api, fleet, by):
+    fleet["services"][0].update(api_address="http://192.0.2.10:8000", api_access="shared", idle_time_sensitive=False)
+    fleet["services"][1].update(api_address="http://127.0.0.1:8000", api_access="local_only", idle_time_sensitive=True)
+    fleet["services"][2].update(api_address="http://[2001:db8::10]:8000", api_access="direct", idle_time_sensitive=True)
+    text = fleet_api["format_fleet"](fleet, width=160, by=by)
+    assert "http://192.0.2.10:8000 · Shared" in text
+    assert "Local only" in text and "http://127.0.0.1:8000" not in text
+    assert "http://[2001:db8::10]:8000" in text
+    assert "Running · inactive" in text and "OVER LIMIT" not in text and "over limit" not in text
+    assert fleet["services"][1]["status"] == "over_limit"
+    fleet["stale"] = True
+    stale = fleet_api["format_fleet"](fleet, width=160, by=by)
+    assert "http://" not in stale and "Shared" not in stale and "Local only" not in stale
+    assert "Unknown" in stale
+
+
+@pytest.mark.parametrize("prompt,generated,total", [(1234, 5678, "6,912 tokens"), (None, 5678, "— tokens"), (1234, None, "— tokens")])
+def test_fleet_token_display_has_units_and_preserves_unknown_totals(fleet_api, fleet, prompt, generated, total):
+    fleet["services"] = fleet["services"][:1]
+    fleet["services"][0]["window_24h"].update(prompt_tokens=prompt, gen_tokens=generated)
+    text = fleet_api["format_fleet"](fleet, width=200)
+    assert "input %s" % ("— tokens" if prompt is None else "1,234 tokens") in text
+    assert "output %s" % ("— tokens" if generated is None else "5,678 tokens") in text
+    assert "total " + total in text
+
+
+def test_fleet_model_and_api_wrap_without_truncating_names(fleet_api, fleet):
+    fleet["services"] = fleet["services"][:1]
+    model = "organization/complete-long-model-name-for-review"
+    address = "http://[2001:db8:1234:5678::10]:11434"
+    fleet["services"][0].update(model=model, api_address=address, api_access="shared", idle_time_sensitive=False)
+    text = fleet_api["format_fleet"](fleet, width=40)
+    unwrapped = text.replace("\n", "")
+    assert model in unwrapped and address in unwrapped and "API:" in text
+    assert all(fleet_api["cell_width"](line) <= 40 for line in text.splitlines())
 
 
 def test_gpu_view_uses_per_card_observations_for_multi_gpu_service(fleet_api, fleet):
@@ -509,5 +552,42 @@ def test_claim_receipt_must_bind_both_service_identifiers(fleet_api):
 @pytest.mark.parametrize("patch", [{"schema_version": 2}, {"services": [{}]}, {"gpus": [None]}, {"stale": "false"}])
 def test_invalid_fleet_is_reported(fleet_api, fleet, patch):
     fleet.update(patch)
+    with pytest.raises(fleet_api["ClientError"], match="Invalid fleet response"):
+        fleet_api["validate_fleet"](fleet)
+
+
+@pytest.mark.parametrize("address,access,sensitive", [
+    ("http://192.0.2.10:8000", "shared", False),
+    ("http://127.0.0.1:8000", "local_only", True),
+    ("http://[2001:db8::10]:8000", "direct", True),
+    ("http://[::1]:8000/", "local_only", True),
+    (None, "unknown", True),
+    (None, "shared", False),
+])
+def test_optional_service_api_metadata_is_preserved(fleet_api, fleet, address, access, sensitive):
+    fleet["services"][0].update(api_address=address, api_access=access, idle_time_sensitive=sensitive)
+    assert fleet_api["validate_fleet"](fleet) is fleet
+
+
+def test_old_service_payload_without_api_metadata_remains_compatible(fleet_api, fleet):
+    for row in fleet["services"]:
+        for key in ("api_address", "api_access", "idle_time_sensitive"):
+            del row[key]
+    assert fleet_api["validate_fleet"](fleet) is fleet
+    assert "API: Unknown" in fleet_api["format_fleet"](fleet)
+
+
+@pytest.mark.parametrize("patch", [
+    {"api_address": True}, {"api_address": "https://192.0.2.10:8000"},
+    {"api_address": "http://192.0.2.10"}, {"api_address": "http://192.0.2.10:0"},
+    {"api_address": "http://example.test:8000"}, {"api_address": "http://2001:db8::10:8000"},
+    {"api_address": "http://[fe80::1%eth0]:8000"}, {"api_address": "http://user:secret@192.0.2.10:8000"},
+    {"api_address": "http://192.0.2.10:8000/v1"}, {"api_address": "http://192.0.2.10:8000?token=secret"},
+    {"api_address": "http://192.0.2.10:8000#fragment"}, {"api_address": " http://192.0.2.10:8000"},
+    {"api_address": "http://192.0.2.10:8000\n"}, {"api_access": "public"}, {"api_access": None},
+    {"idle_time_sensitive": 0}, {"idle_time_sensitive": "false"},
+])
+def test_invalid_optional_service_api_metadata_is_rejected(fleet_api, fleet, patch):
+    fleet["services"][0].update(patch)
     with pytest.raises(fleet_api["ClientError"], match="Invalid fleet response"):
         fleet_api["validate_fleet"](fleet)

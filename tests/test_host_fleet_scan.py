@@ -1,9 +1,11 @@
 # Generated-By: Codex / gpt-6.1-sol
 # Generated-By: Codex / unknown model
 import importlib.util
+import errno
 import json
 import os
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -116,6 +118,8 @@ class FakeRunner:
         assert argv[2:6] == ["--", "/usr/bin/python3", "-I", "-S"]
         assert len(pass_fds) == 1 and str(pass_fds[0]) == argv[1].rsplit("/", 1)[1]
         assert not any(arg in {"--mount", "--pid", "--user", "--target", "-m", "-p", "-U"} for arg in argv)
+        if "--listener-helper" in argv:
+            return json.dumps({"bind": "::", "port": int(argv[8]), "inode": int(argv[9]), "ipv6_only": False}).encode()
         if self.after_get:
             self.after_get(argv)
         if "/api/ps" in argv[8]:
@@ -128,6 +132,90 @@ def fixture_config(scanner, root, tmp_path, **overrides):
     config.update(proc_root=str(root), output_path=str(tmp_path / "fleet.json"))
     config.update(overrides)
     return config
+
+
+def diag_response(*, port=11434, inode=5100, ipv6_only=False, family=socket.AF_INET6, state=10,
+                  bind="::", attributes=None):
+    identity = struct.pack("!HH", port, 0) + socket.inet_pton(socket.AF_INET6, bind) + bytes(16) + struct.pack("=III", 0, 0, 0)
+    body = struct.pack("=BBBB", family, state, 0, 0) + identity + struct.pack("=IIIII", 0, 0, 0, 0, inode)
+    if attributes is None:
+        attributes = struct.pack("=HHB", 5, 11, int(ipv6_only)) + bytes(3)
+    return struct.pack("=IHHII", 16 + len(body) + len(attributes), 20, 0, 1, 0) + body + attributes
+
+
+@pytest.mark.parametrize("ipv6_only", [False, True])
+def test_ipv6_only_diagnostic_is_bound_to_exact_listen_socket(scanner, ipv6_only):
+    assert scanner.parse_ipv6_only(diag_response(ipv6_only=ipv6_only), 11434, 5100) is ipv6_only
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux socket diagnostics required")
+@pytest.mark.parametrize("ipv6_only", [False, True])
+def test_ipv6_only_query_matches_actual_kernel_socket_setting(scanner, ipv6_only):
+    try:
+        listener = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    except OSError as exc:
+        if exc.errno in {errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT}:
+            pytest.skip("IPv6 sockets unsupported by this platform")
+        raise
+    with listener:
+        listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, int(ipv6_only))
+        listener.bind(("::", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        inode = os.fstat(listener.fileno()).st_ino
+        assert listener.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == int(ipv6_only)
+        assert scanner.socket_ipv6_only(port, inode, 0.25) is ipv6_only
+
+
+@pytest.mark.parametrize("change", [
+    {"port": 9000}, {"inode": 5101}, {"family": socket.AF_INET}, {"state": 1}, {"bind": "::1"},
+    {"attributes": b""}, {"attributes": struct.pack("=HHB", 5, 11, 2) + bytes(3)},
+    {"attributes": (struct.pack("=HHB", 5, 11, 0) + bytes(3)) * 2},
+    {"attributes": struct.pack("=HH", 3, 11)},
+    {"attributes": struct.pack("=HHB", 5, 12, 0) + bytes(3)},
+])
+def test_ipv6_only_diagnostic_rejects_mismatched_or_unavailable_evidence(scanner, change):
+    assert scanner.parse_ipv6_only(diag_response(**change), 11434, 5100) is None
+
+
+def test_ipv6_only_diagnostic_rejects_truncated_oversized_and_error_replies(scanner):
+    packet = diag_response()
+    for data in (b"", packet[:-1], packet + bytes(65536), struct.pack("=IHHII", len(packet), 2, 0, 1, 0) + packet[16:]):
+        assert scanner.parse_ipv6_only(data, 11434, 5100) is None
+
+
+@pytest.mark.parametrize("failure", [None, "permission", "timeout", "foreign_sender"])
+def test_ipv6_only_query_is_bounded_read_only_and_degrades_unknown(scanner, monkeypatch, failure):
+    requests = []
+    class Diagnostic:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def settimeout(self, timeout):
+            assert timeout == 0.25
+        def bind(self, address):
+            assert address == (0, 0)
+        def sendto(self, request, address):
+            requests.append(request)
+            assert address == (0, 0)
+        def recvfrom(self, limit):
+            assert limit == 65537
+            if failure == "timeout":
+                raise socket.timeout()
+            return diag_response(), (9 if failure == "foreign_sender" else 0, 0)
+    def factory(family, kind, protocol):
+        assert (family, kind, protocol) == (socket.AF_NETLINK, socket.SOCK_DGRAM, 4)
+        if failure == "permission":
+            raise PermissionError()
+        return Diagnostic()
+    monkeypatch.setattr(scanner.socket, "socket", factory)
+    result = scanner.socket_ipv6_only(11434, 5100, 0.25)
+    assert result is (False if failure is None else None)
+    if requests:
+        length, kind, flags, sequence, _ = struct.unpack_from("=IHHII", requests[0])
+        assert (length, kind, flags, sequence) == (len(requests[0]), 20, 1, 1)
+        assert struct.unpack_from("=BBBBI", requests[0], 16) == (socket.AF_INET6, socket.IPPROTO_TCP, 0, 0, 1 << 10)
 
 
 def test_discovers_engines_aggregates_enginecore_and_redacts(scanner, tmp_path):
@@ -152,6 +240,7 @@ def test_discovers_engines_aggregates_enginecore_and_redacts(scanner, tmp_path):
     assert by_pid[100]["started_at"] == 1700000000 + 100 / os.sysconf("SC_CLK_TCK")
     assert by_pid[100]["metrics"]["requests_total"] == 10
     assert by_pid[100]["scrape"]["ok"]
+    assert by_pid[100]["listener_observation_complete"] is True
     assert by_pid[200]["ollama"]["models"][0]["size_vram"] == 2048
     assert by_pid[400]["host"] and by_pid[400]["container"] is None
     assert by_pid[400]["scrape"]["error"] == "unsupported_engine"
@@ -216,6 +305,7 @@ def test_response_discarded_on_identity_races(scanner, tmp_path, which):
     assert not row["scrape"]["ok"]
     assert row["scrape"]["error"] == "process_identity_changed"
     assert row["metrics"] == {} and row["gpus"] == []
+    assert row["listener_observation_complete"] is False and row["bind"] is None and row["port"] is None
     assert not result["gpu_attribution_complete"]
 
 
@@ -225,12 +315,44 @@ def test_refuses_spoofed_listener_and_argv_endpoint(scanner, tmp_path):
     runner = FakeRunner()
     result = scanner.scan(fixture_config(scanner, root, tmp_path), runner)
     assert result["services"][0]["scrape"]["error"] == "listener_identity_unavailable"
+    assert result["services"][0]["listener_observation_complete"] is False
     assert len(runner.calls) == 2
     (path / "cmdline").write_bytes(b"vllm\0serve\0demo\0")
     (path / "fd/5").unlink()
     result = scanner.scan(fixture_config(scanner, root, tmp_path), runner)
     assert not result["services"][0]["scrape"]["ok"]
     assert len(runner.calls) == 4
+
+
+@pytest.mark.parametrize("argv", [["python", "-m", "sglang.launch_server"], ["llama-server", "--model", "demo"]])
+def test_unsupported_activity_engine_still_exports_verified_listener(scanner, tmp_path, argv):
+    root = fake_root(tmp_path)
+    make_process(root, 100, argv, port=8000)
+    runner = FakeRunner()
+    row = scanner.scan(fixture_config(scanner, root, tmp_path), runner)["services"][0]
+    assert row["bind"] == "0.0.0.0" and row["port"] == 8000
+    assert row["listener_observation_complete"] is True
+    assert row["scrape"]["error"] == "unsupported_engine" and not row["scrape"]["ok"]
+    assert row["metrics"] == {} and row["ollama"] is None
+    assert len(runner.calls) == 2
+
+
+def test_unsupported_activity_engine_requires_stable_listener_identity(scanner, tmp_path, monkeypatch):
+    root = fake_root(tmp_path)
+    path = make_process(root, 100, ["llama-server", "--model", "demo"], port=8000)
+    original = scanner.owned_listeners
+    calls = []
+    def race(reader, pid):
+        calls.append(pid)
+        if len(calls) == 3:
+            (path / "net/tcp").write_text("header\n")
+        return original(reader, pid)
+    monkeypatch.setattr(scanner, "owned_listeners", race)
+    runner = FakeRunner()
+    row = scanner.scan(fixture_config(scanner, root, tmp_path), runner)["services"][0]
+    assert row["listener_observation_complete"] is False
+    assert row["scrape"]["error"] == "process_identity_changed"
+    assert row["bind"] is None and row["port"] is None and len(runner.calls) == 2
 
 
 def test_ollama_host_only_and_ipv6_socket_decode(scanner, tmp_path):
@@ -263,9 +385,56 @@ def test_ollama_cross_family_wildcard_uses_actual_owned_listener(
     row = result["services"][0]
     assert row["bind"] == observed and row["port"] == 11434
     assert row["scrape"]["ok"] and row["scrape"]["error"] is None
+    assert row["listener_observation_complete"] is True
     assert runner.calls[-1][0][8] == f"http://{endpoint}:11434/api/ps"
     assert row["ollama"]["models"][0]["name"] == "demo-ollama"
     assert row["metrics"] == {}
+
+
+@pytest.mark.parametrize("diagnostic,expected", [
+    ({"bind": "::", "port": 11434, "inode": 5100, "ipv6_only": False}, False),
+    ({"bind": "::", "port": 11434, "inode": 5100, "ipv6_only": True}, True),
+    ({"bind": "::", "port": 11434, "inode": 9999, "ipv6_only": False}, None),
+    ({"bind": "::", "port": 9000, "inode": 5100, "ipv6_only": False}, None),
+    ({"bind": "::1", "port": 11434, "inode": 5100, "ipv6_only": False}, None),
+    ({"bind": "::", "port": 11434, "inode": 5100, "ipv6_only": 0}, None),
+    (None, None),
+])
+def test_wildcard_ipv6_listener_setting_requires_exact_namespace_socket_evidence(scanner, tmp_path, diagnostic, expected):
+    root = fake_root(tmp_path)
+    path = make_process(root, 100, ["ollama", "serve"], port=11434)
+    (path / "net/tcp").write_text("header\n")
+    (path / "net/tcp6").write_text("header\n" + tcp6_row(11434, 5100))
+    runner = FakeRunner()
+    def query(argv, timeout, max_output, pass_fds=()):
+        result = runner(argv, timeout, max_output, pass_fds)
+        if "--listener-helper" in argv:
+            assert timeout <= 0.25 and max_output <= 256
+            if diagnostic is None:
+                raise scanner.ScanError("command_unavailable")
+            return json.dumps(diagnostic).encode()
+        return result
+    row = scanner.scan(fixture_config(scanner, root, tmp_path), query)["services"][0]
+    assert row["listener_observation_complete"] is True and row["listener_ipv6_only"] is expected
+    assert row["scrape"]["ok"] and row["ollama"]["models"]
+    assert len(runner.calls) == 4
+
+
+def test_ipv6_dual_stack_diagnostic_identity_race_stays_unknown(scanner, tmp_path):
+    root = fake_root(tmp_path)
+    path = make_process(root, 100, ["ollama", "serve"], port=11434)
+    (path / "net/tcp").write_text("header\n")
+    (path / "net/tcp6").write_text("header\n" + tcp6_row(11434, 5100))
+    runner = FakeRunner()
+    def race(argv, timeout, max_output, pass_fds=()):
+        result = runner(argv, timeout, max_output, pass_fds)
+        if "--listener-helper" in argv:
+            (path / "stat").write_text(proc_stat(100, 1, 999))
+        return result
+    row = scanner.scan(fixture_config(scanner, root, tmp_path), race)["services"][0]
+    assert row["listener_observation_complete"] is False and row["listener_ipv6_only"] is None
+    assert row["scrape"]["error"] == "process_identity_changed" and row["ollama"] is None
+    assert len(runner.calls) == 3
 
 
 @pytest.mark.parametrize("failure", ["different_port", "specific_ipv4", "specific_ipv6", "two_wildcards", "unowned"])

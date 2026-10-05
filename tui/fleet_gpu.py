@@ -9,6 +9,8 @@ import math
 from rich.text import Text
 from rich.console import Console
 
+from .fleet_format import api_label, count, duration, gib, status_label, total_tokens
+
 
 FREE_COLOR = "#28313d"
 NEUTRAL_COLOR = "#66717f"
@@ -27,18 +29,9 @@ def numeric(value):
     return type(value) in (int, float) and math.isfinite(value) and value >= 0
 
 
-def gib(value):
-    """Retain source precision, including allocations smaller than one cell."""
-    if not numeric(value):
-        return "?"
-    return str(int(value)) if value == int(value) else str(value)
-
-
 def compact_gib(value):
-    if not numeric(value):
-        return "?"
-    rounded = ("%.2f" % value).rstrip("0").rstrip(".")
-    return "%.2g" % value if value > 0 and rounded == "0" else rounded
+    """Keep the existing formatter entry point for callers of the GPU view."""
+    return gib(value)
 
 
 def owner_color(identity):
@@ -315,10 +308,11 @@ def service_lines(service, used_gb, index, clean=str, status=None):
     first.append(clean(service.get("model") or "unknown"), style="bold #eaf1f7")
     first.append(" · Engine " + clean(service.get("engine") or "unknown"), style="#98a4b4")
     first.append(" · State ", style="#98a4b4")
-    first.append(status.replace("_", " "), style="bold " + SERVICE_STYLES[status])
+    first.append(status_label(status), style="bold " + SERVICE_STYLES[status])
     first.append(" · GPU %s VRAM: " % index, style="#98a4b4")
     first.append(gib(used_gb) + " GiB", style="bold #eaf1f7")
     ident = Text("    Service ID: " + clean(service["id"]), style="#98a4b4")
+    ident.append(" · API: " + api_label(service, clean))
     values = service.get("hourly_active_24h") or [None] * 24
     activity = "".join("·" if not numeric(value) else "▁▂▃▄▅▆▇█"[
         min(7, int(min(value, 60) * 7 / 60))] for value in values)
@@ -328,15 +322,18 @@ def service_lines(service, used_gb, index, clean=str, status=None):
     third = Text("    24h service activity ", style="#98a4b4")
     third.append(activity, style="#80c1d7")
     third.append(" active ")
-    third.append(gib(window.get("active_minutes")) + " min", style="bold #eaf1f7")
+    active = window.get("active_minutes")
+    third.append(duration(active * 60 if numeric(active) else None), style="bold #eaf1f7")
     third.append(" · coverage ")
     third.append(observed, style="bold #eaf1f7")
     fourth = Text("    24h service requests ", style="#98a4b4")
-    fourth.append(gib(window.get("requests")), style="bold #eaf1f7")
+    fourth.append(count(window.get("requests")), style="bold #eaf1f7")
     fourth.append(" · input ")
-    fourth.append(gib(window.get("prompt_tokens")), style="bold #eaf1f7")
+    fourth.append(count(window.get("prompt_tokens")) + " tokens", style="bold #eaf1f7")
     fourth.append(" · output ")
-    fourth.append(gib(window.get("gen_tokens")), style="bold #eaf1f7")
+    fourth.append(count(window.get("gen_tokens")) + " tokens", style="bold #eaf1f7")
+    fourth.append(" · total ")
+    fourth.append(count(total_tokens(window)) + " tokens", style="bold #eaf1f7")
     return first, ident, third, fourth
 
 
@@ -387,8 +384,7 @@ def render_expanded(accounts, services, width, bar_rows=3, selected_gpu=None,
                 memory = amounts[ident]
                 for line in service_lines(services[ident], memory, account.index, clean, statuses.get(ident)):
                     append(line, account.index, allocation.key, ident, indent=4)
-        if (account.issues or gib(account.used_gb) != compact_gib(account.used_gb)
-                or gib(account.total_gb) != compact_gib(account.total_gb)):
+        if account.issues:
             append(Text("  Measured VRAM · Used %s GiB · Total %s GiB" % (gib(account.used_gb), gib(account.total_gb)),
                         style="#98a4b4"), account.index, MEASURED_KEY, indent=2)
         for key, label, memory in ((RESIDUAL_KEY, "Unattributed used", account.residual_gb),

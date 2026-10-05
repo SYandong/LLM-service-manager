@@ -84,16 +84,13 @@ class FleetController:
             if old is not None and old != status:
                 self.emit("fleet_status_changed", detail={"service_id": service_id, "from": old, "to": status})
 
-    def owner_for_ip(self, source_ip, *, required=True):
-        """Re-read the trusted host export for every request; no identity fallback."""
-        owner = None
+    def _owner_addresses(self, now):
+        """Read one fresh trusted address map without a static identity fallback."""
         try:
-            source = canonical_ip(source_ip)
             path = self.config.collectors.get("ip_containers_path")
             if path is None:
                 raise ValueError("missing_identity_export")
             payload = read_json(path, 1024 * 1024)
-            now = self.clock()
             generated = payload.get("generated_at")
             containers = payload.get("containers")
             if not number(generated) or not 0 <= now - generated <= self.config.fleet_stale_after_seconds or not isinstance(containers, dict):
@@ -106,8 +103,15 @@ class FleetController:
                 if address in normalized and normalized[address] != name:
                     raise ValueError("ambiguous_identity_export")
                 normalized[address] = name
-            owner = normalized.get(source)
+            return normalized
         except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+            return {}
+
+    def owner_for_ip(self, source_ip, *, required=True):
+        """Re-read the trusted host export for every request; no identity fallback."""
+        try:
+            owner = self._owner_addresses(self.clock()).get(canonical_ip(source_ip))
+        except (ValueError, TypeError):
             owner = None
         if owner is None and required:
             raise FleetError(403, "unmapped_container")
@@ -116,6 +120,7 @@ class FleetController:
     def report(self, *, source_ip=None, mine=False, shared=None):
         now = self.clock()
         owner = self.owner_for_ip(source_ip, required=mine) if source_ip is not None else None
+        owner_addresses = self._owner_addresses(now)
         try:
             with self.store.lock:
                 meta = self.store.metadata()
@@ -136,7 +141,8 @@ class FleetController:
                 services = [service_status(instance, claims.get(instance["id"]), self.config, now,
                     stale=stale, generated_at=generated, hourly=hourly.get(instance["id"]),
                     windows={key: value.get(instance["id"]) for key, value in windows.items()},
-                    mine=owner is not None and not instance["host"] and owner == instance["container"])
+                    mine=owner is not None and not instance["host"] and owner == instance["container"],
+                    owner_addresses=owner_addresses)
                     for instance in instances if not mine or instance["container"] == owner]
         except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError) as exc:
             raise FleetError(503, "fleet_store_unavailable") from exc

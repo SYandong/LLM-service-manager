@@ -15,6 +15,7 @@ import re
 import selectors
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -344,7 +345,8 @@ def service_row(process, engine, config, boot_time, clock_ticks):
         "engine_version": None, "container": process.container, "host": process.container is None,
         "managed_by": "llmsvc" if process.container == config["managed_container"] and re.search(r"(?:^|/)vllm-[^/\n]+\.service(?:/|$)", process.cgroup) else None,
         "pid": process.pid, "started_at": boot_time + process.start / clock_ticks if boot_time is not None else None,
-        "bind": None, "port": None, "model": safe_text(model) if model else None,
+        "bind": None, "port": None, "listener_observation_complete": False, "listener_ipv6_only": None,
+        "model": safe_text(model) if model else None,
         "model_path": safe_text(model_path, 512) if model_path else None,
         "gpus": [], "gpu_observation_complete": False,
         "argv_redacted": redact_argv(process.argv), "metrics": {}, "ollama": None,
@@ -676,23 +678,99 @@ def parse_ollama(data, budget):
     return {"models": models}
 
 
+def parse_ipv6_only(data, port, inode):
+    """Read INET_DIAG_SKV6ONLY only for one exact wildcard LISTEN inode."""
+    if not 88 <= len(data) <= 65536:
+        return None
+    length, kind, flags, sequence, _ = struct.unpack_from("=IHHII", data)
+    if length != len(data) or kind != 20 or flags & 2 or sequence != 1:
+        return None
+    if data[16:18] != bytes((socket.AF_INET6, 10)):
+        return None
+    if struct.unpack_from("!HH", data, 20) != (port, 0) or data[24:56] != bytes(32):
+        return None
+    if struct.unpack_from("=I", data, 84)[0] != inode:
+        return None
+    value = None
+    offset = 88
+    while offset < length:
+        if offset + 4 > length:
+            return None
+        size, attribute = struct.unpack_from("=HH", data, offset)
+        if size < 4 or offset + size > length:
+            return None
+        if (attribute & 0x3fff) == 11:  # INET_DIAG_SKV6ONLY from linux/inet_diag.h.
+            if value is not None or size != 5 or data[offset + 4] not in (0, 1):
+                return None
+            value = bool(data[offset + 4])
+        offset += (size + 3) & ~3
+    return value if offset == length else None
+
+
+def socket_ipv6_only(port, inode, timeout):
+    """One bounded kernel diagnostic in the already pinned network namespace."""
+    if not 1 <= port <= 65535 or not 0 < inode <= 2 ** 32 - 1 or not 0 < timeout <= 2:
+        return None
+    # inet_diag_req_v2, exact wildcard socket query, no dump or destructive flags.
+    identity = struct.pack("!HH", port, 0) + bytes(32) + struct.pack("=III", 0, 0xffffffff, 0xffffffff)
+    request = struct.pack("=BBBBI", socket.AF_INET6, socket.IPPROTO_TCP, 0, 0, 1 << 10) + identity
+    header = struct.pack("=IHHII", 16 + len(request), 20, 1, 1, 0)
+    try:
+        with socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM, 4) as diagnostic:
+            diagnostic.settimeout(timeout)
+            diagnostic.bind((0, 0))
+            diagnostic.sendto(header + request, (0, 0))
+            response, sender = diagnostic.recvfrom(65537)
+            if sender[0] != 0:
+                return None
+            return parse_ipv6_only(response, port, inode)
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
 def scrape_service(reader, process, row, config, runner):
     started = reader.budget.clock()
     namespace_fd = None
     try:
         reader.budget.check()
-        if row["engine"] not in {"vllm", "ollama"}:
-            raise ScanError("unsupported_engine")
+        supported = row["engine"] in {"vllm", "ollama"}
         if not current_process(reader, process):
             raise ScanError("process_identity_changed")
         namespace_inode = reader.net_inode(process.pid)
-        listener = choose_listener(reader, process, row["engine"])
+        try:
+            listener = choose_listener(reader, process, row["engine"])
+        except BudgetExceeded:
+            raise
+        except ScanError:
+            if not supported:
+                raise ScanError("unsupported_engine") from None
+            raise
         bind, port, _ = listener
-        row["bind"], row["port"] = bind, port
         # Pin the namespace FD; nsenter cannot follow a subsequently recycled PID.
         namespace_fd = os.open(reader.root / str(process.pid) / "ns/net", os.O_RDONLY | os.O_CLOEXEC)
         if os.fstat(namespace_fd).st_ino != namespace_inode or reader.net_inode(process.pid) != namespace_inode or not current_process(reader, process) or listener not in owned_listeners(reader, process.pid):
             raise ScanError("process_identity_changed")
+        ipv6_only = None
+        if bind == "::":
+            timeout = min(0.25, config["target_timeout_seconds"], max(0.001, reader.budget.remaining() - 0.05))
+            try:
+                diagnostic = json.loads(runner([config["nsenter_path"], f"--net=/proc/self/fd/{namespace_fd}", "--",
+                    config["python_path"], "-I", "-S", str(Path(__file__).resolve()), "--listener-helper", str(port),
+                    listener[2], "--helper-timeout", str(timeout)], timeout,
+                    min(256, config["max_response_bytes"]), pass_fds=(namespace_fd,)))
+                if (isinstance(diagnostic, dict) and diagnostic.get("bind") == bind and diagnostic.get("port") == port
+                        and str(diagnostic.get("inode")) == listener[2] and type(diagnostic.get("ipv6_only")) is bool):
+                    ipv6_only = diagnostic["ipv6_only"]
+            except (ScanError, OSError, ValueError, UnicodeError):
+                pass
+            if not current_process(reader, process) or reader.net_inode(process.pid) != namespace_inode or listener not in owned_listeners(reader, process.pid):
+                raise ScanError("process_identity_changed")
+        if not supported:
+            if not current_process(reader, process) or reader.net_inode(process.pid) != namespace_inode or listener not in owned_listeners(reader, process.pid):
+                raise ScanError("process_identity_changed")
+            row["bind"], row["port"], row["listener_observation_complete"] = bind, port, True
+            row["listener_ipv6_only"] = ipv6_only
+            raise ScanError("unsupported_engine")
         address = "127.0.0.1" if bind == "0.0.0.0" else "::1" if bind == "::" else bind
         address = f"[{address}]" if ":" in address else address
         path = "/metrics" if row["engine"] == "vllm" else "/api/ps"
@@ -704,6 +782,8 @@ def scrape_service(reader, process, row, config, runner):
         # Discard the response if ownership changed while the GET was in flight.
         if not current_process(reader, process) or reader.net_inode(process.pid) != namespace_inode or listener not in owned_listeners(reader, process.pid):
             raise ScanError("process_identity_changed")
+        row["bind"], row["port"], row["listener_observation_complete"] = bind, port, True
+        row["listener_ipv6_only"] = ipv6_only
         if len(data) > config["max_response_bytes"]:
             raise ScanError("response_limit")
         if row["engine"] == "vllm":
@@ -846,11 +926,17 @@ def main(argv=None):
     parser.add_argument("--dry-run", action="store_true", help="scan and print JSON without writing the export")
     parser.add_argument("--check-config", action="store_true")
     parser.add_argument("--http-helper", help=argparse.SUPPRESS)
+    parser.add_argument("--listener-helper", type=int, nargs=2, metavar=("PORT", "INODE"), help=argparse.SUPPRESS)
     parser.add_argument("--helper-limit", type=int, default=MAX_RESPONSE, help=argparse.SUPPRESS)
     parser.add_argument("--helper-timeout", type=float, default=2, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.http_helper:
         return http_helper(args.http_helper, args.helper_limit, args.helper_timeout)
+    if args.listener_helper:
+        port, inode = args.listener_helper
+        print(json.dumps({"bind": "::", "port": port, "inode": inode,
+                          "ipv6_only": socket_ipv6_only(port, inode, args.helper_timeout)}))
+        return 0
     try:
         config = load_config(args.config)
         if args.check_config:

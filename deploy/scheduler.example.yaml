@@ -67,6 +67,9 @@ collectors: {}
 #     re-read when its mtime/size changes; a missing/invalid file is an empty map.
 #     Static ip_containers entries win over the file.
 #   host_ips: ["127.0.0.1", "::1"]  # Peers that mean "the host machine".
+#     For fleet wildcard host listeners, add known nonloopback host addresses;
+#     the first usable same-family address becomes the service API base URI.
+#     Container wildcard URIs use a fresh ip_containers_path export instead.
 #   usage_timezone: UTC             # ZoneInfo name for by=day bucketing.
 # See deploy/host/README.md for the host export and the read-only container mount.
 

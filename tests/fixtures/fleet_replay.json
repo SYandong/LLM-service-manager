@@ -9,6 +9,14 @@
     {"name": "declaration_covers_idle", "offset": 21600, "active": 0, "observed_idle": 21600, "claim": true, "expected": "claimed"},
     {"name": "stale_overrides_declaration", "offset": 21600, "active": 0, "observed_idle": 21600, "claim": true, "stale": true, "expected": "unknown"},
     {"name": "missing_discovery_is_unknown", "offset": 60, "active": 0, "observed_idle": 60, "missing": true, "expected": "unknown"},
-    {"name": "unsupported_engine_is_unknown", "offset": 60, "active": 0, "observed_idle": 60, "supported": false, "expected": "unknown"}
+    {"name": "unsupported_engine_is_unknown", "offset": 60, "active": 0, "observed_idle": 60, "supported": false, "expected": "unknown"},
+    {"name": "wildcard_ipv4_idle_is_shared", "bind": "0.0.0.0", "offset": 21600, "active": 0, "observed_idle": 21600, "expected": "idle"},
+    {"name": "wildcard_ipv6_idle_is_shared", "bind": "::", "offset": 21600, "active": 0, "observed_idle": 21600, "expected": "idle"},
+    {"name": "host_wildcard_idle_is_shared", "host": true, "bind": "0.0.0.0", "offset": 21600, "active": 0, "observed_idle": 21600, "expected": "idle"},
+    {"name": "specific_address_still_has_idle_limit", "bind": "192.0.2.10", "offset": 21600, "active": 0, "observed_idle": 21600, "expected": "over_limit"},
+    {"name": "ipv6_loopback_still_has_idle_limit", "bind": "::1", "offset": 21600, "active": 0, "observed_idle": 21600, "expected": "over_limit"},
+    {"name": "shared_activity_keeps_priority", "bind": "0.0.0.0", "offset": 60, "active": 1, "last_active_offset": 0, "observed_idle": 0, "expected": "active"},
+    {"name": "shared_declaration_keeps_priority", "bind": "0.0.0.0", "offset": 21600, "active": 0, "observed_idle": 21600, "claim": true, "expected": "claimed"},
+    {"name": "shared_unknown_overrides_declaration", "bind": "0.0.0.0", "offset": 60, "active": null, "scrape_ok": 0, "observed_idle": 0, "claim": true, "expected": "unknown"}
   ]
 }

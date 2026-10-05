@@ -1087,6 +1087,19 @@ claims 开关同时开启及服务归属通过校验，不授予 unit、配置�
 响应丢失意味着结果未知；客户端不自动重试写请求。v1 不提供管理员冒用、
 强制撤销、SQL 修改捷径或声明驱逐能力。
 
+Service metadata adds `api_address` (nullable HTTP base URI), `api_access`
+(`shared`, `local_only`, `direct`, `unknown`) and `idle_time_sensitive` (boolean).
+Listener identity is verified during the host observation. Container addresses
+come from the fresh IP export; host addresses use `collectors.host_ips` in
+configured order. Wildcard addresses use a matching advertised address family;
+a verified dual-stack IPv6 listener can use IPv4. IPv6 URIs use brackets.
+
+A fresh verified wildcard listener defaults to Shared and is exempt from the
+idle-limit reminder. Activity, claims and unknown observations keep their
+existing priority. Loopback and specific-address services keep the idle reminder.
+These fields describe the observed binding and sharing convention; request
+routing and model lifecycle remain with their existing services.
+
 `GET /v1/fleet` 不输出完整 argv 或训练命令；详情/history 可给出脱敏后的
 推理参数摘要。服务携带 `mine` 以控制 UI 操作，但 API 每次仍重新校验。
 `fleet_status_changed` 通过现有 SSE 发布；SSE 仅刷新提示，不作为无丢失活动
@@ -1101,7 +1114,7 @@ Shared-model commands remain available. A disabled fleet returns `fleet_disabled
 
 The `llm` / `llm top` TUI opens the GPU view. P switches to People, grouped by
 container. The People view includes 24-hour activity, history and claims;
-its default sort puts over-limit services first, then sorts by memory.
+its default sort puts inactive services first, then sorts by memory.
 GET refreshes every 15 seconds and SSE coalesces changes. Network work stays
 off the UI loop; stable identities preserve selection across refreshes.
 Claims use a dry-run preview followed by submission. Failed or uncertain writes
@@ -1119,7 +1132,8 @@ wrap. Per-card memory comes from that card; activity statistics cover the servic
 
 Z switches to the compact overview. GPU 0–5 fit together at 100×30 with
 two bar rows, and at 80×24 with one. Overview amounts use concise formatting;
-expanded allocations and detail retain source values. The VRAM percentage
+expanded allocations and detail show up to two decimals, without trailing zeros.
+Accounting retains the original precision. The VRAM percentage
 appears when space allows.
 
 Each container owner keeps one color across GPUs and refreshes. Solid segments
@@ -1136,15 +1150,38 @@ GPU header.
 
 For capacity T, measured use U and attributed sum S, segment totals are
 S + (U−S) + (T−U). Small allocations use proportional cell rounding and retain
-their source values in detail. Filters affect selection and detail;
+their measured amounts in detail. Filters affect selection and detail;
 they never turn hidden allocations into free memory. If S exceeds U, show
 the measured use with an attribution-conflict marker and list the discrepancy.
 Missing capacity has no percentage bar; stale values remain labelled stale.
 
-Up/Down selects a GPU and scrolls it into view. Left/Right selects an allocation;
-Enter opens detail and Z switches panel size.
-Mouse selection follows the same path. UI text is English and concise: use
-direct labels such as `Stale`, `Unknown` and `Attribution conflict`.
+#### Selection, scrolling and readable values (#331)
+
+The selected GPU heading has a high-contrast background, bold text and a small
+pulsing marker in its left gutter. The pulse changes style, preserving text and
+layout. Up/Down or a mouse-wheel gesture selects one GPU and aligns its heading.
+A continuous wheel burst produces one selection; a 250 ms pause starts a new
+gesture. Shift+wheel and Page Up/Page Down scroll freely. Left/Right selects an
+allocation within the current panel while preserving the scroll position.
+Refreshes and closing a dialog preserve manual scrolling. Enter opens detail;
+Z switches panel size.
+
+Drag selects text in GPU panels, service details, history and help. Ctrl+C copies
+the selected text using the terminal clipboard; Q quits. A panel with a selection
+holds its displayed text until the selection is cleared. Selection follows wrapped
+lines and whole Unicode characters. Explicit navigation clears the selection.
+
+Durations use at most two integer units: `y`, `mo`, `d`, `h`, `m`, `s`. Input,
+output and their sum each include `tokens`; missing counters remain unknown.
+VRAM uses up to two decimals with trailing zeros removed. `over_limit` remains
+the API state; the TUI labels it `Running · inactive` (`Inactive` in narrow tables).
+Coverage is the fraction of the eligible interval with valid activity observations.
+It describes data completeness, separately from utilization or activity.
+
+Every model includes an `API` address. Loopback listeners show `Local only`.
+Verified wildcard listeners show the owner's advertised IP and port, followed
+by `Shared`. Host addresses use the configured nonloopback host IPs. Unknown
+listeners show `Unknown`. UI text is English and concise.
 
 #### Delivery
 
