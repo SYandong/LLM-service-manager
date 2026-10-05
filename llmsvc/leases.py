@@ -285,7 +285,10 @@ class PlacementController:
         return generation, snapshot.sampled_at, started, finished
 
     def _unplaceable_error(self, request, snapshot, blockers):
-        pool = self.settings.placement_gpus
+        recovery_claim = self._recovery_context(request.name)
+        settings = (self.scheduler.sleeping_recovery.controller.settings
+                    if recovery_claim is not None else self.settings)
+        pool = settings.placement_gpus
         gpus = tuple({"index": gpu.index, "free_gb": gpu.free_gb, "external_gb": gpu.external_gb}
                      for gpu in sorted(snapshot.gpus, key=lambda gpu: gpu.index)
                      if pool is None or gpu.index in pool)

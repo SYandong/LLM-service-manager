@@ -6,12 +6,14 @@ import json
 import threading
 import time
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from llmsvc.actions import ManagedModelTransport
 from llmsvc.config import SchedulerConfig
 from llmsvc.leases import LeaseError, PlacementController, UnitObservation
+from llmsvc.policy import PolicySettings
 from llmsvc.scheduler import Scheduler
 from llmsvc.server import SchedulerHTTPServer
 from llmsvc.state import GPUState, MemoryState, ModelState, Reserve, StateSnapshot
@@ -271,6 +273,20 @@ def test_oversized_budget_fails_with_capacity_message_and_zero_actions(blocked_s
     assert caught.value.status == 503 and "total capacity" in caught.value.message
     assert [b.reason for b in caught.value.blockers if b.gpu is not None] == [
         "request_exceeds_gpu_capacity", "request_exceeds_gpu_capacity"]
+    assert not state["probes"] and not scheduler.store.leases()
+
+
+def test_recovery_error_summary_uses_its_actual_destination_pool(blocked_system, monkeypatch):
+    scheduler, state, _ = blocked_system
+    claim = SimpleNamespace(source_gpu=0, util_floor=0.6, budget_floor_gb=60)
+    settings = PolicySettings(placement_gpus=(1,), shared_external_threshold_gb=30)
+    scheduler.sleeping_recovery = SimpleNamespace(deadline=120, controller=SimpleNamespace(settings=settings))
+    monkeypatch.setattr(scheduler.placement, "_recovery_context", lambda model: claim)
+    with pytest.raises(LeaseError) as caught:
+        place(scheduler)
+    assert caught.value.status == 503
+    assert caught.value.gpus == ({"index": 1, "free_gb": 40, "external_gb": 60},)
+    assert caught.value.message == "All placement GPUs are occupied by workloads outside llmsvc"
     assert not state["probes"] and not scheduler.store.leases()
 
 
