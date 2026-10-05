@@ -133,6 +133,45 @@ def test_default_grace_with_15_second_sampler_fails_below_twenty_seconds(blocked
     assert [b["external_gb"] for b in events[0].detail["blockers"] if b["reason"] == "external_pressure"] == [60, 60]
 
 
+@pytest.mark.parametrize("delay_at", ["classification", "freshness_check", "error_preparation"])
+@pytest.mark.parametrize("delay_seconds", [0.75, 2.0])
+def test_original_deadline_wins_when_unplaceable_proof_finishes_late(blocked_system, monkeypatch, delay_at, delay_seconds):
+    scheduler, state, clock = blocked_system
+    scheduler.config = replace(scheduler.config, placement_wait_seconds=4, placement_unplaceable_grace_seconds=3)
+    method = {"classification": "_decision", "freshness_check": "_unplaceable_sample",
+              "error_preparation": "_unplaceable_error"}[delay_at]
+    original = getattr(scheduler.placement, method)
+    delayed = False
+
+    def pause_on_grace_reaching_round():
+        nonlocal delayed
+        # Delaying at wall time 3 before the finished round would miss the bug:
+        # the actual final observation must first reach the grace endpoint.
+        if not delayed and scheduler._sample_bounds[2] >= 3:
+            delayed = True
+            clock.now += delay_seconds
+
+    def slow_proof(*args, **kwargs):
+        if delay_at != "freshness_check":
+            pause_on_grace_reaching_round()
+        result = original(*args, **kwargs)
+        if delay_at == "freshness_check":
+            pause_on_grace_reaching_round()
+        return result
+
+    monkeypatch.setattr(scheduler.placement, method, slow_proof)
+    with pytest.raises(LeaseError) as caught:
+        place(scheduler)
+    assert delayed and clock.now == 3.25 + delay_seconds
+    assert scheduler._sample_bounds == (5, 3, 3.25)
+    assert (caught.value.status, caught.value.error) == (409, "placement_timeout")
+    assert caught.value.retry_after is None
+    assert {b.gpu: b.external_gb for b in caught.value.blockers if b.reason == "external_pressure"} == {0: 60, 1: 60}
+    assert not scheduler.store.leases() and not state["probes"]
+    assert all(requested < 4 for requested in state["sample_requests"])
+    assert not any(event.kind == "placement_unplaceable" for event in scheduler.events_since(0))
+
+
 @pytest.mark.parametrize("duration", [3, 7])
 def test_normal_multi_second_collector_rounds_remain_fresh_and_finish_below_twenty(blocked_system, duration):
     scheduler, state, clock = blocked_system

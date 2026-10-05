@@ -49,9 +49,9 @@ class FleetController:
             self.stopping.wait(self.config.fleet_ingest_interval_seconds)
 
     def ingest_once(self):
+        now = self.clock()
         try:
             payload = validate_snapshot(read_json(self.config.fleet_snapshot_path))
-            now = self.clock()
             if payload["generated_at"] > now + 5:
                 raise ValueError("future_fleet_snapshot")
             if now - payload["generated_at"] <= self.config.fleet_stale_after_seconds:
@@ -59,6 +59,10 @@ class FleetController:
             self.last_error = None
         except (OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError, sqlite3.Error):
             self.last_error = "fleet_snapshot_unavailable"
+        try:
+            self.store.retention_tick(self.config, now)
+        except (OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError, sqlite3.Error):
+            self.last_error = self.last_error or "fleet_store_unavailable"
         self._publish_statuses()
 
     def _publish_statuses(self):
