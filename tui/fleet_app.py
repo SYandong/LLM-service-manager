@@ -16,10 +16,14 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Sparkline, Static
 
+from .fleet_gpu import (MEASURED_KEY, account_gpu, compact_gib, detail_lines, fit,
+                        gib, render_overview)
+
 
 STATUS_STYLE = {"active": "green", "idle": "", "over_limit": "bold yellow",
                 "claimed": "cyan", "unknown": "dim"}
 HINT = "p/g view  / filter  s sort  m mine  c claim  u revoke  r refresh  ? help  q quit"
+GPU_HINT = "↑↓ card  ←→ owner  Enter detail  / filter  s sort  m mine  c/u claim  q quit"
 
 
 def numeric(value):
@@ -81,6 +85,148 @@ class RowLabel(Text):
 
 class FleetEventsChanged(Message):
     pass
+
+
+class GpuOverview(Static, can_focus=True):
+    """The overview keeps its mouse targets in terminal cell coordinates."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.hits = []
+        self.bar_rows = 1
+
+    def on_click(self, event):
+        if self.app.view != "gpu":
+            return
+        x = event.screen_offset.x - self.content_region.x
+        y = event.screen_offset.y - self.content_region.y
+        for row, left, right, index, key in self.hits:
+            if row == y and left <= x < right:
+                event.stop()
+                self.app.select_gpu(index, key)
+                self.focus()
+                if key is not None:
+                    self.app.open_gpu_details()
+                break
+
+
+class GpuDetailDialog(ModalScreen):
+    DEFAULT_CSS = """
+    GpuDetailDialog { align: center middle; }
+    #gpu-detail-dialog { width: 94; max-width: 96%; height: 94%;
+        background: #181f28; border: round #8192a8; padding: 0 1; }
+    #gpu-allocation-scroll { height: auto; max-height: 6; }
+    #gpu-allocation-text { height: auto; }
+    #gpu-detail-services { height: 1fr; min-height: 3; }
+    #gpu-service-details { height: auto; max-height: 5; }
+    #gpu-service-history { height: 1; }
+    #gpu-service-history-bars { height: auto; max-height: 2; }
+    #gpu-active-chart, #gpu-token-chart { height: 1; }
+    #gpu-detail-buttons { height: 3; }
+    #gpu-detail-buttons Button { width: 1fr; min-width: 0; }
+    """
+    BINDINGS = [("escape", "close", "Close")]
+
+    def __init__(self, owner):
+        super().__init__()
+        self.owner = owner
+        self._rows = None
+
+    def compose(self):
+        with Vertical(id="gpu-detail-dialog"):
+            with VerticalScroll(id="gpu-allocation-scroll"):
+                yield Static("", id="gpu-allocation-text", markup=False)
+            yield DataTable(id="gpu-detail-services", cursor_type="row", cell_padding=1)
+            yield Static("", id="gpu-service-details", markup=False)
+            yield Static("", id="gpu-service-history", markup=False)
+            yield Static("", id="gpu-service-history-bars", markup=False)
+            yield Sparkline([], id="gpu-active-chart")
+            yield Sparkline([], id="gpu-token-chart")
+            with Horizontal(id="gpu-detail-buttons"):
+                yield Button("Claim", id="gpu-detail-claim")
+                yield Button("Revoke", id="gpu-detail-revoke")
+                yield Button("Close", id="gpu-detail-close")
+
+    def on_mount(self):
+        self.owner.gpu_detail = self
+        table = self.query_one("#gpu-detail-services", DataTable)
+        table.add_columns("OWNER / SERVICE", "GiB", "STATE")
+        self.refresh_contents()
+        table.focus()
+
+    def on_unmount(self):
+        if self.owner.gpu_detail is self:
+            self.owner.gpu_detail = None
+
+    def action_close(self):
+        self.dismiss()
+        self.owner.focus_view()
+
+    def refresh_contents(self):
+        if not self.is_attached:
+            return
+        account = self.owner.selected_gpu_account()
+        self.query_one("#gpu-allocation-text", Static).update(
+            detail_lines(account, self.owner.selected_segment, self.owner.clean)
+            if account else "GPU no longer observed")
+        services = self.owner.gpu_services()
+        amounts = {}
+        if account:
+            for allocation in account.allocations:
+                for ident, value in allocation.members:
+                    if ident is not None:
+                        amounts.setdefault(ident, []).append(value)
+        rows = [(service["id"], self.owner.clean(owner_name(service)) + " · " +
+                 self.owner.clean(service.get("model") or "unknown"),
+                 gib(sum(amounts[service["id"]])) if all(numeric(value) for value in
+                     amounts.get(service["id"], [None])) else "?",
+                 self.owner.service_status(service)) for service in services]
+        table = self.query_one("#gpu-detail-services", DataTable)
+        if rows != self._rows:
+            selected = self.owner.selected_service_id()
+            table.clear()
+            for ident, label, memory, status in rows:
+                table.add_row(label, memory, status, key=ident)
+            self._rows = rows
+            position = next((index for index, row in enumerate(rows) if row[0] == selected), 0)
+            table.move_cursor(row=position, animate=False)
+        self.sync_history()
+
+    def sync_history(self):
+        for name, source in (("gpu-service-details", "fleet-detail-text"),
+                             ("gpu-service-history", "fleet-history-text"),
+                             ("gpu-service-history-bars", "fleet-history-bars")):
+            self.query_one("#" + name, Static).update(self.owner._rendered.get(source, ""))
+        for name, source in (("gpu-active-chart", "fleet-active-chart"),
+                             ("gpu-token-chart", "fleet-token-chart")):
+            original = self.owner.dashboard.query_one("#" + source, Sparkline)
+            chart = self.query_one("#" + name, Sparkline)
+            chart.display = original.display
+            if list(chart.data or []) != list(original.data or []):
+                chart.data = list(original.data or [])
+        service = self.owner.selected_service()
+        allowed = bool(service and self.owner.claim_allowed(service["id"], service.get("container")))
+        self.query_one("#gpu-detail-claim", Button).disabled = not allowed
+        self.query_one("#gpu-detail-revoke", Button).disabled = not allowed or not (service.get("claim") or {}).get("id")
+
+    def on_data_table_row_highlighted(self, event):
+        if event.data_table.id == "gpu-detail-services":
+            event.stop()
+            self.owner._gpu_detail_service = event.row_key.value
+            self.owner.render_details()
+            self.sync_history()
+
+    def on_button_pressed(self, event):
+        event.stop()
+        if event.button.id == "gpu-detail-close":
+            self.action_close()
+        else:
+            self.owner.action_claim(revoke=event.button.id == "gpu-detail-revoke")
+
+    def on_key(self, event):
+        if event.key.lower() in ("c", "u"):
+            event.stop()
+            event.prevent_default()
+            self.owner.action_claim(revoke=event.key.lower() == "u")
 
 
 class ClaimDialog(ModalScreen):
@@ -255,7 +401,7 @@ class ClaimDialog(ModalScreen):
 
 
 class FleetApp(App):
-    """Person/GPU views with bounded reads and explicit self-service claims."""
+    """GPU/People views with bounded reads and explicit self-service claims."""
     CSS = """
     Screen { background: #181818; color: #d4d4d4; }
     #fleet-title { height: 1; color: #d8ae7b; text-style: bold; }
@@ -270,6 +416,9 @@ class FleetApp(App):
     #fleet-active-chart, #fleet-token-chart { height: 1; }
     #fleet-notice { height: auto; min-height: 1; max-height: 3; color: #d8ae7b; }
     #fleet-footer { height: 1; color: #aaa; }
+    .gpu #fleet-gpus { height: 1fr; max-height: 100%; }
+    .gpu #fleet-table, .gpu #fleet-details { display: none; }
+    .gpu #fleet-banner, .gpu #fleet-notice { max-height: 1; }
     DataTable > .datatable--header { background: #2b2823; color: #d8ae7b; }
     """
     BINDINGS = [("ctrl+c", "quit", "Quit")]
@@ -283,7 +432,12 @@ class FleetApp(App):
         self.fetching = False
         self._refresh_pending = False
         self.read_error = None
-        self.view = "person"
+        self.view = "gpu"
+        self.selected_gpu = None
+        self.selected_segment = None
+        self._gpu_detail_service = None
+        self.gpu_accounts = []
+        self.gpu_detail = None
         self.sort_mode = "priority"
         self.filter_text = ""
         self.mine_only = False
@@ -319,8 +473,8 @@ class FleetApp(App):
     def compose(self):
         yield Static("GPU inference services · loading…", id="fleet-title", markup=False)
         yield Static("", id="fleet-banner", markup=False)
-        yield Static("GPU observations unavailable", id="fleet-gpus", markup=False)
         yield Static("", id="fleet-controls", markup=False)
+        yield GpuOverview("GPU observations unavailable", id="fleet-gpus", markup=False)
         yield Input(placeholder="Filter container, model, engine or status", id="fleet-filter")
         yield DataTable(id="fleet-table", cursor_type="row", zebra_stripes=False, cell_padding=1)
         with VerticalScroll(id="fleet-details"):
@@ -334,7 +488,8 @@ class FleetApp(App):
 
     def on_mount(self):
         self._table = self.dashboard.query_one("#fleet-table", DataTable)
-        self._table.focus()
+        self.dashboard.set_class(True, "gpu")
+        self.focus_view()
         self._ui_timers.append(self.set_interval(self.refresh_seconds, self.refresh_fleet))
         self._event_timer = self.set_interval(0.25, self.update_events, pause=self._event_driven)
         self._ui_timers.append(self._event_timer)
@@ -361,6 +516,45 @@ class FleetApp(App):
         self.dashboard.set_class(event.size.width < 100, "narrow")
         if self.snapshot is not None and self.alive():
             self.render_snapshot()
+
+    def focus_view(self):
+        if self.alive():
+            self.dashboard.query_one("#fleet-gpus" if self.view == "gpu" else "#fleet-table").focus()
+
+    def selected_gpu_account(self):
+        return next((account for account in self.gpu_accounts if account.index == self.selected_gpu), None)
+
+    def gpu_services(self):
+        account = self.selected_gpu_account()
+        if account is None:
+            return []
+        selected = self.selected_segment
+        allocations = [allocation for allocation in account.allocations
+                       if selected is None or selected in (MEASURED_KEY, allocation.key)]
+        ids = {ident for allocation in allocations for ident, _ in allocation.members if ident is not None}
+        return sorted((service for service in self.services() if service["id"] in ids), key=self.sort_key)
+
+    def select_gpu(self, index, segment=None):
+        self.selected_gpu, self.selected_segment = index, segment
+        self._gpu_detail_service = None
+        self.render_snapshot()
+
+    def move_gpu(self, step):
+        indices = [account.index for account in self.gpu_accounts]
+        if indices:
+            current = indices.index(self.selected_gpu) if self.selected_gpu in indices else 0
+            self.select_gpu(indices[max(0, min(len(indices) - 1, current + step))])
+
+    def move_segment(self, step):
+        account = self.selected_gpu_account()
+        keys = account.selection_keys() if account else []
+        if keys:
+            current = keys.index(self.selected_segment) if self.selected_segment in keys else (-1 if step > 0 else 0)
+            self.select_gpu(self.selected_gpu, keys[(current + step) % len(keys)])
+
+    def open_gpu_details(self):
+        if self.selected_gpu_account() is not None:
+            self.push_screen(GpuDetailDialog(self))
 
     def update_static(self, name, value):
         if self._rendered.get(name) != value:
@@ -521,6 +715,10 @@ class FleetApp(App):
         return result, metadata
 
     def selected_service_id(self):
+        if self.view == "gpu":
+            services = self.gpu_services()
+            return next((service["id"] for service in services if service["id"] == self._gpu_detail_service),
+                        services[0]["id"] if services else None)
         if not hasattr(self, "_table"):
             return None
         row = self._table.cursor_row
@@ -536,9 +734,26 @@ class FleetApp(App):
             return
         snapshot = self.snapshot or {}
         age = snapshot.get("snapshot_age_seconds")
-        self.update_static("fleet-title", "GPU inference services · snapshot %s ago · idle limit %sh" %
-                           ("%ds" % age if numeric(age) and age < 60 else duration(age),
-                            amount((snapshot.get("config") or {}).get("idle_limit_hours"))))
+        self.dashboard.set_class(self.view == "gpu", "gpu")
+        self.gpu_accounts = [account_gpu(gpu, snapshot.get("services", []))
+                             for gpu in sorted(snapshot.get("gpus", []), key=lambda item: item["index"])]
+        indices = [account.index for account in self.gpu_accounts]
+        if self.selected_gpu not in indices:
+            self.selected_gpu = indices[0] if indices else None
+            self.selected_segment, self._gpu_detail_service = None, None
+        account = self.selected_gpu_account()
+        if account and self.selected_segment not in (None, MEASURED_KEY, *account.selection_keys()):
+            self.selected_segment, self._gpu_detail_service = None, None
+        used = [account.used_gb for account in self.gpu_accounts]
+        totals = [account.total_gb for account in self.gpu_accounts]
+        frees = [account.free_gb for account in self.gpu_accounts]
+        summary = "VRAM %s/%s GiB · free %s" % (
+            compact_gib(sum(used)) if used and all(numeric(value) for value in used) else "?",
+            compact_gib(sum(totals)) if totals and all(numeric(value) for value in totals) else "?",
+            compact_gib(sum(frees)) if frees and all(numeric(value) for value in frees) else "?")
+        self.update_static("fleet-title", fit("llm · %s · %s · %s ago" % (
+            "GPU fleet" if self.view == "gpu" else "People / containers", summary,
+            "%ds" % age if numeric(age) and age < 60 else duration(age)), self.size.width))
         errors = []
         if self.read_error:
             errors.append("Read failed: " + self.read_error + "; last observations shown")
@@ -549,20 +764,22 @@ class FleetApp(App):
                           "; ".join(self.clean(error) for error in snapshot["errors"]))
         self.update_static("fleet-banner", " · ".join(errors))
         self.dashboard.query_one("#fleet-banner").display = bool(errors)
-        gpu_lines = []
-        for gpu in sorted(snapshot.get("gpus", []), key=lambda item: item["index"]):
-            used, total = gpu.get("used_gb"), gpu.get("total_gb")
-            filled = min(10, int(used / total * 10)) if numeric(used) and numeric(total) and total > 0 else None
-            bar = "?" * 10 if filled is None else "█" * filled + "░" * (10 - filled)
-            others = ["%s (other workload) %sG" % (self.clean(item.get("container") or "unknown"),
-                                                 amount(item.get("used_gb")))
-                      for item in gpu.get("occupants", []) if item.get("service_id") is None]
-            line = "GPU%s %s %s/%sG %s" % (gpu["index"], bar, amount(used), amount(total), " · ".join(others))
-            gpu_lines.append(self.api.usage_truncate(line, self.size.width))
-        self.update_static("fleet-gpus", "\n".join(gpu_lines) or "GPU observations unavailable")
-        self.update_static("fleet-controls", "By %s · sort %s%s%s · %s" %
-                           (self.view, self.sort_mode, " · mine" if self.mine_only else "",
-                            " · filter: " + self.clean(self.filter_text) if self.filter_text else "", self.connection))
+        overview = self.dashboard.query_one("#fleet-gpus", GpuOverview)
+        if self.view == "gpu":
+            available = self.size.height - 4 - bool(errors) - (3 if self.dashboard.query_one("#fleet-filter").display else 0)
+            overview.bar_rows = 2 if self.size.width >= 100 and available >= len(self.gpu_accounts) * 4 else 1
+            view, overview.hits = render_overview(self.gpu_accounts, self.size.width, overview.bar_rows,
+                self.selected_gpu, self.selected_segment, bool(snapshot.get("stale") or self.read_error),
+                self.clean, show_legends=available >= len(self.gpu_accounts) * 3)
+            self.update_static("fleet-gpus", view)
+        else:
+            overview.hits = []
+            self.update_static("fleet-gpus", summary)
+        self.update_static("fleet-controls", fit("%s · sort %s%s%s · %s" %
+                           ("G GPUs · P People · ■ LLM ▨ Other" if self.view == "gpu" else "People / containers",
+                            self.sort_mode, " · mine" if self.mine_only else "",
+                            " · filter: " + self.clean(self.filter_text) if self.filter_text else "", self.connection), self.size.width))
+        self.update_static("fleet-footer", fit(GPU_HINT if self.view == "gpu" else HINT, self.size.width))
         narrow = self.size.width < 100
         columns = [("service", "OWNER / SERVICE", 16 if narrow else 19), ("gpu", "GPU", 4),
                    ("mem", "GiB", 5), ("activity", "ACTIVITY · 24h", 24),
@@ -609,6 +826,8 @@ class FleetApp(App):
             if self._table.cursor_row != row:
                 self.call_after_refresh(self._table.move_cursor, row=row, animate=False)
         self.render_details()
+        if self.gpu_detail is not None:
+            self.gpu_detail.refresh_contents()
 
     def on_data_table_row_highlighted(self, event):
         if self.alive():
@@ -696,6 +915,8 @@ class FleetApp(App):
                     None if not numeric(value) else (value / maximum * 60 if maximum else 0) for value in values]
                 fallback.append(label + " " + activity_bar(scaled) + " · unknown hours remain dots")
         self.update_static("fleet-history-bars", "\n".join(fallback))
+        if self.gpu_detail is not None:
+            self.gpu_detail.sync_history()
 
     def notify_events(self):
         if not self._ui_closed and not self._event_notice.is_set():
@@ -759,16 +980,26 @@ class FleetApp(App):
         if self.screen is not self.dashboard or isinstance(self.focused, Input):
             if event.key == "escape" and self.screen is self.dashboard:
                 self.dashboard.query_one("#fleet-filter", Input).display = False
-                self._table.focus()
+                self.focus_view()
+                self.render_snapshot()
             return
         key = event.key.lower()
-        if key not in ("p", "g", "s", "m", "c", "u", "r", "q", "slash", "question_mark"):
+        gpu_key = self.view == "gpu" and key in ("up", "down", "left", "right", "enter")
+        if not gpu_key and key not in ("p", "g", "s", "m", "c", "u", "r", "q", "slash", "question_mark"):
             return
         event.stop()
         event.prevent_default()
-        if key in ("p", "g"):
+        if gpu_key:
+            if key in ("up", "down"):
+                self.move_gpu(-1 if key == "up" else 1)
+            elif key in ("left", "right"):
+                self.move_segment(-1 if key == "left" else 1)
+            else:
+                self.open_gpu_details()
+        elif key in ("p", "g"):
             self.view = "person" if key == "p" else "gpu"
             self.render_snapshot()
+            self.focus_view()
         elif key == "s":
             options = ["priority", "idle", "mem", "tokens"]
             self.sort_mode = options[(options.index(self.sort_mode) + 1) % len(options)]
@@ -785,9 +1016,10 @@ class FleetApp(App):
         elif key == "slash":
             field = self.dashboard.query_one("#fleet-filter", Input)
             field.display = True
+            self.render_snapshot()
             field.focus()
         else:
-            self.notice("15s refresh; live changes prompt reads. Choose person/GPU, filter, sort, or your service's claim. Dots mean unknown activity; other workload rows show memory only.")
+            self.notice("15s refresh · arrows select GPU/owner · Enter details · P People · bars retain all allocations when filtering")
 
     def on_input_changed(self, event):
         if event.input.id == "fleet-filter":
@@ -799,4 +1031,5 @@ class FleetApp(App):
         if event.input.id == "fleet-filter":
             event.stop()
             event.input.display = False
-            self._table.focus()
+            self.focus_view()
+            self.render_snapshot()

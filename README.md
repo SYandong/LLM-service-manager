@@ -8,15 +8,22 @@ pin 与 GPU reserve，并提供可选终端面板。llama-swap 和 vllm-wrapper
 发布功能不等于所在部署已启用它们：scheduler 默认只读，模型动作、放置、
 自动策略、故障恢复及 sleeping recovery 各有独立开关。实现与现场验收进度见 [ROADMAP](docs/ROADMAP.md)。
 
-## 全员推理服务视图（fleet）
+## Fleet view
 
-fleet 首次随 v1.10.0 发布，采集与摄取默认关闭，需要部署方显式启用。
-`llm status` 默认使用 fleet 视图，展示自建推理服务、GPU 占用、最近活动和声明。
-无参数的 `llm` 或 `llm top` 在 TTY 且 Textual 可用时打开新面板，其他环境
-输出 fleet 文本。未启用 fleet 时明确返回 `fleet_disabled`，不会自动启用服务。
-按人视图按容器归属分组，按卡视图也展示其他任务的归属/显存，
-不展示训练命令行。共享模型原状态视图改为 `llm status --shared`，需要旧
-JSON 结构的脚本使用 `llm status --shared --json`。
+`llm status` shows inference services, GPU memory, recent activity and claims.
+Run `llm` or `llm top` to open the TUI. The default GPU view shows six large
+allocation bars; P switches to People, grouped by container.
+
+Each owner keeps the same color across cards. Solid segments are LLMs,
+patterned segments are other tasks, neutral segments are unattributed memory,
+and the remaining track is free memory. Compute utilization has its own label.
+Use Up/Down to select a card, Left/Right to select an allocation, and Enter for
+details. The overview fits 100×30 and 80×24 terminals.
+
+Fleet collection is enabled by the deployment operator. A disabled fleet returns
+`fleet_disabled`. Without a TTY or Textual, `llm` prints fleet status.
+The shared-model view remains available as `llm status --shared`;
+scripts using its JSON format can use `llm status --shared --json`.
 
 ```sh
 llm fleet --by person
@@ -28,16 +35,12 @@ llm unclaim CLAIM_ID
 llm history SERVICE_ID --hours 24
 ```
 
-只能声明自己容器的服务，默认最多七天。声明不预留容量，也不改变进程。
-六小时空闲上限只做展示，不会自动停止服务。指标每分钟采样，活动条是
-采样估计；未知、陈旧或缺失不算空闲，也不代表没有请求。
-旧面板第一阶段可用 `llm legacy-tui` 打开并提示弃用，计划在 fleet 首次发布
-后的下一个 minor 按 #311 删除，需要零使用证据或维护者确认。
-原共享模型管理命令继续可用。
+Claims apply to your container's services, for up to seven days. The six-hour
+idle limit is informational. Activity is sampled every minute; gaps stay unknown.
+`llm legacy-tui` opens the old panel, retained until the next minor under #311.
 
-完整命令见 [CLI](docs/CLI.md)，启用、回滚与影子对账见
-[fleet 操作手册](deploy/FLEET_ROLLOUT.md)。发布与安装不会自动完成现场观测或
-影子对账验收。
+See [CLI](docs/CLI.md) for commands and [fleet rollout](deploy/FLEET_ROLLOUT.md)
+for installation, rollback and shadow reconciliation.
 
 ## 用户：第一次请求
 
