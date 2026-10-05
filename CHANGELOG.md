@@ -1,16 +1,27 @@
 # Changelog
 
-## Unreleased — fleet and placement availability
+## 1.10.0 — 2026-10-05
 
-- Known placement blockers that llmsvc cannot clear now have a conservative
-  grace-period 503 path with Retry-After; recoverable/unknown cases retain the
-  existing bounded 409 wait. The launcher and patched llama-swap propagate an
+Minor release; Python distribution `1.10.0`. Fleet collection and ingestion
+remain opt-in; publication does not enable workers or model actions.
+
+- Known placement blockers that llmsvc cannot clear now return 503 after the
+  default 10-second grace period confirmed across fresh observations, with
+  Retry-After (default 60 seconds); recoverable/unknown cases retain the
+  bounded 120-second 409 wait. The 900-second startup window is unchanged.
+  The launcher and patched llama-swap propagate an
   explicit no_gpu_available error rather than an unexplained startup 500
   (#303, #304). Native site replacement remains a separate rollout.
+  Fresh fleet observations can add container ownership to external-pressure
+  blockers; missing attribution remains unknown (#313).
 - Add an opt-in, read-only host fleet observer and independent SQLite activity
   history. Failed/partial/stale observations remain unknown. Owner claims are
   bounded metadata, tied to the direct peer's verified container, and never
   stop workloads (#305–#307).
+- Raise bounded host command-line discovery to 256 KiB and 4096 arguments;
+  scan budgets and redacted export limits remain enforced. Inputs beyond
+  either bound keep discovery incomplete. Validation uses synthetic fixtures
+  only (#323).
 - **CLI behavior change:** status defaults to fleet; scripts using the prior
   state JSON must use status --shared --json. Add fleet, claim, unclaim and
   history. The default TTY llm/top panel becomes fleet; legacy-tui retains the
@@ -1443,3 +1454,4 @@ Release process and cadence: [docs/RELEASING.md](docs/RELEASING.md).
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->
 
 <!-- Generated-By: Codex / unknown model -->
+<!-- Generated-By: Codex / gpt-6.1-sol -->

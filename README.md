@@ -4,15 +4,17 @@ llama-swap 之上的多 GPU 控制面：查看模型与用量、请求释放/唤
 pin 与 GPU reserve，并提供可选终端面板。llama-swap 和 vllm-wrapper
 负责推理路由、排队及后端 sleep/wake；scheduler 负责资源记账、保护和调度。
 
-当前文档面向 [v1.9.2 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v1.9.2)。
+当前文档面向 [v1.10.0 发布包](https://github.com/SYandong/LLM-service-manager/releases/tag/v1.10.0)。
 发布功能不等于所在部署已启用它们：scheduler 默认只读，模型动作、放置、
 自动策略、故障恢复及 sleeping recovery 各有独立开关。实现与现场验收进度见 [ROADMAP](docs/ROADMAP.md)。
 
 ## 全员推理服务视图（fleet）
 
-fleet 是发布包 v1.9.2 之后的 opt-in 功能；部署方启用并完成观测验收后，
-`llm status` 展示自建推理服务、GPU 占用、最近活动和声明，`llm`/`llm top`
-打开新面板。按人视图按容器归属分组，按卡视图也展示其他任务的归属/显存，
+fleet 首次随 v1.10.0 发布，采集与摄取默认关闭，需要部署方显式启用。
+`llm status` 默认使用 fleet 视图，展示自建推理服务、GPU 占用、最近活动和声明。
+无参数的 `llm` 或 `llm top` 在 TTY 且 Textual 可用时打开新面板，其他环境
+输出 fleet 文本。未启用 fleet 时明确返回 `fleet_disabled`，不会自动启用服务。
+按人视图按容器归属分组，按卡视图也展示其他任务的归属/显存，
 不展示训练命令行。共享模型原状态视图改为 `llm status --shared`，需要旧
 JSON 结构的脚本使用 `llm status --shared --json`。
 
@@ -34,8 +36,8 @@ llm history SERVICE_ID --hours 24
 原共享模型管理命令继续可用。
 
 完整命令见 [CLI](docs/CLI.md)，启用、回滚与影子对账见
-[fleet 操作手册](deploy/FLEET_ROLLOUT.md)。后文 v1.9.2 下载示例仍是该已发布
-版本的共享接口；不要把开发中的新入口当作旧发布包已经支持的功能。
+[fleet 操作手册](deploy/FLEET_ROLLOUT.md)。发布与安装不会自动完成现场观测或
+影子对账验收。
 
 ## 用户：第一次请求
 
@@ -44,7 +46,7 @@ llm history SERVICE_ID --hours 24
 
 | 用途 | 环境变量与地址格式 | 请求去向 |
 |---|---|---|
-| 模型状态、用量、CLI/TUI 操作 | `LLM_URL=https://scheduler.example.invalid`，不加 `/v1` | scheduler 的 `/v1/state` 等控制 API |
+| 模型状态、用量、CLI/TUI 操作 | `LLM_URL=https://scheduler.example.invalid`，不加 `/v1` | scheduler 的 `/v1/fleet`、`/v1/state` 等控制 API |
 | 模型列表、OpenAI 兼容推理 | `OPENAI_BASE_URL=https://data-plane.example.invalid/v1`，包含 `/v1` | llama-swap 数据面 |
 
 需要 Python 3.10+ 和 curl。以下示例假设部署方已提供可访问的端点；若其网关
@@ -80,37 +82,57 @@ PYREQUEST
 
 `960` 秒只是这个客户端示例的总等待上限，不修改服务端期限或承诺延迟。
 已醒模型、sleeping 模型与 stopped 模型的等待不同；冷启动可能需要数分钟。
-在启用薄 launcher 的部署中，放置最多等待 120 秒并返回占用/保护阻塞原因，
-默认启动窗口为 900 秒；这些不是所有模型的首 token 时延上限。
+在启用薄 launcher 的部署中，已知且无法由 llmsvc 解除的放置阻塞，经默认
+10 秒宽限期和至少两个不同的新鲜采样轮次确认后返回 503，附带 `Retry-After`
+（默认 60 秒）。可恢复或未知条件仍最多等待 120 秒，超时返回 409。
+默认启动窗口仍为 900 秒；这些不是所有模型的首 token 时延上限。
 遇到错误或超时，先检查状态与部署方日志，不循环重发写操作或自行停模型。
 
-## 用户：已发布的共享 CLI 与旧面板
+## 用户：CLI 与终端面板
 
-以下为 v1.9.2 的共享接口与面板；fleet 版本用 `status --shared` 和
-`legacy-tui` 访问这些视图。新面板操作见前面的 fleet 节和 CLI 文档。
+以下命令适用于 v1.10.0，默认使用 fleet；原共享视图通过 `status --shared`
+和 `legacy-tui` 访问。新面板操作见前面的 fleet 节和 CLI 文档。
 
-从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v1.9.2)
+从同一 [发布页](https://github.com/SYandong/LLM-service-manager/releases/tag/v1.10.0)
 下载 `llm` 和 `SHA256SUMS`，核对对应 SHA-256 后，将脚本放在当前目录：
 
 ```sh
 python3 llm --version
 python3 llm status
 python3 llm status --json
+python3 llm status --shared
+python3 llm status --shared --json
 python3 llm usage --days 7 --by model
 ```
 
 单文件 `llm` 仅需 Python 标准库，不必安装仓库、rich 或 Textual。
-fleet 源码目录中的共享命令是 `python3 cli/llm status --shared`。`LLM_URL` 使用上面设置的
+源码目录中的共享命令是 `python3 cli/llm status --shared`。`LLM_URL` 使用上面设置的
 scheduler 地址；参数/配置优先级及完整命令见 [CLI 使用说明](docs/CLI.md)。
 
-TUI 的「Copy model endpoint address」复制的是**共享 llama-swap OpenAI 地址**，
+需要全屏面板时，在独立 Python 环境安装下载的同版 wheel 与可选依赖：
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install './llmsvc-1.10.0-py3-none-any.whl[tui]'
+.venv/bin/llm
+```
+
+安装依赖需要可用的软件源或管理员准备的离线 wheelhouse。已安装包的 `llm`
+无参数、在 TTY 且 Textual 可用时启动 fleet 面板；否则输出 fleet 状态。
+
+### 原共享状态与已弃用面板
+
+下面的共享状态和面板功能分别由 `llm status --shared` 与 `llm legacy-tui`
+提供；安装同版 wheel 后可用 `.venv/bin/llm legacy-tui` 打开旧面板。
+
+旧面板的「Copy model endpoint address」复制的是**共享 llama-swap OpenAI 地址**，
 调用方仍使用当前选中的模型名。它来自独立的可选配置 `api_url`（或环境变量
 `LLM_API_URL`），**不是** scheduler 管理地址，也不会从管理端口猜测推理端口：
 在配置文件里把 `api_url` 设成与上面 `OPENAI_BASE_URL` 相同的值即可（根路径会
 规范化为 `/v1`，显式非根 base path 原样保留）。未配置时菜单项置灰并给出设置
 提示，复制只请求终端剪贴板，不发任何模型请求、不改变服务状态。
 
-`status` 展示各 GPU 的服务/外部占用、空闲量、模型状态、pin/reserve、租约和
+`status --shared` 展示各 GPU 的服务/外部占用、空闲量、模型状态、pin/reserve、租约和
 阻塞原因。下列为**合成示例**，不是当前服务器测量：
 
 ```text
@@ -125,26 +147,16 @@ RAM   llmsvc 86/200 GiB budget  host available 823 GiB
 租约预算；缺少可信宿主内存源时，RAM 准入不能使用容器 meminfo 或旧快照补零。
 源错误、stale 记录及 `blocked_by` 都需要保留并检查。
 
-需要全屏面板时，在独立 Python 环境安装下载的同版 wheel 与可选依赖：
-
-```sh
-python3 -m venv .venv
-.venv/bin/python -m pip install './llmsvc-1.9.2-py3-none-any.whl[tui]'
-.venv/bin/llm
-```
-
-安装依赖需要可用的软件源或管理员准备的离线 wheelhouse。已安装包的 `llm`
-无参数、在 TTY 且 Textual 可用时启动 TUI；否则降级为状态输出。
-进去就是命令行：Enter 执行、Tab 补全、↑/↓ 翻历史、Shift+↑/↓ 选模型、
+旧面板进去就是命令行：Enter 执行、Tab 补全、↑/↓ 翻历史、Shift+↑/↓ 选模型、
 Ctrl+O 打开选中模型的菜单（load / online / sleep / free、复制名称/状态行、
 复制模型 endpoint 地址、插入命令行）、
 `/help` `/quit` `/usage` `/events` `/copy` 等界面命令，Ctrl+C 两次退出。
 状态每 0.5 秒刷新，收到事件立即再读一次。TUI 事件经 scheduler 转发；缺少数据面
 事件不代表无活动，`stopped` 事件也不能单独证明 unit 退出或资源释放。
-新版面板按变化更新模型单元格和事件，保留当前选择，心跳仅更新连接状态。
+旧面板按变化更新模型单元格和事件，保留当前选择，心跳仅更新连接状态。
 等待操作展示目标、已用时间及可用的已观测阶段；没有可信估计时显示 ETA unknown，
 配置中的冷启动总时长不会冒充实时剩余时间。
-底栏固定以当前运行版本（如 `v1.1.0`）开头，即使连接/队列提示很长也不会被挤掉。
+底栏固定以当前运行版本（如 `v1.10.0`）开头，即使连接/队列提示很长也不会被挤掉。
 事件栏默认显示精简变化，连接/在途/错误计数固定显示；重复快照不会逐条刷屏。
 点 `Details`（或在输入框外按 `e`）查看冻结详情并选择文本。`Copy` 仅在你点击时
 请求终端剪贴板；无选区时复制精简摘要，过大选区会提示改用导出，不静默截断。
@@ -174,9 +186,9 @@ python3 llm wake "$MODEL" --dry-run
 
 HTTP 200 不等于动作成功；阻塞/部分结果返回非零退出码，`--json` 保留完整回执。
 free/reserve 默认客户端等待 150 秒，wake 为 930 秒，可用 `--wait` 调整，
-不会改变服务端期限。断线后先查 `status`，客户端不会重试写操作。
+不会改变服务端期限。断线后先查 `status --shared`，客户端不会重试写操作。
 客户端不切换服务端开关，也不绕过 `read_only` / `operation_not_enabled`。
-`unreserve ID [--dry-run]` 通过现有 DELETE API 幂等解除预约，TUI 使用同一命令；
+`unreserve ID [--dry-run]` 通过现有 DELETE API 幂等解除预约，旧面板使用同一命令；
 它不唤醒模型，丢失响应时不自动重试。配置过 registry 的 scheduler 还支持
 `models`（临时登记记录、配置 inventory 与共享目录发现）和 `registry`（只读队列/恢复状态）。
 登记是目录驱动的：把权重与 `llmsvc.json` 放进共享 root 的一层子目录，scheduler
@@ -185,7 +197,7 @@ free/reserve 默认客户端等待 150 秒，wake 为 930 秒，可用 `--wait` 
 `registry_writes_removed`。`registry` 只读展示已知 job 与恢复状态，未知值保持 null；
 它不启动 worker、提交证明、reconcile 或清除 fence。inventory 与发现不证明运行时已经采纳配置。
 
-活动读取失败会显示 partial update 及脱敏原因；失败计数保持未知，成功读取
+原共享状态和旧面板的活动读取失败会显示 partial update 及脱敏原因；失败计数保持未知，成功读取
 但来源未知不等于没有请求。SSE 静默不再按连接超时反复重连，但也不证明源健康
 或连续安静。查看全局阻塞原因，不能将队列已清除理解为 catalog 已完成。
 
@@ -267,3 +279,4 @@ SIGHUP。生产策略、TTL/reaper、宿主来源及其他用户服务的变更�
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->
 
 <!-- Generated-By: Codex / unknown model -->
+<!-- Generated-By: Codex / gpt-6.1-sol -->
