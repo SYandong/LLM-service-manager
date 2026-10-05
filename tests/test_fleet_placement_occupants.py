@@ -80,7 +80,7 @@ def test_fresh_occupants_match_uuid_across_different_gpu_indices(context):
         {"container": "team-a", "kind": "llm", "used_gb": 50, "service_id": "inference-a", "model": "demo-model"},
         {"container": "team-b", "kind": "other", "used_gb": 30, "service_id": None}]
     assert result["blockers"][0]["occupants_remaining"] == 0
-    assert "GPU0: team-a 50.0G (LLM demo-model), team-b 30.0G (other workload)" in result["message"]
+    assert "GPU0: team-a 50G (LLM demo-model) +1" in result["message"]
     assert result["gpus"] == original["gpus"] and original == before
     assert not Path(config.fleet_db_path).exists()
 
@@ -173,7 +173,7 @@ def test_multiple_occupants_have_top_three_remaining_count_and_exclude_managed(c
     blocker = enrich(config)["blockers"][0]
     assert [row["container"] for row in blocker["occupants"]] == ["team-d", "team-a", "team-b"]
     assert blocker["occupants_remaining"] == 2
-    assert "+2 more" in enrich(config)["message"]
+    assert "GPU0: team-d 70G (other workload) +4" in enrich(config)["message"]
 
 
 def test_other_processes_are_grouped_by_container_without_pid_matching(context):
@@ -250,7 +250,7 @@ def test_model_labels_are_bounded_and_url_credentials_remain_redacted(context):
     assert "synthetic" not in json.dumps(enrich(config))
 
 
-def test_long_owner_labels_do_not_merge_different_containers_or_exceed_message_limit(context):
+def test_long_owner_labels_do_not_merge_different_containers(context):
     config, write = context
     payload = snapshot(services=[])
     payload["other_gpu_processes"] = [
@@ -258,23 +258,82 @@ def test_long_owner_labels_do_not_merge_different_containers_or_exceed_message_l
         for suffix in ("a", "b")]
     write(payload)
     assert len(enrich(config)["blockers"][0]["occupants"]) == 2
-    payload["gpus"] = []
-    payload["services"] = []
-    payload["other_gpu_processes"] = []
+
+
+def many_card_context(count):
+    payload = snapshot(services=[], gpus=[], other_gpu_processes=[])
     original = unavailable()
     original["blockers"] = []
+    original["gpus"] = []
     mapping = {}
-    for index in range(8):
+    for index in range(count):
         payload["gpus"].append({"index": index + 10, "uuid": f"GPU-{index}",
-                                "total_mib": 100 * 1024, "used_mib": 30 * 1024, "util_percent": 20})
-        payload["services"].append(service(f"instance-{index}", container="c" * 128, model="m" * 128,
-                                           gpus=[{"index": index + 10, "used_mib": 30 * 1024}]))
+                                "total_mib": 200 * 1024, "used_mib": 170 * 1024, "util_percent": 20})
+        payload["services"] += [
+            service(f"instance-{index}", container=f"owner-{index}-" + "c" * 200,
+                    model=f"model-{index}-" + "m" * 200,
+                    gpus=[{"index": index + 10, "used_mib": 60 * 1024}]),
+            service(f"second-{index}", container=f"second-{index}",
+                    gpus=[{"index": index + 10, "used_mib": 20 * 1024}])]
+        payload["other_gpu_processes"] += [
+            {"container": f"other-{index}-" + "界" * 200, "gpu": index + 10,
+             "used_mib": (80 if index % 2 else 30) * 1024},
+            {"container": f"fourth-{index}", "gpu": index + 10, "used_mib": 10 * 1024}]
         original["blockers"].append({"gpu": index, "reason": "external_pressure"})
+        original["gpus"].append({"index": index, "external_gb": 170, "free_gb": 30})
         mapping[index] = f"GPU-{index}"
+    return payload, original, mapping
+
+
+@pytest.mark.parametrize("count", [4, 6, 16])
+def test_fair_summary_preserves_every_card_with_long_owners_and_models(context, count):
+    config, write = context
+    payload, original, mapping = many_card_context(count)
     write(payload)
     result = enrich(config, original, gpu_uuids=mapping)
-    assert len(result["message"]) <= 2048
-    assert all(len(blocker["occupants"]) == 1 for blocker in result["blockers"])
+    assert len(result["message"]) <= 512
+    for index in range(count):
+        assert f"GPU{index}:" in result["message"]
+        assert len(result["blockers"][index]["occupants"]) == 3
+        assert result["blockers"][index]["occupants_remaining"] == 1
+        inference = next(row for row in result["blockers"][index]["occupants"]
+                         if row["service_id"] == f"instance-{index}")
+        assert inference["model"] == payload["services"][2 * index]["model"][:128]
+        assert inference["container"] == payload["services"][2 * index]["container"][:128]
+        assert inference["used_gb"] == 60
+    assert result["message"].count("+3") == count
+    if count <= 6:
+        for index in range(count):
+            if index % 2:
+                assert f"other-{index}-" in result["message"] and "other workload" in result["message"]
+            else:
+                assert f"owner-{index}-" in result["message"] and f"model-{index}-" in result["message"]
+    assert "training" not in result["message"]
+
+
+def test_huge_pool_has_bounded_card_count_and_explicit_remainder(context):
+    config, write = context
+    payload, original, mapping = many_card_context(20)
+    write(payload)
+    result = enrich(config, original, gpu_uuids=mapping)
+    assert len(result["message"]) <= 512
+    assert all(f"GPU{index}:" in result["message"] for index in range(16))
+    assert "GPU16:" not in result["message"] and "+4 more GPUs" in result["message"]
+    assert len(result["blockers"]) == 20
+    assert all(len(blocker["occupants"]) == 3 for blocker in result["blockers"])
+
+
+@pytest.mark.parametrize("index", [65535, 65536, 10 ** 40])
+def test_transport_index_bounds_keep_summary_bounded(context, index):
+    config, _ = context
+    original = unavailable()
+    original["blockers"][0]["gpu"] = index
+    result = enrich(config, original, gpu_uuids={index: "GPU-target"})
+    assert len(result["message"]) <= 512 and "occupants" in result["blockers"][0]
+    if index == 65535:
+        assert "GPU65535:" in result["message"]
+    else:
+        assert "+1 more GPUs" in result["message"]
 
 
 def test_only_external_pressure_blockers_receive_fleet_hints(context):

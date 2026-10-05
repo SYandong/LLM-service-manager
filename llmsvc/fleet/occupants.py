@@ -6,6 +6,59 @@ import unicodedata
 
 from llmsvc.fleet.ingest import number, read_json, validate_snapshot
 
+MAX_MESSAGE_CHARACTERS = 512
+MAX_SUMMARY_GPUS = 16
+MAX_SUMMARY_GPU_INDEX = 65535
+
+
+def _shorten(value, limit):
+    if limit <= 0:
+        return ""
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
+def _card_summary(index, details, limit):
+    occupant = details["occupants"][0]
+    other_count = len(details["occupants"]) - 1 + details["occupants_remaining"]
+    suffix = f" +{other_count}" if other_count else ""
+    prefix = f"GPU{index}:"
+    amount = f"{occupant['used_gb']:.3g}G"
+    kind = "LLM" if occupant["kind"] == "llm" else "other workload"
+    tail = f" {amount} ({kind}){suffix}"
+    if len(prefix) + len(tail) + 2 > limit and kind == "other workload":
+        kind = "other"
+        tail = f" {amount} ({kind}){suffix}"
+    if len(prefix) + len(tail) > limit:
+        # Extreme amounts or large indices still retain the card and count;
+        # complete amounts and metadata remain in the structured occupants.
+        amount = ""
+        tail = f" ({kind}){suffix}"
+    label_budget = max(0, limit - len(prefix) - len(tail) - 1)
+    model = occupant.get("model")
+    model_budget = label_budget // 2 - 1 if model and label_budget >= 12 else 0
+    owner_budget = label_budget - model_budget - (1 if model_budget else 0)
+    owner = _shorten(occupant["container"] or "unknown container", owner_budget)
+    model = _shorten(model, model_budget) if model_budget else ""
+    if model:
+        kind += " " + model
+    tail = (f" {amount} ({kind})" if amount else f" ({kind})") + suffix
+    return prefix + (" " + owner if owner else "") + tail
+
+
+def _summary(message, cards):
+    indices = [index for index in sorted(cards) if 0 <= index <= MAX_SUMMARY_GPU_INDEX][:MAX_SUMMARY_GPUS]
+    omitted = len(cards) - len(indices)
+    remainder = f"; +{omitted} more GPUs" if omitted else ""
+    message = _shorten(message, 96)
+    if not indices:
+        return message + remainder
+    available = MAX_MESSAGE_CHARACTERS - len(message) - 2 - len(remainder) - 2 * (len(indices) - 1)
+    # Every visible card gets the same character allowance before any owner or
+    # model is rendered. An earlier long label cannot consume a later card.
+    per_card = available // len(indices)
+    rows = [_card_summary(index, cards[index], per_card) for index in indices]
+    return message + "; " + "; ".join(rows) + remainder
+
 
 def _display_text(value):
     if value is None:
@@ -93,24 +146,14 @@ def enrich_unavailable(error, config, *, gpu_uuids, now):
     except (OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError):
         return error
     blockers = []
-    messages = {}
+    cards = {}
     for blocker in error.get("blockers", []):
         details = occupants.get(blocker.get("gpu")) if blocker.get("reason") == "external_pressure" else None
         if details:
             blocker = {**blocker, **details}
-            labels = []
-            for occupant in details["occupants"]:
-                owner = occupant["container"] or "unknown container"
-                kind = "LLM" if occupant["kind"] == "llm" else "other workload"
-                if occupant.get("model"):
-                    kind += " " + occupant["model"]
-                labels.append(f"{owner} {occupant['used_gb']:.1f}G ({kind})")
-            remaining = details["occupants_remaining"]
-            suffix = f" (+{remaining} more)" if remaining else ""
-            messages[blocker["gpu"]] = f"GPU{blocker['gpu']}: " + ", ".join(labels) + suffix
+            cards[blocker["gpu"]] = details
         blockers.append(blocker)
-    if not messages:
+    if not cards:
         return error
     message = error.get("message", "No placement GPU is available")
-    message += "; " + "; ".join(messages[index] for index in sorted(messages))
-    return {**error, "blockers": blockers, "message": message[:2048]}
+    return {**error, "blockers": blockers, "message": _summary(message, cards)}
