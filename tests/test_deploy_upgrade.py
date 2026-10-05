@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 """Transactional deployment behavior, with real files/launchers and no systemd."""
 import json
 import os
@@ -6,6 +7,7 @@ from pathlib import Path
 import select
 import subprocess
 import sys
+from types import SimpleNamespace
 import zipfile
 
 import pytest
@@ -79,6 +81,36 @@ def watched(site):
     root,_,settings=site
     names=[settings[k] for k in ('unit_path','config_path','cli_path')]+['/srv/cli/bin/llm-run','/usr/local/bin/llm','/opt/scheduler/manifest.json']+settings['backup_files']
     return {name:(root/name.lstrip('/')).read_bytes() for name in names}
+
+
+@pytest.mark.parametrize('fleet_cli',[False,True])
+def test_live_health_preserves_shared_state_and_prior_cli_rollback(fleet_cli):
+    obj=object.__new__(Upgrade)
+    obj.root=Path('/')
+    obj.health_timeout=5
+    obj.cfg={'python':sys.executable,'scheduler_url':'http://scheduler.example.invalid'}
+    obj.cli=Path('/example/llm')
+    obj.cli_run=Path('/example/llm-run')
+    calls=[]
+
+    def run(argv,**kwargs):
+        calls.append(argv)
+        if argv[0]=='systemctl':
+            return SimpleNamespace(stdout='active')
+        if argv[-1].endswith('/v1/state'):
+            return SimpleNamespace(stdout=json.dumps({'read_only':True,'sampled_at':1800000000}))
+        if argv[-1]=='--version':
+            return SimpleNamespace(stdout='1.9.2')
+        if argv==['/example/llm-run','status','--help']:
+            return SimpleNamespace(stdout='--json --shared' if fleet_cli else '--json')
+        flags=['status','--shared','--json'] if fleet_cli else ['status','--json']
+        assert argv==['/example/llm-run',*flags]
+        return SimpleNamespace(stdout='{}')
+
+    obj.run=run
+    assert obj.health()=='1.9.2'
+    flags=['status','--shared','--json'] if fleet_cli else ['status','--json']
+    assert calls[-2:]==[['/example/llm-run','status','--help'],['/example/llm-run',*flags]]
 
 
 def test_dryrun_validates_but_creates_no_files_or_subprocess(site,tmp_path,monkeypatch):
