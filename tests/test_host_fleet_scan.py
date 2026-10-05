@@ -395,6 +395,111 @@ def test_limits_and_budget_cover_discovery_and_metrics_parsing(scanner, tmp_path
         scanner.parse_metrics(METRICS_022 * 200, scanner.Budget(0.1, clock))
 
 
+@pytest.mark.parametrize("cmdline_bytes", [64 * 1024 + 1, 128 * 1024, 256 * 1024])
+def test_long_ordinary_cmdline_preserves_complete_discovery(scanner, tmp_path, cmdline_bytes):
+    root = fake_root(tmp_path)
+    prefix = ["python", "testdummy"]
+    filler = "x" * (cmdline_bytes - sum(len(arg) + 1 for arg in prefix) - 1)
+    ordinary = make_process(root, 100, prefix + [filler], container="ctr-a", comm="python")
+    make_process(root, 200, ["vllm", "serve", "demo"], container="ctr-a", port=8000)
+    assert (ordinary / "cmdline").stat().st_size == cmdline_bytes
+    result = scanner.scan(fixture_config(scanner, root, tmp_path), FakeRunner(b"100, GPU-one, 1000\n"))
+    assert result["inventory_complete"] is True
+    assert result["gpu_attribution_complete"] is True
+    assert [row["pid"] for row in result["services"]] == [200]
+    assert result["other_gpu_processes"] == [{"container": "ctr-a", "pid": 100, "gpu": 0, "used_mib": 1000, "comm": "python"}]
+    assert result["errors"] == []
+    assert "testdummy" not in json.dumps(result) and filler not in json.dumps(result)
+
+
+@pytest.mark.parametrize("argc,cmdline_bytes", [(2048, 32 * 1024), (4096, 128 * 1024)])
+def test_many_ordinary_arguments_preserve_complete_discovery(scanner, tmp_path, argc, cmdline_bytes):
+    root = fake_root(tmp_path)
+    argv = ["python", "testdummy"] + ["item"] * (argc - 3)
+    argv.append("x" * (cmdline_bytes - sum(len(arg) + 1 for arg in argv) - 1))
+    ordinary = make_process(root, 100, argv, container="ctr-a")
+    make_process(root, 200, ["vllm", "serve", "demo"], container="ctr-a", port=8000)
+    assert len(argv) == argc and (ordinary / "cmdline").stat().st_size == cmdline_bytes
+    result = scanner.scan(fixture_config(scanner, root, tmp_path), FakeRunner())
+    assert result["inventory_complete"] is True
+    assert result["gpu_attribution_complete"] is True
+    assert [row["pid"] for row in result["services"]] == [200]
+    assert result["errors"] == []
+
+
+def test_oversized_argument_count_keeps_discovery_incomplete(scanner, tmp_path):
+    root = fake_root(tmp_path)
+    make_process(root, 100, ["python", "testdummy"] + ["item"] * 4095, container="ctr-a")
+    make_process(root, 200, ["vllm", "serve", "demo"], container="ctr-a", port=8000)
+    result = scanner.scan(fixture_config(scanner, root, tmp_path), FakeRunner())
+    assert result["inventory_complete"] is False
+    assert result["gpu_attribution_complete"] is False
+    assert "proc_argv_limit" in result["errors"]
+    assert [row["pid"] for row in result["services"]] == [200]
+
+
+def test_many_service_arguments_keep_redacted_export_bounded(scanner, tmp_path):
+    root = fake_root(tmp_path)
+    argv = ["vllm", "serve", "demo", "--api-key", "synthetic-secret-value"]
+    argv += [f"synthetic-item-{index}" for index in range(4096 - len(argv))]
+    make_process(root, 100, argv, container="ctr-a", port=8000)
+    config = fixture_config(scanner, root, tmp_path)
+    result = scanner.scan(config, FakeRunner())
+    assert result["inventory_complete"] is True
+    assert [row["pid"] for row in result["services"]] == [100]
+    assert len(result["services"][0]["argv_redacted"].encode()) <= 1024
+    assert "[REDACTED]" in result["services"][0]["argv_redacted"]
+    scanner.atomic_write(config["output_path"], result, config["max_snapshot_bytes"])
+    exported = Path(config["output_path"]).read_bytes()
+    assert config["max_snapshot_bytes"] == 2 * 1024 * 1024
+    assert len(exported) <= config["max_snapshot_bytes"]
+    assert b"synthetic-secret-value" not in exported
+    assert b"synthetic-item-4090" not in exported
+
+
+def test_oversized_cmdline_keeps_discovery_incomplete(scanner, tmp_path):
+    root = fake_root(tmp_path)
+    make_process(root, 100, ["python", "testdummy", "x" * (256 * 1024)], container="ctr-a")
+    make_process(root, 200, ["vllm", "serve", "demo"], container="ctr-a", port=8000)
+    result = scanner.scan(fixture_config(scanner, root, tmp_path), FakeRunner())
+    assert result["inventory_complete"] is False
+    assert result["gpu_attribution_complete"] is False
+    assert "proc_file_limit" in result["errors"]
+
+
+def test_long_cmdline_still_obeys_global_proc_byte_budget(scanner, tmp_path):
+    assert scanner.load_config()["max_proc_bytes"] == 64 * 1024 * 1024
+    root = fake_root(tmp_path)
+    make_process(root, 100, ["python", "testdummy", "x" * (128 * 1024)], container="ctr-a")
+    make_process(root, 200, ["vllm", "serve", "demo"], container="ctr-a", port=8000)
+    result = scanner.scan(fixture_config(scanner, root, tmp_path, max_proc_bytes=64 * 1024), FakeRunner())
+    assert result["inventory_complete"] is False
+    assert result["gpu_attribution_complete"] is False
+    assert "proc_file_limit" in result["errors"]
+
+
+def test_long_cmdline_still_obeys_global_time_budget(scanner, tmp_path, monkeypatch):
+    assert scanner.load_config()["scan_budget_seconds"] == 20
+    root = fake_root(tmp_path)
+    make_process(root, 100, ["python", "testdummy", "x" * (128 * 1024)], container="ctr-a")
+    make_process(root, 200, ["vllm", "serve", "demo"], container="ctr-a", port=8000)
+    ticks = [0.0]
+    original_read = scanner.ProcReader.read
+
+    def read(reader, relative, limit):
+        result = original_read(reader, relative, limit)
+        if relative == "100/cmdline":
+            ticks[0] = 20
+        return result
+
+    monkeypatch.setattr(scanner.ProcReader, "read", read)
+    result = scanner.scan(fixture_config(scanner, root, tmp_path), FakeRunner(), clock=lambda: ticks[0])
+    assert result["inventory_complete"] is False
+    assert result["gpu_inventory_complete"] is False
+    assert result["gpu_attribution_complete"] is False
+    assert "scan_budget_exceeded" in result["errors"]
+
+
 def test_remaining_targets_skipped_after_global_budget(scanner, tmp_path):
     root = fake_root(tmp_path)
     for pid in (100, 200):
