@@ -340,7 +340,7 @@ def service_lines(service, used_gb, index, clean=str, status=None):
     return first, ident, third, fourth
 
 
-def render_expanded(accounts, services, width, bar_rows=5, selected_gpu=None,
+def render_expanded(accounts, services, width, bar_rows=3, selected_gpu=None,
                     selected_segment=None, stale=False, clean=str, statuses=None):
     """Wrap complete cards and return anchors and mouse targets for scrolling."""
     width = max(1, width)

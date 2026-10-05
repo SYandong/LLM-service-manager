@@ -153,7 +153,7 @@ def test_layout_views_and_seven_day_details(fleet_snapshot, size, tmp_path):
             assert app.view == "gpu"
             assert not table.display and not app.query_one("#fleet-details").display
             assert not app.compact_gpus
-            assert overview.bar_rows == (5 if size[0] >= 100 else 3)
+            assert overview.bar_rows == 3
             viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
             assert viewport.virtual_size.height > viewport.size.height
             assert "training-group · Other · 20 GiB" in str(overview.render())
