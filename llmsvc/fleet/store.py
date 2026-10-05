@@ -59,10 +59,11 @@ class FleetStore:
         self._writable = False
         self._closed = False
 
-    def _connection(self, *, create=False):
+    def _connection(self, *, create=False, write=False):
         if self._closed:
             raise sqlite3.ProgrammingError("fleet_store_closed")
-        if self._db is not None and (not create or self._writable):
+        write = create or write
+        if self._db is not None and (not write or self._writable):
             return self._db
         if not create and not self.path.exists():
             return None
@@ -71,7 +72,8 @@ class FleetStore:
             self._db = None
         if create:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-        uri = self.path.resolve().as_uri() + ("?mode=rwc" if create else "?mode=ro")
+        mode = "rwc" if create else "rw" if write else "ro"
+        uri = self.path.resolve().as_uri() + "?mode=" + mode
         db = sqlite3.connect(uri, uri=True, timeout=2, check_same_thread=False)
         db.row_factory = sqlite3.Row
         try:
@@ -80,7 +82,7 @@ class FleetStore:
                 db.executescript(SCHEMA)
             elif version != 1:
                 raise sqlite3.DatabaseError("unsupported_fleet_database_schema")
-            if create:
+            if write:
                 db.execute("PRAGMA journal_mode=WAL")
                 db.execute("PRAGMA synchronous=FULL")
             else:
@@ -89,7 +91,7 @@ class FleetStore:
             db.close()
             raise
         self._db = db
-        self._writable = create
+        self._writable = write
         return db
 
     def close(self):
@@ -173,15 +175,39 @@ class FleetStore:
                         other.get(gpu["index"], 0) if known else None))
                 self._meta(db, "generated_at", ts)
                 self._meta(db, "snapshot", snapshot)
+                db.commit()
+                return True
+            except Exception:
+                db.rollback()
+                raise
+
+    def retention_tick(self, config, now):
+        """Prune an existing history independently of export availability."""
+        with self.lock:
+            db = self._connection(create=False)
+            if db is None:
+                return False
+            retained = db.execute("SELECT value FROM fleet_meta WHERE key='last_retention'").fetchone()
+            if retained is not None and now - json.loads(retained[0]) < 3600:
+                return False
+            # mode=rw cannot create a database if the source has never ingested.
+            db = self._connection(create=False, write=True)
+            if db is None:
+                return False
+            db.execute("BEGIN IMMEDIATE")
+            try:
                 retained = db.execute("SELECT value FROM fleet_meta WHERE key='last_retention'").fetchone()
-                if retained is None or now - json.loads(retained[0]) >= 3600:
-                    # Whole-hour cuts keep the remaining raw and hourly split exact.
-                    cutoff = math.floor((now - config.fleet_raw_retention_days * 86400) / 3600) * 3600
-                    db.execute("DELETE FROM fleet_samples WHERE ts<?", (cutoff,))
-                    db.execute("DELETE FROM fleet_gpu_samples WHERE ts<?", (cutoff,))
-                    db.execute("DELETE FROM fleet_hourly WHERE hour_ts<?", (now - config.fleet_hourly_retention_days * 86400,))
-                    self._meta(db, "raw_cutoff", cutoff)
-                    self._meta(db, "last_retention", now)
+                if retained is not None and now - json.loads(retained[0]) < 3600:
+                    db.rollback()
+                    return False
+                # Keep partial boundary hours in both retention tiers.
+                raw_cutoff = math.floor((now - config.fleet_raw_retention_days * 86400) / 3600) * 3600
+                hourly_cutoff = math.floor((now - config.fleet_hourly_retention_days * 86400) / 3600) * 3600
+                db.execute("DELETE FROM fleet_samples WHERE ts<?", (raw_cutoff,))
+                db.execute("DELETE FROM fleet_gpu_samples WHERE ts<?", (raw_cutoff,))
+                db.execute("DELETE FROM fleet_hourly WHERE hour_ts<?", (hourly_cutoff,))
+                self._meta(db, "raw_cutoff", raw_cutoff)
+                self._meta(db, "last_retention", now)
                 db.commit()
                 return True
             except Exception:

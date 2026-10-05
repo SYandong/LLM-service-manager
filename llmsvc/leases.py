@@ -284,7 +284,7 @@ class PlacementController:
             return None
         return generation, snapshot.sampled_at, started, finished
 
-    def _unplaceable_error(self, request, snapshot, blockers):
+    def _unplaceable_error(self, request, snapshot, blockers, *, deadline):
         recovery_claim = self._recovery_context(request.name)
         settings = (self.scheduler.sleeping_recovery.controller.settings
                     if recovery_claim is not None else self.settings)
@@ -301,6 +301,8 @@ class PlacementController:
         else:
             message = "No placement GPU can satisfy the model's capacity or placement constraints"
         retry_after = self.scheduler.config.placement_retry_after_seconds
+        if self.monotonic() >= deadline:
+            raise LeaseError(409, "placement_timeout", blockers)
         self.scheduler.emit("placement_unplaceable", model=request.name, detail={
             "blockers": [asdict(blocker) for blocker in blockers], "gpus": list(gpus),
             "retry_after_seconds": retry_after, "message": message, "dry_run": False})
@@ -335,6 +337,8 @@ class PlacementController:
                     hopeless = decision is not None and decision.unplaceable and action is None
                     if hopeless:
                         now = self.monotonic()
+                        if now >= deadline:
+                            raise LeaseError(409, "placement_timeout", blockers)
                         # Wake the existing sampler only; no collector I/O is
                         # performed by this handler or while holding its lock.
                         if now >= next_sample_request:
@@ -358,7 +362,7 @@ class PlacementController:
                             if (unplaceable_since is not None and unplaceable_samples >= 2
                                     and now - unplaceable_since >= grace
                                     and sample[3] >= unplaceable_since + grace):
-                                raise self._unplaceable_error(request, current, blockers)
+                                raise self._unplaceable_error(request, current, blockers, deadline=deadline)
                     else:
                         unplaceable_since, unplaceable_sample, unplaceable_samples = None, None, 0
                         next_sample_request = 0.0
