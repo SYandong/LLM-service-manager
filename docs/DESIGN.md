@@ -358,6 +358,20 @@ collector 提供的 `sampled_at` 及本地 monotonic 采集开始/完成时间�
 `external_gb`，未测值为 null，公共 state schema 仍为 1。该建议不保证重试后
 资源可用；默认只读/禁用返回、dry-run 零副作用及既有 409 语义保持不变。
 
+显式启用 fleet 后，#313 在返回该 503 时只读一次有界宿主快照，以失败当轮
+GPU 的 UUID 匹配宿主卡；不按两侧卡号或 PID 猜测归属，也不读取历史库。
+快照须非未来、年龄不超过 `fleet_stale_after_seconds`（默认 180 秒），且
+发现、GPU 清单、GPU 归属及每服务 GPU 观察均明确完整。缺失、陈旧、不完整、
+UUID 缺失或含糊时省略占用者，保留原错误。归属仅作显示，不影响可行性、
+宽限期、驱逐或放置动作。
+
+`external_pressure` blocker 可附加 `occupants` 与 `occupants_remaining`：
+每卡按显存降序取前三项，后者为剩余项数；同容器其他工作负载的显存合并。
+项包含 `{container, used_gb, kind: llm|other, service_id}`，推理服务再给出
+`model`。排除 `managed_by: llmsvc`；其他工作负载仅显示容器与显存，不输出
+PID、comm、命令行或模型路径，也不推断它在训练。可读 message 同步附加
+有界卡号/归属/模型提示。未知容器或模型保持 null，默认关闭时不读取快照。
+
 ### 4.3 sleeping → stopped（硬停）
 
 不再按时间。只有三条：

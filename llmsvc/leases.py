@@ -27,13 +27,14 @@ class UnitObservation:
 
 
 class LeaseError(IntentWriteError):
-    def __init__(self, status, error, blockers=(), *, retry_after=None, message=None, gpus=()):
+    def __init__(self, status, error, blockers=(), *, retry_after=None, message=None, gpus=(), gpu_uuids=()):
         super().__init__(status, error)
         self.blockers = tuple(blockers)
         self.retry_after = retry_after
         if message is not None:
             self.message = message
         self.gpus = tuple(gpus)
+        self.gpu_uuids = dict(gpu_uuids)  # Private context from the failure's exact GPU observation.
 
 
 class LeaseUnitProbe:
@@ -305,7 +306,8 @@ class PlacementController:
             "blockers": [asdict(blocker) for blocker in blockers], "gpus": list(gpus),
             "retry_after_seconds": retry_after, "message": message, "dry_run": False})
         return LeaseError(503, "no_feasible_gpu", blockers, retry_after=retry_after,
-                          message=message, gpus=gpus)
+                          message=message, gpus=gpus,
+                          gpu_uuids={gpu.index: gpu.uuid for gpu in snapshot.gpus if gpu.index in indices})
 
     def place(self, payload):
         self._enabled()
