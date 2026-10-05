@@ -124,8 +124,12 @@ Missing discovery or a stale snapshot makes per-service `gpu_gb` null and
 
 The independent `fleet.sqlite` uses schema 1 and WAL with full synchronous
 transactions. Raw service/GPU samples default to 14 days, hourly summaries to
-180 days. Retention runs at most hourly after ingestion and cuts raw data at
-whole-hour boundaries. Hourly summaries are incrementally maintained exactly
+180 days. The explicitly enabled fleet worker runs retention at most hourly in
+a separate transaction, including during stale, missing, invalid or repeated
+exports. Retention opens only an existing database; it creates no database or
+directory before the first successful ingestion. Disabled fleet and modes that
+start no fleet worker perform no retention writes. Both retention tiers keep
+partial boundary hours. Hourly summaries are incrementally maintained exactly
 once; overview windows combine complete hourly buckets with raw boundary
 intervals, avoiding overlap and loading only aggregate rows. Claims and the
 successful counter baselines survive raw retention. History is bounded to
