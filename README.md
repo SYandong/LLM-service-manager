@@ -8,6 +8,34 @@ pin 与 GPU reserve，并提供可选终端面板。llama-swap 和 vllm-wrapper
 发布功能不等于所在部署已启用它们：scheduler 默认只读，模型动作、放置、
 自动策略、故障恢复及 sleeping recovery 各有独立开关。实现与现场验收进度见 [ROADMAP](docs/ROADMAP.md)。
 
+## 全员推理服务视图（fleet）
+
+fleet 是发布包 v1.9.2 之后的 opt-in 功能；部署方启用并完成观测验收后，
+`llm status` 展示自建推理服务、GPU 占用、最近活动和声明，`llm`/`llm top`
+打开新面板。按人视图按容器归属分组，按卡视图也展示其他任务的归属/显存，
+不展示训练命令行。共享模型原状态视图改为 `llm status --shared`，需要旧
+JSON 结构的脚本使用 `llm status --shared --json`。
+
+```sh
+llm fleet --by person
+llm fleet --by gpu
+llm fleet --mine
+llm claim SERVICE_ID --until +3d --reason 'ongoing experiment' --dry-run
+llm claim SERVICE_ID --until +3d --reason 'ongoing experiment'
+llm unclaim CLAIM_ID
+llm history SERVICE_ID --hours 24
+```
+
+只能声明自己容器的服务，默认最多七天。声明不预留容量，也不改变进程。
+六小时空闲上限只做展示，不会自动停止服务。指标每分钟采样，活动条是
+采样估计；未知、陈旧或缺失不算空闲，也不代表没有请求。
+旧面板第一阶段可用 `llm legacy-tui` 打开并提示弃用，后续 minor 的删除
+需要零使用证据或维护者确认。原共享模型管理命令继续可用。
+
+完整命令见 [CLI](docs/CLI.md)，启用、回滚与影子对账见
+[fleet 操作手册](deploy/FLEET_ROLLOUT.md)。后文 v1.9.2 下载示例仍是该已发布
+版本的共享接口；不要把开发中的新入口当作旧发布包已经支持的功能。
+
 ## 用户：第一次请求
 
 先向部署方取得两个地址及可用模型名；这里的 `.invalid` 地址必须替换，
@@ -230,6 +258,7 @@ SIGHUP。生产策略、TTL/reaper、宿主来源及其他用户服务的变更�
 先 issue、再 PR，当前提交须通过独立审核与 CI。
 
 <!-- Generated-By: Codex / gpt-6-astra -->
+<!-- Generated-By: Codex / unknown model -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
 <!-- Generated-By: Claude Code / claude-fable-5-1 -->
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->

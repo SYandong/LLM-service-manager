@@ -1,5 +1,19 @@
 # Operations
 
+## Fleet activation and shadow evidence (#310)
+
+The opt-in host observer, independent history database and fleet clients have a
+separate [rollout and rollback runbook](../deploy/FLEET_ROLLOUT.md). Installation,
+current-head CI/review, actual site activation and the requested three-day
+shadow reconciliation are recorded independently. Ordinary read-only runtime
+upgrades do not install/enable the scanner, edit fleet settings or replace the
+native llama-swap executable. The host timer must be enabled as well as active.
+
+Keep raw evidence private; publish anonymized counts, gaps, hashes and counter
+comparison results. Unknown activity is not idle. Enabling fleet/claims never
+authorizes stopping observed services. The [bilingual announcement draft](FLEET_ANNOUNCEMENT.md)
+is for maintainer review after acceptance and is not sent automatically.
+
 The scheduler is being introduced alongside llama-swap. The canonical gates are
 in [DESIGN §7](DESIGN.md#7-部署与验证) and [ROADMAP](ROADMAP.md). Installation
 and observation do not authorize a production policy or routing change.
@@ -460,6 +474,7 @@ any retirement action.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: Codex / gpt-5.6-luna -->
+<!-- Generated-By: Codex / unknown model -->
 
 ## Watcher-only native generation evidence (#60)
 
