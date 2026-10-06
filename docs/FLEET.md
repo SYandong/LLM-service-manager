@@ -157,5 +157,8 @@ paths, worker shutdown and a 21k-row overview query budget of 100 ms. These
 tests establish code behavior, not a production shadow-run or live accuracy
 receipt.
 
+Process-session usage can be retained beyond database cleanup with
+[compressed session logs](FLEET_SESSION_LOGS.md).
+
 <!-- Generated-By: Codex / gpt-6.1-sol -->
 <!-- Generated-By: Codex / unknown model -->

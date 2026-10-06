@@ -1,0 +1,7 @@
+{
+  "_generated_by": "Codex / gpt-6.1-sol",
+  "_comments": "Container-local archive only. Absolute database and output directory paths; retention follows the fleet hourly history setting. Installer provisions directory mode 0700; the standalone archiver writes gzip files mode 0600.",
+  "database": "/var/lib/llmsvc/fleet.sqlite",
+  "directory": "/var/lib/llmsvc/fleet-sessions",
+  "hourly_retention_days": 180
+}

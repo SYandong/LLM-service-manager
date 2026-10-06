@@ -106,6 +106,7 @@ M7 新 fleet TUI 接替默认入口；本节共享模型 TUI 第一阶段保留�
 - #331 GPU selection and copying, readable metrics, service API addresses and Shared idle exemption (PR #332 merged).
 - #333 Selection after scrolling and direct trackpad/wheel scrolling with passive GPU selection (PR #334 merged).
 - #335 Native terminal drag selection and copying, with wheel and arrow keys scrolling contents and J/K selecting GPUs or services.
+- #337 Compressed local process-session logs with durable observed token totals and hourly history.
 
 依赖：#303 → #304 → 现场 503 验收；#305 → #306 → #307 → #308/#309；
 503 blocker 的 fleet 占用者增强由 #313 在 #307 后接入。#310 汇总现场证据。
@@ -223,3 +224,4 @@ GPU 空闲时的简短测试已获准，由 ops 独占调度并持有共享 `gpu
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->
 <!-- Generated-By: Codex / unknown model -->
 <!-- Generated-By: Codex / gpt-6.1-sol -->
+<!-- Generated-By: Codex / unknown model -->
