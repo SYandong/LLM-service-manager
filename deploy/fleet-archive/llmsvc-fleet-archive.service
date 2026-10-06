@@ -1,0 +1,20 @@
+# Generated-By: Codex / gpt-6.1-sol
+[Unit]
+Description=Archive local fleet sessions as compressed JSON
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 -I -B /usr/local/libexec/llmsvc-fleet-archive.py --config /etc/llmsvc/fleet-archive.json
+TimeoutStartSec=50s
+KillMode=control-group
+UMask=0077
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadOnlyPaths=/var/lib/llmsvc
+ReadWritePaths=/var/lib/llmsvc/fleet-sessions
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=llmsvc-fleet-archive

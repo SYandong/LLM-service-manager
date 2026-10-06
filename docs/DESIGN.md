@@ -1066,6 +1066,40 @@ claims 开关同时开启及服务归属通过校验，不授予 unit、配置�
 
 字段、计数器复位与窗口边界细则见 [FLEET.md](FLEET.md)，随 #307 交付。
 
+### 10.2.1 Compressed process-session logs (#337)
+
+A separate archive worker reads a consistent snapshot of the fleet database and
+keeps one private gzip JSON file per process identity. Identity includes the
+instance ID, container, PID, engine and absolute process start time. Files are
+updated while a process runs and retained after its observed exit. Reappearance
+of the same identity updates the same session.
+
+Each session keeps lifecycle observations, model/GPU metadata, hourly usage and
+observed request, input, output, total and cached token counts. The worker
+replaces cumulative source buckets by hour, retains already archived older
+hours and derives totals from those buckets. Latest reported counters carry
+their own timestamps and epochs and remain separate from observed totals.
+Unavailable statistics stay null. Ollama sessions follow its server process;
+its loaded-model list does not create token-counted sessions. The last valid
+model set and its timestamp survive scrape failures; bounded model-set history
+records changes and any omitted older entries.
+
+`ended_at` records the first complete inventory in which the process is absent.
+Collection starts after process launch and does not sample a final counter at
+exit. Logs therefore describe observed usage; hourly activity coverage does not
+certify token-counter completeness. The configured source retention policy and
+archive gaps identify history that may have expired before capture.
+
+The timer runs every minute and is enabled at installation. A single writer
+lock covers capture and merge; the database read transaction ends before file
+compression. Publication uses a same-directory temporary file, file fsync,
+atomic replacement and directory fsync. Existing corrupt archives or regressed
+source data are preserved and reported. Dry-run creates no archive artifacts.
+Logs contain no prompts, responses, command lines or API addresses.
+
+Installation, rollback and the file format are described in
+[FLEET_SESSION_LOGS.md](FLEET_SESSION_LOGS.md).
+
 ### 10.3 API 与声明归属
 
 | 方法路径 | 说明 |
@@ -1211,3 +1245,4 @@ reconciliation before shared CLI activation, as recorded in #310.
 <!-- Generated-By: Codex / unknown model -->
 <!-- Generated-By: Claude Code / claude-opus-5-5 -->
 <!-- Generated-By: Codex / gpt-6.1-sol -->
+<!-- Generated-By: Codex / unknown model -->
