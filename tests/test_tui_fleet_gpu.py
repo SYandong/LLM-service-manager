@@ -31,6 +31,90 @@ def accounts(snapshot):
     return [account_gpu(gpu, snapshot["services"]) for gpu in snapshot["gpus"]]
 
 
+@pytest.mark.parametrize("width", [80, 100])
+def test_host_other_on_gpu_five_keeps_owner_memory_and_six_cards(gpu_snapshot, width):
+    gpu_snapshot["gpus"][5].update(used_gb=5, occupants=[
+        {"container": None, "host": True, "host_uid": 1000, "host_user": "host-a",
+         "kind": "other", "used_gb": 5, "service_id": None}])
+    cards = accounts(gpu_snapshot)
+    allocation, = cards[5].allocations
+    assert allocation.key == ("host:uid:1000", "other")
+    assert allocation.owner == "Host host-a" and allocation.used_gb == 5
+    view, _, anchors, _ = render_expanded(cards, gpu_snapshot["services"], width)
+    assert [index for index in anchors if type(index) is int] == list(range(6))
+    assert "Host host-a · Other · 5 GiB" in view.plain
+    assert all(line.cell_len <= width for line in view.split("\n"))
+
+
+def test_host_uid_joins_llm_and_other_but_keeps_kinds_and_users_distinct():
+    services = [{"id": "host-llm", "container": None, "host": True,
+                 "host_uid": 1000, "host_user": "host-a"}]
+    card = account_gpu({"index": 5, "total_gb": 140, "used_gb": 25, "occupants": [
+        {"container": None, "kind": "llm", "service_id": "host-llm", "used_gb": 12},
+        {"container": None, "host": True, "host_uid": 1000, "host_user": "host-a",
+         "kind": "other", "used_gb": 5},
+        {"container": None, "host": True, "host_uid": 1005, "host_user": "host-b",
+         "kind": "other", "used_gb": 8}]}, services)
+    segments = {segment.key: segment for segment in drawing_segments(card)}
+    llm = segments[("host:uid:1000", "llm")]
+    other = segments[("host:uid:1000", "other")]
+    second_user = segments[("host:uid:1005", "other")]
+    assert llm.color == other.color and llm.label == other.label == "Host host-a"
+    assert llm.pattern == " " and other.pattern == "·"
+    assert second_user.label == "Host host-b" and second_user.color != llm.color
+    assert {item.key: item.used_gb for item in card.allocations} == {
+        ("host:uid:1000", "llm"): 12, ("host:uid:1000", "other"): 5,
+        ("host:uid:1005", "other"): 8}
+    bar, _ = render_bar(card, 1400)
+    console = Console()
+
+    def luminance(rgb):
+        channels = [value / 255 for value in rgb]
+        linear = [value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4
+                  for value in channels]
+        return sum(value * weight for value, weight in zip(linear, (.2126, .7152, .0722)))
+
+    for label in ("Host host-a LLM", "Host host-b Other"):
+        style = bar.get_style_at_offset(console, bar.plain.index(label))
+        foreground = luminance(style.color.get_truecolor())
+        background = luminance(style.bgcolor.get_truecolor())
+        assert (max(foreground, background) + .05) / (min(foreground, background) + .05) >= 4.5
+
+
+@pytest.mark.parametrize("proof", [None, False])
+def test_unresolved_other_does_not_infer_host_from_null_container(proof):
+    card = account_gpu({"index": 5, "total_gb": 140, "used_gb": 5, "occupants": [
+        {"container": None, "host": proof, "host_uid": 1000, "host_user": "unverified",
+         "kind": "other", "used_gb": 5}]})
+    allocation, = card.allocations
+    assert allocation.key == ("unknown", "other") and allocation.owner == "unknown"
+    assert "unverified" not in detail_lines(card)
+
+
+@pytest.mark.parametrize("user", [None, "", "\x00\r\n"])
+def test_verified_host_without_username_uses_uid(user):
+    card = account_gpu({"index": 5, "total_gb": 140, "used_gb": 5, "occupants": [
+        {"container": None, "host": True, "host_uid": 0, "host_user": user,
+         "kind": "other", "used_gb": 5}]})
+    allocation, = card.allocations
+    assert allocation.key == ("host:uid:0", "other") and allocation.owner == "Host UID 0"
+
+
+def test_legacy_host_llm_and_unsafe_owner_labels_are_safe():
+    card = account_gpu({"index": 5, "total_gb": 140, "used_gb": 15, "occupants": [
+        {"container": None, "kind": "llm", "service_id": "legacy", "used_gb": 5},
+        {"container": None, "host": True, "host_uid": 1000,
+         "host_user": "host\x1b[31m\r\n\u202e[red]", "kind": "other", "used_gb": 5},
+        {"container": "container\x1b[2J\r\u202e", "host": False,
+         "host_uid": None, "host_user": None, "kind": "other", "used_gb": 5}]},
+        [{"id": "legacy", "container": None, "host": True}])
+    assert next(item for item in card.allocations if item.kind == "llm").key == ("host", "llm")
+    text = detail_lines(card)
+    assert "host · LLM · 5 GiB" in text and "Host host" in text
+    assert "[red]" in text
+    assert all(character not in text for character in ("\x1b", "\r", "\u202e"))
+
+
 def test_synthetic_totals_are_counted_once(gpu_snapshot):
     cards = accounts(gpu_snapshot)
     assert sum(card.total_gb for card in cards) == 840

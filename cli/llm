@@ -1470,6 +1470,11 @@ def validate_fleet(result):
     def amount(value):
         return value is None or (type(value) in (int, float) and math.isfinite(value) and value >= 0)
 
+    def host_fields(item):
+        return ((item.get("host") is None or type(item["host"]) is bool)
+                and (item.get("host_uid") is None or (type(item["host_uid"]) is int and item["host_uid"] >= 0))
+                and (item.get("host_user") is None or isinstance(item["host_user"], str)))
+
     def api_address(value):
         if value is None:
             return True
@@ -1500,6 +1505,7 @@ def validate_fleet(result):
             and (isinstance(item.get("model"), str) or item.get("model") is None)
             and ((isinstance(item.get("container"), str) and bool(item["container"]))
                  or (item.get("container") is None and item.get("host") is True))
+            and host_fields(item)
             and item["id"] not in ids
             and item.get("status") in ("active", "idle", "over_limit", "claimed", "unknown")
             and isinstance(item.get("gpus"), list)
@@ -1526,13 +1532,29 @@ def validate_fleet(result):
             isinstance(gpu, dict) and type(gpu.get("index")) is int and gpu["index"] >= 0
             and all(amount(gpu.get(key)) for key in ("used_gb", "total_gb", "util_percent"))
             and isinstance(gpu.get("occupants", []), list)
-            and all(isinstance(item, dict) and amount(item.get("used_gb")) for item in gpu.get("occupants", []))
+            and all(isinstance(item, dict) and amount(item.get("used_gb")) and host_fields(item)
+                    for item in gpu.get("occupants", []))
         )
         if not valid:
             break
     if not valid:
         raise ClientError("Invalid fleet response; check the server API version")
     return result
+
+
+def fleet_owner(item):
+    """Use proven host UID identity without trusting a nullable container label."""
+    container = item.get("container")
+    if isinstance(container, str) and container:
+        return "container:" + container, clean_text(container)
+    if item.get("host") is True:
+        uid = item.get("host_uid")
+        if type(uid) is int and uid >= 0:
+            user = item.get("host_user")
+            user = clean_text(user).strip() if isinstance(user, str) else ""
+            return "host:uid:" + str(uid), "Host " + user if user else "Host UID " + str(uid)
+        return "host", "host"
+    return "unknown", "unknown"
 
 
 def format_fleet(result, width=100, *, by="person", sort=None, color=False):
@@ -1554,7 +1576,7 @@ def format_fleet(result, width=100, *, by="person", sort=None, color=False):
     services = result.get("services", [])
 
     def owner(item):
-        return item.get("container") or ("host" if item.get("host") else "unknown")
+        return fleet_owner(item)[1]
 
     def order(item):
         value = item.get("idle_seconds") if sort == "idle" else (
@@ -1608,7 +1630,7 @@ def format_fleet(result, width=100, *, by="person", sort=None, color=False):
                 gpu["index"], number(gpu.get("used_gb")), number(gpu.get("total_gb")), number(gpu.get("util_percent"))))
             for occupant in gpu.get("occupants", []):
                 if not occupant.get("service_id"):
-                    add("  %s (%s) %sG" % (occupant.get("container") or "unknown",
+                    add("  %s (%s) %sG" % (owner(occupant),
                         occupant.get("kind") or "other", number(occupant.get("used_gb"))))
             for item in sorted((item for item in services if gpu["index"] in item["gpus"]), key=order):
                 add("  owner " + owner(item))
@@ -1620,8 +1642,12 @@ def format_fleet(result, width=100, *, by="person", sort=None, color=False):
             add("No observed GPU · " + owner(item))
             service(item)
     else:
-        for label in sorted({owner(item) for item in services}):
-            items = [item for item in services if owner(item) == label]
+        groups = {}
+        for item in services:
+            groups.setdefault(fleet_owner(item)[0], []).append(item)
+        for identity in sorted(groups, key=lambda identity: (owner(groups[identity][0]), identity)):
+            items = groups[identity]
+            label = owner(items[0])
             memory = None if any(item.get("gpu_gb") is None for item in items) else sum(item["gpu_gb"] for item in items)
             over = sum(item["status"] == "over_limit" for item in items) if not result.get("stale") else 0
             add("%s · %s services · %sG%s" % (label, len(items), number(memory), " · %s running inactive" % over if over else ""))
@@ -1762,8 +1788,9 @@ def format_fleet_history(result, width=100):
     lines = ["Fleet history · %s · last %sh · %s (UTC)" % (
         result["service_id"], result["hours"], result["resolution"])]
     service = result.get("service", {})
-    if service.get("model"):
-        lines.append("%s · %s · %s" % (service["model"], service.get("engine", "—"), service.get("container", "—")))
+    if service.get("model") or service.get("host") is True:
+        lines.append("%s · %s · %s" % (service.get("model") or "unknown",
+                     service.get("engine", "—"), fleet_owner(service)[1]))
     if service.get("argv_redacted"):
         lines.append("Parameters: " + service["argv_redacted"])
     hourly = result["resolution"] == "hourly"

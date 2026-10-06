@@ -6,9 +6,12 @@ import json
 import math
 import os
 import stat
+import unicodedata
 
 MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024
 MAX_SAMPLE_GAP_SECONDS = 300
+MAX_HOST_UID = 2 ** 32 - 1
+MAX_HOST_USER_LENGTH = 128
 COUNTERS = {
     "requests": "requests_total",
     "gen_tokens": "generation_tokens_total",
@@ -87,6 +90,7 @@ def validate_snapshot(payload):
                 raise ValueError("invalid_fleet_container")
         elif not isinstance(container, str) or not container or len(container) > 512 or any(ord(c) < 32 for c in container):
             raise ValueError("invalid_fleet_container")
+        validate_host_owner(service, is_service=True)
         model = service.get("model")
         if model is not None and (not isinstance(model, str) or not model or len(model) > 512 or any(ord(c) < 32 for c in model)):
             raise ValueError("invalid_fleet_model")
@@ -123,7 +127,33 @@ def validate_snapshot(payload):
                 or type(row.get("gpu")) is not int or row["gpu"] < 0
                 or (row.get("used_mib") is not None and not number(row["used_mib"]))):
             raise ValueError("invalid_fleet_other_process")
+        validate_host_owner(row, is_service=False)
     return payload
+
+
+def validate_host_owner(row, *, is_service):
+    """Check additive ownership metadata without guessing host from null owner."""
+    host, uid, user = row.get("host"), row.get("host_uid"), row.get("host_user")
+    container = row.get("container")
+    if host is not None and type(host) is not bool:
+        raise ValueError("invalid_fleet_host_flag")
+    if uid is not None and (type(uid) is not int or not 0 <= uid <= MAX_HOST_UID):
+        raise ValueError("invalid_fleet_host_uid")
+    if user is not None and (not isinstance(user, str) or not user or len(user) > MAX_HOST_USER_LENGTH
+            or any(unicodedata.category(char) in ("Cc", "Cf", "Cs") for char in user)):
+        raise ValueError("invalid_fleet_host_user")
+    if (host is True and container is not None
+            or uid is not None and host is not True
+            or user is not None and uid is None):
+        raise ValueError("invalid_fleet_host_owner")
+    if not is_service and "host" in row:
+        if host is True and uid is None:
+            raise ValueError("invalid_fleet_host_owner")
+        if host is False and (not isinstance(container, str) or not container or len(container) > 512
+                or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in container)):
+            raise ValueError("invalid_fleet_host_owner")
+        if host is None and container is not None:
+            raise ValueError("invalid_fleet_host_owner")
 
 
 def gpu_rows(rows, kind):

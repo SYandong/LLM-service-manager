@@ -21,7 +21,7 @@ from llmsvc.fleet import FleetError
 from llmsvc.fleet.controller import FleetController
 from llmsvc.fleet.ingest import read_json, validate_snapshot
 from llmsvc.fleet.store import FleetStore
-from llmsvc.policy.fleet import service_status
+from llmsvc.policy.fleet import container_summary, service_status
 from llmsvc.scheduler import Scheduler
 from llmsvc.server import SchedulerHTTPServer
 from llmsvc.state import StateSnapshot
@@ -237,8 +237,10 @@ def test_ingestion_deltas_durable_dedupe_and_rollups(controller):
     assert row["window_24h"]["active_ratio"] == pytest.approx(60 / 86400)
     assert row["window_24h"]["coverage_ratio"] == pytest.approx(60 / 86400)
     assert result["gpus"][0]["occupants"] == [
-        {"container": "ctr-a", "kind": "llm", "used_gb": 10, "service_id": "instance-a"},
-        {"container": "ctr-b", "kind": "other", "used_gb": 20, "service_id": None}]
+        {"container": "ctr-a", "kind": "llm", "used_gb": 10, "service_id": "instance-a",
+         "host": False, "host_uid": None, "host_user": None},
+        {"container": "ctr-b", "kind": "other", "used_gb": 20, "service_id": None,
+         "host": False, "host_uid": None, "host_user": None}]
     assert "argv_redacted" not in row and "model_path" not in row
     assert events[-1][1]["detail"] == {"service_id": "instance-a", "from": "idle", "to": "active"}
     worker.ingest_once()
@@ -1013,6 +1015,160 @@ def test_actual_host_producer_snapshot_preserves_unknown_ownership(controller):
     with pytest.raises(FleetError) as error:
         worker.write_claim("claim", {"service_id": host["id"], "until": now[0] + 300, "reason": "work"}, source_ip="127.0.0.1")
     assert error.value.status == 403
+
+
+def test_gpu5_host_job_and_unresolved_process_keep_distinct_ownership(controller):
+    worker, now, _ = controller
+    processes = [
+        {"container": None, "host": True, "host_uid": 61001, "host_user": "sample-host-a",
+         "pid": 51001, "gpu": 5, "used_mib": 30 * 1024, "comm": "internal-process", "argv": "private-argument"},
+        {"container": None, "host": None, "host_uid": None, "host_user": None,
+         "pid": 51002, "gpu": 5, "used_mib": 10 * 1024, "comm": "unknown"},
+    ]
+    data = snapshot(services=[], other_gpu_processes=processes, gpu_attribution_complete=False,
+        gpus=[{"index": 5, "uuid": "GPU-synthetic-five", "total_mib": 140 * 1024,
+               "used_mib": 40 * 1024, "util_percent": 75}])
+    ingest(worker, now, data)
+    result = worker.report()
+    card, = result["gpus"]
+    assert card["index"] == 5 and card["used_gb"] == 40 and card["total_gb"] == 140
+    assert card["occupants"] == [
+        {"container": None, "kind": "other", "used_gb": 30, "service_id": None,
+         "host": True, "host_uid": 61001, "host_user": "sample-host-a"},
+        {"container": None, "kind": "other", "used_gb": 10, "service_id": None,
+         "host": None, "host_uid": None, "host_user": None},
+    ]
+    assert result["services"] == [] and result["gpu_attribution_complete"] is False
+    assert worker.store.metadata()["snapshot"]["other_gpu_processes"] == processes
+    assert worker.store._db.execute("SELECT used_mib,other_mib FROM fleet_gpu_samples").fetchone()[:] == (40 * 1024, None)
+    assert "internal-process" not in json.dumps(result) and "private-argument" not in json.dumps(result)
+
+
+def test_host_llm_users_group_by_uid_and_survive_historical_detail(controller):
+    worker, now, _ = controller
+    rows = [service("host-a", None, host=True, pid=51001, host_uid=61001, host_user="sample-host-a"),
+            service("host-a-extra", None, host=True, pid=51002, host_uid=61001, host_user="sample-host-a"),
+            service("host-b", None, host=True, pid=51003, host_uid=61002, host_user=None),
+            service("legacy-host", None, host=True, pid=51004),
+            service("legacy-host-extra", None, host=True, pid=51005)]
+    data = snapshot(services=rows, other_gpu_processes=[])
+    data["gpus"][0]["used_mib"] = 50 * 1024
+    ingest(worker, now, data)
+    result = worker.report(source_ip="127.0.0.1")
+    assert all(row["mine"] is False for row in result["services"])
+    assert [(row["host_uid"], row["host_user"], row["services"], row["gpu_gb"])
+            for row in result["containers"]] == [(None, None, 2, 20), (61001, "sample-host-a", 2, 20), (61002, None, 1, 10)]
+    assert all(row["host"] is True and row["container"] is None for row in result["containers"])
+    services = {row["id"]: row for row in result["services"]}
+    occupants = {row["service_id"]: row for row in result["gpus"][0]["occupants"]}
+    for source in rows:
+        for projected in (services[source["id"]], occupants[source["id"]]):
+            assert projected["host"] is True
+            assert projected["host_uid"] == source.get("host_uid")
+            assert projected["host_user"] == source.get("host_user")
+    worker.store.close()
+    worker.store = FleetStore(worker.config.fleet_db_path)
+    ingest(worker, now, snapshot(BASE + 60, services=[], other_gpu_processes=[]))
+    for hours in (24, 168):
+        detail = worker.history("host-a", hours)["service"]
+        assert detail["ended_at"] == BASE + 60
+        assert (detail["host"], detail["host_uid"], detail["host_user"]) == (True, 61001, "sample-host-a")
+    assert worker.report()["services"] == []
+
+
+def test_legacy_schema1_ownership_remains_accepted(controller):
+    worker, now, _ = controller
+    data = snapshot(services=[service("legacy-host", None, host=True)],
+        other_gpu_processes=[{"container": None, "pid": 51002, "gpu": 2, "used_mib": 1024, "comm": "python"},
+                             {"container": "ctr-b", "pid": 51003, "gpu": 2, "used_mib": 1024, "comm": "python"}])
+    original = copy.deepcopy(data)
+    assert validate_snapshot(data) == original
+    ingest(worker, now, data)
+    result = worker.report()
+    legacy = result["services"][0]
+    assert legacy["host"] is True and legacy["host_uid"] is None and legacy["host_user"] is None
+    unresolved, mapped = [row for row in result["gpus"][0]["occupants"] if row["kind"] == "other"]
+    assert unresolved["host"] is None and unresolved["host_uid"] is None and unresolved["host_user"] is None
+    assert mapped["host"] is False and mapped["host_uid"] is None and mapped["host_user"] is None
+
+
+def test_container_summary_accepts_legacy_abbreviated_services():
+    result = container_summary([
+        {"container": "ctr-a", "gpu_gb": 2, "status": "idle"},
+        {"container": None, "gpu_gb": None, "status": "unknown"},
+        {"container": "ctr-a", "gpu_gb": 3, "status": "over_limit"},
+    ])
+    assert result == [
+        {"container": None, "host": True, "host_uid": None, "host_user": None,
+         "services": 1, "gpu_gb": None, "over_limit": 0},
+        {"container": "ctr-a", "host": False, "host_uid": None, "host_user": None,
+         "services": 2, "gpu_gb": 5, "over_limit": 1},
+    ]
+
+
+@pytest.mark.parametrize("target", ["service", "other"])
+@pytest.mark.parametrize("changes", [
+    {"host": "true"}, {"host": 1}, {"host_uid": True}, {"host_uid": -1},
+    {"host_uid": 2 ** 32}, {"host_uid": 1.0}, {"host_uid": "61001"},
+    {"host_user": True}, {"host_user": ""}, {"host_user": "x" * 129},
+    {"host_user": "sample\nhost"}, {"host_user": "sample\x1b[31m"}, {"host_user": "sample\x7f"},
+    {"host_user": "sample\x85"}, {"host_user": "sample\u202ehost"}, {"host_user": "sample\udc00"},
+    {"host_uid": None}, {"host": False}, {"container": "ctr-a"},
+    {"host": False, "container": "ctr-a", "host_user": None},
+    {"host": True, "container": "ctr-a", "host_uid": None, "host_user": None},
+])
+def test_snapshot_rejects_invalid_host_identity(target, changes):
+    owner = {"container": None, "host": True, "host_uid": 61001, "host_user": "sample-host-a"}
+    owner.update(changes)
+    if target == "service":
+        data = snapshot(services=[service(**owner)])
+    else:
+        data = snapshot(services=[], other_gpu_processes=[{"pid": 51001, "gpu": 5, "used_mib": 1024, **owner}])
+    with pytest.raises(ValueError, match="invalid_fleet_"):
+        validate_snapshot(data)
+
+
+@pytest.mark.parametrize("owner", [
+    {"host": True, "container": None, "host_uid": None, "host_user": None},
+    {"host": False, "container": None, "host_uid": None, "host_user": None},
+    {"host": None, "container": "ctr-a", "host_uid": None, "host_user": None},
+    {"host": None, "container": None, "host_uid": 61001, "host_user": None},
+])
+def test_snapshot_rejects_contradictory_other_owner(owner):
+    with pytest.raises(ValueError, match="invalid_fleet_host_owner"):
+        validate_snapshot(snapshot(other_gpu_processes=[{"pid": 51001, "gpu": 5, "used_mib": 1024, **owner}]))
+
+
+@pytest.mark.parametrize("target", ["service", "other"])
+@pytest.mark.parametrize("uid,user", [(0, None), (2 ** 32 - 1, "x" * 128)])
+def test_snapshot_accepts_bounded_host_uid_and_user(target, uid, user):
+    owner = {"container": None, "host": True, "host_uid": uid, "host_user": user}
+    data = snapshot(services=[service(**owner)]) if target == "service" else snapshot(
+        services=[], other_gpu_processes=[{"pid": 51001, "gpu": 5, "used_mib": 1024, **owner}])
+    assert validate_snapshot(data) is data
+
+
+@pytest.mark.parametrize("host,container", [(False, "ctr-a"), (None, None)])
+def test_snapshot_accepts_resolved_container_and_unresolved_other_owners(host, container):
+    data = snapshot(other_gpu_processes=[{"pid": 51001, "gpu": 5, "used_mib": 1024,
+        "host": host, "container": container, "host_uid": None, "host_user": None}])
+    assert validate_snapshot(data) is data
+
+
+def test_invalid_host_owner_export_keeps_committed_observations(controller):
+    worker, now, _ = controller
+    ingest(worker, now, snapshot(services=[service("host-a", None, host=True,
+        host_uid=61001, host_user="sample-host-a")]))
+    before = worker.store.metadata()
+    instances = worker.store.instances()
+    now[0] += 60
+    write_snapshot(worker.config, snapshot(now[0], services=[service("host-a", None, host=True,
+        host_uid=True, host_user="sample-host-a")]))
+    worker.ingest_once()
+    assert worker.last_error == "fleet_snapshot_unavailable"
+    assert worker.store.metadata() == before and worker.store.instances() == instances
+    result = worker.report()
+    assert result["stale"] is True and result["services"][0]["status"] == "unknown"
 
 
 def test_fleet_get_21k_raw_rows_is_bounded_under_100ms(http_service):

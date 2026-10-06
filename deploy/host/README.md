@@ -70,7 +70,8 @@ the same IP.
 library imports. On the host it discovers vLLM, ollama, sglang and llama-server
 API processes, resolves LXC ownership from cgroups, and aggregates GPU memory
 from descendant processes such as `VLLM::EngineCore`. Unmatched GPU workloads
-export only container, PID, GPU, memory and a bounded `comm`. The scanner has no
+export container, PID, GPU, memory, a bounded `comm` and verified host ownership
+when available. The scanner has no
 workload control operations. It queries vLLM `/metrics` and ollama `/api/ps`;
 activity for the other engines remains unknown. Engine version is unknown when
 there is no verified version source.
@@ -99,8 +100,11 @@ through the rollback path when changing that value. Timing is nominal rather
 than a promise that every sample completes at exactly that interval.
 
 Discovery, proc reads, process-tree traversal, subprocess waits and parsing
-share a monotonic budget of at most 20 seconds. Each external command/GET uses
-at most two seconds and the remaining budget. Responses are limited to 4 MiB;
+share a monotonic budget of at most 20 seconds. Each GPU inventory/compute query
+uses `gpu_query_timeout_seconds`, default five seconds and configurable from
+0.01 through 10 seconds, capped by the remaining scan budget. Target HTTP and
+listener commands retain the `target_timeout_seconds` maximum of two seconds.
+Responses are limited to 4 MiB;
 the final JSON is limited to 2 MiB. Limits also cover processes, socket FDs,
 services, GPU rows, proc bytes and metric line/label lengths. Remaining targets
 are marked `scrape_skipped`. Discovery accepts up to 256 KiB and 4096 arguments
@@ -145,9 +149,21 @@ The schema is version 1 and includes explicit unknown/completeness markers:
 | Service `listener_ipv6_only` | An exact-inode kernel socket diagnostic for an IPv6 wildcard listener. False permits an IPv4 URI; null leaves address-family support unknown. |
 | `sample_interval_seconds` | Nominal host sampling interval, independent of the consumer's read cadence. |
 | Service `metrics_series_id` | Fingerprint of counter series identities; a change invalidates consumer counter baselines. |
+| Other process `host` | True only with matching PID/user/mount namespace identities against host `/proc/1`, a validated real UID and stable process checks; false for a resolved LXC container; null when unverified. |
+| `host_uid`, `host_user` | Optional verified host owner metadata. Numeric UID identifies the owner; the sanitized username is a display label of at most 128 characters and may remain null. |
 
 Host services retain `container: null, host: true`; unknown GPU ownership retains
-`container: null, comm: "unknown"`. Missing model/version values remain null.
+`container: null, comm: "unknown"`. A null container alone does not establish
+host ownership. The scanner rechecks PID/start ticks, cgroup, real UID and
+namespace identities around host identification. Services retain their existing
+boolean `host` field for compatibility and gain UID/user metadata only after
+positive verification. Username lookup reads the configured `host_passwd_path`
+(default `/etc/passwd`) as a regular file without following a final symlink,
+at most once per scan and at most 64 KiB within the shared byte/time budget.
+It performs no NSS lookup. Missing, invalid or ambiguous passwd entries retain
+the verified numeric UID with a null username. A raced or inaccessible compute
+PID retains known GPU memory as an unknown occupant and marks attribution
+incomplete. Missing model/version values remain null.
 The export uses counters from the metric whitelist, sums counter series, takes
 the latest `*_created` timestamp to detect worker resets, and averages bounded
 KV-cache usage gauges. Conflicting sleep-state gauges remain unknown. It does

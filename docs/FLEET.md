@@ -33,6 +33,27 @@ command line and model path. History contains a `service` detail with only the
 redacted `argv_redacted` summary. Host services have `host: true` and a null
 container; unknown models and other-process ownership may also be null.
 `mine` is false for host or unmapped services.
+
+Schema 1 adds host ownership metadata for GPU allocations (#339). Every GPU
+occupant carries `host`, `host_uid` and `host_user`; services and historical
+service details also expose nullable `host_uid` / `host_user`. For other jobs,
+`host: true` requires a verified host namespace identity, null container and a
+real UID (integer 0–4294967295). `host: false` describes a resolved container,
+with null host UID/user. Unresolved ownership has all three fields and container
+null. A null container alone does not establish host ownership. Older schema-1
+exports remain accepted; their null-container other jobs stay unknown and their
+resolved-container jobs use `host: false`.
+
+Host usernames come from the configured bounded local passwd file and are
+nullable labels of at most 128 characters, without control characters. A failed
+or ambiguous name lookup retains the verified UID with a null username. Host
+LLMs and other jobs group by UID, displaying `Host <username>` or `Host UID
+<uid>`; legacy host services without a verified UID retain the Host fallback.
+Container summaries separate host LLM users by UID and include `host`,
+`host_uid` and `host_user`, retaining a null container. These labels are
+observations, not caller authentication. Socket-peer ownership and claims keep
+their existing rules. GPU occupants contain no process command line or comm.
+
 Services also expose `api_address` (HTTP base URI or null), `api_access`
 (`shared`, `local_only`, `direct`, `unknown`) and `idle_time_sensitive`.
 Loopback bindings are Local only. Fresh verified wildcard bindings are Shared
@@ -129,6 +150,13 @@ Only snapshots with `inventory_complete: true` may end a missing instance.
 an empty failed GPU query does not assert zero memory use.
 Missing discovery or a stale snapshot makes per-service `gpu_gb` null and
 `gpu_observation_complete` false, including retained instance metadata.
+
+The host scanner uses a separate `gpu_query_timeout_seconds` for each GPU and
+compute-process query (default 5 seconds); HTTP targets retain their 2-second
+limit. Every operation remains bounded by the remaining 20-second scan budget.
+Failed GPU queries retain completeness errors and unknown observations; measured
+card usage with missing process attribution remains unattributed rather than
+free memory. Host jobs are observed and never become fleet process actions.
 
 ## Storage and verification
 

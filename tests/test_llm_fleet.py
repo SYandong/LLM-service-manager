@@ -255,6 +255,76 @@ def test_host_and_unknown_model_keep_known_observations(fleet_api, fleet):
     assert "id id-a" in text
 
 
+@pytest.mark.parametrize("command", ["status", "fleet"])
+@pytest.mark.parametrize("by", ["person", "gpu"])
+def test_host_uid_labels_match_status_fleet_and_other_occupants(fleet_api, fleet, command, by):
+    for index, item in enumerate(fleet["services"]):
+        item.update(container=None, host=True, host_uid=1000 if index < 2 else 1005,
+                    host_user="host-a" if index < 2 else "host-b", mine=False)
+    fleet["gpus"][0].update(used_gb=5, occupants=[
+        {"container": None, "host": True, "host_uid": 1000, "host_user": "host-a",
+         "kind": "other", "used_gb": 5, "service_id": None}])
+    args = fleet_api["build_parser"]().parse_args([command, "--by", by])
+    fleet_api["validate_fleet"](fleet)
+    text = fleet_api["format_result"](args, fleet, width=80)
+    assert "Host host-a" in text and "Host host-b" in text
+    if by == "person":
+        assert "Host host-a · 2 services · 100G" in text
+        assert "Host host-b · 1 services" in text
+    else:
+        assert "Host host-a (other) 5G" in text
+        assert "owner Host host-b" in text
+    assert all(fleet_api["cell_width"](line) <= 80 for line in text.splitlines())
+
+
+def test_cli_groups_host_uid_instead_of_visible_username(fleet_api, fleet):
+    for index, item in enumerate(fleet["services"]):
+        item.update(container=None, host=True, host_uid=1000 if index < 2 else 1005,
+                    host_user="operator", mine=False)
+    text = fleet_api["format_fleet"](fleet, width=80)
+    assert "Host operator · 2 services" in text and "Host operator · 1 services" in text
+    assert "Host operator · 3 services" not in text
+
+
+@pytest.mark.parametrize("user, expected", [(None, "Host UID 0"), ("\x00\r\n", "Host UID 0"),
+                                            ("host\x1b[31m\r\n\u202e", "Host host [31m")])
+def test_cli_host_labels_and_history_sanitize_names(fleet_api, fleet, user, expected):
+    item = fleet["services"][0]
+    item.update(container=None, host=True, host_uid=0, host_user=user, mine=False)
+    if user is None:
+        item["model"] = None
+    fleet["services"] = [item]
+    text = fleet_api["format_fleet"](fleet, width=80)
+    assert expected in text
+    args = fleet_api["build_parser"]().parse_args(["history", item["id"], "--hours", "168"])
+    history = {"schema_version": 1, "service_id": item["id"], "hours": 168,
+               "resolution": "hourly", "samples": [], "service": copy.deepcopy(item)}
+    fleet_api["validate_fleet_history"](args, history)
+    rendered = fleet_api["format_fleet_history"](history, width=80)
+    assert expected in rendered
+    assert all(character not in text + rendered for character in ("\x1b", "\r", "\u202e"))
+    assert all(fleet_api["cell_width"](line) <= 80 for line in rendered.splitlines())
+
+
+@pytest.mark.parametrize("proof", [None, False])
+def test_cli_unresolved_other_keeps_unknown_without_host_proof(fleet_api, fleet, proof):
+    fleet["gpus"][0]["occupants"] = [
+        {"container": None, "host": proof, "host_uid": 1000, "host_user": "unverified",
+         "kind": "other", "used_gb": 5, "service_id": None}]
+    text = fleet_api["format_fleet"](fleet, width=80, by="gpu")
+    assert "unknown (other) 5G" in text and "unverified" not in text
+
+
+@pytest.mark.parametrize("fields", [{"host": "true"}, {"host_uid": True},
+                                   {"host_uid": -1}, {"host_user": 123}])
+@pytest.mark.parametrize("where", ["service", "occupant"])
+def test_cli_rejects_malformed_additive_host_fields(fleet_api, fleet, fields, where):
+    item = fleet["services"][0] if where == "service" else fleet["gpus"][0]["occupants"][0]
+    item.update(fields)
+    with pytest.raises(fleet_api["ClientError"], match="Invalid fleet response"):
+        fleet_api["validate_fleet"](fleet)
+
+
 def test_missing_gpu_probe_does_not_hide_discovered_services(fleet_api, fleet):
     fleet["gpus"] = []
     fleet["errors"] = ["GPU probe unavailable"]

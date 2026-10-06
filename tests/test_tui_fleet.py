@@ -236,6 +236,82 @@ def test_unknown_history_and_host_owner_are_not_zero(fleet_snapshot):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("size", [(100, 30), (80, 24)])
+def test_people_group_and_filter_proven_host_uids(fleet_snapshot, size):
+    for index, service in enumerate(fleet_snapshot["services"]):
+        service.update(container=None, host=True, host_uid=1000 if index < 2 else 1005,
+                       host_user="operator", mine=False)
+        for gpu in fleet_snapshot["gpus"]:
+            for occupant in gpu["occupants"]:
+                if occupant.get("service_id") == service["id"]:
+                    occupant["container"] = None
+
+    async def scenario():
+        app, _ = make_app(fleet_snapshot)
+        async with app.run_test(size=size) as pilot:
+            await ready(app, pilot)
+            await pilot.press("p")
+            await ready(app, pilot)
+            groups = [key for key in app.row_keys if key.startswith("person:")]
+            assert set(groups) == {"person:host:uid:1000", "person:host:uid:1005"}
+            assert app._table.get_cell("person:host:uid:1000", "service").plain == "Host operator · 2svc"
+            assert app._table.get_cell("person:host:uid:1005", "service").plain == "Host operator · 1svc"
+            await select(app, pilot, "busy")
+            assert "Host operator" in str(app.query_one("#fleet-detail-text").render())
+            app.query_one("#fleet-filter", Input).value = "Host operator"
+            await ready(app, pilot)
+            assert set(app.row_services.values()) == {"busy", "quiet", "own"}
+            assert not app.claim_allowed("own", None)
+            fleet_snapshot["services"][0]["host_user"] = "operator-renamed"
+            app.refresh_fleet()
+            await ready(app, pilot)
+            assert "person:host:uid:1000" in app.row_keys
+            assert app.selected_service_id() == "busy"
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("size", [(100, 30), (80, 24)])
+def test_people_owner_namespaces_keep_rows_and_selection_distinct(fleet_snapshot, size):
+    for service, container in zip(fleet_snapshot["services"], ("host", None, "unknown")):
+        service.update(container=container, host=container is None, host_uid=None, host_user=None)
+        for gpu in fleet_snapshot["gpus"]:
+            for occupant in gpu["occupants"]:
+                if occupant.get("service_id") == service["id"]:
+                    occupant.update(container=container, host=container is None, host_uid=None, host_user=None)
+
+    async def scenario():
+        app, _ = make_app(fleet_snapshot)
+        async with app.run_test(size=size) as pilot:
+            await ready(app, pilot)
+            await pilot.press("p")
+            await ready(app, pilot)
+            expected_groups = {"person:container:host", "person:host", "person:container:unknown"}
+            assert app._table.row_count == len(app.row_keys) == len(set(app.row_keys)) == 6
+            assert {key for key in app.row_keys if key.startswith("person:")} == expected_groups
+            for service in fleet_snapshot["services"]:
+                await select(app, pilot, service["id"])
+                assert app.selected_service_id() == service["id"]
+                assert service["model"] in str(app.query_one("#fleet-detail-text").render())
+                assert app.history["service_id"] == service["id"]
+            await select(app, pilot, "quiet")
+            await pilot.press("j")
+            await ready(app, pilot)
+            assert app._table.cursor_row == app._table.get_row_index("person:container:host")
+            assert app.selected_service_id() is None
+            await pilot.press("j")
+            await ready(app, pilot)
+            assert app.selected_service_id() == "busy"
+            await pilot.press("k", "k")
+            await ready(app, pilot)
+            assert app.selected_service_id() == "quiet"
+            app.refresh_fleet()
+            await ready(app, pilot)
+            assert app.selected_service_id() == "quiet"
+            assert app._table.row_count == len(app.row_keys) == len(set(app.row_keys)) == 6
+            assert {key for key in app.row_keys if key.startswith("person:")} == expected_groups
+    asyncio.run(scenario())
+
+
 def test_late_history_cannot_replace_new_selection(fleet_snapshot):
     async def scenario():
         app, client = make_app(fleet_snapshot)
@@ -366,7 +442,7 @@ def test_sort_filter_and_mine_keep_selection(fleet_snapshot):
             await pilot.press("p")
             await pilot.press("s", "s")
             assert app.sort_mode == "mem"
-            assert app.row_keys[0] == "person:group-a"
+            assert app.row_keys[0] == "person:container:group-a"
             assert app.selected_service_id() == "quiet"
             await pilot.press("slash")
             field = app.query_one("#fleet-filter", Input)
