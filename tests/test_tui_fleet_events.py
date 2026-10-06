@@ -75,7 +75,7 @@ def test_real_sse_reconnect_keeps_cursor_and_closes_reader(fleet_snapshot):
             async with app.run_test(size=(80, 24)) as pilot:
                 await ready(app, pilot)
                 assert app.view == "gpu"
-                await pilot.press("down", "right")
+                await pilot.press("j", "right")
                 selected = app.selected_gpu, app.selected_segment
                 deadline = time.monotonic() + 3
                 while app.event_cursor != 2 or len(event_requests) < 3:

@@ -195,11 +195,11 @@ def test_keyboard_selection_survives_alignment_of_short_empty_gpu_panels(interac
                 await drag(pilot, "#fleet-gpus", (start, 0), (start + 5, 0))
                 assert overview.has_selection
             for expected in (1, 2, 3):
-                await pilot.press("down")
+                await pilot.press("j")
                 await pilot.pause()
                 assert app.selected_gpu == expected
                 assert viewport.scroll_y == min(app._gpu_anchors[expected], viewport.max_scroll_y)
-            await pilot.press("up")
+            await pilot.press("k")
             await pilot.pause()
             assert app.selected_gpu == 2 and viewport.scroll_y == app._gpu_anchors[2]
     asyncio.run(scenario())
@@ -257,7 +257,7 @@ def test_allocation_navigation_keeps_heading_and_chart_in_the_stationary_viewpor
             await ready(app, pilot)
             overview = app.query_one("#fleet-gpus", GpuOverview)
             viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
-            await pilot.press("down", "down")
+            await pilot.press("j", "j")
             assert viewport.scroll_y == app._gpu_anchors[2]
             original_scroll = viewport.scroll_y
             for key in ("right", "right", "left", "right"):
@@ -328,7 +328,7 @@ def test_gpu_drag_freezes_source_click_targets_and_anchors_through_refresh(inter
             await app.refresh_fleet().wait()
             await ready(app, pilot)
             assert overview.selected_text == "GPU 0" and overview.render().plain == source
-            await pilot.press("down")
+            await pilot.press("j")
             assert not overview.has_selection
             assert "changed-long model" in overview.render().plain
             assert overview.hits != hits and app._gpu_anchors != anchors
@@ -341,7 +341,7 @@ def test_focus_refresh_and_help_close_keep_manual_scroll(interaction_snapshot):
         app, _ = make_app(interaction_snapshot)
         async with app.run_test(size=(80, 24)) as pilot:
             await ready(app, pilot)
-            await pilot.press("down")
+            await pilot.press("j")
             viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
             viewport.scroll_to(y=viewport.scroll_y + 4, animate=False)
             await pilot.pause()
@@ -555,7 +555,7 @@ def test_nonfirst_modal_service_selection_survives_row_rebuild_and_clears_on_nav
                 clipboard.assert_called_once_with(selected)
             table.focus(scroll_visible=False)
             if navigation == "key":
-                await pilot.press("up")
+                await pilot.press("k")
             else:
                 await pilot.click("#gpu-detail-services", offset=(2, table.header_height))
             await ready(app, pilot)
@@ -600,7 +600,7 @@ def test_nonfirst_people_selection_survives_programmatic_rebuild_and_clears_on_n
                 clipboard.assert_called_once_with(selected)
             app._table.focus(scroll_visible=False)
             if navigation == "key":
-                await pilot.press("down" if rebuild == "reorder" else "up")
+                await pilot.press("j" if rebuild == "reorder" else "k")
             else:
                 row = app.row_keys.index("service:" + interaction_snapshot["services"][0]["id"])
                 await pilot.click("#fleet-table", offset=(2, app._table.header_height + row))

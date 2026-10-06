@@ -328,10 +328,10 @@ def test_gpu_keyboard_segment_details_and_individual_services(gpu_snapshot, size
             assert table.get_cell_at((0, 1)) == "52"
             assert table.get_cell_at((1, 1)) == "22"
             assert app.history["service_id"] == "demo-0-0"
-            await pilot.press("down")
+            await pilot.press("j")
             await ready(app, pilot)
             assert app.selected_service_id() == app.history["service_id"] == "demo-0-1"
-            await pilot.press("escape", "down", "down", "right")
+            await pilot.press("escape", "j", "j", "right")
             assert app.selected_gpu == 2
             assert app.selected_segment == ("container:sample-a", "llm")
             await pilot.press("p", "g")
@@ -371,7 +371,7 @@ def test_refresh_keeps_owner_selection_and_colors(gpu_snapshot):
         app, client = make_app(gpu_snapshot)
         async with app.run_test(size=(100, 30)) as pilot:
             await ready(app, pilot)
-            await pilot.press("down", "down", "right")
+            await pilot.press("j", "j", "right")
             selected = app.selected_gpu, app.selected_segment
             colors = [segment.color for segment in drawing_segments(app.selected_gpu_account())]
             client.snapshot["gpus"].reverse()
@@ -400,7 +400,7 @@ def test_expanded_selection_scroll_refresh_and_compact_roundtrip(gpu_snapshot, s
             for service in gpu_snapshot["services"]:
                 assert service["id"] in overview.render().plain
                 assert service["model"] in overview.render().plain
-            await pilot.press("down", "down", "right")
+            await pilot.press("j", "j", "right")
             await ready(app, pilot)
             selected = app.selected_gpu, app.selected_segment
             anchor = app._gpu_anchors[app.selected_gpu]
@@ -461,7 +461,7 @@ def test_help_scrolls_at_80_columns_and_restores_gpu_focus(gpu_snapshot):
         app, _ = make_app(gpu_snapshot)
         async with app.run_test(size=(80, 24)) as pilot:
             await ready(app, pilot)
-            await pilot.press("down", "right", "question_mark")
+            await pilot.press("j", "right", "question_mark")
             await pilot.pause()
             assert isinstance(app.screen, FleetHelpDialog)
             content = app.screen.query_one("#fleet-help-text")
@@ -471,8 +471,8 @@ def test_help_scrolls_at_80_columns_and_restores_gpu_focus(gpu_snapshot):
             assert "Other: other GPU jobs, dotted fill" in text
             assert "Unattributed: used VRAM with no matched workload" in text
             assert "Activity and tokens cover the whole service" in text
-            assert "Wheel / trackpad or Page Up / Down" in text
-            assert "Ctrl+C to copy" in text
+            assert "wheel / trackpad" in text
+            assert "copy with your terminal" in text
             viewport = app.screen.query_one("#fleet-help-scroll", VerticalScroll)
             assert viewport.virtual_size.height > viewport.size.height
             assert content.region.width <= 80
@@ -574,7 +574,7 @@ def test_claim_preview_submit_and_revoke_from_gpu_details(fleet_snapshot):
         app, client = make_app(fleet_snapshot)
         async with app.run_test(size=(80, 24)) as pilot:
             await ready(app, pilot)
-            await pilot.press("down", "down", "down", "right", "enter")
+            await pilot.press("j", "j", "j", "right", "enter")
             await ready(app, pilot)
             assert app.view == "gpu" and app.selected_service_id() == "own"
             await pilot.click("#gpu-detail-claim")
