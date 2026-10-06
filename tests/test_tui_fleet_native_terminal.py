@@ -236,6 +236,61 @@ def test_new_reply_prefix_gets_its_own_timeout_after_a_delayed_frame(monkeypatch
     assert decoder.decode(replies.feed(b"[?31u\xa9")) == "é"
 
 
+def test_input_thread_keeps_reply_escape_while_utf8_is_incomplete(monkeypatch):
+    from codecs import getincrementaldecoder
+    from threading import Event
+    from tui import fleet_terminal
+
+    clock = [10.0]
+    monkeypatch.setattr(fleet_terminal.time, "monotonic", lambda: clock[0])
+    driver = FleetTerminalDriver.__new__(FleetTerminalDriver)
+    driver.fileno = 42
+    driver._debug = False
+    driver._wheel_keys_enabled = False
+    driver._reply_filter = FleetReplyFilter()
+    driver._input_decoder = getincrementaldecoder("utf-8")()
+    driver._pending_input = bytearray(b"a\xc3\x1bP>|iTerm2 3.7.3\x1b\\\x1b[?1;1$y\x1b")
+    driver.exit_event = Event()
+    messages = []
+
+    def process(message):
+        messages.append(message)
+        if message.key == "x":
+            driver.exit_event.set()
+
+    driver.process_message = process
+
+    class InputSelector:
+        def __init__(self):
+            self.calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def register(self, fd, event):
+            assert fd == driver.fileno
+
+        def select(self, timeout):
+            self.calls += 1
+            if self.calls == 1:
+                clock[0] += 1
+                return []
+            return [(None, fleet_terminal.selectors.EVENT_READ)]
+
+    def read(fd, size):
+        assert fd == driver.fileno
+        return b"[?1007;1$y\xa9x"
+
+    monkeypatch.setattr(fleet_terminal.selectors, "SelectSelector", InputSelector)
+    monkeypatch.setattr(fleet_terminal.os, "read", read)
+    driver.run_input_thread()
+    assert [message.key for message in messages] == ["a", "é", "x"]
+    assert not driver._input_decoder.getstate()[0] and not driver._reply_filter.pending
+
+
 @pytest.mark.parametrize("size", [(100, 30), (80, 24)])
 def test_help_keyboard_scroll_from_button_focus_preserves_dashboard(native_snapshot, size):
     async def scenario():
@@ -440,6 +495,13 @@ if scenario in ("pre_query_error", "post_push_error"):
         return result
     FleetTerminalDriver._query_terminal_state = failing_query
 
+async def wait_for_late_reply(pilot, cycles):
+    deadline = time.monotonic() + 3
+    while app.observed_keys.count("w") < cycles and time.monotonic() < deadline:
+        await pilot.pause(.02)
+    assert observations.get("input_error") is None, observations.get("input_error")
+    assert app.observed_keys.count("w") == cycles, "late reply input was not processed"
+
 async def operate(pilot):
     await ready(app, pilot)
     viewport = app.query_one("#fleet-gpu-scroll")
@@ -455,12 +517,15 @@ async def operate(pilot):
     observations["after_scroll"] = viewport.scroll_y
     observations["selected_gpu"] = app.selected_gpu
     if "late_reply" in scenario:
-        await pilot.pause(.4)
+        await wait_for_late_reply(pilot, 1)
     if scenario in ("suspend", "suspend_late_reply"):
         with app.suspend():
             report("suspended")
             time.sleep(.06)
-        await pilot.pause(.4 if "late_reply" in scenario else .1)
+        if "late_reply" in scenario:
+            await wait_for_late_reply(pilot, 2)
+        else:
+            await pilot.pause(.1)
     observations["view"] = app.view
     if scenario == "app_error":
         app.call_later(fail)
@@ -532,7 +597,8 @@ def terminal_frames(output, width=100, height=30):
 def run_pty(tmp_path, scenario, entrypoint, initial_mode, reply_position, query_reply="known",
             *, initial_cursor_mode=False, initial_flags=0, kitty_reply="known",
             cursor_reply="known", identity_reply=b"iTerm2 3.7.3", confirm_reply=None,
-            split_replies=False, split_wheel=False, late_identity=False, identity_prefix_bytes=0):
+            split_replies=False, split_wheel=False, late_identity=False, identity_prefix_bytes=0,
+            pause_reply_escape=False):
     import fcntl
     import pty
     import termios
@@ -566,8 +632,9 @@ def run_pty(tmp_path, scenario, entrypoint, initial_mode, reply_position, query_
             for due, packet in list(scheduled):
                 if time.monotonic() >= due:
                     for offset in range(0, len(packet), 3):
-                        os.write(master, packet[offset:offset + 3])
-                        time.sleep(.001)
+                        chunk = packet[offset:offset + 3]
+                        os.write(master, chunk)
+                        time.sleep(.15 if pause_reply_escape and chunk.endswith(b"\x1b") else .001)
                     scheduled.remove((due, packet))
             readable, _, _ = select.select([master], [], [], .02)
             if readable:
@@ -685,6 +752,7 @@ def run_pty(tmp_path, scenario, entrypoint, initial_mode, reply_position, query_
             elif params == "?1049" and command == "l":
                 screen_exits.append(dict(modes, flags=kitty_stack[-1], depth=len(kitty_stack)))
         result = json.loads(report_path.read_text())
+        assert result.get("input_error") is None, result.get("input_error")
         result["terminal"] = dict(identity_queries=identity_queries, pushes=pushes, pops=pops,
                                   screen_exits=screen_exits, flags=kitty_stack[-1], modes=modes)
         return bytes(output).decode("utf-8", errors="replace"), result, queries, active_modes
@@ -844,13 +912,14 @@ def test_unconfirmed_protocol_rolls_back_before_input_thread_starts(tmp_path, co
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX terminal protocol")
 @pytest.mark.parametrize("scenario", ["normal_late_reply", "suspend_late_reply"])
-@pytest.mark.parametrize("identity_prefix_bytes", [0, 2, 3, 10],
-                         ids=["whole-late-frame", "dcs-introducer", "dcs-header", "startup-partial-frame"])
+@pytest.mark.parametrize("identity_prefix_bytes,pause_reply_escape", [
+    (0, False), (2, False), (3, False), (10, False), (3, True),
+], ids=["whole-late-frame", "dcs-introducer", "dcs-header", "startup-partial-frame", "utf8-reply-gap"])
 def test_late_fragmented_replies_never_trigger_app_keys_at_startup_or_resume(
-        tmp_path, scenario, identity_prefix_bytes):
+        tmp_path, scenario, identity_prefix_bytes, pause_reply_escape):
     output, result, queries, active_modes = run_pty(
         tmp_path, scenario, "run", False, "before", initial_flags=16,
-        late_identity=True, identity_prefix_bytes=identity_prefix_bytes)
+        late_identity=True, identity_prefix_bytes=identity_prefix_bytes, pause_reply_escape=pause_reply_escape)
     cycles = 2 if scenario == "suspend_late_reply" else 1
     assert queries == cycles and result["terminal"]["identity_queries"] == cycles
     assert active_modes == [{1: False, 1007: False, "flags": 16}]

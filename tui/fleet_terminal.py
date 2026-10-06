@@ -369,7 +369,10 @@ class FleetTerminalDriver(LinuxDriver):
                             if not data:
                                 return
                             feed(replies.feed(data))
-                    feed(replies.tick())
+                    # A response may split a UTF-8 character. Releasing its
+                    # ambiguous Escape before the continuation corrupts input.
+                    if not self._input_decoder.getstate()[0]:
+                        feed(replies.tick())
                     if hasattr(parser, "tick") and not replies.pending:
                         for message in parser.tick():
                             process(message)
