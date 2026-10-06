@@ -74,6 +74,14 @@ def assert_visible_highlight(app, start, end, expected):
     assert all(segment.style and segment.style.reverse for segment in strip)
 
 
+def source_caret(panel, position):
+    """GPU fixtures use single-cell characters and already wrapped source rows."""
+    lines = panel.render().plain.splitlines(keepends=True)
+    row = position[1] - panel.content_region.y
+    column = position[0] - panel.content_region.x
+    return sum(map(len, lines[:row])) + min(column, len(lines[row].rstrip("\n")))
+
+
 class ScrolledSelectionApp(App):
     CSS = """
     #selection-scroll { width: 35; height: 12; padding: 1; border: solid white;
@@ -176,4 +184,61 @@ def test_scrolled_gpu_reselection_retains_displayed_source_and_click_targets(siz
             assert panel.render().plain != frozen and not panel.has_selection
             assert panel.anchors[2] > anchors[2] and panel.hits != hits
             assert app._gpu_anchors is panel.anchors
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("size", [(100, 30), (80, 24)])
+@pytest.mark.parametrize("step", [-1, 1], ids=["wheel_up", "wheel_down"])
+@pytest.mark.parametrize("shift", [False, True], ids=["direct", "shift"])
+def test_captured_sgr_drag_tracks_visible_cells_across_wheel_scroll(size, step, shift):
+    async def scenario():
+        snapshot = json.loads((Path(__file__).parent / "fixtures/fleet_gpu_overview.json").read_text())
+        app, client = make_app(snapshot)
+        async with app.run_test(size=size) as pilot:
+            await ready(app, pilot)
+            app.select_gpu(2)
+            await ready(app, pilot)
+            panel = app.query_one("#fleet-gpus", GpuOverview)
+            viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
+            frozen = panel.render().plain
+            initial_scroll = viewport.scroll_y
+            start, start_end, visible_start = visible_selection(app, panel, viewport)
+            anchor = source_caret(panel, start)
+            assert frozen[anchor:source_caret(panel, start_end)] == visible_start
+            mouse = SgrMouse(app, pilot)
+            modifier = 4 if shift else 0
+            await mouse.send(modifier, start)
+            assert panel.dragging and app.mouse_captured is panel
+            client.snapshot["services"][0]["model"] = "WHEELREFRESH " * 150
+            client.snapshot["generated_at"] += 60
+            await app.refresh_fleet().wait()
+            await ready(app, pilot)
+            assert panel.render().plain == frozen
+            await mouse.send((64 if step < 0 else 65) | modifier, start)
+            assert viewport.scroll_y == initial_scroll + step
+            assert panel.dragging and app.mouse_captured is panel
+            assert app.selected_gpu == 2 and panel.render().plain == frozen
+            end_start, end, visible_end = visible_selection(app, panel, viewport)
+            endpoint = source_caret(panel, end)
+            assert frozen[source_caret(panel, end_start):endpoint] == visible_end
+            expected = frozen[min(anchor, endpoint):max(anchor, endpoint)]
+            assert expected
+            copied = []
+            with patch.object(app, "copy_to_clipboard", side_effect=copied.append):
+                await mouse.send(32 | modifier, end)
+                await mouse.send(modifier, end, release=True)
+                await pilot.press("ctrl+c")
+            assert panel.selected_text == expected and copied == [expected]
+            assert app.is_running and app.mouse_captured is None
+            assert app.selected_gpu == 2 and panel.render().plain == frozen
+            assert viewport.scroll_y == initial_scroll + step
+            # The endpoint came from the compositor after scrolling, rather
+            # than from the old widget-local coordinates before the wheel.
+            highlighted = screen_strip(app, end[1]).crop(end_start[0], end[0])
+            assert highlighted.text == visible_end
+            if endpoint > anchor:
+                assert any(segment.style and segment.style.reverse for segment in highlighted)
+            panel.clear_selection()
+            await pilot.pause()
+            assert "WHEELREFRESH" in panel.render().plain and not panel.has_selection
     asyncio.run(scenario())
