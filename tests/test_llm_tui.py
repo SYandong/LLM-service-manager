@@ -58,6 +58,26 @@ def test_absent_textual_returns_fallback(monkeypatch):
     assert api["fleet_tui_app"]() is None
 
 
+def test_show_names_is_forwarded_to_fleet_tui(monkeypatch):
+    api = runpy.run_path(str(Path(__file__).resolve().parents[1] / "cli" / "llm"))
+    globals_ = api["main"].__globals__
+    calls = []
+
+    class FakeApp:
+        def __init__(self, client, api, show_names=False):
+            calls.append(show_names)
+
+        def run(self):
+            pass
+
+    monkeypatch.setattr(globals_["sys"].stdout, "isatty", lambda: True)
+    monkeypatch.setitem(globals_, "load_config", lambda **kwargs: {})
+    monkeypatch.setitem(globals_, "fleet_tui_app", lambda: FakeApp)
+    monkeypatch.setitem(globals_, "SchedulerClient", lambda **kwargs: object())
+    assert api["main"](["top", "--show-names"]) == 0
+    assert calls == [True]
+
+
 @pytest.mark.parametrize("command", [["status"], ["fleet"], ["status", "--shared"]])
 def test_explicit_read_commands_never_launch_tui(monkeypatch, capsys, command):
     api = runpy.run_path(str(Path(__file__).resolve().parents[1] / "cli" / "llm"))

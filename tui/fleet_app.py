@@ -19,7 +19,8 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Sparkline, Static
 
-from .fleet_format import api_label, count, duration, gib, status_label, total_tokens
+from .fleet_format import (api_label, count, display_text, duration, error_label, gib,
+                           model_label, status_label, total_tokens)
 from .fleet_gpu import (MEASURED_KEY, account_gpu, compact_gib, detail_lines, expanded_header,
                         fit, owner_info, render_expanded, render_overview)
 from .fleet_selection import SelectableStatic
@@ -27,8 +28,8 @@ from .fleet_selection import SelectableStatic
 
 STATUS_STYLE = {"active": "green", "idle": "", "over_limit": "bold yellow",
                 "claimed": "cyan", "unknown": "dim"}
-HINT = "↑↓ scroll  J/K service  S sort  M mine  C claim  U revoke  G GPU  ? help Q quit"
-GPU_HINT = "↑↓ scroll  J/K GPU  ←→ owner  Enter details  Z compact  P people  ? help Q quit"
+HINT = "↑↓ scroll  J/K service  N names  S sort  M mine  C claim  U revoke  G GPU  ? help Q quit"
+GPU_HINT = "↑↓ GPU  ←→ owner  Enter details  Z compact  N names  P people  ? help Q quit"
 
 
 def numeric(value):
@@ -52,8 +53,8 @@ def activity_bar(values):
         min(7, int(min(value, 60) * 7 / 60))] for value in values)
 
 
-def owner_name(service):
-    return owner_info(service)[1]
+def owner_name(service, show_names=False):
+    return owner_info(service, show_names)[1]
 
 
 def total_memory(services):
@@ -85,6 +86,8 @@ class FleetHelpDialog(ModalScreen):
     BINDINGS = [("escape", "close", "Close"), ("q", "app.quit", "Quit"),
                 Binding("up", "scroll_contents(-1)", show=False, priority=True),
                 Binding("down", "scroll_contents(1)", show=False, priority=True),
+                Binding("fleet_scroll_up", "scroll_contents(-1)", show=False, priority=True),
+                Binding("fleet_scroll_down", "scroll_contents(1)", show=False, priority=True),
                 Binding("pageup", "scroll_contents(-1, True)", show=False, priority=True),
                 Binding("pagedown", "scroll_contents(1, True)", show=False, priority=True)]
 
@@ -107,10 +110,12 @@ class FleetHelpDialog(ModalScreen):
                 yield SelectableStatic(
                     "G  GPU panels     P  People / containers\n"
                     "Z  Expanded / compact GPU view\n"
+                    "Up / Down  Select next / previous GPU\n"
                     "J / K  Select next / previous GPU or service\n"
-                    "Up / Down, wheel / trackpad  Scroll contents\n"
+                    "Wheel / trackpad  Scroll freely; keep the selected GPU\n"
                     "Page Up / Down  Scroll one page\n"
-                    "Left / Right  Select owner; keep the chart in place\n"
+                    "Left / Right  Select owner; return to the selected GPU\n"
+                    "N  Show / hide owner names (available to everyone)\n"
                     "Enter  Details and history\n"
                     "Drag to select; copy with your terminal\n"
                     "Tab / Shift+Tab  Focus controls     Escape  Close     Q  Quit\n\n"
@@ -118,7 +123,7 @@ class FleetHelpDialog(ModalScreen):
                     "S  Sort: State, Idle time, Memory, Output tokens\n"
                     "C  Claim service     U  Revoke claim\n\n"
                     "LLM: inference models, solid fill\n"
-                    "Other: other GPU jobs, dotted fill\n"
+                    "Work: other GPU jobs, dotted fill\n"
                     "Unattributed: used VRAM with no matched workload\n"
                     "Free: available VRAM\n\n"
                     + idle_help + inactive_help +
@@ -158,13 +163,6 @@ class FleetGpuScroll(VerticalScroll):
     def scroll_now(self, y):
         # Both supported Textual versions use this synchronous scroll primitive.
         self._scroll_to(y=y, animate=False)
-
-    def watch_scroll_y(self, old_value, new_value):
-        super().watch_scroll_y(old_value, new_value)
-        if (self.is_attached and round(old_value) != round(new_value)
-                and not self.app._gpu_scroll_pending):
-            self.call_after_refresh(self.app.follow_gpu_scroll)
-
 
 class GpuOverview(SelectableStatic):
     """Selection, heading styles and click targets share one displayed snapshot."""
@@ -259,6 +257,8 @@ class GpuDetailDialog(ModalScreen):
     BINDINGS = [("escape", "close", "Close"), ("q", "app.quit", "Quit"),
                 Binding("up", "scroll_contents(-1)", show=False, priority=True),
                 Binding("down", "scroll_contents(1)", show=False, priority=True),
+                Binding("fleet_scroll_up", "scroll_contents(-1)", show=False, priority=True),
+                Binding("fleet_scroll_down", "scroll_contents(1)", show=False, priority=True),
                 Binding("pageup", "scroll_contents(-1, True)", show=False, priority=True),
                 Binding("pagedown", "scroll_contents(1, True)", show=False, priority=True)]
 
@@ -312,8 +312,8 @@ class GpuDetailDialog(ModalScreen):
                 for ident, value in allocation.members:
                     if ident is not None:
                         amounts.setdefault(ident, []).append(value)
-        rows = [(service["id"], self.owner.clean(owner_name(service)) + " · " +
-                 self.owner.clean(service.get("model") or "unknown"),
+        rows = [(service["id"], self.owner.clean(owner_name(service, self.owner.show_names)) + " · " +
+                 self.owner.clean(model_label(service.get("model"))),
                  gib(sum(amounts[service["id"]])) if all(numeric(value) for value in
                      amounts.get(service["id"], [None])) else "?",
                  status_label(self.owner.service_status(service))) for service in services]
@@ -375,6 +375,10 @@ class GpuDetailDialog(ModalScreen):
             if table.row_count:
                 table.move_cursor(row=max(0, min(table.row_count - 1,
                                   table.cursor_row + (1 if key == "j" else -1))), animate=False)
+        elif key == "n":
+            event.stop()
+            event.prevent_default()
+            self.owner.action_toggle_names()
         elif key in ("c", "u"):
             event.stop()
             event.prevent_default()
@@ -405,7 +409,7 @@ class ClaimDialog(ModalScreen):
         self.owner = owner
         self.service_id = service["id"]
         self.container = service.get("container")
-        self.model = service.get("model") or "unknown"
+        self.model = model_label(service.get("model"))
         self.revoke = revoke
         self.claim = dict(service.get("claim") or {})
         self.busy = False
@@ -424,7 +428,7 @@ class ClaimDialog(ModalScreen):
                             id="claim-reason")
             else:
                 yield SelectableStatic("Until %s · %s" % (timestamp(self.claim.get("until")),
-                             self.owner.clean(self.claim.get("reason", ""))), markup=False)
+                             self.owner.private_text(self.claim.get("reason", ""))), markup=False)
             yield SelectableStatic("Preview first. A preview does not save or revoke a claim.",
                          id="claim-status", markup=False)
             with Horizontal(id="claim-buttons"):
@@ -435,7 +439,7 @@ class ClaimDialog(ModalScreen):
 
     def say(self, message):
         if self.owner.alive() and self.is_attached:
-            self.query_one("#claim-status", Static).update(self.owner.clean(message))
+            self.query_one("#claim-status", Static).update(self.owner.private_text(message))
 
     def on_input_changed(self, event):
         self.preview_payload = None
@@ -578,7 +582,6 @@ class FleetApp(App):
     #fleet-notice { height: auto; min-height: 1; max-height: 3; color: #d8ae7b; }
     #fleet-footer { height: 1; color: #aaa; }
     .gpu #fleet-gpu-scroll { height: 1fr; max-height: 100%; }
-    .gpu.compact #fleet-gpu-scroll { overflow-y: hidden; }
     .gpu #fleet-table, .gpu #fleet-details { display: none; }
     .gpu #fleet-banner, .gpu #fleet-notice { max-height: 1; }
     DataTable > .datatable--header { background: #2b2823; color: #d8ae7b; }
@@ -586,7 +589,7 @@ class FleetApp(App):
     BINDINGS = [Binding("ctrl+c", "copy_selection", "Copy", show=False, priority=True),
                 Binding("q", "quit", "Quit", show=False)]
 
-    def __init__(self, client, api, event_reader=None, **kwargs):
+    def __init__(self, client, api, event_reader=None, show_names=False, **kwargs):
         if sys.platform != "win32" and "driver_class" not in kwargs:
             from .fleet_terminal import FleetTerminalDriver
             kwargs["driver_class"] = FleetTerminalDriver
@@ -598,7 +601,10 @@ class FleetApp(App):
         self.fetching = False
         self._refresh_pending = False
         self.read_error = None
+        self._read_exception = None
+        self._read_context = ()
         self.view = "gpu"
+        self.show_names = show_names
         self.compact_gpus = False
         self._gpu_anchors = {}
         self._gpu_scroll_pending = True
@@ -619,6 +625,10 @@ class FleetApp(App):
         self._columns = None
         self.history = None
         self.history_error = None
+        self._history_exception = None
+        self._history_context = ()
+        self._notice_raw = "Drag to select; copy with your terminal"
+        self._notice_context = ()
         self._history_generation = 0
         self._history_signature = None
         self._history_timer = None
@@ -645,6 +655,31 @@ class FleetApp(App):
 
     def clean(self, value):
         return self.api.clean_text(value)
+
+    def display_items(self):
+        snapshot = self.snapshot or {}
+        return (list(snapshot.get("services", [])) + list(snapshot.get("containers", [])) +
+                 [item for gpu in snapshot.get("gpus", []) for item in gpu.get("occupants", [])] +
+                 [(self.history or {}).get("service") or {}])
+
+    def display_context(self):
+        # Cache copied presentation fields with diagnostic evidence, so later
+        # observations cannot erase or change its original owner identity.
+        fields = ("container", "host", "host_uid", "host_user", "model")
+        return tuple({field: item[field] for field in fields if field in item}
+                     for item in self.display_items())
+
+    def private_text(self, value, context=()):
+        return display_text(value, list(context) + self.display_items(), self.show_names)
+
+    def error_text(self, error, context=()):
+        return error_label(error, list(context) + self.display_items(), self.show_names)
+
+    def action_toggle_names(self):
+        self.clear_text_selections()
+        self.show_names = not self.show_names
+        self.render_snapshot()
+        self.render_history()
 
     def compose(self):
         yield SelectableStatic("GPU inference services · loading…", id="fleet-title", markup=False)
@@ -715,8 +750,6 @@ class FleetApp(App):
             self._selection_widget = panel
         elif self._selection_widget is panel:
             self._selection_widget = None
-            if self.view == "gpu" and self.screen is self.dashboard:
-                self.call_after_refresh(self.follow_gpu_scroll)
 
     def action_copy_selection(self):
         panel = self._selection_widget
@@ -742,30 +775,30 @@ class FleetApp(App):
             return
         event.stop()
         event.prevent_default()
-        viewport = self.dashboard.query_one("#fleet-gpu-scroll", FleetGpuScroll)
-        viewport.scroll_now(viewport.scroll_y + step)
-
-    def follow_gpu_scroll(self):
-        if (not self.alive() or self.view != "gpu" or self.screen is not self.dashboard
-                or self.compact_gpus or self._gpu_scroll_pending):
-            return
-        overview = self.dashboard.query_one("#fleet-gpus", GpuOverview)
-        if overview.dragging or overview.has_selection:
-            return
         viewport = self.dashboard.query_one("#fleet-gpu-scroll", VerticalScroll)
-        middle = viewport.scroll_y + viewport.content_size.height / 2
-        visible = [account.index for account in self.gpu_accounts
-                   if self._gpu_anchors.get(account.index, float("inf")) <= middle]
-        if visible and visible[-1] != self.selected_gpu:
-            self.select_gpu(visible[-1], scroll=False)
+        self.scroll_contents(step, viewport=viewport)
 
-    def scroll_gpu_selection(self):
+    def scroll_contents(self, direction, *, page=False, viewport=None):
+        if self.view == "gpu":
+            self._gpu_scroll_pending = False
+        if viewport is None:
+            viewport = (self.dashboard.query_one("#fleet-gpu-scroll", FleetGpuScroll)
+                        if self.view == "gpu" else self._table)
+            if self.view == "person" and self.focused is not None:
+                details = self.dashboard.query_one("#fleet-details", VerticalScroll)
+                if self.focused is details or details in self.focused.ancestors:
+                    viewport = details
+        viewport._scroll_to(y=viewport.scroll_y + direction * (viewport.size.height if page else 1),
+                            animate=False)
+
+    def scroll_gpu_selection(self, *, finish=True):
         try:
-            if self.alive() and self.view == "gpu":
-                target = 0 if self.compact_gpus else self._gpu_anchors.get(self.selected_gpu, 0)
+            if self.alive() and self.view == "gpu" and self._gpu_scroll_pending:
+                target = self._gpu_anchors.get(self.selected_gpu, 0)
                 self.dashboard.query_one("#fleet-gpu-scroll", FleetGpuScroll).scroll_now(target)
         finally:
-            self._gpu_scroll_pending = False
+            if finish:
+                self._gpu_scroll_pending = False
 
     def selected_gpu_account(self):
         return next((account for account in self.gpu_accounts if account.index == self.selected_gpu), None)
@@ -781,12 +814,13 @@ class FleetApp(App):
         return sorted((service for service in self.services() if service["id"] in ids), key=self.sort_key)
 
     def select_gpu(self, index, segment=None, service_id=None, *, scroll=True):
-        changed = index != self.selected_gpu
         self.clear_text_selections()
         self.selected_gpu, self.selected_segment = index, segment
         self._gpu_detail_service = service_id
-        self._gpu_scroll_pending = self._gpu_scroll_pending or (changed and scroll)
+        self._gpu_scroll_pending = self._gpu_scroll_pending or scroll
         self.render_snapshot()
+        if scroll:
+            self.scroll_gpu_selection(finish=False)
 
     def move_gpu(self, step):
         indices = [account.index for account in self.gpu_accounts]
@@ -800,6 +834,8 @@ class FleetApp(App):
         if keys:
             current = keys.index(self.selected_segment) if self.selected_segment in keys else (-1 if step > 0 else 0)
             self.select_gpu(self.selected_gpu, keys[(current + step) % len(keys)])
+        else:
+            self.select_gpu(self.selected_gpu)
 
     def open_gpu_details(self):
         if self.selected_gpu_account() is not None:
@@ -812,8 +848,10 @@ class FleetApp(App):
             self._rendered[name] = value
 
     def notice(self, message):
+        self._notice_raw = self.clean(message)
+        self._notice_context = self.display_context()
         if self.alive():
-            self.update_static("fleet-notice", self.clean(message))
+            self.update_static("fleet-notice", self.private_text(self._notice_raw, self._notice_context))
 
     def unreliable(self):
         return bool(self.read_error or (self.snapshot or {}).get("stale") or
@@ -827,6 +865,7 @@ class FleetApp(App):
             self._refresh_pending = True
             return
         self.fetching = True
+        context = self.display_context()
         try:
             snapshot = await asyncio.to_thread(self.client.request, "GET", "/v1/fleet")
             validator = getattr(self.api, "validate_fleet", None)
@@ -857,11 +896,13 @@ class FleetApp(App):
                 account_gpu(gpu, snapshot["services"])
             if not self.alive():
                 return
-            self.snapshot, self.read_error = snapshot, None
+            self.snapshot, self.read_error, self._read_exception = snapshot, None, None
+            self._read_context = ()
             self.render_snapshot()
         except Exception as exc:
             if self.alive():
-                self.read_error = self.clean(exc)
+                self.read_error, self._read_exception = self.clean(exc), exc
+                self._read_context = context
                 self.render_snapshot()
         finally:
             self.fetching = False
@@ -878,8 +919,9 @@ class FleetApp(App):
         needle = self.filter_text.casefold()
         return [service for service in values
                 if (not self.mine_only or service.get("mine") is True)
-                and (not needle or needle in " ".join([owner_name(service)] +
-                     [self.clean(service.get(key, "")) for key in ("model", "engine", "status")]).casefold())]
+                and (not needle or needle in " ".join([owner_name(service, self.show_names),
+                     model_label(service.get("model"))] +
+                     [self.clean(service.get(key, "")) for key in ("engine", "status")]).casefold())]
 
     def sort_key(self, service):
         mem = service.get("gpu_gb")
@@ -890,13 +932,13 @@ class FleetApp(App):
         tokens = tokens if numeric(tokens) else -1
         leading = {"priority": -(self.service_status(service) == "over_limit"),
                    "idle": -idle, "mem": -mem, "tokens": -tokens}[self.sort_mode]
-        return leading, -mem, self.clean(owner_name(service)), service["id"]
+        return leading, -mem, owner_info(service)[0], service["id"]
 
     def service_cells(self, service, key, narrow):
         status = self.service_status(service)
         window = service.get("window_24h") or {}
         ratio = window.get("active_ratio")
-        values = ["  " + self.clean(service.get("model") or "unknown"),
+        values = ["  " + self.clean(model_label(service.get("model"))),
                   ",".join(str(gpu) for gpu in service.get("gpus", [])) or "?",
                   gib(service.get("gpu_gb")),
                   activity_bar(service.get("hourly_active_24h") or [None] * 24),
@@ -919,10 +961,10 @@ class FleetApp(App):
                 groups.setdefault(owner_info(service)[0], []).append(service)
             ordered = sorted(groups, key=lambda identity: (min(self.sort_key(item)[0] for item in groups[identity]),
                              -(total_memory(groups[identity]) if total_memory(groups[identity]) is not None else -1),
-                             owner_name(groups[identity][0]), identity))
+                             identity))
             for identity in ordered:
                 members = groups[identity]
-                name = owner_name(members[0])
+                name = owner_name(members[0], self.show_names)
                 key = "person:" + identity
                 over = sum(self.service_status(item) == "over_limit" for item in members)
                 values = [name + " · %dsvc" % len(members), "", gib(total_memory(members)),
@@ -946,8 +988,8 @@ class FleetApp(App):
                     if index in service.get("gpus", []):
                         key = "service:%s:%s" % (index, service["id"])
                         cells = list(self.service_cells(service, key, narrow))
-                        cells[0] = RowLabel(self.clean(owner_name(service)) + " · " +
-                                            self.clean(service.get("model") or "unknown"), key)
+                        cells[0] = RowLabel(self.clean(owner_name(service, self.show_names)) + " · " +
+                                            self.clean(model_label(service.get("model"))), key)
                         # Per-card occupants are measured independently of a service's total.
                         occupant = next((item for item in gpu.get("occupants", [])
                                          if item.get("service_id") == service["id"]), None)
@@ -958,11 +1000,11 @@ class FleetApp(App):
                     for number, occupant in enumerate(gpu.get("occupants", [])):
                         if occupant.get("service_id") is not None:
                             continue
-                        identity, name = owner_info(occupant)
+                        identity, name = owner_info(occupant, self.show_names)
                         if self.filter_text and self.filter_text.casefold() not in name.casefold():
                             continue
                         key = "other:%s:%s:%s" % (index, identity, number)
-                        values = [name + " (other workload)", str(index), gib(occupant.get("used_gb")),
+                        values = [name + " (Work)", str(index), gib(occupant.get("used_gb")),
                                   "", "", ""] + ([] if narrow else ["", ""])
                         result.append((key, tuple([RowLabel(values[0], key)] + [Text(value) for value in values[1:]])))
         return result, metadata
@@ -989,7 +1031,7 @@ class FleetApp(App):
         age = snapshot.get("snapshot_age_seconds")
         self.dashboard.set_class(self.view == "gpu", "gpu")
         self.dashboard.set_class(self.compact_gpus, "compact")
-        self.gpu_accounts = [account_gpu(gpu, snapshot.get("services", []))
+        self.gpu_accounts = [account_gpu(gpu, snapshot.get("services", []), show_names=self.show_names)
                              for gpu in sorted(snapshot.get("gpus", []), key=lambda item: item["index"])]
         indices = [account.index for account in self.gpu_accounts]
         if self.selected_gpu not in indices:
@@ -1010,32 +1052,35 @@ class FleetApp(App):
             "GPU fleet" if self.view == "gpu" else "People / containers", summary), self.size.width))
         errors = []
         if self.read_error:
-            errors.append("Read failed: " + self.read_error)
+            errors.append("Read failed: " + self.error_text(self._read_exception or self.read_error,
+                                                          self._read_context))
         if snapshot.get("stale"):
             errors.append("Snapshot stale")
         if snapshot.get("errors"):
             errors.append("Collection incomplete: " +
-                          "; ".join(self.clean(error) for error in snapshot["errors"]))
+                          "; ".join(self.private_text(error) for error in snapshot["errors"]))
         self.update_static("fleet-banner", " · ".join(errors))
+        self.update_static("fleet-notice", self.private_text(self._notice_raw, self._notice_context))
         self.dashboard.query_one("#fleet-banner").display = bool(errors)
         overview = self.dashboard.query_one("#fleet-gpus", GpuOverview)
         if self.view == "gpu":
             stale = bool(snapshot.get("stale") or self.read_error)
             if self.compact_gpus:
-                available = self.size.height - 4 - bool(errors) - (3 if self.dashboard.query_one("#fleet-filter").display else 0)
-                bar_rows = 2 if self.size.width >= 100 and available >= len(self.gpu_accounts) * 4 else 1
-                view, hits = render_overview(self.gpu_accounts, self.size.width, bar_rows,
+                bar_rows = 3
+                view, hits = render_overview(self.gpu_accounts, max(1, self.size.width - 1), bar_rows,
                     self.selected_gpu, self.selected_segment, stale, self.clean,
-                    show_legends=available >= len(self.gpu_accounts) * 3)
-                service_hits, anchors = {}, {}
+                    show_legends=True)
+                service_hits = {}
                 headings = {index: (row, 1) for row, _, _, index, key in hits if key is None}
+                anchors = {index: row for index, (row, _) in headings.items()}
             else:
                 bar_rows = 3
                 width = max(1, self.size.width - 1)
                 view, hits, anchors, service_hits = render_expanded(
                     self.gpu_accounts, sorted(self.services(), key=self.sort_key), self.size.width - 1,
                     bar_rows, self.selected_gpu, self.selected_segment, stale, self.clean,
-                    {service["id"]: self.service_status(service) for service in self.services()})
+                    {service["id"]: self.service_status(service) for service in self.services()},
+                    show_names=self.show_names)
                 headings = {account.index: (anchors[account.index], len(expanded_header(
                     account, account.index == self.selected_gpu, stale).wrap(
                         self.console, width, overflow="fold", no_wrap=False))) for account in self.gpu_accounts}
@@ -1047,7 +1092,7 @@ class FleetApp(App):
             overview.update_view(Text(summary), [], {}, {}, {}, None, 1)
             self._rendered["fleet-gpus"] = summary
         if self.view == "gpu":
-            controls = Text("LLM · Other · Unattributed · Free", style="#98a4b4")
+            controls = Text("LLM · Work · Unattributed · Free", style="#98a4b4")
             controls.append(" · Updated " + age_label + " ago", style="#98a4b4")
             if self.mine_only:
                 controls.append(" · mine", style="#c5ced8")
@@ -1130,11 +1175,12 @@ class FleetApp(App):
             self._history_generation += 1
             self._history_signature = None
             self.update_static("fleet-detail-text", "Select a service to see its last 7 days.")
-            self.history, self.history_error = None, None
+            self.history, self.history_error, self._history_exception = None, None, None
+            self._history_context = ()
             self.render_history()
             return
-        lines = ["%s · %s · %s · online %s · %s" % (self.clean(service.get("model") or "unknown"),
-                 self.clean(owner_name(service)), self.clean(service.get("engine", "?")),
+        lines = ["%s · %s · %s · online %s · %s" % (self.clean(model_label(service.get("model"))),
+                 self.clean(owner_name(service, self.show_names)), self.clean(service.get("engine", "?")),
                  duration(service.get("uptime_seconds")), status_label(self.service_status(service))),
                  "API: " + api_label(service, self.clean, fresh=not bool(
                      self.read_error or (self.snapshot or {}).get("stale")))]
@@ -1148,7 +1194,7 @@ class FleetApp(App):
                           "?" if not numeric(coverage) else "%d%%" % (coverage * 100)))
         claim = service.get("claim")
         lines.append("Started %s · claim %s" % (timestamp(service.get("started_at")),
-                     ("until %s: %s" % (timestamp(claim.get("until")), self.clean(claim.get("reason", "")))) if claim else "none"))
+                     ("until %s: %s" % (timestamp(claim.get("until")), self.private_text(claim.get("reason", "")))) if claim else "none"))
         self.update_static("fleet-detail-text", "\n".join(lines))
         signature = service["id"], (self.snapshot or {}).get("generated_at")
         if signature != self._history_signature:
@@ -1157,6 +1203,8 @@ class FleetApp(App):
             self._history_generation += 1
             if changed:
                 self.history, self.history_error = None, "Loading 7d history…"
+                self._history_exception = None
+                self._history_context = ()
                 self.render_history()
             if self._history_timer is not None:
                 self._history_timer.stop()
@@ -1167,6 +1215,7 @@ class FleetApp(App):
     async def fetch_history(self, ident, generation):
         if not self.alive() or generation != self._history_generation or self.selected_service_id() != ident:
             return
+        context = self.display_context()
         try:
             result = await asyncio.to_thread(self.client.request, "GET", "/v1/fleet/history?" +
                                             urlencode({"service": ident, "hours": 168}))
@@ -1182,17 +1231,22 @@ class FleetApp(App):
                 raise ValueError("Unrecognized service history.")
             error = None
         except Exception as exc:
-            result, error = None, "7d history unavailable: " + self.clean(exc)
+            result, error = None, exc
         if self.alive() and generation == self._history_generation and self.selected_service_id() == ident:
-            self.history, self.history_error = result, error
+            self.history, self._history_exception = result, error
+            self.history_error = "7d history unavailable: " + self.clean(error) if error else None
+            self._history_context = context if error else ()
             self.render_history()
 
     def render_history(self):
         samples = (self.history or {}).get("samples", [])
         summary = (self.history or {}).get("service") or {}
-        self.update_static("fleet-history-text", self.history_error or
+        error = ("7d history unavailable: " + self.error_text(self._history_exception, self._history_context)
+                 if self._history_exception else
+                 self.private_text(self.history_error, self._history_context) if self.history_error else "")
+        self.update_static("fleet-history-text", error or
                            ("7d hourly active / output tokens · %d hour records · parameters: %s" %
-                            (len(samples), self.clean(summary.get("argv_redacted") or "unavailable")) if self.history else ""))
+                            (len(samples), self.private_text(summary.get("argv_redacted") or "unavailable")) if self.history else ""))
         fallback = []
         for name, field, label in (("fleet-active-chart", "active_minutes", "Active"),
                                    ("fleet-token-chart", "gen_tokens", "Output")):
@@ -1278,21 +1332,18 @@ class FleetApp(App):
                 self.render_snapshot()
             return
         key = event.key.lower()
-        if key in ("up", "down", "pageup", "pagedown"):
+        if key in ("up", "down") and self.view == "gpu":
             event.stop()
             event.prevent_default()
-            self.clear_text_selections()
-            viewport = (self.dashboard.query_one("#fleet-gpu-scroll", FleetGpuScroll)
-                        if self.view == "gpu" else self._table)
-            if self.view == "person" and self.focused is not None:
-                details = self.dashboard.query_one("#fleet-details", VerticalScroll)
-                if self.focused is details or details in self.focused.ancestors:
-                    viewport = details
-            step = (-1 if key in ("up", "pageup") else 1) * (
-                viewport.size.height if key in ("pageup", "pagedown") else 1)
-            viewport._scroll_to(y=viewport.scroll_y + step, animate=False)
-            if self.view == "gpu":
-                self.call_after_refresh(self.follow_gpu_scroll)
+            self.move_gpu(-1 if key == "up" else 1)
+            return
+        if key in ("up", "down", "pageup", "pagedown", "fleet_scroll_up", "fleet_scroll_down"):
+            event.stop()
+            event.prevent_default()
+            if not key.startswith("fleet_scroll_"):
+                self.clear_text_selections()
+            self.scroll_contents(-1 if key in ("up", "pageup", "fleet_scroll_up") else 1,
+                                 page=key in ("pageup", "pagedown"))
             return
         if self.view == "person" and key in ("j", "k"):
             event.stop()
@@ -1302,7 +1353,7 @@ class FleetApp(App):
                                     self._table.cursor_row + (-1 if key == "k" else 1))), animate=False)
             return
         gpu_key = self.view == "gpu" and key in ("j", "k", "left", "right", "enter")
-        if not gpu_key and key not in ("p", "g", "z", "s", "m", "c", "u", "r", "q", "slash", "question_mark"):
+        if not gpu_key and key not in ("p", "g", "z", "n", "s", "m", "c", "u", "r", "q", "slash", "question_mark"):
             return
         event.stop()
         event.prevent_default()
@@ -1325,6 +1376,8 @@ class FleetApp(App):
                 self.compact_gpus = not self.compact_gpus
                 self._gpu_scroll_pending = True
                 self.render_snapshot()
+        elif key == "n":
+            self.action_toggle_names()
         elif key == "s":
             options = ["priority", "idle", "mem", "tokens"]
             self.sort_mode = options[(options.index(self.sort_mode) + 1) % len(options)]

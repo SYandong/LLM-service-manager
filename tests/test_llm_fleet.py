@@ -167,6 +167,88 @@ def test_json_response_is_preserved(fleet_api, fleet_service, fleet, command):
     assert requests == [("GET", "/v1/fleet", None)]
 
 
+@pytest.mark.parametrize("by", ["person", "gpu"])
+def test_default_text_anonymizes_ids_claims_errors_and_history(fleet_api, fleet, by):
+    item = fleet["services"][0]
+    item.update(id="private-owner:42:55", container="private-owner",
+                model="/srv/private-owner/gemma-4-31b-it-qat-w4a16-ct")
+    item["claim"] = {"id": "private-owner:claim", "until": 1900086400,
+                     "reason": "private-owner is running this service"}
+    fleet["errors"] = ["private-owner: GPU reading unavailable"]
+    fleet["services"] = [item]
+    fleet["containers"] = []
+    fleet["gpus"][0]["occupants"][0]["container"] = "private-owner"
+    before = copy.deepcopy(fleet)
+    label = fleet_api["fleet_owner"](item)[1]
+    args = fleet_api["build_parser"]().parse_args(["fleet", "--by", by])
+    text = fleet_api["format_result"](args, fleet, width=200)
+    assert label in text and label + ":42:55" in text
+    assert "private-owner" not in text and "/srv/" not in text
+    assert "gemma-4-31b-it-qat-w4a16-ct" in text
+    args.show_names = True
+    revealed = fleet_api["format_result"](args, fleet, width=200)
+    assert "private-owner" in revealed and "/srv/" not in revealed
+    args.json = True
+    assert json.loads(fleet_api["format_result"](args, fleet)) == before
+    history = {"service_id": item["id"], "hours": 168, "resolution": "hourly",
+               "samples": [], "service": dict(item, argv_redacted="vllm serve %s --owner private-owner" % item["model"])}
+    text = fleet_api["format_fleet_history"](history, width=200)
+    assert label in text and "private-owner" not in text and "/srv/" not in text
+    assert "private-owner" in fleet_api["format_fleet_history"](history, show_names=True)
+    assert fleet == before
+
+
+@pytest.mark.parametrize("name", ["User", "Work", "google"])
+def test_owner_names_do_not_rewrite_generated_labels_or_public_models(fleet_api, fleet, name):
+    item = fleet["services"][0]
+    item.update(container=name, model=name + "/gemma", id=name + ":42:55")
+    fleet["services"] = [item]
+    fleet["gpus"][0]["occupants"][0]["container"] = name
+    label = fleet_api["fleet_owner"](item)[1]
+    text = fleet_api["format_fleet"](fleet, width=200, by="gpu")
+    assert label + " (Work)" in text
+    assert label + ":42:55" in text
+    assert name + "/gemma" in text
+    assert label + " " + label not in text
+
+
+@pytest.mark.parametrize("name, model", [("gemma-owner", "gemma"),
+                                        ("User", "/srv/models/User"),
+                                        ("Work", "/srv/models/Work")])
+def test_model_owner_collisions_keep_visible_models_and_anonymous_service_ids(fleet_api, fleet, name, model):
+    item = fleet["services"][0]
+    item.update(container=name, model=model, id=name)
+    fleet["services"] = [item]
+    text = fleet_api["format_fleet"](fleet, width=200)
+    assert "id " + fleet_api["fleet_owner"](item)[1] in text
+    assert fleet_api["fleet_model_label"](model) + "  vllm" in text
+
+
+@pytest.mark.parametrize("code", ["fleet_disabled", "fleet_claims_disabled", "fleet_store_unavailable",
+                                  "unmapped_container", "invalid_fleet_history_query", "service_not_found",
+                                  "forbidden_container", "service_observation_unknown", "claim_not_found"])
+def test_anonymous_cli_preserves_safe_structured_http_reasons(fleet_api, monkeypatch, capsys, code):
+    class Client:
+        def request(self, *args):
+            raise fleet_api["ClientError"]("HTTP 503: %s private-owner" % code, status=503,
+                                           payload={"error": code, "container": "private-owner"})
+
+    globals_ = fleet_api["main"].__globals__
+    monkeypatch.setitem(globals_, "load_config", lambda **kwargs: {})
+    monkeypatch.setitem(globals_, "SchedulerClient", lambda **kwargs: Client())
+    assert fleet_api["main"](["fleet"]) == 1
+    error = capsys.readouterr().err
+    assert code in error and "private-owner" not in error
+    assert fleet_api["main"](["fleet", "--show-names"]) == 1
+    assert "private-owner" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("arguments", [["--show-names", "fleet"], ["fleet", "--show-names"],
+                                       ["top", "--show-names"], ["history", "raw-id", "--show-names"]])
+def test_show_names_is_available_without_authentication(fleet_api, arguments):
+    assert fleet_api["build_parser"]().parse_args(arguments).show_names is True
+
+
 def test_mine_is_resolved_by_server(fleet_api, fleet_service):
     address, requests, _ = fleet_service
     args = fleet_api["build_parser"]().parse_args(["fleet", "--mine"])
@@ -186,7 +268,8 @@ def test_narrow_display_uses_real_character_widths(fleet_api, fleet, width, by):
 
 def test_unknown_coverage_stale_and_other_occupants_are_visible(fleet_api, fleet):
     text = fleet_api["format_fleet"](fleet, width=80, by="gpu")
-    for expected in ("ctr-c (other) 50G", "output —", "idle —", "observed coverage 50%", "·▁▂█"):
+    owner = fleet_api["fleet_owner"]({"container": "ctr-c"})[1]
+    for expected in (owner + " (Work) 50G", "output —", "idle —", "observed coverage 50%", "·▁▂█"):
         assert expected in text
     fleet["stale"] = True
     stale = fleet_api["format_fleet"](fleet, width=80)
@@ -249,7 +332,7 @@ def test_host_and_unknown_model_keep_known_observations(fleet_api, fleet):
     fleet["services"][0]["window_24h"]["observed_active_ratio"] = 0.28
     assert fleet_api["validate_fleet"](fleet) is fleet
     text = fleet_api["format_fleet"](fleet, width=80)
-    assert "host · 1 services · 80G" in text
+    assert "Unknown · 1 services · 80G" in text
     assert "unknown  vllm" in text
     assert "observed coverage 50% (24h) · observed active 28%" in text
     assert "id id-a" in text
@@ -264,16 +347,16 @@ def test_host_uid_labels_match_status_fleet_and_other_occupants(fleet_api, fleet
     fleet["gpus"][0].update(used_gb=5, occupants=[
         {"container": None, "host": True, "host_uid": 1000, "host_user": "host-a",
          "kind": "other", "used_gb": 5, "service_id": None}])
-    args = fleet_api["build_parser"]().parse_args([command, "--by", by])
+    args = fleet_api["build_parser"]().parse_args([command, "--by", by, "--show-names"])
     fleet_api["validate_fleet"](fleet)
     text = fleet_api["format_result"](args, fleet, width=80)
-    assert "Host host-a" in text and "Host host-b" in text
+    assert "host-a" in text and "host-b" in text and "Host " not in text
     if by == "person":
-        assert "Host host-a · 2 services · 100G" in text
-        assert "Host host-b · 1 services" in text
+        assert "host-a · 2 services · 100G" in text
+        assert "host-b · 1 services" in text
     else:
-        assert "Host host-a (other) 5G" in text
-        assert "owner Host host-b" in text
+        assert "host-a (Work) 5G" in text
+        assert "owner host-b" in text
     assert all(fleet_api["cell_width"](line) <= 80 for line in text.splitlines())
 
 
@@ -281,26 +364,26 @@ def test_cli_groups_host_uid_instead_of_visible_username(fleet_api, fleet):
     for index, item in enumerate(fleet["services"]):
         item.update(container=None, host=True, host_uid=1000 if index < 2 else 1005,
                     host_user="operator", mine=False)
-    text = fleet_api["format_fleet"](fleet, width=80)
-    assert "Host operator · 2 services" in text and "Host operator · 1 services" in text
-    assert "Host operator · 3 services" not in text
+    text = fleet_api["format_fleet"](fleet, width=80, show_names=True)
+    assert "operator · 2 services" in text and "operator · 1 services" in text
+    assert "operator · 3 services" not in text
 
 
-@pytest.mark.parametrize("user, expected", [(None, "Host UID 0"), ("\x00\r\n", "Host UID 0"),
-                                            ("host\x1b[31m\r\n\u202e", "Host host [31m")])
+@pytest.mark.parametrize("user, expected", [(None, "UID 0"), ("\x00\r\n", "UID 0"),
+                                            ("host\x1b[31m\r\n\u202e", "host [31m")])
 def test_cli_host_labels_and_history_sanitize_names(fleet_api, fleet, user, expected):
     item = fleet["services"][0]
     item.update(container=None, host=True, host_uid=0, host_user=user, mine=False)
     if user is None:
         item["model"] = None
     fleet["services"] = [item]
-    text = fleet_api["format_fleet"](fleet, width=80)
+    text = fleet_api["format_fleet"](fleet, width=80, show_names=True)
     assert expected in text
     args = fleet_api["build_parser"]().parse_args(["history", item["id"], "--hours", "168"])
     history = {"schema_version": 1, "service_id": item["id"], "hours": 168,
                "resolution": "hourly", "samples": [], "service": copy.deepcopy(item)}
     fleet_api["validate_fleet_history"](args, history)
-    rendered = fleet_api["format_fleet_history"](history, width=80)
+    rendered = fleet_api["format_fleet_history"](history, width=80, show_names=True)
     assert expected in rendered
     assert all(character not in text + rendered for character in ("\x1b", "\r", "\u202e"))
     assert all(fleet_api["cell_width"](line) <= 80 for line in rendered.splitlines())
@@ -312,7 +395,7 @@ def test_cli_unresolved_other_keeps_unknown_without_host_proof(fleet_api, fleet,
         {"container": None, "host": proof, "host_uid": 1000, "host_user": "unverified",
          "kind": "other", "used_gb": 5, "service_id": None}]
     text = fleet_api["format_fleet"](fleet, width=80, by="gpu")
-    assert "unknown (other) 5G" in text and "unverified" not in text
+    assert "Unknown (Work) 5G" in text and "unverified" not in text
 
 
 @pytest.mark.parametrize("fields", [{"host": "true"}, {"host_uid": True},

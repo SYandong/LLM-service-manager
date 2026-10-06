@@ -1,6 +1,7 @@
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: OpenCode / deepseek-v4.1-flash
 # Generated-By: Codex / gpt-6.1-sol
+# Generated-By: Codex / unknown model
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
@@ -16,7 +17,7 @@ dependencies = ["PyYAML>=6", "rich>=13"]
 llmsvc-scheduler = "llmsvc.__main__:main"
 
 [project.optional-dependencies]
-tui = ["textual>=0.70"]
+tui = ["textual>=0.70,<9"]
 test = ["pytest", "huggingface_hub", "openai"]
 
 [tool.setuptools.packages.find]

@@ -10,6 +10,7 @@ import argparse
 from collections import deque
 import configparser
 from datetime import datetime, timezone
+import hashlib
 from http.client import HTTPException
 import importlib
 import ipaddress
@@ -1542,22 +1543,73 @@ def validate_fleet(result):
     return result
 
 
-def fleet_owner(item):
-    """Use proven host UID identity without trusting a nullable container label."""
+def fleet_owner(item, show_names=False):
+    """Keep canonical owner keys separate from their optional visible names."""
     container = item.get("container")
     if isinstance(container, str) and container:
-        return "container:" + container, clean_text(container)
-    if item.get("host") is True:
+        identity, name = "container:" + container, clean_text(container)
+    elif item.get("host") is True:
         uid = item.get("host_uid")
-        if type(uid) is int and uid >= 0:
-            user = item.get("host_user")
-            user = clean_text(user).strip() if isinstance(user, str) else ""
-            return "host:uid:" + str(uid), "Host " + user if user else "Host UID " + str(uid)
-        return "host", "host"
-    return "unknown", "unknown"
+        if type(uid) is not int or uid < 0:
+            return "host", "Unknown"
+        user = item.get("host_user")
+        user = clean_text(user).strip() if isinstance(user, str) else ""
+        identity, name = "host:uid:" + str(uid), user or "UID " + str(uid)
+    else:
+        return "unknown", "Unknown"
+    if not show_names:
+        digest = hashlib.sha256(identity.encode("utf-8")).digest()
+        name = "User %09d" % (int.from_bytes(digest, "big") % 1000000000)
+    return identity, name
 
 
-def format_fleet(result, width=100, *, by="person", sort=None, color=False):
+def fleet_model_label(value):
+    """Shorten absolute model filesystem paths, preserving repository IDs."""
+    value = str(value or "unknown")
+    return value.rstrip("/").rsplit("/", 1)[-1] if value.startswith("/") and value.strip("/") else value
+
+
+def fleet_display_text(value, items=(), show_names=False, *, preserve_models=True):
+    """Apply the same presentation rules to IDs, parameters and diagnostics."""
+    text, names, models = clean_text(value), {}, set()
+    for item in items:
+        model = item.get("model")
+        if isinstance(model, str) and model.startswith("/"):
+            text = text.replace(model, fleet_model_label(model))
+        if preserve_models and isinstance(model, str) and model:
+            models.add(fleet_model_label(model))
+        if show_names:
+            continue
+        identity, label = fleet_owner(item)
+        if identity in ("host", "unknown"):
+            continue
+        names.setdefault(identity, label)
+        raw_name = item.get("container") if identity.startswith("container:") else item.get("host_user")
+        if isinstance(raw_name, str) and raw_name:
+            names.setdefault(raw_name, label)
+    if names:
+        keep = r"User [0-9]{9}(?!\d)"
+        if models:
+            keep += r"|(?<![\w./-])(?:" + "|".join(
+                re.escape(model) for model in sorted(models, key=len, reverse=True)) + r")(?![\w./:-])"
+        pattern = r"(?P<keep>" + keep + r")|(?<![\w.-])(?:" + "|".join(
+            re.escape(name) for name in sorted(names, key=len, reverse=True)) + r")(?![\w.-])"
+        text = re.sub(pattern, lambda match: match.group() if match.group("keep") else names[match.group()], text)
+    return text
+
+
+FLEET_ERROR_CODES = frozenset(("fleet_disabled", "fleet_claims_disabled", "fleet_store_unavailable",
+    "fleet_stopping", "unmapped_container", "invalid_fleet_history_query", "service_not_found",
+    "claim_not_found", "forbidden_container", "service_observation_unknown", "invalid_claim",
+    "invalid_request", "request_too_large", "not_found"))
+
+
+def fleet_display_items(result):
+    return (list(result.get("services", [])) + list(result.get("containers", [])) +
+            [item for gpu in result.get("gpus", []) for item in gpu.get("occupants", [])])
+
+
+def format_fleet(result, width=100, *, by="person", sort=None, color=False, show_names=False):
     width, lines = max(1, width), []
     colors = {"active": "32", "over_limit": "31", "claimed": "34", "unknown": "90"}
 
@@ -1572,11 +1624,11 @@ def format_fleet(result, width=100, *, by="person", sort=None, color=False):
     if result.get("stale"):
         add("WARNING stale fleet snapshot; activity is unknown")
     for error in result.get("errors", []):
-        add("WARNING " + str(error))
+        add("WARNING " + fleet_display_text(error, fleet_display_items(result), show_names))
     services = result.get("services", [])
 
     def owner(item):
-        return fleet_owner(item)[1]
+        return fleet_owner(item, show_names)[1]
 
     def order(item):
         value = item.get("idle_seconds") if sort == "idle" else (
@@ -1597,7 +1649,7 @@ def format_fleet(result, width=100, *, by="person", sort=None, color=False):
         suffix = "  %s  %s  %sG  %s" % (
             item["engine"], ",".join("GPU%s" % index for index in observed_gpus) or "GPU—",
             number(memory), label)
-        add("  " + (item.get("model") or "unknown") + suffix, status)
+        add("  " + fleet_model_label(item.get("model")) + suffix, status)
         add("    API: " + endpoint)
         window = item.get("window_24h", {})
         ratio = window.get("active_ratio")
@@ -1610,7 +1662,8 @@ def format_fleet(result, width=100, *, by="person", sort=None, color=False):
             fleet_tokens(fleet_total_tokens(window))))
         add("    idle %s · uptime %s · id %s" % (
             "—" if status == "unknown" else fleet_age(item.get("idle_seconds")),
-            fleet_age(item.get("uptime_seconds")), item["id"]))
+            fleet_age(item.get("uptime_seconds")), fleet_display_text(
+                item["id"], [item], show_names, preserve_models=False)))
         coverage = window.get("coverage_ratio")
         if coverage is not None and coverage < 1:
             observed = window.get("observed_active_ratio")
@@ -1619,7 +1672,8 @@ def format_fleet(result, width=100, *, by="person", sort=None, color=False):
         if item.get("claim"):
             claim = item["claim"]
             add("    claim %s · until %s · %s" % (
-                claim.get("id", "—"), expiry(claim.get("until")), claim.get("reason", "")))
+                fleet_display_text(claim.get("id", "—"), [item], show_names, preserve_models=False), expiry(claim.get("until")),
+                fleet_display_text(claim.get("reason", ""), fleet_display_items(result), show_names)))
 
     if by == "gpu":
         observed = {item["index"]: item for item in result.get("gpus", [])}
@@ -1631,7 +1685,7 @@ def format_fleet(result, width=100, *, by="person", sort=None, color=False):
             for occupant in gpu.get("occupants", []):
                 if not occupant.get("service_id"):
                     add("  %s (%s) %sG" % (owner(occupant),
-                        occupant.get("kind") or "other", number(occupant.get("used_gb"))))
+                        "Work" if occupant.get("kind") in (None, "other") else occupant["kind"], number(occupant.get("used_gb"))))
             for item in sorted((item for item in services if gpu["index"] in item["gpus"]), key=order):
                 add("  owner " + owner(item))
                 amounts = [occupant.get("used_gb") for occupant in gpu.get("occupants", [])
@@ -1751,11 +1805,16 @@ def validate_fleet_claim(args, result, service_id=None, *, payload=None):
 
 def format_fleet_claim(args, result):
     claim = result["claim"]
+    items = [claim] + getattr(args, "_fleet_display_items", [])
+    show_names = getattr(args, "show_names", False)
     if args.command == "unclaim":
-        return clean_text(("Dry run: would revoke claim " if args.dry_run else "Claim revoked: ") + claim["id"])
+        return fleet_display_text(("Dry run: would revoke claim " if args.dry_run else "Claim revoked: ") + claim["id"],
+                                  items, show_names, preserve_models=False)
     return clean_text("%s %s · service %s · until %s · %s" % (
-        "Dry run: would claim" if args.dry_run else "Claim recorded:", claim.get("id", ""),
-        claim["service_id"], expiry(claim["until"]), claim["reason"]))
+        "Dry run: would claim" if args.dry_run else "Claim recorded:",
+        fleet_display_text(claim.get("id", ""), items, show_names, preserve_models=False),
+        fleet_display_text(claim["service_id"], items, show_names, preserve_models=False), expiry(claim["until"]),
+        fleet_display_text(claim["reason"], items, show_names)))
 
 
 def validate_fleet_history(args, result):
@@ -1784,15 +1843,16 @@ def validate_fleet_history(args, result):
     return result
 
 
-def format_fleet_history(result, width=100):
-    lines = ["Fleet history · %s · last %sh · %s (UTC)" % (
-        result["service_id"], result["hours"], result["resolution"])]
+def format_fleet_history(result, width=100, *, show_names=False):
     service = result.get("service", {})
-    if service.get("model") or service.get("host") is True:
-        lines.append("%s · %s · %s" % (service.get("model") or "unknown",
-                     service.get("engine", "—"), fleet_owner(service)[1]))
+    lines = ["Fleet history · %s · last %sh · %s (UTC)" % (
+        fleet_display_text(result["service_id"], [service], show_names, preserve_models=False),
+        result["hours"], result["resolution"])]
+    if service.get("model") or service.get("host") is True or service.get("container"):
+        lines.append("%s · %s · %s" % (fleet_model_label(service.get("model")),
+                     service.get("engine", "—"), fleet_owner(service, show_names)[1]))
     if service.get("argv_redacted"):
-        lines.append("Parameters: " + service["argv_redacted"])
+        lines.append("Parameters: " + fleet_display_text(service["argv_redacted"], [service], show_names))
     hourly = result["resolution"] == "hourly"
     lines.append("UTC time             Active   Requests  Output  Input" if hourly else
                  "UTC time             Active   Running  Waiting  Requests  Output  Input")
@@ -1817,6 +1877,7 @@ def build_parser(parser_class=argparse.ArgumentParser):
     parser.add_argument("--url", help="Scheduler URL (overrides LLM_URL and config)")
     parser.add_argument("--config", help="Config file (default: ~/.config/llm/config)")
     parser.add_argument("--timeout", help="HTTP timeout in seconds (model actions and reserve use --wait instead)")
+    parser.add_argument("--show-names", action="store_true", help="Show fleet owner names instead of stable anonymous labels")
     commands = parser.add_subparsers(dest="command")
     for command in ("status", "fleet"):
         fleet = commands.add_parser(command, help="Show all observed inference services")
@@ -1825,9 +1886,12 @@ def build_parser(parser_class=argparse.ArgumentParser):
         fleet.add_argument("--mine", action="store_true", help="Ask the server for services owned by this connection's container")
         fleet.add_argument("--json", action="store_true", help="Print the complete JSON snapshot")
         fleet.add_argument("--plain", action="store_true", help="Print text without terminal colors")
+        fleet.add_argument("--show-names", action="store_true", default=argparse.SUPPRESS,
+                           help="Show fleet owner names instead of stable anonymous labels")
         if command == "status":
             fleet.add_argument("--shared", action="store_true", help="Use the original shared-model /v1/state snapshot")
-    commands.add_parser("top", help="Open the optional fleet TUI (text fallback outside a terminal)")
+    top = commands.add_parser("top", help="Open the optional fleet TUI (text fallback outside a terminal)")
+    top.add_argument("--show-names", action="store_true", default=argparse.SUPPRESS)
     commands.add_parser("legacy-tui", help="Open the deprecated shared-model TUI")
     claim = commands.add_parser("claim", help="Declare use of one of your inference services")
     claim.add_argument("service", type=model_name, help="Service ID or unambiguous model name")
@@ -1835,14 +1899,17 @@ def build_parser(parser_class=argparse.ArgumentParser):
     claim.add_argument("--reason", required=True, type=claim_reason)
     claim.add_argument("--dry-run", action="store_true")
     claim.add_argument("--json", action="store_true")
+    claim.add_argument("--show-names", action="store_true", default=argparse.SUPPRESS)
     unclaim = commands.add_parser("unclaim", help="Revoke one of your fleet declarations")
     unclaim.add_argument("id", type=model_name)
     unclaim.add_argument("--dry-run", action="store_true")
     unclaim.add_argument("--json", action="store_true")
+    unclaim.add_argument("--show-names", action="store_true", default=argparse.SUPPRESS)
     history = commands.add_parser("history", help="Show recorded activity for a service ID")
     history.add_argument("service", type=model_name)
     history.add_argument("--hours", type=int, choices=(24, 168), default=24)
     history.add_argument("--json", action="store_true")
+    history.add_argument("--show-names", action="store_true", default=argparse.SUPPRESS)
     usage = commands.add_parser("usage", help="Show request and token usage totals")
     usage.add_argument("--days", type=usage_days, default=7, help="Usage window in days, 1-365 (default: 7)")
     usage.add_argument("--by", choices=("user", "model", "day"), default="user",
@@ -1912,15 +1979,20 @@ def app_version(parser_class=argparse.ArgumentParser):
 
 def execute_command(args, client, *, now=None):
     if args.command in (None, "top", "fleet", "status") and not getattr(args, "shared", False):
-        return validate_fleet(client.request("GET", "/v1/fleet" + ("?mine=1" if getattr(args, "mine", False) else "")))
+        result = validate_fleet(client.request("GET", "/v1/fleet" + ("?mine=1" if getattr(args, "mine", False) else "")))
+        args._fleet_display_items = fleet_display_items(result)
+        return result
     if args.command == "history":
         path = "/v1/fleet/history?" + urlencode({"service": args.service, "hours": args.hours})
-        return validate_fleet_history(args, client.request("GET", path))
+        result = validate_fleet_history(args, client.request("GET", path))
+        args._fleet_display_items = [result.get("service", {})]
+        return result
     if args.command in ("claim", "unclaim"):
         service_id = None
         if args.command == "claim":
             until = claim_until(args.until, now)
             fleet = validate_fleet(client.request("GET", "/v1/fleet"))
+            args._fleet_display_items = fleet_display_items(fleet)
             service_id = resolve_fleet_service(args.service, fleet)
             method, path = "POST", "/v1/fleet/claims"
             payload = {"service_id": service_id, "until": until, "reason": args.reason}
@@ -2005,9 +2077,10 @@ def format_result(args, result, width=100, *, color=False):
         return json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
     if args.command in (None, "top", "fleet", "status") and not getattr(args, "shared", False):
         return format_fleet(result, width=width, by=getattr(args, "by", "person"),
-                            sort=getattr(args, "sort", None), color=color and not getattr(args, "plain", False))
+                            sort=getattr(args, "sort", None), color=color and not getattr(args, "plain", False),
+                            show_names=getattr(args, "show_names", False))
     if args.command == "history":
-        return format_fleet_history(result, width=width)
+        return format_fleet_history(result, width=width, show_names=getattr(args, "show_names", False))
     if args.command in ("claim", "unclaim"):
         return format_fleet_claim(args, result)
     if args.command == "usage":
@@ -2112,7 +2185,8 @@ def main(argv=None):
         if args.command in (None, "top", "legacy-tui") and sys.stdout.isatty():
             app = tui_app() if args.command == "legacy-tui" else fleet_tui_app()
             if app is not None:
-                app(client=client, api=SimpleNamespace(**globals())).run()
+                kwargs = {"show_names": True} if args.command != "legacy-tui" and args.show_names else {}
+                app(client=client, api=SimpleNamespace(**globals()), **kwargs).run()
                 return 0
         if args.command == "wake" and not args.dry_run:
             result = execute_wake_with_progress(args, client)
@@ -2130,7 +2204,15 @@ def main(argv=None):
             else:
                 print("llm: " + clean_text(format_registry_error(exc)), file=sys.stderr)
             return 1
-        print("llm: " + clean_text(exc), file=sys.stderr)
+        message = clean_text(exc)
+        if args.command in (None, "top", "fleet", "status", "history", "claim", "unclaim") and not getattr(args, "shared", False):
+            message = fleet_display_text(message, getattr(args, "_fleet_display_items", []), args.show_names)
+            if exc.status is not None and not args.show_names:
+                outcome = re.search(r"; claim(?: preview)? outcome unknown:.*", message)
+                detail = (exc.payload or {}).get("error") if isinstance(exc.payload, dict) else None
+                detail = detail if isinstance(detail, str) and detail in FLEET_ERROR_CODES else "Fleet request failed"
+                message = "HTTP %s: %s%s" % (exc.status, detail, outcome.group() if outcome else "")
+        print("llm: " + message, file=sys.stderr)
         return 1
     except (KeyError, TypeError, ValueError, OverflowError):
         print("llm: Invalid scheduler state response; check the server API version", file=sys.stderr)

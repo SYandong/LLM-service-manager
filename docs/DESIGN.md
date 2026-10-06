@@ -1169,6 +1169,25 @@ and its JSON format. `llm fleet` supports person/GPU grouping, sorting, mine,
 plain and JSON output. `claim`, `unclaim` and `history` use the fleet API.
 Shared-model commands remain available. A disabled fleet returns `fleet_disabled`.
 
+Fleet text and the TUI default to anonymous owner labels, `User 123456789`.
+The nine decimal digits are SHA-256 of the canonical owner identity modulo
+1,000,000,000, padded with zeros. Container identities use `container:<name>`;
+verified host identities use `host:uid:<uid>`, so equal visible names in different
+namespaces remain distinct. Missing owner identity displays `Unknown`.
+`--show-names` reveals names in the CLI; N toggles them in the TUI for everyone,
+without authentication or authorization. A revealed host owner uses its username
+or `UID <uid>`, without a Host prefix. Known owner names in visible service IDs,
+history parameters and diagnostics follow the same display setting. Copying
+displayed text copies these labels. Cached notices and read/history errors keep
+their original owner context, so N still hides or reveals names after that
+owner disappears from current observations. API identities, colors, selection keys,
+requests and `--json` output retain the original data; this is a presentation
+setting, not an API privacy boundary.
+
+Absolute model filesystem paths display their basename, for example
+`gemma-4-31b-it-qat-w4a16-ct`. Repository names such as `google/gemma` and request
+routing identifiers retain their meaning.
+
 The `llm` / `llm top` TUI opens the GPU view. P switches to People, grouped by
 container. The People view includes 24-hour activity, history and claims;
 its default sort puts inactive services first, then sorts by memory.
@@ -1187,14 +1206,15 @@ It lists every owner allocation and individual
 LLM service, including model, engine, state and 24-hour activity. Long fields
 wrap. Per-card memory comes from that card; activity statistics cover the service.
 
-Z switches to the compact overview. GPU 0–5 fit together at 100×30 with
-two bar rows, and at 80×24 with one. Overview amounts use concise formatting;
+Z switches to the compact overview. Every allocation bar keeps three rows at
+100×30 and 80×24, with labels on the middle row. The overview scrolls when
+its contents exceed the viewport. Overview amounts use concise formatting;
 expanded allocations and detail show up to two decimals, without trailing zeros.
 Accounting retains the original precision. The VRAM percentage
 appears when space allows.
 
 Each container owner keeps one color across GPUs and refreshes. Solid segments
-are LLM allocations; a subtle texture and explicit `Other` labels identify other tasks.
+are LLM allocations; a subtle texture and explicit `Work` labels identify other tasks.
 Neutral segments show unattributed used memory; the muted track shows free
 memory. Owner keys and numeric labels make the view readable without color.
 Multiple LLM services from the same owner share a segment, with individual
@@ -1209,18 +1229,23 @@ For capacity T, measured use U and attributed sum S, segment totals are
 S + (U−S) + (T−U). Small allocations use proportional cell rounding and retain
 their measured amounts in detail. Filters affect selection and detail;
 they never turn hidden allocations into free memory. If S exceeds U, show
-the measured use with an attribution-conflict marker and list the discrepancy.
+the measured use with `Memory readings differ` and list the discrepancy.
+GPU and process readings are collected sequentially; a difference alone does
+not identify duplicate allocations. Attributed amounts and measured use remain
+visible with their original accounting precision.
 Missing capacity has no percentage bar; stale values remain labelled stale.
 
 #### Selection, scrolling and readable values (#331, #333, #335)
 
 The selected GPU heading has a high-contrast background, bold text and a small
 pulsing marker in its left gutter. The pulse changes style, preserving text and
-layout. J/K selects the next/previous GPU and aligns its heading. Up/Down scrolls
-contents by one row. Wheel and trackpad gestures use the same scrolling path.
-The selected GPU follows the panel at the viewport center without realigning the
-contents. Page Up/Page Down scrolls by a page. Left/Right selects an allocation
-within the current panel while preserving the scroll position.
+layout. Up/Down selects the previous/next GPU across all observed cards,
+including GPU 4 and 5 when expanded panels are tall. J/K remains an alternative.
+Each arrow key returns the selected GPU heading to the viewport, including
+Left/Right when selecting an allocation in that GPU. In iTerm2 with successful
+input-protocol negotiation, wheel and trackpad gestures scroll freely without
+changing selection. Page Up/Page Down scrolls by a page
+and preserves selection.
 Refreshes and closing a dialog preserve manual scrolling. Enter opens detail;
 Z switches panel size.
 
@@ -1228,8 +1253,10 @@ Drag selection and copying belong to the terminal. The fleet app disables pointe
 button and motion reporting. Its POSIX driver queries DEC alternate-scroll mode
 1007 before enabling it, preserving unrelated input and restoring the reported
 mode on suspend, exit and startup failure. Resume queries again. A missing or
-unsupported reply leaves mode 1007 unchanged. The terminal translates wheel and
-trackpad gestures into Up/Down keys; item selection therefore uses J/K.
+unsupported reply leaves mode 1007 unchanged. Terminal input must distinguish
+wheel scrolling from physical arrow keys before the TUI applies these separate
+scroll and selection paths. Unsupported protocols retain arrow selection and
+Page Up/Page Down scrolling.
 
 People scrolls the focused table or details pane. Help and GPU details scroll
 their whole content with Up/Down or Page Up/Page Down, including when a button

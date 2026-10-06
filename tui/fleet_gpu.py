@@ -5,12 +5,12 @@
 from dataclasses import dataclass
 import hashlib
 import math
-import unicodedata
 
 from rich.text import Text
 from rich.console import Console
 
-from .fleet_format import api_label, count, duration, gib, status_label, total_tokens
+from .fleet_format import (api_label, count, display_text, duration, gib, model_label,
+                           owner_info, status_label, total_tokens)
 
 
 FREE_COLOR = "#28313d"
@@ -18,7 +18,7 @@ NEUTRAL_COLOR = "#66717f"
 OWNER_COLORS = ("#db9c9c", "#97b4dd", "#c6c786", "#d8a2c8",
                 "#94c5b7", "#e4b778", "#8fc397", "#dba5a1",
                 "#82b9d8", "#c6ad86", "#a9c4a7", "#b996d9")
-KIND_LABEL = {"llm": "LLM", "other": "Other", "unknown": "Unknown type"}
+KIND_LABEL = {"llm": "LLM", "other": "Work", "unknown": "Unknown type"}
 RESIDUAL_KEY = ("system", "unattributed")
 FREE_KEY = ("system", "free")
 MEASURED_KEY = ("system", "measured")
@@ -33,25 +33,6 @@ def numeric(value):
 def compact_gib(value):
     """Keep the existing formatter entry point for callers of the GPU view."""
     return gib(value)
-
-
-def owner_info(item):
-    """Return a stable owner identity and a terminal-safe display label."""
-    def clean(value):
-        return "".join(character if not unicodedata.category(character).startswith("C") else " "
-                       for character in value)
-
-    container = item.get("container")
-    if isinstance(container, str) and container:
-        return "container:" + container, clean(container)
-    if item.get("host") is True:
-        uid = item.get("host_uid")
-        if type(uid) is int and uid >= 0:
-            user = item.get("host_user")
-            user = clean(user).strip() if isinstance(user, str) else ""
-            return "host:uid:" + str(uid), "Host " + user if user else "Host UID " + str(uid)
-        return "host", "host"
-    return "unknown", "unknown"
 
 
 def owner_color(identity):
@@ -121,7 +102,7 @@ def service_amounts(members):
             for ident, values in groups.items()}
 
 
-def account_gpu(gpu, services=()):
+def account_gpu(gpu, services=(), *, show_names=False):
     services = {service["id"]: service for service in services}
     groups = {}
     for occupant in gpu.get("occupants", []):
@@ -129,9 +110,9 @@ def account_gpu(gpu, services=()):
         if service_id is not None and (not isinstance(service_id, str) or not service_id):
             raise ValueError("Invalid GPU service ID.")
         service = services.get(service_id, {})
-        identity, owner = owner_info(occupant)
+        identity, owner = owner_info(occupant, show_names)
         if identity in ("host", "unknown") and service.get("host") is True:
-            identity, owner = owner_info(service)
+            identity, owner = owner_info(service, show_names)
         kind = occupant.get("kind")
         kind = "llm" if kind in ("llm", "inference") else "other" if kind == "other" else "unknown"
         group = groups.setdefault((identity, kind), {"owner": owner, "members": []})
@@ -157,7 +138,7 @@ def account_gpu(gpu, services=()):
     if attributed is None:
         issues.append("allocation amount unknown")
     if used is not None and attributed is not None and attributed > used:
-        issues.append("attribution conflict +%s GiB" % gib(attributed - used))
+        issues.append("Memory readings differ +%s GiB" % gib(attributed - used))
     if used is not None and total is not None and used > total:
         issues.append("over capacity +%s GiB" % gib(used - total))
     residual = used - attributed if used is not None and attributed is not None and attributed <= used else None
@@ -267,8 +248,6 @@ def card_header(account, width, selected=False, stale=False, exact=False):
         title += " · STALE"
     result = Text(title, style="bold #e0e7ef" if selected else "#c1cad5")
     warning = "; ".join(account.issues)
-    if not exact:
-        warning = warning.replace("attribution conflict", "conflict")
     compute = " · compute %s%%" % number(account.util_percent)
     memory_percent = ""
     if account.total_gb and account.used_gb is not None:
@@ -317,20 +296,21 @@ def expanded_header(account, selected=False, stale=False):
     return text
 
 
-def service_lines(service, used_gb, index, clean=str, status=None, *, fresh=True):
+def service_lines(service, used_gb, index, clean=str, status=None, *, fresh=True, show_names=False):
     """Four logical rows; activity and counters describe the whole service."""
     status = status or service.get("status", "unknown")
     if status not in SERVICE_STYLES:
         status = "unknown"
     first = Text()
     first.append("    Model ", style="#98a4b4")
-    first.append(clean(service.get("model") or "unknown"), style="bold #eaf1f7")
+    first.append(clean(model_label(service.get("model"))), style="bold #eaf1f7")
     first.append(" · Engine " + clean(service.get("engine") or "unknown"), style="#98a4b4")
     first.append(" · State ", style="#98a4b4")
     first.append(status_label(status), style="bold " + SERVICE_STYLES[status])
     first.append(" · GPU %s VRAM: " % index, style="#98a4b4")
     first.append(gib(used_gb) + " GiB", style="bold #eaf1f7")
-    ident = Text("    Service ID: " + clean(service["id"]), style="#98a4b4")
+    ident = Text("    Service ID: " + clean(display_text(
+        service["id"], [service], show_names, preserve_models=False)), style="#98a4b4")
     ident.append(" · API: " + api_label(service, clean, fresh=fresh))
     values = service.get("hourly_active_24h") or [None] * 24
     activity = "".join("·" if not numeric(value) else "▁▂▃▄▅▆▇█"[
@@ -357,7 +337,7 @@ def service_lines(service, used_gb, index, clean=str, status=None, *, fresh=True
 
 
 def render_expanded(accounts, services, width, bar_rows=3, selected_gpu=None,
-                    selected_segment=None, stale=False, clean=str, statuses=None):
+                    selected_segment=None, stale=False, clean=str, statuses=None, *, show_names=False):
     """Wrap complete cards and return anchors and mouse targets for scrolling."""
     width = max(1, width)
     console = Console(width=width)
@@ -402,7 +382,7 @@ def render_expanded(accounts, services, width, bar_rows=3, selected_gpu=None,
             for ident in sorted((ident for ident in amounts if ident in services), key=lambda ident: ranks[ident]):
                 memory = amounts[ident]
                 for line in service_lines(services[ident], memory, account.index, clean,
-                                          statuses.get(ident), fresh=not stale):
+                                          statuses.get(ident), fresh=not stale, show_names=show_names):
                     append(line, account.index, allocation.key, ident, indent=4)
         if account.issues:
             append(Text("  Measured VRAM · Used %s GiB · Total %s GiB" % (gib(account.used_gb), gib(account.total_gb)),

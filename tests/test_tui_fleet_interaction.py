@@ -98,7 +98,7 @@ def test_owned_wheels_are_consumed_once_at_scroll_boundaries(interaction_snapsho
             app.handle_gpu_wheel(last, 1)
             await pilot.pause()
             assert viewport.scroll_y == viewport.max_scroll_y
-            assert app.selected_gpu == 5 and last.stopped and last.prevented
+            assert app.selected_gpu == 0 and last.stopped and last.prevented
     asyncio.run(scenario())
 
 
@@ -150,7 +150,7 @@ def test_wheel_over_compact_viewport_preserves_the_visible_overview(interaction_
     asyncio.run(scenario())
 
 
-def test_scroll_position_drives_gpu_selection_without_realignment(interaction_snapshot):
+def test_scroll_position_preserves_gpu_selection_until_an_arrow_realigns(interaction_snapshot):
     async def scenario():
         app, _ = make_app(interaction_snapshot)
         async with app.run_test(size=(80, 24)) as pilot:
@@ -158,18 +158,18 @@ def test_scroll_position_drives_gpu_selection_without_realignment(interaction_sn
             viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
             viewport.scroll_to(y=app._gpu_anchors[2] + 3, animate=False)
             await pilot.pause()
-            assert app.selected_gpu == 2
+            assert app.selected_gpu == 0
             start = viewport.scroll_y
             await wheel(pilot)
-            assert viewport.scroll_y == start + 1 and app.selected_gpu == 2
+            assert viewport.scroll_y == start + 1 and app.selected_gpu == 0
             await pilot.press("right")
-            assert viewport.scroll_y == start + 1 and app.selected_gpu == 2
+            assert viewport.scroll_y == 0 and app.selected_gpu == 0
             await wheel(pilot, shift=True)
-            assert viewport.scroll_y == start + 2
+            assert viewport.scroll_y == 1
             await pilot.press("pagedown")
-            assert viewport.scroll_y > start + 2
+            assert viewport.scroll_y > 1
             await pilot.press("pageup")
-            assert viewport.scroll_y == start + 2
+            assert viewport.scroll_y == 1
             viewport.scroll_to(y=0, animate=False)
             await pilot.pause()
             assert app.selected_gpu == 0
@@ -205,8 +205,8 @@ def test_keyboard_selection_survives_alignment_of_short_empty_gpu_panels(interac
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("key,expected_gpu", [("pageup", 0), ("pagedown", 5)])
-def test_page_key_at_scroll_boundary_catches_up_gpu_after_clearing_text(interaction_snapshot, key, expected_gpu):
+@pytest.mark.parametrize("key", ["pageup", "pagedown"])
+def test_page_key_at_scroll_boundary_preserves_gpu_after_clearing_text(interaction_snapshot, key):
     async def scenario():
         app, _ = make_app(interaction_snapshot)
         async with app.run_test(size=(80, 24)) as pilot:
@@ -226,7 +226,7 @@ def test_page_key_at_scroll_boundary_catches_up_gpu_after_clearing_text(interact
             await pilot.press(key)
             await pilot.pause()
             assert not overview.has_selection and viewport.scroll_y == boundary
-            assert app.selected_gpu == expected_gpu
+            assert app.selected_gpu == 2
     asyncio.run(scenario())
 
 
@@ -270,7 +270,7 @@ def test_allocation_navigation_keeps_heading_and_chart_in_the_stationary_viewpor
             viewport.scroll_to(y=original_scroll + 3, animate=False)
             await pilot.pause()
             await pilot.press("left")
-            assert viewport.scroll_y == original_scroll + 3
+            assert viewport.scroll_y == original_scroll
     asyncio.run(scenario())
 
 

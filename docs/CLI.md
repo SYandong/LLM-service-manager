@@ -396,7 +396,7 @@ LLM_URL=http://scheduler:8011 python3 llm registry --json
 ## 可选 TUI
 
 包含 TUI 的发布包使用 `pip install 'llmsvc[tui]'` 安装，也可复制实际 `tui/`
-目录到独立 `llm` 旁边并安装 `textual>=0.70`。只有 stdout 是 TTY 时才启动界面。
+目录到独立 `llm` 旁边并安装 `textual>=0.70,<9`。只有 stdout 是 TTY 时才启动界面。
 
 ```sh
 python -m pip install '.[tui]'
@@ -407,22 +407,31 @@ LLM_URL=http://scheduler:8011 python cli/llm top
 The default fleet TUI opens large GPU panels with all owner/model allocations
 inline. The selected GPU has a highlighted heading and pulsing marker. P opens
 People; G returns to GPUs. Fleet refreshes every 15 seconds and on service changes.
+Owners default to stable `User 123456789` labels. Use `llm fleet --show-names`
+or `llm top --show-names` to reveal names; N toggles them in the TUI for everyone.
+Host owners reveal their username or UID without a Host prefix. Absolute model
+paths show their basename; `--json` retains the original API data.
 
 | Control | Action |
 |---|---|
-| Up / Down | Scroll contents by one row |
+| Up / Down | Select previous / next GPU and show its heading; scroll in People and dialogs |
 | J / K | Select next / previous GPU or service |
-| Left / Right | Select allocation while keeping the viewport in place |
-| Wheel / trackpad | Scroll contents gently; the selected GPU follows the viewport |
+| Left / Right | Select allocation and return to the selected GPU heading |
+| Wheel / trackpad | Scroll freely without changing selection in iTerm2 after successful input negotiation |
 | Page Up / Page Down | Scroll by a page |
 | Drag, terminal copy shortcut | Select and copy text |
 | Enter | Open details and history |
 | Z | Expanded panels / compact six-GPU overview |
+| N | Show / hide owner names |
 | P / G | People / GPUs |
 | S / M | Sort / Mine |
 | / | Search |
 | C / U | Claim / revoke |
 | R / ? / Q | Refresh / Help / Quit |
+
+Compact allocation bars keep three rows with centered middle-row labels and
+scroll when needed. All six GPUs remain selectable in tall expanded panels.
+Unsupported input protocols retain arrow selection and Page Up/Page Down scrolling.
 
 Durations use integer time units; input, output and total include `tokens`.
 VRAM displays up to two decimals without trailing zeros. `Running · inactive`

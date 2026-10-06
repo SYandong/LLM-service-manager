@@ -1,13 +1,92 @@
 # Generated-By: Codex / gpt-6.1-sol
 """Concise fleet labels without changing the underlying observations."""
 
+import hashlib
 import math
+import re
+import unicodedata
 
 
 STATUS_LABELS = {"active": "Active", "idle": "Idle", "over_limit": "Running · inactive",
                  "claimed": "Claimed", "unknown": "Unknown"}
+FLEET_ERROR_CODES = frozenset(("fleet_disabled", "fleet_claims_disabled", "fleet_store_unavailable",
+    "fleet_stopping", "unmapped_container", "invalid_fleet_history_query", "service_not_found",
+    "claim_not_found", "forbidden_container", "service_observation_unknown", "invalid_claim",
+    "invalid_request", "request_too_large", "not_found"))
 DURATION_UNITS = ((365 * 86400, "y"), (30 * 86400, "mo"), (86400, "d"),
                   (3600, "h"), (60, "m"), (1, "s"))
+
+
+def owner_info(item, show_names=False):
+    """Keep canonical owner keys separate from their optional visible names."""
+    def clean(value):
+        return "".join(character if not unicodedata.category(character).startswith("C") else " "
+                       for character in value)
+
+    container = item.get("container")
+    if isinstance(container, str) and container:
+        identity, name = "container:" + container, clean(container)
+    elif item.get("host") is True:
+        uid = item.get("host_uid")
+        if type(uid) is not int or uid < 0:
+            return "host", "Unknown"
+        user = item.get("host_user")
+        user = clean(user).strip() if isinstance(user, str) else ""
+        identity, name = "host:uid:" + str(uid), user or "UID " + str(uid)
+    else:
+        return "unknown", "Unknown"
+    if not show_names:
+        digest = hashlib.sha256(identity.encode("utf-8")).digest()
+        name = "User %09d" % (int.from_bytes(digest, "big") % 1000000000)
+    return identity, name
+
+
+def model_label(value):
+    """Shorten absolute model filesystem paths, preserving repository IDs."""
+    value = str(value or "unknown")
+    return value.rstrip("/").rsplit("/", 1)[-1] if value.startswith("/") and value.strip("/") else value
+
+
+def display_text(value, items=(), show_names=False, *, preserve_models=True):
+    """Apply the same presentation rules to IDs, parameters and diagnostics."""
+    text = "".join(character if not unicodedata.category(character).startswith("C") else " "
+                   for character in str(value))
+    names, models = {}, set()
+    for item in items:
+        model = item.get("model")
+        if isinstance(model, str) and model.startswith("/"):
+            text = text.replace(model, model_label(model))
+        if preserve_models and isinstance(model, str) and model:
+            models.add(model_label(model))
+        if show_names:
+            continue
+        identity, label = owner_info(item)
+        if identity in ("host", "unknown"):
+            continue
+        names.setdefault(identity, label)
+        raw_name = item.get("container") if identity.startswith("container:") else item.get("host_user")
+        if isinstance(raw_name, str) and raw_name:
+            names.setdefault(raw_name, label)
+    if names:
+        keep = r"User [0-9]{9}(?!\d)"
+        if models:
+            keep += r"|(?<![\w./-])(?:" + "|".join(
+                re.escape(model) for model in sorted(models, key=len, reverse=True)) + r")(?![\w./:-])"
+        pattern = r"(?P<keep>" + keep + r")|(?<![\w.-])(?:" + "|".join(
+            re.escape(name) for name in sorted(names, key=len, reverse=True)) + r")(?![\w.-])"
+        text = re.sub(pattern, lambda match: match.group() if match.group("keep") else names[match.group()], text)
+    return text
+
+
+def error_label(error, items=(), show_names=False):
+    """Retain public fleet reason codes without displaying unbound HTTP bodies."""
+    status = getattr(error, "status", None)
+    if status is not None and not show_names:
+        payload = getattr(error, "payload", None)
+        code = payload.get("error") if isinstance(payload, dict) else None
+        code = code if isinstance(code, str) and code in FLEET_ERROR_CODES else "Fleet request failed"
+        return "HTTP %s: %s" % (status, code)
+    return display_text(error, items, show_names)
 
 
 def numeric(value):
