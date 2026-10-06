@@ -1155,24 +1155,29 @@ they never turn hidden allocations into free memory. If S exceeds U, show
 the measured use with an attribution-conflict marker and list the discrepancy.
 Missing capacity has no percentage bar; stale values remain labelled stale.
 
-#### Selection, scrolling and readable values (#331, #333)
+#### Selection, scrolling and readable values (#331, #333, #335)
 
 The selected GPU heading has a high-contrast background, bold text and a small
 pulsing marker in its left gutter. The pulse changes style, preserving text and
-layout. Up/Down selects one GPU and aligns its heading. Wheel and trackpad events
-scroll contents by one row per tick, retaining every tick in a continuous gesture.
+layout. J/K selects the next/previous GPU and aligns its heading. Up/Down scrolls
+contents by one row. Wheel and trackpad gestures use the same scrolling path.
 The selected GPU follows the panel at the viewport center without realigning the
 contents. Page Up/Page Down scrolls by a page. Left/Right selects an allocation
 within the current panel while preserving the scroll position.
 Refreshes and closing a dialog preserve manual scrolling. Enter opens detail;
 Z switches panel size.
 
-Drag selects text in GPU panels, service details, history and help. Ctrl+C copies
-the selected text using the terminal clipboard; Q quits. A panel with a selection
-holds its displayed text until the selection is cleared. Selection follows wrapped
-lines and whole Unicode characters. Explicit navigation clears the selection.
-Scrolling retains the selected text and freezes automatic GPU selection until
-the text selection is cleared.
+Drag selection and copying belong to the terminal. The fleet app disables pointer
+button and motion reporting. Its POSIX driver queries DEC alternate-scroll mode
+1007 before enabling it, preserving unrelated input and restoring the reported
+mode on suspend, exit and startup failure. Resume queries again. A missing or
+unsupported reply leaves mode 1007 unchanged. The terminal translates wheel and
+trackpad gestures into Up/Down keys; item selection therefore uses J/K.
+
+People scrolls the focused table or details pane. Help and GPU details scroll
+their whole content with Up/Down or Page Up/Page Down, including when a button
+has focus. J/K selects a service in GPU details. Tab changes control focus;
+Escape closes a dialog and Q quits.
 
 Durations use at most two integer units: `y`, `mo`, `d`, `h`, `m`, `s`. Input,
 output and their sum each include `tokens`; missing counters remain unknown.
@@ -1184,6 +1189,8 @@ default). Running · inactive means at least the configured observed idle interv
 from the idle reminder. Help shows the current configured intervals.
 Coverage is the fraction of the eligible interval with valid activity observations.
 It describes data completeness, separately from utilization or activity.
+Activity duration and token totals contain observed-window increments. The first
+valid counters establish a baseline; earlier lifetime usage is not backfilled.
 
 Every model includes an `API` address. Loopback listeners show `Local only`.
 Verified wildcard listeners show the owner's advertised IP and port, followed
