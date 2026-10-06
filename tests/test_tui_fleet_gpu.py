@@ -471,7 +471,7 @@ def test_help_scrolls_at_80_columns_and_restores_gpu_focus(gpu_snapshot):
             assert "Other: other GPU jobs, dotted fill" in text
             assert "Unattributed: used VRAM with no matched workload" in text
             assert "Activity and tokens cover the whole service" in text
-            assert "Shift + wheel or Page Up / Down" in text
+            assert "Wheel / trackpad or Page Up / Down" in text
             assert "Ctrl+C to copy" in text
             viewport = app.screen.query_one("#fleet-help-scroll", VerticalScroll)
             assert viewport.virtual_size.height > viewport.size.height

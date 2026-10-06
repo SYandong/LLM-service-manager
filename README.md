@@ -18,8 +18,9 @@ dotted segments labelled `Other` are other tasks, neutral segments are unattribu
 and the remaining track is free memory. Compute utilization has its own label.
 The default GPU view uses large, scrolling panels with every owner and model
 allocation listed underneath. Bar labels are centered in each segment.
-Use Up/Down or the wheel to select a GPU. Left/Right selects an allocation;
-the GPU chart stays in place. Shift+wheel and Page Up/Page Down scroll freely.
+Use the wheel or trackpad to scroll contents; the selected GPU follows the panel
+at the center of the viewport. Up/Down selects a GPU. Left/Right selects an
+allocation and keeps the chart in place. Page Up/Page Down scrolls by a page.
 Drag to select text, then Ctrl+C to copy. Enter opens details; Q quits.
 Z switches to the compact six-GPU overview, which fits 100×30 and 80×24 terminals.
 P opens People. Each model includes its API address or `Local only`.

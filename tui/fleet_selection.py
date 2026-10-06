@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6.1-sol
+# Generated-By: Codex / unknown model
 """Mouse selection for the fleet's left-aligned Rich text panels."""
 
 from rich._wrap import divide_line
@@ -77,7 +78,7 @@ class SelectableStatic(Static, can_focus=True):
             text.stylize("reverse", start, end)
         return text
 
-    def clear_selection(self):
+    def clear_selection(self, *, apply_pending=True):
         changed = self.dragging or self.has_selection
         if self.dragging:
             self._suppress_selection_click = True
@@ -86,7 +87,9 @@ class SelectableStatic(Static, can_focus=True):
         self._dragging = False
         self._anchor = self._endpoint = self._drag_origin = None
         self._release_capture()
-        pending, self._pending_text = self._pending_text, None
+        pending = self._pending_text if apply_pending else None
+        if apply_pending:
+            self._pending_text = None
         if not self._selection_closed:
             if pending is not None:
                 self.update(pending)
@@ -158,7 +161,9 @@ class SelectableStatic(Static, can_focus=True):
         point = event.get_content_offset(self)
         if point is None:
             return
-        self.clear_selection()
+        # Begin on the frame under the pointer, retaining queued refreshes for
+        # the next explicit clear rather than moving text before the anchor.
+        self.clear_selection(apply_pending=False)
         self._suppress_selection_click = False
         self._anchor = self._endpoint = self._offset_at(point)
         self._drag_origin = point

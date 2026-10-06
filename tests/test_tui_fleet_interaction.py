@@ -1,4 +1,5 @@
 # Generated-By: Codex / gpt-6.1-sol
+# Generated-By: Codex / unknown model
 """Headless fleet navigation, selection and snapshot preservation contracts."""
 
 import asyncio
@@ -49,30 +50,25 @@ def two_service_snapshot(snapshot):
     return snapshot
 
 
-def test_wheel_burst_uses_the_last_tick_quiet_gap_and_consumes_rejected_ticks(interaction_snapshot):
+@pytest.mark.parametrize("size", [(80, 24), (100, 30)])
+def test_each_wheel_tick_scrolls_contents_without_jumping_gpu(interaction_snapshot, size):
     async def scenario():
         app, _ = make_app(interaction_snapshot)
-        async with app.run_test(size=(80, 24)) as pilot:
+        async with app.run_test(size=size) as pilot:
             await ready(app, pilot)
             viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
-            with patch("tui.fleet_app.monotonic", side_effect=[1, 1.1, 1.22, 1.34, 1.46, 1.72]):
+            start = viewport.scroll_y
+            for number in range(1, 7):
                 await wheel(pilot)
-                await pilot.pause()
-                assert app.selected_gpu == 1
-                selected_scroll = viewport.scroll_y
-                for _ in range(4):
-                    await wheel(pilot)
-                    assert app.selected_gpu == 1
-                    assert viewport.scroll_y == selected_scroll
-                assert app._gpu_wheel_at == 1.46
-                await wheel(pilot)
-                assert app.selected_gpu == 2
-                assert viewport.scroll_y == app._gpu_anchors[2]
+                assert viewport.scroll_y == start + number
+            assert app.selected_gpu == 0
+            await wheel(pilot, events.MouseScrollUp)
+            assert viewport.scroll_y == start + 5
             assert app._exception is None
     asyncio.run(scenario())
 
 
-def test_owned_wheels_prevent_defaults_even_at_gpu_boundaries(interaction_snapshot):
+def test_owned_wheels_are_consumed_once_at_scroll_boundaries(interaction_snapshot):
     class Wheel:
         shift = False
 
@@ -89,24 +85,40 @@ def test_owned_wheels_prevent_defaults_even_at_gpu_boundaries(interaction_snapsh
         app, _ = make_app(interaction_snapshot)
         async with app.run_test(size=(100, 30)) as pilot:
             await ready(app, pilot)
-            with patch("tui.fleet_app.monotonic", side_effect=[1, 1.1, 1.4, 1.7, 2]):
-                first, ignored = Wheel(), Wheel()
-                app.handle_gpu_wheel(first, -1)
-                app.handle_gpu_wheel(ignored, 1)
-                assert app.selected_gpu == 0
-                assert first.stopped and first.prevented and ignored.stopped and ignored.prevented
-                app.handle_gpu_wheel(Wheel(), 1)
-                assert app.selected_gpu == 1
-                app.select_gpu(5)
-                last = Wheel()
-                app.handle_gpu_wheel(last, 1)
-                assert app.selected_gpu == 5 and last.stopped and last.prevented
-                app.handle_gpu_wheel(Wheel(), -1)
-                assert app.selected_gpu == 4
+            viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
+            viewport.scroll_to(y=0, animate=False)
+            await pilot.pause()
+            first = Wheel()
+            app.handle_gpu_wheel(first, -1)
+            await pilot.pause()
+            assert viewport.scroll_y == 0 and first.stopped and first.prevented
+            viewport.scroll_to(y=viewport.max_scroll_y, animate=False)
+            await pilot.pause()
+            last = Wheel()
+            app.handle_gpu_wheel(last, 1)
+            await pilot.pause()
+            assert viewport.scroll_y == viewport.max_scroll_y
+            assert app.selected_gpu == 5 and last.stopped and last.prevented
     asyncio.run(scenario())
 
 
-def test_wheel_over_viewport_padding_selects_once_without_default_scroll(interaction_snapshot):
+def test_wheel_burst_retains_every_tick_before_the_next_refresh(interaction_snapshot):
+    async def scenario():
+        app, _ = make_app(interaction_snapshot)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await ready(app, pilot)
+            viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
+            start = viewport.scroll_y
+            for _ in range(8):
+                app.handle_gpu_wheel(events.MouseScrollDown(
+                    app.query_one("#fleet-gpus"), 3, 4, 0, 0, 0, False, False, False), 1)
+            assert viewport.scroll_y == start + 8
+            await pilot.pause()
+            assert viewport.scroll_y == start + 8 and app.selected_gpu == 0
+    asyncio.run(scenario())
+
+
+def test_wheel_over_viewport_padding_scrolls_exactly_once(interaction_snapshot):
     async def scenario():
         app, _ = make_app(interaction_snapshot)
         async with app.run_test(size=(80, 24)) as pilot:
@@ -114,15 +126,14 @@ def test_wheel_over_viewport_padding_selects_once_without_default_scroll(interac
             viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
             viewport.styles.padding = 1
             await pilot.pause()
-            with patch("tui.fleet_app.monotonic", return_value=1) as tick:
-                await pilot._post_mouse_events([events.MouseScrollDown], "#fleet-gpu-scroll", (0, 0))
-                tick.assert_called_once()
-            assert app.selected_gpu == 1
-            assert viewport.scroll_y == app._gpu_anchors[1]
+            start = viewport.scroll_y
+            await pilot._post_mouse_events([events.MouseScrollDown], "#fleet-gpu-scroll", (0, 0))
+            await pilot.pause()
+            assert viewport.scroll_y == start + 1 and app.selected_gpu == 0
     asyncio.run(scenario())
 
 
-def test_wheel_over_empty_compact_viewport_selects_the_next_gpu(interaction_snapshot):
+def test_wheel_over_compact_viewport_preserves_the_visible_overview(interaction_snapshot):
     async def scenario():
         interaction_snapshot["gpus"] = interaction_snapshot["gpus"][:2]
         app, _ = make_app(interaction_snapshot)
@@ -133,31 +144,108 @@ def test_wheel_over_empty_compact_viewport_selects_the_next_gpu(interaction_snap
             overview = app.query_one("#fleet-gpus", GpuOverview)
             point_y = viewport.size.height - 2
             assert viewport.region.y + point_y >= overview.region.bottom
-            with patch("tui.fleet_app.monotonic", return_value=1) as tick:
-                await pilot._post_mouse_events([events.MouseScrollDown], "#fleet-gpu-scroll", (5, point_y))
-                tick.assert_called_once()
-            assert app.selected_gpu == 1 and viewport.scroll_y == 0
+            await pilot._post_mouse_events([events.MouseScrollDown], "#fleet-gpu-scroll", (5, point_y))
+            await pilot.pause()
+            assert app.selected_gpu == 0 and viewport.scroll_y == 0
     asyncio.run(scenario())
 
 
-def test_shift_wheel_and_page_keys_scroll_without_changing_gpu(interaction_snapshot):
+def test_scroll_position_drives_gpu_selection_without_realignment(interaction_snapshot):
     async def scenario():
         app, _ = make_app(interaction_snapshot)
         async with app.run_test(size=(80, 24)) as pilot:
             await ready(app, pilot)
             viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
-            await wheel(pilot, shift=True)
+            viewport.scroll_to(y=app._gpu_anchors[2] + 3, animate=False)
             await pilot.pause()
-            assert viewport.scroll_y > 0 and app.selected_gpu == 0
-            assert app._gpu_wheel_at is None
-            scroll = viewport.scroll_y
+            assert app.selected_gpu == 2
+            start = viewport.scroll_y
+            await wheel(pilot)
+            assert viewport.scroll_y == start + 1 and app.selected_gpu == 2
+            await pilot.press("right")
+            assert viewport.scroll_y == start + 1 and app.selected_gpu == 2
+            await wheel(pilot, shift=True)
+            assert viewport.scroll_y == start + 2
             await pilot.press("pagedown")
-            assert viewport.scroll_y > scroll and app.selected_gpu == 0
+            assert viewport.scroll_y > start + 2
             await pilot.press("pageup")
-            assert viewport.scroll_y == scroll and app.selected_gpu == 0
+            assert viewport.scroll_y == start + 2
             viewport.scroll_to(y=0, animate=False)
+            await pilot.pause()
+            assert app.selected_gpu == 0
             await pilot.press("pageup")
             assert viewport.scroll_y == 0
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("selected_text", [False, True])
+def test_keyboard_selection_survives_alignment_of_short_empty_gpu_panels(interaction_snapshot, selected_text):
+    async def scenario():
+        interaction_snapshot["services"] = []
+        for gpu in interaction_snapshot["gpus"]:
+            gpu.update(occupants=[], used_gb=0, util_percent=0)
+        app, _ = make_app(interaction_snapshot)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await ready(app, pilot)
+            viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
+            assert app._gpu_anchors[1] < viewport.content_size.height / 2
+            if selected_text:
+                overview = app.query_one("#fleet-gpus", GpuOverview)
+                start = overview.render().plain.splitlines()[0].index("GPU ")
+                await drag(pilot, "#fleet-gpus", (start, 0), (start + 5, 0))
+                assert overview.has_selection
+            for expected in (1, 2, 3):
+                await pilot.press("down")
+                await pilot.pause()
+                assert app.selected_gpu == expected
+                assert viewport.scroll_y == min(app._gpu_anchors[expected], viewport.max_scroll_y)
+            await pilot.press("up")
+            await pilot.pause()
+            assert app.selected_gpu == 2 and viewport.scroll_y == app._gpu_anchors[2]
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("key,expected_gpu", [("pageup", 0), ("pagedown", 5)])
+def test_page_key_at_scroll_boundary_catches_up_gpu_after_clearing_text(interaction_snapshot, key, expected_gpu):
+    async def scenario():
+        app, _ = make_app(interaction_snapshot)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await ready(app, pilot)
+            app.select_gpu(2)
+            await ready(app, pilot)
+            overview = app.query_one("#fleet-gpus", GpuOverview)
+            viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
+            row = overview.anchors[2]
+            start = overview.render().plain.splitlines()[row].index("GPU ")
+            await drag(pilot, "#fleet-gpus", (start, row), (start + 5, row))
+            assert overview.has_selection
+            boundary = 0 if key == "pageup" else viewport.max_scroll_y
+            viewport.scroll_to(y=boundary, animate=False)
+            await pilot.pause()
+            assert viewport.scroll_y == boundary and app.selected_gpu == 2
+            await pilot.press(key)
+            await pilot.pause()
+            assert not overview.has_selection and viewport.scroll_y == boundary
+            assert app.selected_gpu == expected_gpu
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("active_window,idle_hours,recent,idle", [
+    (900, 6, "15m", "6h"), (1800, 2, "30m", "2h"),
+])
+def test_help_explains_current_activity_and_idle_intervals(
+        interaction_snapshot, active_window, idle_hours, recent, idle):
+    async def scenario():
+        interaction_snapshot["config"].update(
+            active_window_seconds=active_window, idle_limit_hours=idle_hours)
+        app, _ = make_app(interaction_snapshot)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await ready(app, pilot)
+            await pilot.press("question_mark")
+            text = app.screen.query_one("#fleet-help-text").render().plain
+            assert "Idle: no inference activity in the last %s." % recent in text
+            assert "still running, idle for at least %s." % idle in text
+            assert "Shared APIs have no idle reminder" in text
     asyncio.run(scenario())
 
 
