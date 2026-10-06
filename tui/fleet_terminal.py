@@ -88,11 +88,11 @@ class FleetTerminalDriver(LinuxDriver):
         self._application_mode_open = True
         try:
             super().start_application_mode()
-        except BaseException:
+        except BaseException as startup_error:
             try:
                 self.stop_application_mode()
-            except Exception:
-                pass
+            except Exception as cleanup_error:
+                raise startup_error from cleanup_error
             raise
 
     def stop_application_mode(self):
