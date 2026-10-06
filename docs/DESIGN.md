@@ -1015,6 +1015,18 @@ fleet 观察自建推理服务及全部 GPU 占用，给服务主人提供占用
 及每服务的 `gpu_observation_complete`。采集失败不等于空机器；发现不完整
 时不能把缺失服务记成已退出。整轮失败保留旧文件，陈旧性由消费者判断。
 
+Host GPU ownership (#339) adds `host`, `host_uid` and `host_user` to other
+processes. Proven host ownership requires matching host PID/user/mount namespaces
+and a rechecked process identity with a valid real UID. Resolved containers use
+`host: false`; unresolved owners keep host/container/UID/user null. Usernames
+come from a bounded configured local passwd file, without NSS calls; an absent
+or ambiguous name retains the UID. Existing service `host` booleans remain
+compatible, with nullable UID/user metadata only after positive host proof.
+Each GPU query defaults to 5 seconds through `gpu_query_timeout_seconds`,
+independent of the 2-second HTTP limit and within the same 20-second scan budget.
+Failed attribution keeps measured VRAM unattributed rather than free. Host jobs
+remain observation-only.
+
 | 配置 | 默认 | 作用 |
 |---|---|---|
 | `fleet_enabled` | false | 显式启用摄取与独立历史库 |
@@ -1133,6 +1145,17 @@ idle-limit reminder. Activity, claims and unknown observations keep their
 existing priority. Loopback and specific-address services keep the idle reminder.
 These fields describe the observed binding and sharing convention; request
 routing and model lifecycle remain with their existing services.
+
+Schema-1 GPU occupants preserve nullable `host`, `host_uid` and `host_user`;
+services and historical details expose their host UID/user metadata. UID is an
+integer in 0–4294967295 and username is a nullable 1–128-character label without
+control characters. A username requires a verified UID. Null-container other
+jobs remain unknown unless explicitly host-proven. Host LLMs and other jobs
+group by stable numeric UID, displaying `Host <username>` or `Host UID <uid>`.
+Host LLM container summaries retain `container: null`, separate verified UIDs
+and preserve one legacy host fallback when UID is unknown. Older schema-1
+exports remain valid. These observations grant no caller identity or process
+actions and do not change socket-peer filtering or claim ownership.
 
 `GET /v1/fleet` 不输出完整 argv 或训练命令；详情/history 可给出脱敏后的
 推理参数摘要。服务携带 `mine` 以控制 UI 操作，但 API 每次仍重新校验。

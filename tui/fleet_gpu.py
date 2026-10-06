@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 import hashlib
 import math
+import unicodedata
 
 from rich.text import Text
 from rich.console import Console
@@ -34,10 +35,32 @@ def compact_gib(value):
     return gib(value)
 
 
+def owner_info(item):
+    """Return a stable owner identity and a terminal-safe display label."""
+    def clean(value):
+        return "".join(character if not unicodedata.category(character).startswith("C") else " "
+                       for character in value)
+
+    container = item.get("container")
+    if isinstance(container, str) and container:
+        return "container:" + container, clean(container)
+    if item.get("host") is True:
+        uid = item.get("host_uid")
+        if type(uid) is int and uid >= 0:
+            user = item.get("host_user")
+            user = clean(user).strip() if isinstance(user, str) else ""
+            return "host:uid:" + str(uid), "Host " + user if user else "Host UID " + str(uid)
+        return "host", "host"
+    return "unknown", "unknown"
+
+
 def owner_color(identity):
     if identity == "unknown":
         return NEUTRAL_COLOR
-    slot = int.from_bytes(hashlib.sha256(identity.encode("utf-8")).digest(), "big") % len(OWNER_COLORS)
+    digest = hashlib.sha256(identity.encode("utf-8")).digest()
+    if identity.startswith("host:uid:"):
+        return "#%02x%02x%02x" % tuple(144 + value // 4 for value in digest[:3])
+    slot = int.from_bytes(digest, "big") % len(OWNER_COLORS)
     return OWNER_COLORS[slot]
 
 
@@ -105,14 +128,10 @@ def account_gpu(gpu, services=()):
         service_id = occupant.get("service_id")
         if service_id is not None and (not isinstance(service_id, str) or not service_id):
             raise ValueError("Invalid GPU service ID.")
-        container = occupant.get("container")
         service = services.get(service_id, {})
-        if isinstance(container, str) and container:
-            identity, owner = "container:" + container, container
-        elif service.get("host") is True:
-            identity, owner = "host", "host"
-        else:
-            identity, owner = "unknown", "unknown"
+        identity, owner = owner_info(occupant)
+        if identity in ("host", "unknown") and service.get("host") is True:
+            identity, owner = owner_info(service)
         kind = occupant.get("kind")
         kind = "llm" if kind in ("llm", "inference") else "other" if kind == "other" else "unknown"
         group = groups.setdefault((identity, kind), {"owner": owner, "members": []})

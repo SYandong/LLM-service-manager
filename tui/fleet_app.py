@@ -21,7 +21,7 @@ from textual.widgets import Button, DataTable, Input, Sparkline, Static
 
 from .fleet_format import api_label, count, duration, gib, status_label, total_tokens
 from .fleet_gpu import (MEASURED_KEY, account_gpu, compact_gib, detail_lines, expanded_header,
-                        fit, render_expanded, render_overview)
+                        fit, owner_info, render_expanded, render_overview)
 from .fleet_selection import SelectableStatic
 
 
@@ -53,7 +53,7 @@ def activity_bar(values):
 
 
 def owner_name(service):
-    return service.get("container") or ("host" if service.get("host") else "unknown")
+    return owner_info(service)[1]
 
 
 def total_memory(services):
@@ -652,7 +652,7 @@ class FleetApp(App):
         yield SelectableStatic("", id="fleet-controls", markup=False)
         with FleetGpuScroll(id="fleet-gpu-scroll"):
             yield GpuOverview("GPU observations unavailable", id="fleet-gpus", markup=False)
-        yield Input(placeholder="Filter container, model, engine or status", id="fleet-filter")
+        yield Input(placeholder="Filter owner, model, engine or status", id="fleet-filter")
         yield DataTable(id="fleet-table", cursor_type="row", zebra_stripes=False, cell_padding=1)
         with VerticalScroll(id="fleet-details"):
             yield SelectableStatic("Select a service to see its last 7 days.", id="fleet-detail-text", markup=False)
@@ -878,8 +878,8 @@ class FleetApp(App):
         needle = self.filter_text.casefold()
         return [service for service in values
                 if (not self.mine_only or service.get("mine") is True)
-                and (not needle or needle in " ".join(self.clean(service.get(key, ""))
-                     for key in ("container", "model", "engine", "status")).casefold())]
+                and (not needle or needle in " ".join([owner_name(service)] +
+                     [self.clean(service.get(key, "")) for key in ("model", "engine", "status")]).casefold())]
 
     def sort_key(self, service):
         mem = service.get("gpu_gb")
@@ -916,12 +916,14 @@ class FleetApp(App):
         result, metadata = [], {}
         if self.view == "person":
             for service in services:
-                groups.setdefault(owner_name(service), []).append(service)
-            ordered = sorted(groups, key=lambda name: (min(self.sort_key(item)[0] for item in groups[name]),
-                             -(total_memory(groups[name]) if total_memory(groups[name]) is not None else -1), name))
-            for name in ordered:
-                members = groups[name]
-                key = "person:" + name
+                groups.setdefault(owner_info(service)[0], []).append(service)
+            ordered = sorted(groups, key=lambda identity: (min(self.sort_key(item)[0] for item in groups[identity]),
+                             -(total_memory(groups[identity]) if total_memory(groups[identity]) is not None else -1),
+                             owner_name(groups[identity][0]), identity))
+            for identity in ordered:
+                members = groups[identity]
+                name = owner_name(members[0])
+                key = "person:" + identity.removeprefix("container:")
                 over = sum(self.service_status(item) == "over_limit" for item in members)
                 values = [name + " · %dsvc" % len(members), "", gib(total_memory(members)),
                           "", "", "%d inactive" % over if over else ""] + ([] if narrow else ["", ""])
@@ -956,10 +958,10 @@ class FleetApp(App):
                     for number, occupant in enumerate(gpu.get("occupants", [])):
                         if occupant.get("service_id") is not None:
                             continue
-                        name = self.clean(occupant.get("container") or "unknown")
+                        identity, name = owner_info(occupant)
                         if self.filter_text and self.filter_text.casefold() not in name.casefold():
                             continue
-                        key = "other:%s:%s:%s" % (index, name, number)
+                        key = "other:%s:%s:%s" % (index, identity, number)
                         values = [name + " (other workload)", str(index), gib(occupant.get("used_gb")),
                                   "", "", ""] + ([] if narrow else ["", ""])
                         result.append((key, tuple([RowLabel(values[0], key)] + [Text(value) for value in values[1:]])))

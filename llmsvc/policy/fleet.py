@@ -98,6 +98,7 @@ def service_status(instance, claim, config, now, *, stale, generated_at, hourly=
     return {
         "id": instance["id"], "container": instance["container"], "engine": instance["engine"],
         "engine_version": instance["engine_version"], "host": bool(instance["host"]),
+        "host_uid": meta.get("host_uid"), "host_user": meta.get("host_user"),
         "managed_by": instance["managed_by"], "model": instance["model"],
         "gpus": [gpu["index"] for gpu in meta["gpus"]],
         "gpu_gb": sum(gpu["used_mib"] for gpu in meta["gpus"]) / 1024 if gpu_known else None,
@@ -120,11 +121,15 @@ def container_summary(services):
     buckets = {}
     for service in services:
         container = service["container"]
-        bucket = buckets.setdefault(container, {"container": container, "services": 0, "gpu_gb": 0, "over_limit": 0})
+        host = bool(service.get("host", container is None))
+        uid = service.get("host_uid") if host else None
+        key = ("host", uid) if host else ("container", container)
+        bucket = buckets.setdefault(key, {"container": container, "host": host, "host_uid": uid,
+            "host_user": service.get("host_user") if host else None, "services": 0, "gpu_gb": 0, "over_limit": 0})
         bucket["services"] += 1
         if service["gpu_gb"] is None:
             bucket["gpu_gb"] = None
         elif bucket["gpu_gb"] is not None:
             bucket["gpu_gb"] += service["gpu_gb"]
         bucket["over_limit"] += int(service["status"] == "over_limit")
-    return [buckets[key] for key in sorted(buckets, key=lambda value: (value is not None, value or ""))]
+    return [buckets[key] for key in sorted(buckets, key=lambda value: (value[0] != "host", -1 if value[1] is None else value[1]))]

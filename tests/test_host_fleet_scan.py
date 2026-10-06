@@ -108,12 +108,14 @@ class FakeRunner:
 
     def __call__(self, argv, timeout, max_output, pass_fds=()):
         self.calls.append((argv, timeout, max_output, pass_fds))
-        assert 0 < timeout <= 2
         assert max_output <= 4 * 1024 * 1024
         if argv[1].startswith("--query-gpu="):
+            assert 0 < timeout <= 10
             return b"0, GPU-one, 140000, 100000, 70\n1, GPU-two, 140000, 1000, 0\n"
         if argv[1].startswith("--query-compute-apps="):
+            assert 0 < timeout <= 10
             return self.apps
+        assert 0 < timeout <= 2
         assert argv[1].startswith("--net=/proc/self/fd/")
         assert argv[2:6] == ["--", "/usr/bin/python3", "-I", "-S"]
         assert len(pass_fds) == 1 and str(pass_fds[0]) == argv[1].rsplit("/", 1)[1]
@@ -129,7 +131,9 @@ class FakeRunner:
 
 def fixture_config(scanner, root, tmp_path, **overrides):
     config = scanner.load_config(EXAMPLE)
-    config.update(proc_root=str(root), output_path=str(tmp_path / "fleet.json"))
+    passwd = tmp_path / "passwd"
+    if not passwd.exists(): passwd.write_text("user-a:x:1000:1000:private-gecos:/synthetic-home:/bin/false\n")
+    config.update(proc_root=str(root), output_path=str(tmp_path / "fleet.json"), host_passwd_path=str(passwd))
     config.update(overrides)
     return config
 
@@ -244,7 +248,8 @@ def test_discovers_engines_aggregates_enginecore_and_redacts(scanner, tmp_path):
     assert by_pid[200]["ollama"]["models"][0]["size_vram"] == 2048
     assert by_pid[400]["host"] and by_pid[400]["container"] is None
     assert by_pid[400]["scrape"]["error"] == "unsupported_engine"
-    assert result["other_gpu_processes"] == [{"container": "team-c", "pid": 300, "gpu": 1, "used_mib": 900, "comm": "python"}]
+    assert result["other_gpu_processes"] == [{"container": "team-c", "pid": 300, "gpu": 1, "used_mib": 900, "comm": "python",
+                                              "host": False, "host_uid": None, "host_user": None}]
     exported = json.dumps(result)
     for secret in ("private-api-value", "private-hf-value", "password-value", "hf_abcdef", "sk-abcdef", "training-secret", "UNRELATED_SECRET", "ignored_secret", "never-export", "\u001b"):
         assert secret not in exported
@@ -626,7 +631,248 @@ def test_failed_gpu_scan_has_explicit_completeness(scanner, tmp_path, failure):
         assert result["host"]["gpu_count"] is None
         assert not result["gpu_inventory_complete"]
     elif failure == "unmapped":
-        assert result["other_gpu_processes"] == [{"container": None, "pid": 99999, "gpu": 0, "used_mib": 700, "comm": "unknown"}]
+        assert result["other_gpu_processes"] == [{"container": None, "pid": 99999, "gpu": 0, "used_mib": 700, "comm": "unknown",
+                                                  "host": None, "host_uid": None, "host_user": None}]
+
+
+def host_process(root, *, uid=1000, container=None, argv=None, port=None):
+    init = make_process(root, 1, ["init"], ppid=0, start=1, container=None)
+    process = make_process(root, 100, argv or ["python", "testdummy.py"], container=container, port=port)
+    (process / "status").write_text(f"Name:\tpython\nPPid:\t1\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
+    for name in ("pid", "user", "mnt"):
+        (init / "ns" / name).write_bytes(b"synthetic-host-namespace")
+        os.link(init / "ns" / name, process / "ns" / name)
+    return process
+
+
+def gpu_five_runner(argv, timeout, max_output, pass_fds=()):
+    assert 0 < timeout <= 10 and not pass_fds
+    if argv[1].startswith("--query-gpu="):
+        return b"5, GPU-five, 140000, 12000, 70\n"
+    assert argv[1].startswith("--query-compute-apps=")
+    return b"100, GPU-five, 10000\n"
+
+
+def test_slow_gpu_queries_use_five_seconds_while_http_keeps_target_cap(scanner, tmp_path):
+    root = fake_root(tmp_path)
+    make_process(root, 100, ["vllm", "serve", "demo"], port=8000)
+    fake = FakeRunner(b"100, GPU-one, 500\n")
+    ticks = [0.0]
+    def runner(argv, timeout, max_output, pass_fds=()):
+        if argv[1].startswith("--query-"):
+            if timeout < 2.25: raise scanner.ScanError("command_timeout")
+            ticks[0] += 2.25
+        return fake(argv, timeout, max_output, pass_fds)
+    result = scanner.scan(fixture_config(scanner, root, tmp_path, target_timeout_seconds=0.25), runner, clock=lambda: ticks[0])
+    assert result["gpu_inventory_complete"] and result["gpu_attribution_complete"]
+    assert result["services"][0]["scrape"]["ok"]
+    assert [call[1] for call in fake.calls if call[0][1].startswith("--query-")] == [5, 5]
+    assert all(call[1] <= 0.25 for call in fake.calls if call[3])
+
+
+def test_gpu_query_timeouts_share_the_remaining_global_budget(scanner, tmp_path):
+    root = fake_root(tmp_path)
+    config = fixture_config(scanner, root, tmp_path, scan_budget_seconds=6)
+    ticks, timeouts = [0.0], []
+    def runner(argv, timeout, max_output, pass_fds=()):
+        timeouts.append(timeout)
+        assert timeout <= 6 - ticks[0] - 0.05
+        ticks[0] += 2.25
+        return gpu_five_runner(argv, timeout, max_output, pass_fds)
+    gpus, apps, gpu_ok, apps_ok, errors = scanner.gpu_inventory(config, scanner.Budget(6, lambda: ticks[0]), runner)
+    assert timeouts == pytest.approx([5, 3.7])
+    assert gpu_ok and apps_ok and not errors and gpus[0]["index"] == 5 and apps[0][0] == 100
+
+
+def test_actual_delayed_synthetic_gpu_command_succeeds_above_two_seconds(scanner, tmp_path):
+    config = fixture_config(scanner, fake_root(tmp_path), tmp_path)
+    def runner(argv, timeout, max_output, pass_fds=()):
+        if argv[1].startswith("--query-gpu="):
+            code = "import time; time.sleep(2.1); print('5, GPU-five, 140000, 12000, 70')"
+        else:
+            code = "print('100, GPU-five, 10000')"
+        return scanner.run_bounded([sys.executable, "-I", "-B", "-S", "-c", code], timeout, max_output)
+    _, _, gpu_ok, apps_ok, errors = scanner.gpu_inventory(config, scanner.Budget(20), runner)
+    assert gpu_ok and apps_ok and not errors
+
+
+@pytest.mark.parametrize("uid, user", [(1000, "user-a"), (2000, None), (0, "root-user")])
+def test_generic_host_gpu_five_work_has_verified_numeric_owner(scanner, tmp_path, uid, user):
+    root = fake_root(tmp_path)
+    host_process(root, uid=uid)
+    config = fixture_config(scanner, root, tmp_path)
+    with open(config["host_passwd_path"], "a") as stream: stream.write("root-user:x:0:0::/synthetic:/bin/false\n")
+    result = scanner.scan(config, gpu_five_runner)
+    assert result["inventory_complete"] and result["gpu_inventory_complete"] and result["gpu_attribution_complete"]
+    assert result["services"] == []
+    assert result["other_gpu_processes"] == [{"container": None, "pid": 100, "gpu": 5, "used_mib": 10000,
+                                              "comm": "python", "host": True, "host_uid": uid, "host_user": user}]
+    assert "private-gecos" not in json.dumps(result) and "synthetic-home" not in json.dumps(result)
+
+
+def test_host_owner_uses_real_uid_from_status_not_effective_uid(scanner, tmp_path):
+    root = fake_root(tmp_path)
+    process = host_process(root)
+    (process / "status").write_text("Name:\tpython\nPPid:\t1\nUid:\t1000\t2000\t2000\t2000\n")
+    row = scanner.scan(fixture_config(scanner, root, tmp_path), gpu_five_runner)["other_gpu_processes"][0]
+    assert row["host_uid"] == 1000 and row["host_user"] == "user-a"
+
+
+def test_lxc_process_is_nonhost_even_with_matching_namespace_fixtures(scanner, tmp_path):
+    root = fake_root(tmp_path)
+    host_process(root, container="ctr-a")
+    row = scanner.scan(fixture_config(scanner, root, tmp_path), gpu_five_runner)["other_gpu_processes"][0]
+    assert row["container"] == "ctr-a" and row["host"] is False
+    assert row["host_uid"] is None and row["host_user"] is None
+
+
+@pytest.mark.parametrize("evidence", ["pid", "user", "mnt", "missing", "missing_init", "missing_uid", "invalid_uid", "duplicate_uid"])
+def test_unresolved_host_namespace_or_uid_evidence_stays_unknown(scanner, tmp_path, evidence):
+    root = fake_root(tmp_path)
+    process = host_process(root)
+    if evidence in {"pid", "user", "mnt"}:
+        path = process / "ns" / evidence
+        path.unlink(); path.write_bytes(b"foreign-namespace")
+    elif evidence == "missing": (process / "ns/pid").unlink()
+    elif evidence == "missing_init": (root / "1/ns/mnt").unlink()
+    elif evidence == "missing_uid": (process / "status").write_text("Name:\tpython\nPPid:\t1\n")
+    elif evidence == "invalid_uid": (process / "status").write_text("Name:\tpython\nPPid:\t1\nUid:\t4294967296\t0\t0\t0\n")
+    else:
+        with (process / "status").open("a") as stream: stream.write("Uid:\t2000\t2000\t2000\t2000\n")
+    row = scanner.scan(fixture_config(scanner, root, tmp_path), gpu_five_runner)["other_gpu_processes"][0]
+    assert row["used_mib"] == 10000 and row["container"] is None
+    assert row["host"] is None and row["host_uid"] is None and row["host_user"] is None
+
+
+@pytest.mark.parametrize("race", ["namespace", "start", "cgroup", "uid", "disappear", "init_namespace", "init_start"])
+def test_host_proof_rechecks_raced_evidence_and_retains_memory(scanner, tmp_path, monkeypatch, race):
+    root = fake_root(tmp_path)
+    process = host_process(root)
+    config = fixture_config(scanner, root, tmp_path)
+    original = scanner.os.stat
+    raced = [False]
+    def stat(path, *args, **kwargs):
+        result = original(path, *args, **kwargs)
+        if Path(path) == process / "ns/user" and not raced[0]:
+            raced[0] = True
+            if race == "namespace":
+                replacement = tmp_path / "replacement"
+                replacement.write_bytes(b"changed-namespace"); replacement.replace(process / "ns/user")
+            elif race == "start": (process / "stat").write_text(proc_stat(100, 1, 200))
+            elif race == "cgroup": (process / "cgroup").write_text("0::/changed-workload\n")
+            elif race == "uid": (process / "status").write_text("Name:\tpython\nPPid:\t1\nUid:\t2000\t2000\t2000\t2000\n")
+            elif race == "init_namespace":
+                replacement = tmp_path / "replacement"
+                replacement.write_bytes(b"changed-init-namespace"); replacement.replace(root / "1/ns/user")
+            elif race == "init_start": (root / "1/stat").write_text(proc_stat(1, 0, 200))
+            else: (process / "stat").unlink()
+        return result
+    monkeypatch.setattr(scanner.os, "stat", stat)
+    result = scanner.scan(config, gpu_five_runner)
+    assert raced[0] and len(result["other_gpu_processes"]) == 1
+    row = result["other_gpu_processes"][0]
+    assert row["used_mib"] == 10000 and row["host"] is None and row["host_uid"] is None and row["host_user"] is None
+    if race in {"start", "cgroup", "disappear"}: assert result["gpu_attribution_complete"] is False
+
+
+@pytest.mark.parametrize("passwd", ["missing", "oversized", "duplicate_uid", "invalid_utf8", "directory", "symlink", "fifo"])
+def test_unavailable_or_ambiguous_local_passwd_keeps_verified_uid(scanner, tmp_path, passwd):
+    root = fake_root(tmp_path)
+    host_process(root)
+    config = fixture_config(scanner, root, tmp_path)
+    path = Path(config["host_passwd_path"])
+    if passwd == "oversized": path.write_bytes(b"x" * (64 * 1024 + 1))
+    elif passwd == "duplicate_uid":
+        with path.open("a") as stream: stream.write("alias-a:x:1000:1000::/synthetic:/bin/false\n")
+    elif passwd == "invalid_utf8": path.write_bytes(b"\xff")
+    else:
+        path.unlink()
+        if passwd == "directory": path.mkdir()
+        elif passwd == "symlink":
+            other = tmp_path / "other-passwd"; other.write_text("unverified-name:x:1000:1000::/:/bin/false\n")
+            path.symlink_to(other)
+        elif passwd == "fifo": os.mkfifo(path)
+    row = scanner.scan(config, gpu_five_runner)["other_gpu_processes"][0]
+    assert row["host"] is True and row["host_uid"] == 1000 and row["host_user"] is None
+
+
+def test_local_passwd_labels_are_sanitized_bounded_and_read_once(scanner, tmp_path, monkeypatch):
+    root = fake_root(tmp_path)
+    host_process(root)
+    process = make_process(root, 200, ["python", "testdummy.py"], container=None)
+    (process / "status").write_text("Name:\tpython\nPPid:\t1\nUid:\t1000\t1000\t1000\t1000\n")
+    for name in ("pid", "user", "mnt"): os.link(root / "1/ns" / name, process / "ns" / name)
+    config = fixture_config(scanner, root, tmp_path)
+    path = Path(config["host_passwd_path"])
+    path.write_text("\x1b[31muser-a\x9f" + "z" * 200 + ":x:1000:1000:private-gecos:/synthetic:/bin/false\n")
+    original = scanner.ProcReader.read
+    reads = []
+    def read(reader, relative, limit, **kwargs):
+        before = reader.bytes_left
+        result = original(reader, relative, limit, **kwargs)
+        if Path(relative) == path:
+            assert before - reader.bytes_left == len(result)
+            reads.append((limit, len(result)))
+        return result
+    monkeypatch.setattr(scanner.ProcReader, "read", read)
+    def runner(argv, timeout, max_output, pass_fds=()):
+        result = gpu_five_runner(argv, timeout, max_output, pass_fds)
+        return result + b"200, GPU-five, 1000\n" if argv[1].startswith("--query-compute-apps=") else result
+    rows = scanner.scan(config, runner)["other_gpu_processes"]
+    assert reads == [(64 * 1024, path.stat().st_size)]
+    assert all(row["host_uid"] == 1000 and len(row["host_user"]) == 128 for row in rows)
+    assert all(not any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in row["host_user"]) for row in rows)
+
+
+def test_local_passwd_read_obeys_shared_byte_budget(scanner, tmp_path):
+    config = fixture_config(scanner, fake_root(tmp_path), tmp_path)
+    Path(config["host_passwd_path"]).write_text("user-a:x:1000:1000::/synthetic:/bin/false\n" + "x" * 2000)
+    reader = scanner.ProcReader(config["proc_root"], scanner.Budget(20), 1024, config["host_passwd_path"])
+    assert reader.host_user(1000) is None and reader.bytes_left < 0
+    with pytest.raises(scanner.ScanError, match="proc_byte_limit"): reader.text("stat")
+
+
+def test_local_passwd_parsing_obeys_shared_time_budget(scanner, tmp_path, monkeypatch):
+    config = fixture_config(scanner, fake_root(tmp_path), tmp_path)
+    ticks = [0.0]
+    reader = scanner.ProcReader(config["proc_root"], scanner.Budget(20, lambda: ticks[0]), 65536, config["host_passwd_path"])
+    original = reader.read
+    def read(*args, **kwargs):
+        result = original(*args, **kwargs)
+        ticks[0] = 20
+        return result
+    monkeypatch.setattr(reader, "read", read)
+    with pytest.raises(scanner.BudgetExceeded): reader.host_user(1000)
+
+
+def test_host_service_uid_metadata_requires_the_same_positive_proof(scanner, tmp_path):
+    root = fake_root(tmp_path)
+    host_process(root, argv=["vllm", "serve", "demo"], port=8000)
+    config = fixture_config(scanner, root, tmp_path)
+    row = scanner.scan(config, FakeRunner(b"100, GPU-one, 500\n"))["services"][0]
+    assert row["host"] is True and row["host_uid"] == 1000 and row["host_user"] == "user-a"
+    (root / "100/ns/mnt").unlink()
+    row = scanner.scan(config, FakeRunner(b"100, GPU-one, 500\n"))["services"][0]
+    assert row["host"] is True and row.get("host_uid") is None and row.get("host_user") is None
+
+
+@pytest.mark.parametrize("value", [0, 0.009, 10.01, 11, True])
+def test_gpu_query_timeout_config_rejects_out_of_bounds(scanner, tmp_path, value):
+    path = tmp_path / "invalid.json"; path.write_text(json.dumps({"gpu_query_timeout_seconds": value}))
+    with pytest.raises(scanner.ScanError, match="invalid_config_bound"): scanner.load_config(path)
+
+
+@pytest.mark.parametrize("value", [0.01, 5, 10])
+def test_gpu_query_timeout_config_accepts_bounds_and_default(scanner, tmp_path, value):
+    path = tmp_path / "valid.json"; path.write_text(json.dumps({"gpu_query_timeout_seconds": value}))
+    assert scanner.load_config(path)["gpu_query_timeout_seconds"] == value
+    assert scanner.load_config()["gpu_query_timeout_seconds"] == scanner.load_config(EXAMPLE)["gpu_query_timeout_seconds"] == 5
+
+
+@pytest.mark.parametrize("path", ["relative-passwd", "/tmp/../passwd", "/tmp/passwd\n"])
+def test_host_passwd_config_requires_safe_absolute_path(scanner, tmp_path, path):
+    config = tmp_path / "invalid.json"; config.write_text(json.dumps({"host_passwd_path": path}))
+    with pytest.raises(scanner.ScanError, match="invalid_config_path"): scanner.load_config(config)
 
 
 def test_limits_and_budget_cover_discovery_and_metrics_parsing(scanner, tmp_path):
@@ -661,7 +907,8 @@ def test_long_ordinary_cmdline_preserves_complete_discovery(scanner, tmp_path, c
     assert result["inventory_complete"] is True
     assert result["gpu_attribution_complete"] is True
     assert [row["pid"] for row in result["services"]] == [200]
-    assert result["other_gpu_processes"] == [{"container": "ctr-a", "pid": 100, "gpu": 0, "used_mib": 1000, "comm": "python"}]
+    assert result["other_gpu_processes"] == [{"container": "ctr-a", "pid": 100, "gpu": 0, "used_mib": 1000, "comm": "python",
+                                              "host": False, "host_uid": None, "host_user": None}]
     assert result["errors"] == []
     assert "testdummy" not in json.dumps(result) and filler not in json.dumps(result)
 

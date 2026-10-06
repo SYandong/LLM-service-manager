@@ -15,6 +15,7 @@ import re
 import selectors
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -33,6 +34,8 @@ MAX_SNAPSHOT = 2 * MIB
 MAX_RESPONSE = 4 * MIB
 MAX_CMDLINE_BYTES = 256 * 1024
 MAX_ARGC = 4096
+MAX_PASSWD_BYTES = 64 * 1024
+MAX_UID = 2 ** 32 - 1
 DEFAULT_RULES = [
     {"engine": "vllm", "all": ["vllm", "serve"]},
     {"engine": "vllm", "all": ["vllm.entrypoints.openai.api_server"]},
@@ -42,6 +45,7 @@ DEFAULT_RULES = [
 ]
 DEFAULTS = {
     "proc_root": "/proc",
+    "host_passwd_path": "/etc/passwd",
     "output_path": "/var/lib/llmsvc-host-export/fleet.json",
     "nvidia_smi_path": "/usr/bin/nvidia-smi",
     "nsenter_path": "/usr/bin/nsenter",
@@ -50,6 +54,7 @@ DEFAULTS = {
     "sample_interval_seconds": 60,
     "scan_budget_seconds": 20,
     "target_timeout_seconds": 2,
+    "gpu_query_timeout_seconds": 5,
     "max_response_bytes": MAX_RESPONSE,
     "max_snapshot_bytes": MAX_SNAPSHOT,
     "max_processes": 65536,
@@ -167,13 +172,14 @@ def load_config(path=None):
         if any(key not in DEFAULTS and key not in {"_comments", "_generated_by"} for key in supplied):
             raise ScanError("unknown_config_field")
         config.update({key: value for key, value in supplied.items() if key in DEFAULTS})
-    for key in ("proc_root", "output_path", "nvidia_smi_path", "nsenter_path", "python_path"):
+    for key in ("proc_root", "host_passwd_path", "output_path", "nvidia_smi_path", "nsenter_path", "python_path"):
         value = config[key]
         if not isinstance(value, str) or not value.startswith("/") or CONTROL.search(value) or ".." in Path(value).parts:
             raise ScanError("invalid_config_path")
     bounds = {
         "sample_interval_seconds": (30, 300), "scan_budget_seconds": (0.1, 20),
         "target_timeout_seconds": (0.01, 2), "max_response_bytes": (1, MAX_RESPONSE),
+        "gpu_query_timeout_seconds": (0.01, 10),
         "max_snapshot_bytes": (1, MAX_SNAPSHOT), "max_processes": (1, 65536),
         "max_services": (1, 256), "max_gpu_processes": (1, 4096),
         "max_proc_bytes": (1024, 64 * MIB),
@@ -198,17 +204,24 @@ def load_config(path=None):
 
 
 class ProcReader:
-    def __init__(self, root, budget, max_bytes):
+    def __init__(self, root, budget, max_bytes, host_passwd_path="/etc/passwd"):
         self.root = Path(root)
         self.budget = budget
         self.bytes_left = max_bytes
+        self.host_passwd_path = Path(host_passwd_path)
+        self.host_users = None
 
-    def read(self, relative, limit):
+    def read(self, relative, limit, regular=False):
         self.budget.check()
         if self.bytes_left <= 0:
             raise ScanError("proc_byte_limit")
-        fd = os.open(self.root / relative, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        flags = os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | (os.O_NOFOLLOW if regular else 0)
+        fd = os.open(self.root / relative, flags)
         try:
+            if regular:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+                    raise ScanError("passwd_file_unavailable")
             chunks = []
             size = 0
             while size <= limit and size <= self.bytes_left:
@@ -234,6 +247,40 @@ class ProcReader:
         self.budget.check()
         return os.stat(self.root / str(pid) / "ns/net").st_ino
 
+    def namespace_ids(self, pid):
+        identities = []
+        for name in ("pid", "user", "mnt"):
+            self.budget.check()
+            info = os.stat(self.root / str(pid) / "ns" / name)
+            identities.append((info.st_dev, info.st_ino))
+        self.budget.check()
+        return identities
+
+    def host_user(self, uid):
+        if self.host_users is None:
+            self.host_users = {}
+            try:
+                data = self.read(self.host_passwd_path, MAX_PASSWD_BYTES, regular=True).decode("utf-8", "strict")
+                ambiguous = set()
+                for line in data.splitlines():
+                    self.budget.check()
+                    fields = line.split(":")
+                    if len(fields) != 7 or not re.fullmatch(r"[0-9]{1,10}", fields[2]):
+                        continue
+                    owner = int(fields[2])
+                    if owner > MAX_UID:
+                        continue
+                    if owner in self.host_users:
+                        ambiguous.add(owner)
+                    self.host_users[owner] = safe_text(fields[0], 128) or None
+                for owner in ambiguous:
+                    self.host_users.pop(owner, None)
+            except BudgetExceeded:
+                raise
+            except (OSError, ScanError, ValueError, UnicodeError):
+                self.host_users = {}
+        return self.host_users.get(uid)
+
 
 def stat_identity(text):
     # comm can contain spaces and parentheses; fields start after the last ')'.
@@ -250,6 +297,17 @@ class Process:
     cgroup: str
     container: str | None
     comm: str
+    uid: int | None = None
+
+
+def real_uid(status):
+    rows = re.findall(r"^Uid:[ \t]*([^\n]+)$", status, re.M)
+    if len(rows) != 1:
+        return None
+    fields = rows[0].split()
+    if len(fields) != 4 or any(not re.fullmatch(r"[0-9]{1,10}", value) or int(value) > MAX_UID for value in fields):
+        return None
+    return int(fields[0])
 
 
 def container_from_cgroup(cgroup):
@@ -285,7 +343,7 @@ def discover(reader, config):
                 comm = reader.text(f"{pid}/comm", 512).strip()
                 if stat_identity(reader.text(f"{pid}/stat")) != (ppid, start):
                     raise ScanError("proc_identity_changed")
-                processes[pid] = Process(pid, ppid, start, argv, cgroup, container_from_cgroup(cgroup), safe_text(comm, 64))
+                processes[pid] = Process(pid, ppid, start, argv, cgroup, container_from_cgroup(cgroup), safe_text(comm, 64), real_uid(status))
             except (BudgetExceeded, ScanError) as exc:
                 complete = False
                 errors.add(str(exc))
@@ -414,7 +472,7 @@ def gpu_inventory(config, budget, runner):
             budget.check()
             flag = "--query-gpu=" if target == "gpus" else "--query-compute-apps="
             data = runner([config["nvidia_smi_path"], flag + query, "--format=csv,noheader,nounits"],
-                          min(config["target_timeout_seconds"], max(0.001, budget.remaining() - 0.05)), config["max_response_bytes"])
+                          min(config["gpu_query_timeout_seconds"], max(0.001, budget.remaining() - 0.05)), config["max_response_bytes"])
             if len(data) > config["max_response_bytes"]:
                 raise ScanError("gpu_output_limit")
             seen = set()
@@ -464,18 +522,43 @@ def current_process(reader, process):
     return stat_identity(reader.text(f"{process.pid}/stat")) == (process.ppid, process.start) and reader.text(f"{process.pid}/cgroup") == process.cgroup
 
 
+def host_metadata(reader, process):
+    unknown = {"host": None, "host_uid": None, "host_user": None}
+    if process.container is not None:
+        return dict(unknown, host=False)
+    if process.uid is None:
+        return unknown
+    try:
+        init_identity = stat_identity(reader.text("1/stat"))
+        namespaces = reader.namespace_ids(1)
+        if not current_process(reader, process) or reader.namespace_ids(process.pid) != namespaces:
+            return unknown
+        user = reader.host_user(process.uid)
+        if (reader.namespace_ids(1) != namespaces or reader.namespace_ids(process.pid) != namespaces
+                or stat_identity(reader.text("1/stat")) != init_identity
+                or real_uid(reader.text(f"{process.pid}/status")) != process.uid or not current_process(reader, process)):
+            return unknown
+        return {"host": True, "host_uid": process.uid, "host_user": user}
+    except BudgetExceeded:
+        raise
+    except (OSError, ValueError, IndexError, ScanError):
+        return unknown
+
+
 def attribute_gpus(reader, processes, services, gpus, apps, complete):
     other = []
     gpu_indices = {gpu["uuid"]: gpu["index"] for gpu in gpus}
     usage = {pid: {} for pid in services}
     for pid, uuid, used in apps:
+        unknown = {"container": None, "pid": pid, "gpu": gpu_indices.get(uuid), "used_mib": used, "comm": "unknown",
+                   "host": None, "host_uid": None, "host_user": None}
         try:
             reader.budget.check()
             process = processes.get(pid)
             if process is None or not current_process(reader, process) or uuid not in gpu_indices:
                 complete = False
                 if uuid in gpu_indices:
-                    other.append({"container": None, "pid": pid, "gpu": gpu_indices[uuid], "used_mib": used, "comm": "unknown"})
+                    other.append(unknown)
                 continue
             owner = ancestor_service(pid, processes, services, reader.budget)
             ancestor = pid
@@ -495,11 +578,16 @@ def attribute_gpus(reader, processes, services, gpus, apps, complete):
                 complete = False
             gpu = gpu_indices[uuid]
             if owner is None:
-                other.append({"container": process.container, "pid": pid, "gpu": gpu, "used_mib": used, "comm": process.comm})
+                metadata = host_metadata(reader, process)
+                if not current_process(reader, process):
+                    raise ScanError("proc_identity_changed")
+                other.append(dict(unknown, container=process.container, comm=process.comm, **metadata))
             else:
                 usage[owner][gpu] = usage[owner].get(gpu, 0) + used
         except (OSError, ValueError, IndexError, ScanError):
             complete = False
+            if uuid in gpu_indices:
+                other.append(unknown)
     for pid, service in services.items():
         service["gpus"] = [{"index": index, "used_mib": value} for index, value in sorted(usage[pid].items())]
         service["gpu_observation_complete"] = complete
@@ -840,7 +928,7 @@ def http_helper(url, limit, timeout):
 def scan(config, runner=run_bounded, clock=time.monotonic, wall_clock=time.time):
     budget = Budget(config["scan_budget_seconds"], clock)
     generated_at = wall_clock()
-    reader = ProcReader(config["proc_root"], budget, config["max_proc_bytes"])
+    reader = ProcReader(config["proc_root"], budget, config["max_proc_bytes"], config["host_passwd_path"])
     try:
         match = re.search(r"^btime[ \t]+([0-9]{1,20})[ \t]*$", reader.text("stat", 65536), re.M)
         if match is None:
@@ -886,6 +974,12 @@ def scan(config, runner=run_bounded, clock=time.monotonic, wall_clock=time.time)
             errors.add("scan_budget_exceeded")
             continue
         scrape_service(reader, processes[pid], row, config, runner)
+        try:
+            metadata = host_metadata(reader, processes[pid])
+            if metadata["host"] is True:
+                row.update(host_uid=metadata["host_uid"], host_user=metadata["host_user"])
+        except BudgetExceeded:
+            errors.add("scan_budget_exceeded")
     if attribution_ok and any(not row["gpu_observation_complete"] for row in services.values()):
         attribution_ok = False
         errors.add("gpu_attribution_incomplete")

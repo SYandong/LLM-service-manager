@@ -171,13 +171,16 @@ class FleetController:
                 continue
             for gpu in service["gpus"]:
                 occupants.setdefault(gpu["index"], []).append({"container": service["container"], "kind": "llm",
-                    "used_gb": None if gpu.get("used_mib") is None else gpu["used_mib"] / 1024, "service_id": service["id"]})
+                    "used_gb": None if gpu.get("used_mib") is None else gpu["used_mib"] / 1024, "service_id": service["id"],
+                    "host": service["host"], "host_uid": service.get("host_uid"), "host_user": service.get("host_user")})
         owners = {service["container"] for service in services}
         for process in snapshot.get("other_gpu_processes", []):
             if mine and process["container"] not in owners:
                 continue
             occupants.setdefault(process["gpu"], []).append({"container": process["container"], "kind": "other",
-                "used_gb": None if process.get("used_mib") is None else process["used_mib"] / 1024, "service_id": None})
+                "used_gb": None if process.get("used_mib") is None else process["used_mib"] / 1024, "service_id": None,
+                "host": process.get("host", False if process["container"] is not None else None),
+                "host_uid": process.get("host_uid"), "host_user": process.get("host_user")})
         return [{"index": gpu["index"], "uuid": gpu.get("uuid"),
                  "total_gb": None if gpu.get("total_mib") is None else gpu["total_mib"] / 1024,
                  "used_gb": None if gpu.get("used_mib") is None else gpu["used_mib"] / 1024,
@@ -223,6 +226,8 @@ class FleetController:
         except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError) as exc:
             raise FleetError(503, "fleet_store_unavailable") from exc
         service = {key: instance[key] for key in ("id", "container", "engine", "model", "started_at", "first_seen", "last_seen", "ended_at", "argv_redacted")}
+        service.update(host=bool(instance["host"]), host_uid=instance["metadata"].get("host_uid"),
+                       host_user=instance["metadata"].get("host_user"))
         return {"schema_version": 1, "service_id": instance_id, "hours": hours,
                 "start_at": now - hours * 3600, "end_at": now,
                 "resolution": resolution, "samples": rows, "service": service}
