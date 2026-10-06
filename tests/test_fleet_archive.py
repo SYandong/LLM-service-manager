@@ -245,18 +245,82 @@ def test_counter_resets_add_zero_observed_flow(source, kind):
     assert result["latest_reported_counters"]["requests"]["ts"] == BASE + 120
 
 
-def test_ollama_is_one_process_session_with_null_tokens_and_bounded_model_history(source):
+def test_vllm_model_history_remains_bounded(source):
     for index in range(archive.MAX_MODEL_HISTORY + 3):
-        row = service(engine="ollama", model="demo-" + str(index), metrics=None,
-            ollama={"models": [{"name": "demo-" + str(index), "expires_at": BASE + index * 60 + 600}]})
+        row = service(model="demo-" + str(index))
         ingest(source, BASE + index * 60, [row])
         archive.run_archive(source[2])
     _, result = read(source[2])
     assert len(files(source[2])) == 1
-    assert all(result["usage"][key] is None for key in (*archive.COUNTERS, "total_tokens"))
-    assert all(counter["value"] is None for counter in result["latest_reported_counters"].values())
+    assert result["usage"]["requests"] == 0 and result["usage"]["total_tokens"] == 0
     assert len(result["model_history"]) == archive.MAX_MODEL_HISTORY
     assert result["model_history_truncated"] is True
+
+
+def ollama_service(models, unknown=None):
+    data = {"models": [{"name": name, "expires_at": BASE + 3600} for name in models]}
+    if unknown == "unsupported":
+        data = {"models": [{"name": "demo-unknown", "expires_at": "invalid"}]}
+    return service(engine="ollama", engine_version="0.9.6", model=None, metrics=None,
+        ollama=data, scrape={"ok": unknown != "failed", "error": "timeout" if unknown == "failed" else None})
+
+
+def test_real_shaped_ollama_loaded_sets_are_one_process_with_null_tokens(source):
+    sets = [[], ["demo-a"], ["demo-b", "demo-a"], ["demo-b"]]
+    for index, names in enumerate(sets):
+        ts = BASE + index * 60
+        ingest(source, ts, [ollama_service(names)])
+        assert archive.run_archive(source[2])["written"] == 1
+        _, result = read(source[2])
+        assert result["model"] is None
+        assert result["loaded_models"] == sorted(names)
+        assert result["loaded_models_at"] == ts
+    ingest(source, BASE + 240, [ollama_service([], unknown="failed")])
+    archive.run_archive(source[2])
+    _, result = read(source[2])
+    assert result["loaded_models"] == ["demo-b"]
+    assert result["loaded_models_at"] == BASE + 180
+    assert result["loaded_models_history"] == [
+        {"ts": BASE + index * 60, "models": sorted(names)} for index, names in enumerate(sets)]
+    assert result["loaded_models_history_truncated"] is False
+    assert len(files(source[2])) == 1
+    assert all(result["usage"][key] is None for key in (*archive.COUNTERS, "total_tokens"))
+    assert all(counter["value"] is None for counter in result["latest_reported_counters"].values())
+
+
+@pytest.mark.parametrize("unknown", ["failed", "unsupported"])
+def test_ollama_unknown_preserves_prior_valid_set_and_observation_time(source, unknown):
+    ingest(source, rows=[ollama_service([], unknown=unknown)])
+    archive.run_archive(source[2])
+    _, first = read(source[2])
+    assert first["loaded_models"] is None and first["loaded_models_at"] is None
+    assert first["loaded_models_history"] == []
+    ingest(source, BASE + 60, [ollama_service(["demo-a"])])
+    archive.run_archive(source[2])
+    ingest(source, BASE + 120, [ollama_service(["demo-a"])])
+    archive.run_archive(source[2])
+    _, current = read(source[2])
+    assert current["loaded_models_at"] == BASE + 120
+    assert current["loaded_models_history"] == [{"ts": BASE + 60, "models": ["demo-a"]}]
+    ingest(source, BASE + 180, [ollama_service([], unknown=unknown)])
+    archive.run_archive(source[2])
+    _, failed = read(source[2])
+    assert failed["loaded_models"] == current["loaded_models"]
+    assert failed["loaded_models_at"] == current["loaded_models_at"]
+    assert failed["loaded_models_history"] == current["loaded_models_history"]
+
+
+def test_ollama_loaded_model_history_is_bounded_and_allowlisted(source):
+    for index in range(archive.MAX_MODEL_HISTORY + 3):
+        ingest(source, BASE + index * 60, [ollama_service(["demo-" + str(index),
+            "/private/model/" + PRIVATE, "192.0.2.123"])])
+        archive.run_archive(source[2])
+    path, result = read(source[2])
+    assert len(result["loaded_models_history"]) == archive.MAX_MODEL_HISTORY
+    assert result["loaded_models_history_truncated"] is True
+    assert result["loaded_models"] == ["demo-" + str(archive.MAX_MODEL_HISTORY + 2)]
+    assert PRIVATE.encode() not in gzip.decompress(path.read_bytes())
+    assert b"192.0.2.123" not in gzip.decompress(path.read_bytes())
 
 
 @pytest.mark.parametrize("mutation,code", [
@@ -282,6 +346,39 @@ def test_source_regressions_preserve_existing_file(source, mutation, code):
     result = archive.run_archive(config)
     assert result["ok"] is False and result["errors"] == {code: 1}
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("restore", ["last_seen", "ended_at", "premature_reopen"])
+def test_source_lifecycle_regression_preserves_file_and_healthy_sessions_advance(source, restore):
+    store, _, config = source
+    ingest(source, rows=[service(), service("session-b")])
+    original_state = store.instance("session-a")["state_json"]
+    second = service("session-b")
+    second["metrics"]["requests_total"] = 105
+    ingest(source, BASE + 60, [increased(requests_total=105), second])
+    archive.run_archive(config)
+    if restore != "last_seen":
+        second["metrics"]["requests_total"] = 106
+        ingest(source, BASE + 120, [second])
+        archive.run_archive(config)
+    path, _ = read(config)
+    checkpoint = path.read_bytes()
+    second["metrics"]["requests_total"] = 107
+    if restore == "last_seen":
+        ingest(source, BASE + 120, [increased(requests_total=107), second])
+    else:
+        ingest(source, BASE + 240, [second])
+    with store._db as db:
+        if restore == "last_seen":
+            db.execute("UPDATE fleet_instances SET last_seen=?,state_json=? WHERE id='session-a'",
+                (BASE, original_state))
+        else:
+            db.execute("UPDATE fleet_instances SET ended_at=? WHERE id='session-a'",
+                (BASE + 100 if restore == "ended_at" else None,))
+    summary = archive.run_archive(config)
+    assert summary["errors"] == {"source_lifecycle_regression": 1}
+    assert summary["written"] == 1 and path.read_bytes() == checkpoint
+    assert read(config, "session-b")[1]["usage"]["requests"] == 7
 
 
 def test_recreated_source_with_same_process_and_new_first_seen_is_ambiguous(source):

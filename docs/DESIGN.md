@@ -1080,7 +1080,9 @@ replaces cumulative source buckets by hour, retains already archived older
 hours and derives totals from those buckets. Latest reported counters carry
 their own timestamps and epochs and remain separate from observed totals.
 Unavailable statistics stay null. Ollama sessions follow its server process;
-its loaded-model list does not create token-counted sessions.
+its loaded-model list does not create token-counted sessions. The last valid
+model set and its timestamp survive scrape failures; bounded model-set history
+records changes and any omitted older entries.
 
 `ended_at` records the first complete inventory in which the process is absent.
 Collection starts after process launch and does not sample a final counter at

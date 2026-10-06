@@ -20,7 +20,7 @@ FILES = {"/usr/local/libexec/llmsvc-fleet-archive.py": 0o755, "/etc/llmsvc/fleet
          "/etc/systemd/system/" + SERVICE: 0o644, "/etc/systemd/system/" + TIMER: 0o644}
 PROPERTIES = ("Id", "LoadState", "ActiveState", "UnitFileState", "FragmentPath", "DropInPaths")
 ERROR_CODES = {"invalid_path", "symlink_path", "invalid_json_file", "systemctl_unknown", "unit_unknown", "unit_identity_unknown",
-               "config_size", "config_field", "config_path", "unit_path", "config_retention", "database_in_writable_archive",
+               "config_size", "config_field", "config_path", "unit_path", "config_retention", "database_in_writable_archive", "archive_install_path_overlap",
                "owned_file_changed", "receipt_unknown", "action_outcome_unknown", "installed_artifact_changed", "foreign_file", "foreign_unit",
                "timer_changed", "service_changed", "archive_directory_unknown", "receipt_directory_unknown", "install_lock_unknown",
                "receipt_changed", "timer_activation_unknown", "archive_still_active", "invalid_root", "root_required"}
@@ -97,7 +97,11 @@ def prepare(config_path=None):
             raise ValueError("config_path")
         if any(char.isspace() or char in '\\%"\'' or ord(char) < 32 for char in cfg[key]): raise ValueError("unit_path")
     if type(cfg.get("hourly_retention_days")) is not int or not 1 <= cfg["hourly_retention_days"] <= 3650: raise ValueError("config_retention")
-    if Path(cfg["database"]).is_relative_to(Path(cfg["directory"])): raise ValueError("database_in_writable_archive")
+    directory = Path("/" + cfg["directory"].lstrip("/"))
+    if Path("/" + cfg["database"].lstrip("/")).is_relative_to(directory): raise ValueError("database_in_writable_archive")
+    for logical in (*FILES, RECEIPT, str(Path(RECEIPT).with_name("install.lock"))):
+        protected = Path(logical)
+        if directory.is_relative_to(protected) or protected.is_relative_to(directory): raise ValueError("archive_install_path_overlap")
     script = SCRIPT.read_bytes()
     compile(script, str(SCRIPT), "exec")
     service = (SOURCE / SERVICE).read_bytes().replace(b"ReadOnlyPaths=/var/lib/llmsvc", ("ReadOnlyPaths=" + str(Path(cfg["database"]).parent)).encode())

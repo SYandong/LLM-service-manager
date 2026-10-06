@@ -242,6 +242,48 @@ def test_invalid_or_database_writable_config_has_no_artifacts(admin, tmp_path, o
     assert not root.exists()
 
 
+@pytest.mark.parametrize("logical", [
+    "/usr/local/libexec/llmsvc-fleet-archive.py", "/etc/llmsvc/fleet-archive.json",
+    "/etc/systemd/system/llmsvc-fleet-archive.service", "/etc/systemd/system/llmsvc-fleet-archive.timer",
+    "/var/lib/llmsvc-fleet-archive-install/receipt.json", "/var/lib/llmsvc-fleet-archive-install/install.lock",
+], ids=["script", "config", "service", "timer", "receipt", "lock"])
+@pytest.mark.parametrize("relation", ["equal", "descendant", "ancestor"])
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "isolated-install"])
+def test_archive_output_overlap_rejected_before_any_artifacts(admin, tmp_path, monkeypatch, logical, relation, dry_run):
+    directory = Path(logical)
+    if relation == "descendant": directory /= "session-data"
+    if relation == "ancestor": directory = directory.parent
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"database": "/var/lib/llmsvc/fleet.sqlite", "directory": str(directory), "hourly_retention_days": 180}))
+    root = tmp_path / "absent"
+    monkeypatch.setattr(admin, "control", lambda *args: pytest.fail("overlap reached systemctl"))
+    before = set(tmp_path.rglob("*"))
+    with pytest.raises(ValueError, match="^archive_install_path_overlap$"):
+        admin.administer("install", root, config, dry_run)
+    assert not root.exists() and set(tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize("directory", ["//usr/local/libexec/llmsvc-fleet-archive.py", "//var/lib/llmsvc-fleet-archive-install"])
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "isolated-install"])
+def test_double_root_cannot_bypass_archive_output_overlap(admin, tmp_path, directory, dry_run):
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"database": "/var/lib/llmsvc/fleet.sqlite", "directory": directory, "hourly_retention_days": 180}))
+    root = tmp_path / "absent"
+    with pytest.raises(ValueError, match="^archive_install_path_overlap$"):
+        admin.administer("install", root, config, dry_run)
+    assert not root.exists()
+
+
+def test_cli_reports_safe_archive_overlap_error(admin, tmp_path, capsys):
+    config = tmp_path / "private-config.json"
+    config.write_text(json.dumps({"database": "/var/lib/llmsvc/fleet.sqlite", "directory": "/var/lib/llmsvc-fleet-archive-install", "hourly_retention_days": 180}))
+    root = tmp_path / "absent"
+    assert admin.main(["install", "--root", str(root), "--config", str(config), "--dry-run"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["error"] == "archive_install_path_overlap" and result["ok"] is False
+    assert str(config) not in json.dumps(result) and not root.exists()
+
+
 def test_cli_reports_safe_expected_error_without_private_paths(admin, tmp_path, capsys):
     config = tmp_path / "private-config.json"
     config.write_text(json.dumps({"database": "/synthetic-private/database.sqlite", "directory": "/synthetic-private", "hourly_retention_days": 180}))

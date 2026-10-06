@@ -21,7 +21,11 @@ The first counter reading establishes a baseline. Collection gaps, resets and
 unsampled startup/exit traffic mean these totals describe observed usage.
 Unavailable counters are `null`. Ollama currently provides loaded-model and
 activity observations without request/token counters; its session follows the
-server process, including changes to its loaded models.
+server process. `loaded_models` keeps the last observed model set,
+`loaded_models_at` its observation time, and `loaded_models_history` its recent
+changes. A failed scrape preserves the prior set and timestamp; `null` means no
+valid observation and `[]` means an observed empty server. Model histories keep
+the latest 32 changes and record when older entries have been omitted.
 
 The archive retains captured hours after fleet database cleanup. It records
 history that may have expired before the first archive or during a prolonged

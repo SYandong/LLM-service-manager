@@ -33,7 +33,8 @@ HOUR_FIELDS = tuple(COUNTERS) + ("active_minutes", "observed_seconds", "samples"
 ARCHIVE_KEYS = {"schema_version", "identity", "model", "engine_version", "host", "gpus",
                 "started_at", "first_seen", "last_seen", "ended_at", "state", "usage",
                 "latest_reported_counters", "hourly", "coverage", "source", "model_history",
-                "model_history_truncated"}
+                "model_history_truncated", "loaded_models", "loaded_models_at",
+                "loaded_models_history", "loaded_models_history_truncated"}
 
 
 class ArchiveError(ValueError):
@@ -279,6 +280,11 @@ def _merge(row, hours, source, old):
             raise ArchiveError("archive_identity_mismatch")
         if source["generated_at"] < _number(old["source"]["generated_at"]):
             raise ArchiveError("source_generation_regression")
+        previous_end = _number(old["ended_at"], nullable=True)
+        if last_seen < _number(old["last_seen"]) or (previous_end is not None and (
+                (ended_at is not None and ended_at < previous_end)
+                or (ended_at is None and last_seen < previous_end))):
+            raise ArchiveError("source_lifecycle_regression")
     hourly = {} if old is None else dict(old["hourly"])
     for hour in hours:
         key, current = _hour(hour)
@@ -307,6 +313,19 @@ def _merge(row, hours, source, old):
     history = [] if old is None else list(old.get("model_history", []))
     if not history or history[-1]["model"] != model:
         history.append({"ts": last_seen, "model": model})
+    loaded_models = None if old is None else old["loaded_models"]
+    loaded_models_at = None if old is None else old["loaded_models_at"]
+    loaded_history = [] if old is None else list(old["loaded_models_history"])
+    if (identity["engine"] == "ollama" and state.get("observed") is True
+            and state.get("supported") is True and (state.get("latest") or {}).get("scrape_ok") == 1):
+        expiries = state.get("expiries")
+        if not isinstance(expiries, dict):
+            raise ArchiveError("invalid_source_loaded_models")
+        names = [_safe_label(name) for name in expiries]
+        loaded_models = sorted(name for name in names if name is not None)
+        loaded_models_at = _number(state["ts"])
+        if not loaded_history or loaded_history[-1]["models"] != loaded_models:
+            loaded_history.append({"ts": loaded_models_at, "models": loaded_models})
     missing = [] if old is None else list(old["coverage"]["missing_intervals"])
     cutoff = source["hourly_cutoff"]
     start = first_seen if old is None else old["source"]["generated_at"]
@@ -321,7 +340,10 @@ def _merge(row, hours, source, old):
                "usage": _usage(hourly), "latest_reported_counters": counters, "hourly": hourly,
                "coverage": {"startup_unobserved_seconds": first_seen - identity["started_at"], "missing_intervals": missing},
                "source": source, "model_history": history[-MAX_MODEL_HISTORY:],
-               "model_history_truncated": len(history) > MAX_MODEL_HISTORY or bool(old and old.get("model_history_truncated"))}
+               "model_history_truncated": len(history) > MAX_MODEL_HISTORY or bool(old and old.get("model_history_truncated")),
+               "loaded_models": loaded_models, "loaded_models_at": loaded_models_at,
+               "loaded_models_history": loaded_history[-MAX_MODEL_HISTORY:],
+               "loaded_models_history_truncated": len(loaded_history) > MAX_MODEL_HISTORY or bool(old and old["loaded_models_history_truncated"])}
     if old is not None and ended_at is not None and dict(archive, source=old["source"]) == old:
         return old
     if len(_dumps(archive).encode()) > MAX_ARCHIVE_BYTES:
