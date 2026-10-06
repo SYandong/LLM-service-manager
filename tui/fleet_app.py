@@ -5,6 +5,7 @@
 import asyncio
 from datetime import datetime, timezone
 import math
+import sys
 import threading
 from types import SimpleNamespace
 from urllib.parse import quote, urlencode
@@ -26,8 +27,8 @@ from .fleet_selection import SelectableStatic
 
 STATUS_STYLE = {"active": "green", "idle": "", "over_limit": "bold yellow",
                 "claimed": "cyan", "unknown": "dim"}
-HINT = "↑↓ service  S sort  M mine  C claim  U revoke  G GPU  Ctrl+C copy  ? help Q quit"
-GPU_HINT = "↑↓ GPU  ←→ owner  Enter details  Z compact  P people  Ctrl+C copy  ? help Q quit"
+HINT = "↑↓ scroll  J/K service  S sort  M mine  C claim  U revoke  G GPU  ? help Q quit"
+GPU_HINT = "↑↓ scroll  J/K GPU  ←→ owner  Enter details  Z compact  P people  ? help Q quit"
 
 
 def numeric(value):
@@ -81,7 +82,11 @@ class FleetHelpDialog(ModalScreen):
     #fleet-help-text { height: auto; }
     #fleet-help-close { height: 3; width: 100%; }
     """
-    BINDINGS = [("escape", "close", "Close"), ("q", "app.quit", "Quit")]
+    BINDINGS = [("escape", "close", "Close"), ("q", "app.quit", "Quit"),
+                Binding("up", "scroll_contents(-1)", show=False, priority=True),
+                Binding("down", "scroll_contents(1)", show=False, priority=True),
+                Binding("pageup", "scroll_contents(-1, True)", show=False, priority=True),
+                Binding("pagedown", "scroll_contents(1, True)", show=False, priority=True)]
 
     def __init__(self, owner):
         super().__init__()
@@ -102,11 +107,13 @@ class FleetHelpDialog(ModalScreen):
                 yield SelectableStatic(
                     "G  GPU panels     P  People / containers\n"
                     "Z  Expanded / compact GPU view\n"
-                    "Up / Down  Select GPU\n"
-                    "Wheel / trackpad or Page Up / Down  Scroll contents\n"
+                    "J / K  Select next / previous GPU or service\n"
+                    "Up / Down, wheel / trackpad  Scroll contents\n"
+                    "Page Up / Down  Scroll one page\n"
                     "Left / Right  Select owner; keep the chart in place\n"
                     "Enter  Details and history\n"
-                    "Drag text, then Ctrl+C to copy     Q  Quit\n\n"
+                    "Drag to select; copy with your terminal\n"
+                    "Tab / Shift+Tab  Focus controls     Escape  Close     Q  Quit\n\n"
                     "/  Search     M  Mine     R  Refresh\n"
                     "S  Sort: State, Idle time, Memory, Output tokens\n"
                     "C  Claim service     U  Revoke claim\n\n"
@@ -119,7 +126,6 @@ class FleetHelpDialog(ModalScreen):
                     "Activity and tokens cover the whole service, across all its GPUs.\n"
                     "Dots mean unknown hours; coverage is observed time.\n"
                     "Search and Mine filter services; bars show all allocations.\n"
-                    "Selected text stays fixed until cleared or navigation changes.\n"
                     "Refresh every 15s and on service changes.",
                     id="fleet-help-text", markup=False)
             yield Button("Close", id="fleet-help-close")
@@ -133,15 +139,11 @@ class FleetHelpDialog(ModalScreen):
         event.stop()
         self.action_close()
 
-    def on_key(self, event):
-        if event.key in ("pageup", "pagedown"):
-            event.stop()
-            event.prevent_default()
-            self.owner.clear_text_selections()
-            viewport = self.query_one("#fleet-help-scroll", VerticalScroll)
-            viewport.scroll_to(y=viewport.scroll_y +
-                               (-1 if event.key == "pageup" else 1) * viewport.size.height,
-                               animate=False)
+    def action_scroll_contents(self, direction, page=False):
+        self.owner.clear_text_selections()
+        viewport = self.query_one("#fleet-help-scroll", VerticalScroll)
+        viewport._scroll_to(y=viewport.scroll_y + direction * (viewport.size.height if page else 1),
+                            animate=False)
 
 
 class FleetGpuScroll(VerticalScroll):
@@ -245,17 +247,20 @@ class GpuDetailDialog(ModalScreen):
     GpuDetailDialog { align: center middle; }
     #gpu-detail-dialog { width: 94; max-width: 96%; height: 94%;
         background: #181f28; border: round #8192a8; padding: 0 1; }
-    #gpu-allocation-scroll { height: auto; max-height: 6; }
+    #gpu-allocation-scroll { height: 1fr; }
     #gpu-allocation-text { height: auto; }
-    #gpu-detail-services { height: 1fr; min-height: 3; }
-    #gpu-service-details { height: auto; max-height: 9; }
-    #gpu-service-history { height: 1; }
-    #gpu-service-history-bars { height: auto; max-height: 2; }
+    #gpu-detail-services { height: 6; min-height: 3; }
+    #gpu-service-details { height: auto; }
+    #gpu-service-history, #gpu-service-history-bars { height: auto; }
     #gpu-active-chart, #gpu-token-chart { height: 1; }
     #gpu-detail-buttons { height: 3; }
     #gpu-detail-buttons Button { width: 1fr; min-width: 0; }
     """
-    BINDINGS = [("escape", "close", "Close"), ("q", "app.quit", "Quit")]
+    BINDINGS = [("escape", "close", "Close"), ("q", "app.quit", "Quit"),
+                Binding("up", "scroll_contents(-1)", show=False, priority=True),
+                Binding("down", "scroll_contents(1)", show=False, priority=True),
+                Binding("pageup", "scroll_contents(-1, True)", show=False, priority=True),
+                Binding("pagedown", "scroll_contents(1, True)", show=False, priority=True)]
 
     def __init__(self, owner):
         super().__init__()
@@ -266,12 +271,12 @@ class GpuDetailDialog(ModalScreen):
         with Vertical(id="gpu-detail-dialog"):
             with VerticalScroll(id="gpu-allocation-scroll"):
                 yield SelectableStatic("", id="gpu-allocation-text", markup=False)
-            yield DataTable(id="gpu-detail-services", cursor_type="row", cell_padding=1)
-            yield SelectableStatic("", id="gpu-service-details", markup=False)
-            yield SelectableStatic("", id="gpu-service-history", markup=False)
-            yield SelectableStatic("", id="gpu-service-history-bars", markup=False)
-            yield Sparkline([], id="gpu-active-chart")
-            yield Sparkline([], id="gpu-token-chart")
+                yield DataTable(id="gpu-detail-services", cursor_type="row", cell_padding=1)
+                yield SelectableStatic("", id="gpu-service-details", markup=False)
+                yield SelectableStatic("", id="gpu-service-history", markup=False)
+                yield SelectableStatic("", id="gpu-service-history-bars", markup=False)
+                yield Sparkline([], id="gpu-active-chart")
+                yield Sparkline([], id="gpu-token-chart")
             with Horizontal(id="gpu-detail-buttons"):
                 yield Button("Claim", id="gpu-detail-claim")
                 yield Button("Revoke", id="gpu-detail-revoke")
@@ -361,11 +366,26 @@ class GpuDetailDialog(ModalScreen):
             self.owner.action_claim(revoke=event.button.id == "gpu-detail-revoke")
 
     def on_key(self, event):
-        if event.key.lower() in ("c", "u"):
+        key = event.key.lower()
+        if key in ("j", "k"):
             event.stop()
             event.prevent_default()
             self.owner.clear_text_selections()
-            self.owner.action_claim(revoke=event.key.lower() == "u")
+            table = self.query_one("#gpu-detail-services", DataTable)
+            if table.row_count:
+                table.move_cursor(row=max(0, min(table.row_count - 1,
+                                  table.cursor_row + (1 if key == "j" else -1))), animate=False)
+        elif key in ("c", "u"):
+            event.stop()
+            event.prevent_default()
+            self.owner.clear_text_selections()
+            self.owner.action_claim(revoke=key == "u")
+
+    def action_scroll_contents(self, direction, page=False):
+        self.owner.clear_text_selections()
+        viewport = self.query_one("#gpu-allocation-scroll", VerticalScroll)
+        viewport._scroll_to(y=viewport.scroll_y + direction * (viewport.size.height if page else 1),
+                            animate=False)
 
 
 class ClaimDialog(ModalScreen):
@@ -567,6 +587,9 @@ class FleetApp(App):
                 Binding("q", "quit", "Quit", show=False)]
 
     def __init__(self, client, api, event_reader=None, **kwargs):
+        if sys.platform != "win32" and "driver_class" not in kwargs:
+            from .fleet_terminal import FleetTerminalDriver
+            kwargs["driver_class"] = FleetTerminalDriver
         super().__init__(**kwargs)
         self.client, self.api = client, api
         self.event_reader = event_reader if event_reader is not None else api.EventReader(client)
@@ -607,6 +630,12 @@ class FleetApp(App):
         self.event_cursor = 0
         self.connection = "Live changes connecting"
 
+    def run(self, *, mouse=False, **kwargs):
+        return super().run(mouse=mouse, **kwargs)
+
+    async def run_async(self, *, mouse=False, **kwargs):
+        return await super().run_async(mouse=mouse, **kwargs)
+
     @property
     def dashboard(self):
         return self.screen_stack[0]
@@ -631,7 +660,7 @@ class FleetApp(App):
             yield SelectableStatic("", id="fleet-history-bars", markup=False)
             yield Sparkline([], id="fleet-active-chart")
             yield Sparkline([], id="fleet-token-chart")
-        yield SelectableStatic("", id="fleet-notice", markup=False)
+        yield SelectableStatic("Drag to select; copy with your terminal", id="fleet-notice", markup=False)
         yield SelectableStatic(HINT, id="fleet-footer", markup=False)
 
     def on_mount(self):
@@ -1247,24 +1276,30 @@ class FleetApp(App):
                 self.render_snapshot()
             return
         key = event.key.lower()
-        if self.view == "gpu" and key in ("pageup", "pagedown"):
+        if key in ("up", "down", "pageup", "pagedown"):
             event.stop()
             event.prevent_default()
             self.clear_text_selections()
-            viewport = self.dashboard.query_one("#fleet-gpu-scroll", VerticalScroll)
-            viewport.scroll_to(y=viewport.scroll_y +
-                               (-1 if key == "pageup" else 1) * viewport.size.height,
-                               animate=False)
-            self.call_after_refresh(self.follow_gpu_scroll)
+            viewport = (self.dashboard.query_one("#fleet-gpu-scroll", FleetGpuScroll)
+                        if self.view == "gpu" else self._table)
+            if self.view == "person" and self.focused is not None:
+                details = self.dashboard.query_one("#fleet-details", VerticalScroll)
+                if self.focused is details or details in self.focused.ancestors:
+                    viewport = details
+            step = (-1 if key in ("up", "pageup") else 1) * (
+                viewport.size.height if key in ("pageup", "pagedown") else 1)
+            viewport._scroll_to(y=viewport.scroll_y + step, animate=False)
+            if self.view == "gpu":
+                self.call_after_refresh(self.follow_gpu_scroll)
             return
-        if self.view == "person" and key in ("up", "down"):
+        if self.view == "person" and key in ("j", "k"):
             event.stop()
             event.prevent_default()
             self.clear_text_selections()
             self._table.move_cursor(row=max(0, min(len(self.row_keys) - 1,
-                                    self._table.cursor_row + (-1 if key == "up" else 1))), animate=False)
+                                    self._table.cursor_row + (-1 if key == "k" else 1))), animate=False)
             return
-        gpu_key = self.view == "gpu" and key in ("up", "down", "left", "right", "enter")
+        gpu_key = self.view == "gpu" and key in ("j", "k", "left", "right", "enter")
         if not gpu_key and key not in ("p", "g", "z", "s", "m", "c", "u", "r", "q", "slash", "question_mark"):
             return
         event.stop()
@@ -1272,8 +1307,8 @@ class FleetApp(App):
         if key not in ("r", "q"):
             self.clear_text_selections()
         if gpu_key:
-            if key in ("up", "down"):
-                self.move_gpu(-1 if key == "up" else 1)
+            if key in ("j", "k"):
+                self.move_gpu(-1 if key == "k" else 1)
             elif key in ("left", "right"):
                 self.move_segment(-1 if key == "left" else 1)
             else:
