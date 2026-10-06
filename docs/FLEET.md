@@ -47,12 +47,34 @@ resolved-container jobs use `host: false`.
 Host usernames come from the configured bounded local passwd file and are
 nullable labels of at most 128 characters, without control characters. A failed
 or ambiguous name lookup retains the verified UID with a null username. Host
-LLMs and other jobs group by UID, displaying `Host <username>` or `Host UID
-<uid>`; legacy host services without a verified UID retain the Host fallback.
+LLMs and other jobs group by UID. Fleet text and the TUI default to stable
+`User 123456789` labels. `--show-names` in the CLI or N in the TUI reveals the
+username or `UID <uid>`, without a Host prefix. Everyone can reveal names;
+this setting requires no authentication. Missing owner identity displays
+`Unknown`.
 Container summaries separate host LLM users by UID and include `host`,
 `host_uid` and `host_user`, retaining a null container. These labels are
 observations, not caller authentication. Socket-peer ownership and claims keep
 their existing rules. GPU occupants contain no process command line or comm.
+
+Anonymous labels use SHA-256 of `container:<name>` or `host:uid:<uid>`, modulo
+1,000,000,000 with nine decimal digits. They stay stable across CLI/TUI views,
+refreshes and history, and keep host and container identities separate. Known
+owner names in visible IDs, parameters, copied text and diagnostics use the
+same setting. Absolute model paths display only the basename; repository IDs
+such as `google/gemma` remain intact. Other GPU jobs display `Work`. API data,
+raw service IDs, selection/color keys, requests and `--json` are unchanged.
+The display setting does not conceal identities in the API.
+
+Up/Down selects every observed GPU, including GPU 4 and 5 in tall expanded
+views. Any arrow key returns the viewport to the selected GPU heading;
+Left/Right selects its allocations. In iTerm2 with successful input-protocol
+negotiation, wheel/trackpad scrolls freely and keeps selection. Unsupported
+protocols retain arrow selection and Page Up/Page Down scrolling. Compact bars
+have three rows, with labels on the
+middle row, and scroll when needed. `Memory readings differ` reports an excess
+of attributed memory over measured use without changing either amount; the
+sequential observations can differ in time.
 
 Services also expose `api_address` (HTTP base URI or null), `api_access`
 (`shared`, `local_only`, `direct`, `unknown`) and `idle_time_sensitive`.

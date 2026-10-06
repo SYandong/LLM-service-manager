@@ -114,7 +114,7 @@ class FleetClient:
         return {"ok": True, "dry_run": preview, "claim": claim}
 
 
-def make_app(snapshot, reader=None):
+def make_app(snapshot, reader=None, *, show_names=False):
     api = SimpleNamespace(**runpy.run_path(str(Path(__file__).parents[1] / "cli/llm")))
     if not hasattr(api, "claim_until"):
         def claim_until(value):
@@ -123,7 +123,7 @@ def make_app(snapshot, reader=None):
             return 1900086400
         api.claim_until = claim_until
     client = FleetClient(snapshot)
-    return FleetApp(client, api, event_reader=reader or FixtureEvents()), client
+    return FleetApp(client, api, event_reader=reader or FixtureEvents(), show_names=show_names), client
 
 
 async def ready(app, pilot):
@@ -156,7 +156,7 @@ def test_layout_views_and_seven_day_details(fleet_snapshot, size, tmp_path):
             assert overview.bar_rows == 3
             viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
             assert viewport.virtual_size.height > viewport.size.height
-            assert "training-group · Other · 20 GiB" in str(overview.render())
+            assert " · Work · 20 GiB" in str(overview.render())
             assert "quiet-model" in str(overview.render())
             assert "sort priority" not in str(app.query_one("#fleet-controls").render())
             assert "Live changes" not in str(app.query_one("#fleet-controls").render())
@@ -164,17 +164,17 @@ def test_layout_views_and_seven_day_details(fleet_snapshot, size, tmp_path):
             await pilot.press("z")
             await ready(app, pilot)
             assert app.compact_gpus
-            assert overview.bar_rows == (2 if size[0] >= 100 else 1)
+            assert overview.bar_rows == 3
             lines = overview.render().plain.splitlines()
             assert len(lines) == 6 * (overview.bar_rows + 2)
             assert all(len(line) <= size[0] for line in lines)
             assert str(overview.render()).count("GPU ") == 6
-            assert "Other 20" in str(overview.render())
-            assert overview.region.y + len(lines) <= app.query_one("#fleet-notice").region.y
+            assert "Work 20" in str(overview.render())
+            assert viewport.max_scroll_y > 0
             app.save_screenshot(filename="fleet-%sx%s.svg" % size, path=str(tmp_path))
             await pilot.press("enter")
             assert isinstance(app.screen, GpuDetailDialog)
-            assert "training-group · Other · 20 GiB" in str(app.screen.query_one("#gpu-allocation-text").render())
+            assert " · Work · 20 GiB" in str(app.screen.query_one("#gpu-allocation-text").render())
             await pilot.press("escape", "p")
             await ready(app, pilot)
             assert table.size.height >= 3
@@ -195,7 +195,7 @@ def test_layout_views_and_seven_day_details(fleet_snapshot, size, tmp_path):
             others = [key for key in app.row_keys if key.startswith("other:")]
             assert len(others) == 6
             for key in others:
-                assert "(other workload)" in table.get_cell(key, "service").plain
+                assert "(Work)" in table.get_cell(key, "service").plain
                 assert table.get_cell(key, "mem").plain == "20"
                 for column in ("activity", "idle", "status"):
                     assert table.get_cell(key, column).plain == ""
@@ -250,15 +250,15 @@ def test_people_group_and_filter_proven_host_uids(fleet_snapshot, size):
         app, _ = make_app(fleet_snapshot)
         async with app.run_test(size=size) as pilot:
             await ready(app, pilot)
-            await pilot.press("p")
+            await pilot.press("p", "n")
             await ready(app, pilot)
             groups = [key for key in app.row_keys if key.startswith("person:")]
             assert set(groups) == {"person:host:uid:1000", "person:host:uid:1005"}
-            assert app._table.get_cell("person:host:uid:1000", "service").plain == "Host operator · 2svc"
-            assert app._table.get_cell("person:host:uid:1005", "service").plain == "Host operator · 1svc"
+            assert app._table.get_cell("person:host:uid:1000", "service").plain == "operator · 2svc"
+            assert app._table.get_cell("person:host:uid:1005", "service").plain == "operator · 1svc"
             await select(app, pilot, "busy")
-            assert "Host operator" in str(app.query_one("#fleet-detail-text").render())
-            app.query_one("#fleet-filter", Input).value = "Host operator"
+            assert "operator" in str(app.query_one("#fleet-detail-text").render())
+            app.query_one("#fleet-filter", Input).value = "operator"
             await ready(app, pilot)
             assert set(app.row_services.values()) == {"busy", "quiet", "own"}
             assert not app.claim_allowed("own", None)

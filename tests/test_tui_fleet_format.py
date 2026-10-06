@@ -3,12 +3,74 @@
 
 import copy
 import math
+from pathlib import Path
+import re
+import runpy
 
 import pytest
 
-from tui.fleet_format import api_label, count, duration, gib, status_label, total_tokens
+from tui.fleet_format import (api_label, count, display_text, duration, gib, model_label,
+                              owner_info, status_label, total_tokens)
 from tui.fleet_gpu import (account_gpu, allocation_legend, card_header, detail_lines,
                            render_expanded, service_lines)
+
+
+def test_anonymous_owner_labels_match_standalone_cli_and_keep_namespaces():
+    cli = runpy.run_path(str(Path(__file__).parents[1] / "cli/llm"))
+    owners = [{"container": "operator"},
+              {"host": True, "host_uid": 1000, "host_user": "operator"},
+              {"host": True, "host_uid": 1001, "host_user": "operator"}]
+    labels = []
+    for owner in owners:
+        identity, label = owner_info(owner)
+        assert re.fullmatch(r"User [0-9]{9}", label)
+        assert cli["fleet_owner"](owner) == (identity, label)
+        labels.append(label)
+    assert len(set(labels)) == 3
+    owners[1]["host_user"] = "renamed"
+    assert owner_info(owners[1])[1] == labels[1]
+    assert owner_info(owners[1], True) == ("host:uid:1000", "renamed")
+    assert owner_info({"host": True, "host_uid": 1000}, True)[1] == "UID 1000"
+    assert owner_info({}) == ("unknown", "Unknown")
+    assert owner_info({"host": True}) == ("host", "Unknown")
+
+
+@pytest.mark.parametrize("model, expected", [
+    ("/srv/models/gemma-4-31b-it-qat-w4a16-ct", "gemma-4-31b-it-qat-w4a16-ct"),
+    ("/srv/models/gemma/", "gemma"), ("google/gemma", "google/gemma"),
+])
+def test_model_paths_have_basename_labels_without_changing_repo_ids(model, expected):
+    cli = runpy.run_path(str(Path(__file__).parents[1] / "cli/llm"))
+    assert model_label(model) == cli["fleet_model_label"](model) == expected
+
+
+@pytest.mark.parametrize("name", ["User", "Work", "google"])
+def test_raw_text_projection_preserves_labels_and_model_ids(name):
+    cli = runpy.run_path(str(Path(__file__).parents[1] / "cli/llm"))
+    owner = {"container": name, "model": name + "/gemma"}
+    label = owner_info(owner)[1]
+    raw = "%s:42:55 · %s/gemma · %s" % (name, name, label)
+    expected = "%s:42:55 · %s/gemma · %s" % (label, name, label)
+    assert display_text(raw, [owner]) == expected
+    assert cli["fleet_display_text"](raw, [owner]) == expected
+
+
+@pytest.mark.parametrize("name, model", [("gemma-owner", "gemma"),
+                                        ("User", "/srv/models/User"),
+                                        ("Work", "/srv/models/Work")])
+def test_model_tokens_do_not_protect_owner_id_prefixes(name, model):
+    cli = runpy.run_path(str(Path(__file__).parents[1] / "cli/llm"))
+    owner = {"container": name, "model": model, "id": name + ":42:55"}
+    label = owner_info(owner)[1]
+    assert display_text(owner["id"], [owner]) == label + ":42:55"
+    assert cli["fleet_display_text"](owner["id"], [owner]) == label + ":42:55"
+    first, ident, _, _ = service_lines(owner, 1, 0)
+    assert "Model " + model_label(model) in first.plain
+    assert "Service ID: " + label + ":42:55" in ident.plain
+    owner["id"] = name
+    assert display_text(name, [owner], preserve_models=False) == label
+    assert cli["fleet_display_text"](name, [owner], preserve_models=False) == label
+    assert "Service ID: " + label in service_lines(owner, 1, 0)[1].plain
 
 
 @pytest.mark.parametrize("seconds, expected", [
@@ -118,7 +180,7 @@ def test_all_gpu_labels_share_precision_while_accounting_keeps_source_values():
     assert card.total_gb == gpu["total_gb"]
     assert card.used_gb == gpu["used_gb"]
     assert card.attributed_gb == math.fsum([52.0009765625, .0001])
-    assert next(item.used_gb for item in card.allocations if item.owner == "tiny") == .0001
+    assert next(item.used_gb for item in card.allocations if item.identity == "container:tiny") == .0001
     assert gpu == original
     for label in labels:
         assert "140.1201171875" not in label

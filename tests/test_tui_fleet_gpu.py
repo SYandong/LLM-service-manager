@@ -15,6 +15,7 @@ from textual.widgets import Button, DataTable, Input
 from textual.containers import VerticalScroll
 
 from tui.fleet_app import ClaimDialog, FleetHelpDialog, GpuDetailDialog, GpuOverview
+from tui.fleet_format import owner_info
 from tui.fleet_gpu import (FREE_KEY, MEASURED_KEY, RESIDUAL_KEY, account_gpu,
                            allocation_legend, card_header, compact_gib, detail_lines,
                            drawing_segments, expanded_header, gib, owner_color,
@@ -28,7 +29,7 @@ def gpu_snapshot():
 
 
 def accounts(snapshot):
-    return [account_gpu(gpu, snapshot["services"]) for gpu in snapshot["gpus"]]
+    return [account_gpu(gpu, snapshot["services"], show_names=True) for gpu in snapshot["gpus"]]
 
 
 @pytest.mark.parametrize("width", [80, 100])
@@ -39,10 +40,10 @@ def test_host_other_on_gpu_five_keeps_owner_memory_and_six_cards(gpu_snapshot, w
     cards = accounts(gpu_snapshot)
     allocation, = cards[5].allocations
     assert allocation.key == ("host:uid:1000", "other")
-    assert allocation.owner == "Host host-a" and allocation.used_gb == 5
+    assert allocation.owner == "host-a" and allocation.used_gb == 5
     view, _, anchors, _ = render_expanded(cards, gpu_snapshot["services"], width)
     assert [index for index in anchors if type(index) is int] == list(range(6))
-    assert "Host host-a · Other · 5 GiB" in view.plain
+    assert "host-a · Work · 5 GiB" in view.plain
     assert all(line.cell_len <= width for line in view.split("\n"))
 
 
@@ -54,14 +55,14 @@ def test_host_uid_joins_llm_and_other_but_keeps_kinds_and_users_distinct():
         {"container": None, "host": True, "host_uid": 1000, "host_user": "host-a",
          "kind": "other", "used_gb": 5},
         {"container": None, "host": True, "host_uid": 1005, "host_user": "host-b",
-         "kind": "other", "used_gb": 8}]}, services)
+         "kind": "other", "used_gb": 8}]}, services, show_names=True)
     segments = {segment.key: segment for segment in drawing_segments(card)}
     llm = segments[("host:uid:1000", "llm")]
     other = segments[("host:uid:1000", "other")]
     second_user = segments[("host:uid:1005", "other")]
-    assert llm.color == other.color and llm.label == other.label == "Host host-a"
+    assert llm.color == other.color and llm.label == other.label == "host-a"
     assert llm.pattern == " " and other.pattern == "·"
-    assert second_user.label == "Host host-b" and second_user.color != llm.color
+    assert second_user.label == "host-b" and second_user.color != llm.color
     assert {item.key: item.used_gb for item in card.allocations} == {
         ("host:uid:1000", "llm"): 12, ("host:uid:1000", "other"): 5,
         ("host:uid:1005", "other"): 8}
@@ -74,7 +75,7 @@ def test_host_uid_joins_llm_and_other_but_keeps_kinds_and_users_distinct():
                   for value in channels]
         return sum(value * weight for value, weight in zip(linear, (.2126, .7152, .0722)))
 
-    for label in ("Host host-a LLM", "Host host-b Other"):
+    for label in ("host-a LLM", "host-b Work"):
         style = bar.get_style_at_offset(console, bar.plain.index(label))
         foreground = luminance(style.color.get_truecolor())
         background = luminance(style.bgcolor.get_truecolor())
@@ -87,7 +88,7 @@ def test_unresolved_other_does_not_infer_host_from_null_container(proof):
         {"container": None, "host": proof, "host_uid": 1000, "host_user": "unverified",
          "kind": "other", "used_gb": 5}]})
     allocation, = card.allocations
-    assert allocation.key == ("unknown", "other") and allocation.owner == "unknown"
+    assert allocation.key == ("unknown", "other") and allocation.owner == "Unknown"
     assert "unverified" not in detail_lines(card)
 
 
@@ -95,9 +96,9 @@ def test_unresolved_other_does_not_infer_host_from_null_container(proof):
 def test_verified_host_without_username_uses_uid(user):
     card = account_gpu({"index": 5, "total_gb": 140, "used_gb": 5, "occupants": [
         {"container": None, "host": True, "host_uid": 0, "host_user": user,
-         "kind": "other", "used_gb": 5}]})
+         "kind": "other", "used_gb": 5}]}, show_names=True)
     allocation, = card.allocations
-    assert allocation.key == ("host:uid:0", "other") and allocation.owner == "Host UID 0"
+    assert allocation.key == ("host:uid:0", "other") and allocation.owner == "UID 0"
 
 
 def test_legacy_host_llm_and_unsafe_owner_labels_are_safe():
@@ -107,10 +108,10 @@ def test_legacy_host_llm_and_unsafe_owner_labels_are_safe():
          "host_user": "host\x1b[31m\r\n\u202e[red]", "kind": "other", "used_gb": 5},
         {"container": "container\x1b[2J\r\u202e", "host": False,
          "host_uid": None, "host_user": None, "kind": "other", "used_gb": 5}]},
-        [{"id": "legacy", "container": None, "host": True}])
+        [{"id": "legacy", "container": None, "host": True}], show_names=True)
     assert next(item for item in card.allocations if item.kind == "llm").key == ("host", "llm")
     text = detail_lines(card)
-    assert "host · LLM · 5 GiB" in text and "Host host" in text
+    assert "Unknown · LLM · 5 GiB" in text and "host [31m" in text
     assert "[red]" in text
     assert all(character not in text for character in ("\x1b", "\r", "\u202e"))
 
@@ -125,8 +126,8 @@ def test_synthetic_totals_are_counted_once(gpu_snapshot):
     assert sum(item.used_gb for item in allocations if item.kind == "llm") == 456
     assert sum(item.used_gb for item in allocations if item.kind == "other") == 134
     totals = {owner: sum(item.used_gb for item in allocations if item.owner == owner)
-              for owner in ("sample-a", "sample-b", "sample-c", "sample-d", "unknown")}
-    assert totals == {"sample-a": 220, "sample-b": 168, "sample-c": 120, "sample-d": 76, "unknown": 6}
+              for owner in ("sample-a", "sample-b", "sample-c", "sample-d", "Unknown")}
+    assert totals == {"sample-a": 220, "sample-b": 168, "sample-c": 120, "sample-d": 76, "Unknown": 6}
     assert all(card.reconciled for card in cards)
     first = next(item for item in cards[0].allocations if item.owner == "sample-a")
     assert first.used_gb == 74
@@ -154,7 +155,7 @@ def test_owner_color_is_stable_across_cards_kinds_and_order(gpu_snapshot):
 @pytest.mark.parametrize("expanded", [False, True], ids=["compact", "expanded"])
 def test_bar_labels_have_equal_padding_on_all_sides(rows, expanded):
     card = account_gpu({"index": 0, "total_gb": 100, "used_gb": 52,
-                        "occupants": [{"container": "sample-a", "kind": "llm", "used_gb": 52}]})
+                        "occupants": [{"container": "sample-a", "kind": "llm", "used_gb": 52}]}, show_names=True)
     if expanded:
         view, hits, _, _ = render_expanded([card], [], 100, bar_rows=rows)
     else:
@@ -177,10 +178,10 @@ def test_proportional_rounding_keeps_tiny_amounts_without_forcing_a_cell():
     with pytest.raises(ValueError):
         proportional_cells([90, 30], 100, 80)
     card = account_gpu({"index": 0, "total_gb": 100, "used_gb": 50.0001,
-                        "occupants": [{"container": "tiny", "kind": "other", "used_gb": .0001}]})
+                        "occupants": [{"container": "tiny", "kind": "other", "used_gb": .0001}]}, show_names=True)
     assert gib(.0001) == "<0.01"
-    assert "tiny Other <0.01" in allocation_legend(card, 100)[0].plain
-    assert "tiny · Other · <0.01 GiB" in detail_lines(card)
+    assert "tiny Work <0.01" in allocation_legend(card, 100)[0].plain
+    assert "tiny · Work · <0.01 GiB" in detail_lines(card)
     assert card.allocations[0].used_gb == .0001
 
 
@@ -214,8 +215,8 @@ def test_conflict_draws_measurement_and_preserves_supplied_allocations(gpu_snaps
     segments = drawing_segments(card)
     assert [(item.key, item.used_gb) for item in segments] == [(MEASURED_KEY, 100), (FREE_KEY, 40)]
     assert proportional_cells([item.used_gb for item in segments], 140, 80) == [57, 23]
-    assert "conflict +18 GiB" in card_header(card, 80).plain
-    assert "attribution conflict +18 GiB" in detail_lines(card)
+    assert "Memory readings differ +18 GiB" in card_header(card, 80).plain
+    assert "Memory readings differ +18 GiB" in detail_lines(card)
     assert "sample-a · LLM · 74 GiB" in detail_lines(card)
     assert "Unattributed: ?" in detail_lines(card)
 
@@ -236,7 +237,7 @@ def test_legend_continuation_and_selection_retain_exact_details(gpu_snapshot):
     assert "+" in legend.plain and "Enter" in legend.plain
     selected = next(item.key for item in card.allocations if item.owner == "sample-c")
     legend, _ = allocation_legend(card, 48, selected)
-    assert "sample-c Other 10" in legend.plain
+    assert "sample-c Work 10" in legend.plain
     assert "sample-b · LLM · 34 GiB" in detail_lines(card)
 
 
@@ -264,8 +265,8 @@ def test_fractional_conflict_keeps_compute_visible_with_a_stale_label():
     header = card_header(card, 80, selected=True, stale=True).plain
     assert "STALE" in header
     assert "compute 61.12%" in header
-    assert "conflict +17.97 GiB" in header
-    assert "attribution conflict +17.97 GiB" in detail_lines(card)
+    assert "Memory readings differ" in header
+    assert "Memory readings differ +17.97 GiB" in detail_lines(card)
 
 
 def test_expanded_cards_wrap_full_labels_with_concise_per_card_values(gpu_snapshot):
@@ -321,7 +322,7 @@ def test_expanded_conflicts_and_unknowns_keep_allocations_readable(gpu_snapshot)
     gpu_snapshot["gpus"][1]["total_gb"] = None
     cards = accounts(gpu_snapshot)[:2]
     view, _, _, _ = render_expanded(cards, gpu_snapshot["services"], 79, stale=True)
-    assert "attribution conflict +18 GiB" in view.plain
+    assert "Memory readings differ +18 GiB" in view.plain
     assert "sample-a · LLM · 74 GiB" in view.plain
     assert "Unattributed used · ? GiB" in view.plain
     assert "Free VRAM · 40 GiB" in view.plain
@@ -406,7 +407,7 @@ def test_gpu_keyboard_segment_details_and_individual_services(gpu_snapshot, size
             await ready(app, pilot)
             assert isinstance(app.screen, GpuDetailDialog)
             assert app.selected_segment == ("container:sample-a", "llm")
-            assert "sample-a · LLM · 74 GiB" in str(app.screen.query_one("#gpu-allocation-text").render())
+            assert " · LLM · 74 GiB" in str(app.screen.query_one("#gpu-allocation-text").render())
             table = app.screen.query_one("#gpu-detail-services", DataTable)
             assert table.row_count == 2
             assert table.get_cell_at((0, 1)) == "52"
@@ -443,7 +444,7 @@ def test_mouse_targets_gpu_headers_and_owner_segments(gpu_snapshot):
             await pilot.click("#fleet-gpus", offset=(segment[1] + 1, segment[0]))
             await ready(app, pilot)
             assert isinstance(app.screen, GpuDetailDialog)
-            assert "sample-a · Other · 12 GiB" in str(app.screen.query_one("#gpu-allocation-text").render())
+            assert " · Work · 12 GiB" in str(app.screen.query_one("#gpu-allocation-text").render())
             assert app.screen.query_one("#gpu-detail-services", DataTable).row_count == 0
             assert app.screen.query_one("#gpu-detail-claim", Button).disabled
             assert app.screen.query_one("#gpu-detail-revoke", Button).disabled
@@ -499,7 +500,7 @@ def test_expanded_selection_scroll_refresh_and_compact_roundtrip(gpu_snapshot, s
             assert viewport.scroll_y == manual_scroll
             await pilot.press("z")
             await ready(app, pilot)
-            assert app.compact_gpus and viewport.scroll_y == 0
+            assert app.compact_gpus and viewport.scroll_y == min(app._gpu_anchors[app.selected_gpu], viewport.max_scroll_y)
             assert (app.selected_gpu, app.selected_segment) == selected
             await pilot.press("z")
             await ready(app, pilot)
@@ -552,10 +553,10 @@ def test_help_scrolls_at_80_columns_and_restores_gpu_focus(gpu_snapshot):
             text = str(content.render())
             assert "/  Search" in text
             assert "LLM: inference models, solid fill" in text
-            assert "Other: other GPU jobs, dotted fill" in text
+            assert "Work: other GPU jobs, dotted fill" in text
             assert "Unattributed: used VRAM with no matched workload" in text
             assert "Activity and tokens cover the whole service" in text
-            assert "wheel / trackpad" in text
+            assert "Wheel / trackpad" in text
             assert "copy with your terminal" in text
             viewport = app.screen.query_one("#fleet-help-scroll", VerticalScroll)
             assert viewport.virtual_size.height > viewport.size.height
@@ -585,17 +586,17 @@ def test_filter_and_mine_never_turn_hidden_allocations_into_free_memory(gpu_snap
             original = copy.deepcopy(app.gpu_accounts)
             original_bar = render_bar(app.gpu_accounts[0], 80)[0]
             await pilot.press("slash")
-            app.query_one("#fleet-filter", Input).value = "sample-a"
+            app.query_one("#fleet-filter", Input).value = owner_info({"container": "sample-a"})[1]
             await pilot.press("enter", "m")
             assert app.gpu_accounts == original
             assert render_bar(app.gpu_accounts[0], 80)[0] == original_bar
-            assert "sample-b · LLM · 34 GiB" in str(app.query_one("#fleet-gpus").render())
+            assert " · LLM · 34 GiB" in str(app.query_one("#fleet-gpus").render())
             assert "demo-model-34" not in str(app.query_one("#fleet-gpus").render())
             assert "demo-model-52" in str(app.query_one("#fleet-gpus").render())
             assert app.selected_gpu_account().free_gb == 17
             await pilot.press("right", "right", "enter")
             await ready(app, pilot)
-            assert "sample-b · LLM · 34 GiB" in str(app.screen.query_one("#gpu-allocation-text").render())
+            assert " · LLM · 34 GiB" in str(app.screen.query_one("#gpu-allocation-text").render())
             assert app.screen.query_one("#gpu-detail-services", DataTable).row_count == 0
     asyncio.run(scenario())
 
@@ -612,14 +613,14 @@ def test_stale_and_conflict_are_visible_in_the_compact_overview(gpu_snapshot):
             await ready(app, pilot)
             overview = app.query_one("#fleet-gpus", GpuOverview)
             assert "STALE" in str(overview.render())
-            assert "conflict +18 GiB" in str(overview.render())
+            assert "Memory readings differ" in str(overview.render())
             header = overview.render().plain.splitlines()[0]
             assert "compute 61%" in header
             assert str(overview.render()).count("GPU ") == 6
-            assert overview.region.y + len(overview.render().plain.splitlines()) <= app.query_one("#fleet-notice").region.y
+            assert app.query_one("#fleet-gpu-scroll", VerticalScroll).max_scroll_y > 0
             await pilot.press("right", "enter")
             await ready(app, pilot)
-            assert "sample-a · LLM · 74 GiB" in str(app.screen.query_one("#gpu-allocation-text").render())
+            assert " · LLM · 74 GiB" in str(app.screen.query_one("#gpu-allocation-text").render())
             assert app.screen.query_one("#gpu-detail-claim", Button).disabled
             assert app.selected_service()["status"] == "idle"
             assert "Unknown" in str(app.screen.query_one("#gpu-service-details").render())
@@ -628,7 +629,7 @@ def test_stale_and_conflict_are_visible_in_the_compact_overview(gpu_snapshot):
 
 @pytest.mark.parametrize("size", [(100, 30), (80, 24)])
 @pytest.mark.parametrize("failure", ["stale", "read"])
-def test_six_gpu_headers_fit_with_filter_and_failure_banner(gpu_snapshot, size, failure):
+def test_six_gpu_headers_scroll_with_filter_and_failure_banner(gpu_snapshot, size, failure):
     async def scenario():
         app, client = make_app(gpu_snapshot)
         async with app.run_test(size=size) as pilot:
@@ -642,13 +643,14 @@ def test_six_gpu_headers_fit_with_filter_and_failure_banner(gpu_snapshot, size, 
             await pilot.press("slash")
             await pilot.pause()
             overview = app.query_one("#fleet-gpus", GpuOverview)
-            assert overview.bar_rows == 1
+            assert overview.bar_rows == 3
             assert app.query_one("#fleet-filter").display
             assert app.query_one("#fleet-banner").display
             headers = [hit for hit in overview.hits if hit[4] is None]
             assert [hit[3] for hit in headers] == list(range(6))
             assert all(overview.region.y + hit[0] < overview.region.bottom for hit in headers)
             assert overview.region.y + len(overview.render().plain.splitlines()) <= overview.region.bottom
+            assert app.query_one("#fleet-gpu-scroll", VerticalScroll).max_scroll_y > 0
             assert app.query_one("#fleet-footer").region.bottom <= size[1]
     asyncio.run(scenario())
 
