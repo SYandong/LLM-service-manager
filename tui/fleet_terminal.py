@@ -35,7 +35,8 @@ class FleetTerminalDriver(LinuxDriver):
         previous = termios.tcgetattr(self.fileno)
         attributes = list(previous)
         attributes[tty.CC] = list(previous[tty.CC])
-        attributes[tty.LFLAG] &= ~(termios.ICANON | termios.ECHO)
+        attributes[tty.IFLAG] = self._patch_iflag(attributes[tty.IFLAG])
+        attributes[tty.LFLAG] = self._patch_lflag(attributes[tty.LFLAG])
         attributes[tty.CC][termios.VMIN] = 1
         attributes[tty.CC][termios.VTIME] = 0
         buffer = bytearray()
