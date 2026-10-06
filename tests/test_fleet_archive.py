@@ -460,10 +460,10 @@ def test_dry_run_has_no_archive_lock_config_or_state_artifacts(source, tmp_path)
     assert not Path(config["directory"]).exists()
     archive.run_archive(config)
     path, _ = read(config)
-    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in Path(config["directory"]).iterdir()}
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in Path(config["directory"]).rglob("*") if p.is_file()}
     ingest(source, BASE + 60, [increased(requests_total=102)])
     assert archive.run_archive(config, dry_run=True)["would_write"] == 1
-    assert {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in Path(config["directory"]).iterdir()} == before
+    assert {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in Path(config["directory"]).rglob("*") if p.is_file()} == before
     assert read(config)[0] == path
 
 
@@ -505,11 +505,11 @@ def test_read_only_consistent_snapshot_closes_before_file_io(source, monkeypatch
         def row_factory(self, value):
             self.db.row_factory = value
 
-        def execute(self, sql):
+        def execute(self, sql, parameters=()):
             if "FROM fleet_instances" in sql and not changed:
                 changed.append(True)
                 store.ingest(snapshot(BASE + 60, [increased(requests_total=102)]), settings, BASE + 60)
-            result = self.db.execute(sql)
+            result = self.db.execute(sql, parameters)
             if sql == "PRAGMA query_only=ON":
                 assert self.db.execute("PRAGMA query_only").fetchone()[0] == 1
                 with pytest.raises(sqlite3.OperationalError):
@@ -528,14 +528,14 @@ def test_read_only_consistent_snapshot_closes_before_file_io(source, monkeypatch
         assert target.endswith("?mode=ro") and "immutable" not in target and "nolock" not in target
         return Reader(original(target, **options))
 
-    write = archive._atomic_write
+    write = archive._atomic_gzip
 
     def atomic(*args):
         assert closed
         return write(*args)
 
     monkeypatch.setattr(archive.sqlite3, "connect", connect)
-    monkeypatch.setattr(archive, "_atomic_write", atomic)
+    monkeypatch.setattr(archive, "_atomic_gzip", atomic)
     assert archive.run_archive(config)["written"] == 1
     _, result = read(config)
     assert result["source"]["generated_at"] == BASE and result["usage"]["requests"] == 0
@@ -553,6 +553,8 @@ def test_atomic_write_failure_retry_is_idempotent(source, monkeypatch, after_rep
     replace = archive.os.replace
 
     def fail(*args):
+        if Path(args[1]) != path:
+            return replace(*args)
         if after_replace:
             replace(*args)
         raise OSError("synthetic interrupted rename")
@@ -595,16 +597,23 @@ def test_failed_directory_durability_barrier_is_retried_for_unchanged_file(sourc
 
     def sync(fd):
         if stat.S_ISDIR(os.fstat(fd).st_mode):
+            directory = Path(os.readlink('/proc/self/fd/' + str(fd)))
+            if directory != Path(config["directory"]) or not summary_synced:
+                return fsync(fd)
             barriers.append("directory")
             if barriers.count("directory") == 1:
                 raise OSError("synthetic directory barrier failure")
         else:
-            barriers.append("file")
             # The gzip trailer is closed and flushed before the file barrier.
             temporary = Path(os.readlink('/proc/self/fd/' + str(fd)))
+            if temporary.parent != Path(config["directory"]):
+                return fsync(fd)
+            barriers.append("file")
             assert json.loads(gzip.decompress(temporary.read_bytes()))["usage"]["requests"] == 2
+            summary_synced.append(True)
         return fsync(fd)
 
+    summary_synced = []
     monkeypatch.setattr(archive.os, "fsync", sync)
     with pytest.raises(archive.ArchiveError, match="archive_directory_sync_failed"):
         archive.run_archive(config)
