@@ -205,6 +205,31 @@ def test_keyboard_selection_survives_alignment_of_short_empty_gpu_panels(interac
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("key,expected_gpu", [("pageup", 0), ("pagedown", 5)])
+def test_page_key_at_scroll_boundary_catches_up_gpu_after_clearing_text(interaction_snapshot, key, expected_gpu):
+    async def scenario():
+        app, _ = make_app(interaction_snapshot)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await ready(app, pilot)
+            app.select_gpu(2)
+            await ready(app, pilot)
+            overview = app.query_one("#fleet-gpus", GpuOverview)
+            viewport = app.query_one("#fleet-gpu-scroll", VerticalScroll)
+            row = overview.anchors[2]
+            start = overview.render().plain.splitlines()[row].index("GPU ")
+            await drag(pilot, "#fleet-gpus", (start, row), (start + 5, row))
+            assert overview.has_selection
+            boundary = 0 if key == "pageup" else viewport.max_scroll_y
+            viewport.scroll_to(y=boundary, animate=False)
+            await pilot.pause()
+            assert viewport.scroll_y == boundary and app.selected_gpu == 2
+            await pilot.press(key)
+            await pilot.pause()
+            assert not overview.has_selection and viewport.scroll_y == boundary
+            assert app.selected_gpu == expected_gpu
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("active_window,idle_hours,recent,idle", [
     (900, 6, "15m", "6h"), (1800, 2, "30m", "2h"),
 ])

@@ -1255,6 +1255,7 @@ class FleetApp(App):
             viewport.scroll_to(y=viewport.scroll_y +
                                (-1 if key == "pageup" else 1) * viewport.size.height,
                                animate=False)
+            self.call_after_refresh(self.follow_gpu_scroll)
             return
         if self.view == "person" and key in ("up", "down"):
             event.stop()
