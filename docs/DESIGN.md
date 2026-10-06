@@ -1155,14 +1155,15 @@ they never turn hidden allocations into free memory. If S exceeds U, show
 the measured use with an attribution-conflict marker and list the discrepancy.
 Missing capacity has no percentage bar; stale values remain labelled stale.
 
-#### Selection, scrolling and readable values (#331)
+#### Selection, scrolling and readable values (#331, #333)
 
 The selected GPU heading has a high-contrast background, bold text and a small
 pulsing marker in its left gutter. The pulse changes style, preserving text and
-layout. Up/Down or a mouse-wheel gesture selects one GPU and aligns its heading.
-A continuous wheel burst produces one selection; a 250 ms pause starts a new
-gesture. Shift+wheel and Page Up/Page Down scroll freely. Left/Right selects an
-allocation within the current panel while preserving the scroll position.
+layout. Up/Down selects one GPU and aligns its heading. Wheel and trackpad events
+scroll contents by one row per tick, retaining every tick in a continuous gesture.
+The selected GPU follows the panel at the viewport center without realigning the
+contents. Page Up/Page Down scrolls by a page. Left/Right selects an allocation
+within the current panel while preserving the scroll position.
 Refreshes and closing a dialog preserve manual scrolling. Enter opens detail;
 Z switches panel size.
 
@@ -1170,11 +1171,17 @@ Drag selects text in GPU panels, service details, history and help. Ctrl+C copie
 the selected text using the terminal clipboard; Q quits. A panel with a selection
 holds its displayed text until the selection is cleared. Selection follows wrapped
 lines and whole Unicode characters. Explicit navigation clears the selection.
+Scrolling retains the selected text and freezes automatic GPU selection until
+the text selection is cleared.
 
 Durations use at most two integer units: `y`, `mo`, `d`, `h`, `m`, `s`. Input,
 output and their sum each include `tokens`; missing counters remain unknown.
 VRAM uses up to two decimals with trailing zeros removed. `over_limit` remains
 the API state; the TUI labels it `Running · inactive` (`Inactive` in narrow tables).
+Idle means no activity in the configured recent-activity window (15 minutes by
+default). Running · inactive means at least the configured observed idle interval
+(six hours by default); both describe running services. Shared services are exempt
+from the idle reminder. Help shows the current configured intervals.
 Coverage is the fraction of the eligible interval with valid activity observations.
 It describes data completeness, separately from utilization or activity.
 

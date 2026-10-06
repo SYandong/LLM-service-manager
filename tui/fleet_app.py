@@ -6,7 +6,6 @@ import asyncio
 from datetime import datetime, timezone
 import math
 import threading
-from time import monotonic
 from types import SimpleNamespace
 from urllib.parse import quote, urlencode
 
@@ -89,14 +88,22 @@ class FleetHelpDialog(ModalScreen):
         self.owner = owner
 
     def compose(self):
+        settings = (self.owner.snapshot or {}).get("config", {})
+        active_window = settings.get("active_window_seconds")
+        idle_limit = settings.get("idle_limit_hours")
+        idle_help = ("Idle: no inference activity in the last %s.\n" % duration(active_window)
+                     if numeric(active_window) else "Idle: no recent inference activity.\n")
+        inactive_help = ("Running · inactive: still running, idle for at least %s.\n" %
+                         duration(idle_limit * 3600) if numeric(idle_limit)
+                         else "Running · inactive: still running, past the idle reminder.\n")
         with Vertical(id="fleet-help-dialog"):
             yield SelectableStatic("Fleet help", id="fleet-help-title")
             with VerticalScroll(id="fleet-help-scroll"):
                 yield SelectableStatic(
                     "G  GPU panels     P  People / containers\n"
                     "Z  Expanded / compact GPU view\n"
-                    "Up / Down or wheel  Select GPU\n"
-                    "Shift + wheel or Page Up / Down  Scroll freely\n"
+                    "Up / Down  Select GPU\n"
+                    "Wheel / trackpad or Page Up / Down  Scroll contents\n"
                     "Left / Right  Select owner; keep the chart in place\n"
                     "Enter  Details and history\n"
                     "Drag text, then Ctrl+C to copy     Q  Quit\n\n"
@@ -107,7 +114,7 @@ class FleetHelpDialog(ModalScreen):
                     "Other: other GPU jobs, dotted fill\n"
                     "Unattributed: used VRAM with no matched workload\n"
                     "Free: available VRAM\n\n"
-                    "Running · inactive means still running, beyond the idle limit.\n"
+                    + idle_help + inactive_help +
                     "Local only means loopback access. Shared APIs have no idle reminder.\n"
                     "Activity and tokens cover the whole service, across all its GPUs.\n"
                     "Dots mean unknown hours; coverage is observed time.\n"
@@ -146,6 +153,16 @@ class FleetGpuScroll(VerticalScroll):
     def on_mouse_scroll_down(self, event):
         self.app.handle_gpu_wheel(event, 1)
 
+    def scroll_now(self, y):
+        # Both supported Textual versions use this synchronous scroll primitive.
+        self._scroll_to(y=y, animate=False)
+
+    def watch_scroll_y(self, old_value, new_value):
+        super().watch_scroll_y(old_value, new_value)
+        if (self.is_attached and round(old_value) != round(new_value)
+                and not self.app._gpu_scroll_pending):
+            self.call_after_refresh(self.app.follow_gpu_scroll)
+
 
 class GpuOverview(SelectableStatic):
     """Selection, heading styles and click targets share one displayed snapshot."""
@@ -174,9 +191,11 @@ class GpuOverview(SelectableStatic):
         if self.is_attached:
             self.app._gpu_anchors = self.anchors
 
-    def clear_selection(self):
-        payload, self._pending_view = self._pending_view, None
-        super().clear_selection()
+    def clear_selection(self, *, apply_pending=True):
+        payload = self._pending_view if apply_pending else None
+        if apply_pending:
+            self._pending_view = None
+        super().clear_selection(apply_pending=apply_pending)
         if payload is not None and not self._selection_closed:
             self.update_view(*payload)
 
@@ -560,7 +579,6 @@ class FleetApp(App):
         self.compact_gpus = False
         self._gpu_anchors = {}
         self._gpu_scroll_pending = True
-        self._gpu_wheel_at = None
         self._selection_widget = None
         self.selected_gpu = None
         self.selected_segment = None
@@ -668,6 +686,8 @@ class FleetApp(App):
             self._selection_widget = panel
         elif self._selection_widget is panel:
             self._selection_widget = None
+            if self.view == "gpu" and self.screen is self.dashboard:
+                self.call_after_refresh(self.follow_gpu_scroll)
 
     def action_copy_selection(self):
         panel = self._selection_widget
@@ -691,24 +711,32 @@ class FleetApp(App):
     def handle_gpu_wheel(self, event, step):
         if self.view != "gpu" or self.screen is not self.dashboard:
             return
-        if event.shift:
-            event.stop()
-            event.prevent_default()
-            self.clear_text_selections()
-            self.dashboard.query_one("#fleet-gpu-scroll", VerticalScroll).scroll_relative(
-                y=step * 3, animate=False)
-            return
         event.stop()
         event.prevent_default()
-        now, previous = monotonic(), self._gpu_wheel_at
-        self._gpu_wheel_at = now
-        if previous is None or now - previous >= .25:
-            self.move_gpu(step)
+        viewport = self.dashboard.query_one("#fleet-gpu-scroll", FleetGpuScroll)
+        viewport.scroll_now(viewport.scroll_y + step)
+
+    def follow_gpu_scroll(self):
+        if (not self.alive() or self.view != "gpu" or self.screen is not self.dashboard
+                or self.compact_gpus or self._gpu_scroll_pending):
+            return
+        overview = self.dashboard.query_one("#fleet-gpus", GpuOverview)
+        if overview.dragging or overview.has_selection:
+            return
+        viewport = self.dashboard.query_one("#fleet-gpu-scroll", VerticalScroll)
+        middle = viewport.scroll_y + viewport.content_size.height / 2
+        visible = [account.index for account in self.gpu_accounts
+                   if self._gpu_anchors.get(account.index, float("inf")) <= middle]
+        if visible and visible[-1] != self.selected_gpu:
+            self.select_gpu(visible[-1], scroll=False)
 
     def scroll_gpu_selection(self):
-        if self.alive() and self.view == "gpu":
-            target = 0 if self.compact_gpus else self._gpu_anchors.get(self.selected_gpu, 0)
-            self.dashboard.query_one("#fleet-gpu-scroll", VerticalScroll).scroll_to(y=target, animate=False)
+        try:
+            if self.alive() and self.view == "gpu":
+                target = 0 if self.compact_gpus else self._gpu_anchors.get(self.selected_gpu, 0)
+                self.dashboard.query_one("#fleet-gpu-scroll", FleetGpuScroll).scroll_now(target)
+        finally:
+            self._gpu_scroll_pending = False
 
     def selected_gpu_account(self):
         return next((account for account in self.gpu_accounts if account.index == self.selected_gpu), None)
@@ -723,12 +751,12 @@ class FleetApp(App):
         ids = {ident for allocation in allocations for ident, _ in allocation.members if ident is not None}
         return sorted((service for service in self.services() if service["id"] in ids), key=self.sort_key)
 
-    def select_gpu(self, index, segment=None, service_id=None):
+    def select_gpu(self, index, segment=None, service_id=None, *, scroll=True):
         changed = index != self.selected_gpu
         self.clear_text_selections()
         self.selected_gpu, self.selected_segment = index, segment
         self._gpu_detail_service = service_id
-        self._gpu_scroll_pending = self._gpu_scroll_pending or changed
+        self._gpu_scroll_pending = self._gpu_scroll_pending or (changed and scroll)
         self.render_snapshot()
 
     def move_gpu(self, step):
@@ -983,7 +1011,6 @@ class FleetApp(App):
             overview.update_view(view, hits, service_hits, anchors, headings, self.selected_gpu, bar_rows)
             self._rendered["fleet-gpus"] = view
             if self._gpu_scroll_pending and not (overview.dragging or overview.has_selection):
-                self._gpu_scroll_pending = False
                 self.call_after_refresh(self.scroll_gpu_selection)
         else:
             overview.update_view(Text(summary), [], {}, {}, {}, None, 1)

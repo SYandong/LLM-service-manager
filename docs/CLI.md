@@ -410,9 +410,10 @@ People; G returns to GPUs. Fleet refreshes every 15 seconds and on service chang
 
 | Control | Action |
 |---|---|
-| Up / Down, wheel | Select GPU; one selection per wheel gesture |
+| Up / Down | Select GPU |
 | Left / Right | Select allocation while keeping the viewport in place |
-| Shift+wheel, Page Up / Page Down | Scroll freely |
+| Wheel / trackpad | Scroll contents gently; the selected GPU follows the viewport |
+| Page Up / Page Down | Scroll by a page |
 | Drag, Ctrl+C | Select and copy text |
 | Enter | Open details and history |
 | Z | Expanded panels / compact six-GPU overview |
