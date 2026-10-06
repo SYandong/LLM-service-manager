@@ -4,6 +4,7 @@
 
 import argparse
 from contextlib import contextmanager
+from datetime import datetime, timezone
 import fcntl
 import gzip
 import hashlib
@@ -25,6 +26,8 @@ MAX_SOURCE_ROWS = 2_000_000
 MAX_SOURCE_BYTES = 512 * 1024 * 1024
 MAX_SOURCE_SECONDS = 30
 MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+MAX_USAGE_BYTES = 8 * 1024 * 1024
+MAX_USAGE_STATE_BYTES = 64 * 1024
 MAX_CONFIG_BYTES = 64 * 1024
 MAX_MODEL_HISTORY = 32
 COUNTERS = {"requests": "requests", "input_tokens": "prompt_tokens",
@@ -35,6 +38,23 @@ ARCHIVE_KEYS = {"schema_version", "identity", "model", "engine_version", "host",
                 "latest_reported_counters", "hourly", "coverage", "source", "model_history",
                 "model_history_truncated", "loaded_models", "loaded_models_at",
                 "loaded_models_history", "loaded_models_history_truncated"}
+SAMPLE_FIELDS = ("ts", "d_requests", "d_prompt_tokens", "d_gen_tokens", "d_cached_tokens",
+                 "interval_seconds", "observed_seconds", "scrape_ok", "gap", "counter_reset")
+USAGE_STATE_KEYS = {"schema_version", "identity", "first_seen", "source_generated_at",
+                    "last_sample_at", "last_sample_sha256", "sample_count", "ended_at",
+                    "missing_through"}
+EVENT_KEYS = {"schema_version", "type", "event_id", "timestamp", "ts", "session_id",
+              "instance_id", "engine", "model", "model_basis"}
+EVENT_FIELDS = {
+    "session_started": {"process_started_at", "startup_unobserved_seconds"},
+    "usage": {"usage", "interval_seconds", "observed_seconds", "scrape_ok", "gap",
+              "counter_reset", "baseline", "source_sample_sha256"},
+    "session_ended": {"last_seen", "final_counters_sampled"},
+    "session_reobserved": {"previous_ended_at", "observation_basis"},
+    "source_retention_gap": {"start_at", "end_at", "reason"},
+}
+EVENT_ORDER = {"session_started": 0, "source_retention_gap": 1,
+               "session_reobserved": 2, "usage": 3, "session_ended": 4}
 
 
 class ArchiveError(ValueError):
@@ -123,7 +143,7 @@ def _source_preflight(database, dry_run):
         raise ArchiveError(code) from error
 
 
-def _read_source(database, days, dry_run):
+def _read_source(database, days, dry_run, directory):
     _source_preflight(database, dry_run)
     deadline = time.monotonic() + MAX_SOURCE_SECONDS
     rows_read = 0
@@ -139,12 +159,12 @@ def _read_source(database, days, dry_run):
             if db.execute("PRAGMA user_version").fetchone()[0] != 1:
                 raise ArchiveError("unsupported_source_schema")
 
-            def read(sql):
+            def read(sql, parameters=()):
                 nonlocal rows_read, bytes_read
-                for row in db.execute(sql):
+                for row in db.execute(sql, parameters):
                     rows_read += 1
                     bytes_read += sum(len(value.encode()) if isinstance(value, str) else 16 for value in row)
-                    if rows_read > MAX_SOURCE_ROWS or bytes_read > MAX_SOURCE_BYTES:
+                    if rows_read > MAX_SOURCE_ROWS or bytes_read > MAX_SOURCE_BYTES or time.monotonic() > deadline:
                         raise ArchiveError("source_read_limit")
                     yield dict(row)
 
@@ -161,7 +181,30 @@ def _read_source(database, days, dry_run):
                 hourly.setdefault(row.pop("instance_id"), []).append(row)
             if set(hourly) - {row["id"] for row in instances}:
                 raise ArchiveError("source_history_without_instance")
-            return meta, instances, hourly
+            if list(read("SELECT instance_id FROM fleet_samples WHERE instance_id NOT IN "
+                         "(SELECT id FROM fleet_instances) LIMIT 1")):
+                raise ArchiveError("source_history_without_instance")
+            samples, states, errors = {}, {}, {}
+            # Small resume checkpoints bound each indexed sample query. No gzip
+            # publication occurs while this consistent SQL snapshot is open.
+            for row in instances:
+                try:
+                    identity = _identity(row)
+                    digest = _session_id(identity)
+                    state = _load_usage_state(directory / "usage-state" / (digest + ".json.gz"))
+                    if state is not None and (state["identity"] != identity or state["first_seen"] != row["first_seen"]):
+                        raise ArchiveError("usage_identity_mismatch")
+                    states[row["id"]] = state
+                    cursor = None if state is None else state["last_sample_at"]
+                    samples[row["id"]] = list(read(
+                        "SELECT " + ",".join(SAMPLE_FIELDS) + " FROM fleet_samples "
+                        "WHERE instance_id=? AND ts>=? ORDER BY ts", (row["id"], 0 if cursor is None else cursor)))
+                except (ArchiveError, OSError, KeyError, TypeError) as error:
+                    # A corrupt checkpoint blocks only its own process session.
+                    if isinstance(error, ArchiveError) and error.code == "source_read_limit":
+                        raise
+                    errors[row["id"]] = error.code if isinstance(error, ArchiveError) else "usage_update_failed"
+            return meta, instances, hourly, samples, states, errors
         finally:
             db.close()
     except (sqlite3.Error, OSError, UnicodeError) as error:
@@ -216,6 +259,195 @@ def _identity(row):
         raise ArchiveError("invalid_source_identity")
     _number(identity["started_at"])
     return identity
+
+
+def _session_id(identity):
+    return hashlib.sha256(_dumps(identity).encode()).hexdigest()
+
+
+def _iso(timestamp):
+    try:
+        return datetime.fromtimestamp(_number(timestamp), timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError) as error:
+        raise ArchiveError("invalid_source_timestamp") from error
+
+
+def _timestamp(value):
+    if not isinstance(value, str):
+        raise ArchiveError("invalid_timestamp")
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        if _iso(timestamp) != value:
+            raise ArchiveError("invalid_timestamp")
+        return timestamp
+    except (OverflowError, OSError, ValueError) as error:
+        raise ArchiveError("invalid_timestamp") from error
+
+
+def _private_directory(path, create=False):
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise ArchiveError("unsafe_usage_directory")
+    if create:
+        path.mkdir(mode=0o700, exist_ok=True)
+        path.chmod(0o700)
+
+
+def _gzip_bytes(path, limit, code):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise ArchiveError("usage_read_limit")
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise ArchiveError(code)
+        with os.fdopen(fd, "rb", closefd=False) as stream, gzip.GzipFile(fileobj=stream) as compressed:
+            raw = compressed.read(limit + 1)
+        if len(raw) > limit:
+            raise ArchiveError("usage_read_limit")
+        return raw
+    except (OSError, EOFError, ValueError, zlib.error) as error:
+        if isinstance(error, ArchiveError) and error.code == "usage_read_limit":
+            raise
+        raise ArchiveError(code) from error
+    finally:
+        os.close(fd)
+
+
+def _digest_ok(value):
+    return isinstance(value, str) and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
+def _load_usage_state(path):
+    _private_directory(path.parent)
+    raw = _gzip_bytes(path, MAX_USAGE_STATE_BYTES, "usage_state_corrupt")
+    if raw is None:
+        return None
+    try:
+        state = _loads(raw)
+        if not isinstance(state, dict) or set(state) != USAGE_STATE_KEYS or state["schema_version"] != 1:
+            raise ArchiveError("usage_state_corrupt")
+        if _identity(state["identity"]) != state["identity"] or _session_id(state["identity"]) + ".json.gz" != path.name:
+            raise ArchiveError("usage_state_corrupt")
+        first = _number(state["first_seen"])
+        generated = _number(state["source_generated_at"])
+        if not state["identity"]["started_at"] <= first <= generated:
+            raise ArchiveError("usage_state_corrupt")
+        for key in ("last_sample_at", "ended_at", "missing_through"):
+            value = _number(state[key], nullable=True)
+            if value is not None and not first <= value <= generated:
+                raise ArchiveError("usage_state_corrupt")
+        count = state["sample_count"]
+        if type(count) is not int or count < 0 or (state["last_sample_at"] is None) != (count == 0):
+            raise ArchiveError("usage_state_corrupt")
+        if state["last_sample_at"] is None:
+            if state["last_sample_sha256"] is not None:
+                raise ArchiveError("usage_state_corrupt")
+        elif not _digest_ok(state["last_sample_sha256"]):
+            raise ArchiveError("usage_state_corrupt")
+        return state
+    except (ArchiveError, KeyError, TypeError, AttributeError) as error:
+        raise ArchiveError("usage_state_corrupt") from error
+
+
+def _event_id(event):
+    key = {field: event[field] for field in ("session_id", "type", "ts")}
+    if event["type"] == "source_retention_gap":
+        key["start_at"] = event["start_at"]
+    return hashlib.sha256(_dumps(key).encode()).hexdigest()
+
+
+def _event(row, digest, kind, ts, **fields):
+    event = {"schema_version": 1, "type": kind, "timestamp": _iso(ts), "ts": ts,
+             "session_id": digest, "instance_id": row["id"], "engine": row["engine"],
+             "model": _safe_label(row["model"]), "model_basis": "session_metadata_at_export", **fields}
+    event["event_id"] = _event_id(event)
+    return event
+
+
+def _event_sort(event):
+    return event["ts"], EVENT_ORDER[event["type"]], event["event_id"]
+
+
+def _validate_event(event, digest, identity):
+    kind = event.get("type") if isinstance(event, dict) else None
+    if kind not in EVENT_FIELDS or set(event) != EVENT_KEYS | EVENT_FIELDS[kind] or event["schema_version"] != 1:
+        raise ArchiveError("usage_corrupt")
+    if (event["session_id"] != digest or event["instance_id"] != identity["id"] or event["engine"] != identity["engine"]
+            or event["timestamp"] != _iso(event["ts"]) or event["event_id"] != _event_id(event)
+            or event["model_basis"] != "session_metadata_at_export" or event["model"] != _safe_label(event["model"])):
+        raise ArchiveError("usage_corrupt")
+    if kind == "usage":
+        usage = event["usage"]
+        if not isinstance(usage, dict) or set(usage) != set(COUNTERS) | {"total_tokens"}:
+            raise ArchiveError("usage_corrupt")
+        for value in usage.values():
+            _number(value, nullable=True)
+        total = None if usage["input_tokens"] is None or usage["output_tokens"] is None else _number(usage["input_tokens"] + usage["output_tokens"])
+        if usage["total_tokens"] != total or not _digest_ok(event["source_sample_sha256"]):
+            raise ArchiveError("usage_corrupt")
+        interval, observed = _number(event["interval_seconds"]), _number(event["observed_seconds"])
+        if observed > interval or any(type(event[key]) is not bool for key in ("scrape_ok", "gap", "counter_reset", "baseline")):
+            raise ArchiveError("usage_corrupt")
+        if event["baseline"] != (interval == 0) or (event["baseline"] and any(value is not None for value in usage.values())):
+            raise ArchiveError("usage_corrupt")
+    elif kind == "session_started":
+        if event["process_started_at"] != _iso(identity["started_at"]) or _number(event["startup_unobserved_seconds"]) != event["ts"] - identity["started_at"]:
+            raise ArchiveError("usage_corrupt")
+    elif kind == "session_ended":
+        if _timestamp(event["last_seen"]) > event["ts"] or event["final_counters_sampled"] is not False:
+            raise ArchiveError("usage_corrupt")
+    elif kind == "session_reobserved":
+        if _timestamp(event["previous_ended_at"]) > event["ts"] or event["observation_basis"] not in (
+                "first_retained_sample_after_absence", "latest_session_observation"):
+            raise ArchiveError("usage_corrupt")
+    else:
+        if (_timestamp(event["start_at"]) >= event["ts"] or event["end_at"] != event["timestamp"] or event["reason"] not in (
+                "source_retention_before_initial_export", "archive_outage_exceeded_raw_retention")):
+            raise ArchiveError("usage_corrupt")
+
+
+def _load_usage_file(path, digest, identity):
+    _private_directory(path.parent.parent)
+    _private_directory(path.parent)
+    raw = _gzip_bytes(path, MAX_USAGE_BYTES, "usage_corrupt")
+    if raw is None:
+        return {}
+    try:
+        if not raw or not raw.endswith(b"\n"):
+            raise ArchiveError("usage_corrupt")
+        events = {}
+        previous = None
+        for line in raw.splitlines():
+            event = _loads(line)
+            _validate_event(event, digest, identity)
+            order = _event_sort(event)
+            if event["timestamp"][:10] != path.parent.name or event["event_id"] in events or (previous is not None and order <= previous):
+                raise ArchiveError("usage_corrupt")
+            events[event["event_id"]] = event
+            previous = order
+        return events
+    except (ArchiveError, KeyError, TypeError, AttributeError) as error:
+        raise ArchiveError("usage_corrupt") from error
+
+
+def _sample_event(row, sample, digest, source):
+    ts = _number(sample["ts"])
+    if not row["first_seen"] <= ts <= source["generated_at"] or (row["ended_at"] is not None and ts > row["ended_at"]):
+        raise ArchiveError("invalid_source_sample")
+    interval, observed = _number(sample["interval_seconds"]), _number(sample["observed_seconds"])
+    if observed > interval or any(type(sample[key]) is not int or sample[key] not in (0, 1) for key in ("scrape_ok", "gap", "counter_reset")):
+        raise ArchiveError("invalid_source_sample")
+    usage = {key: _number(sample["d_" + column], nullable=True) for key, column in COUNTERS.items()}
+    if interval == 0:
+        usage = dict.fromkeys(COUNTERS)
+    usage["total_tokens"] = None if usage["input_tokens"] is None or usage["output_tokens"] is None else _number(usage["input_tokens"] + usage["output_tokens"])
+    return _event(row, digest, "usage", ts, usage=usage, interval_seconds=interval,
+                  observed_seconds=observed, scrape_ok=bool(sample["scrape_ok"]), gap=bool(sample["gap"]),
+                  counter_reset=bool(sample["counter_reset"]), baseline=interval == 0,
+                  source_sample_sha256=hashlib.sha256(_dumps(sample).encode()).hexdigest())
 
 
 def _hour(row):
@@ -351,19 +583,145 @@ def _merge(row, hours, source, old):
     return archive
 
 
-def _atomic_write(directory, path, archive):
+def _merge_usage(directory, row, samples, source, old):
+    identity = _identity(row)
+    digest = _session_id(identity)
+    first = row["first_seen"]
+    if old is not None and source["generated_at"] < old["source_generated_at"]:
+        raise ArchiveError("source_generation_regression")
+    cursor = None if old is None else old["last_sample_at"]
+    fingerprint = None if old is None else old["last_sample_sha256"]
+    count = 0 if old is None else old["sample_count"]
+    ended = None if old is None else old["ended_at"]
+    missing = None if old is None else old["missing_through"]
+    pending = []
+    if old is None:
+        pending.append(_event(row, digest, "session_started", first,
+                              process_started_at=_iso(identity["started_at"]),
+                              startup_unobserved_seconds=first - identity["started_at"]))
+    cutoff = source["raw_cutoff"]
+    start = max(first, first if cursor is None else cursor, first if missing is None else missing,
+                first if old is None else old["source_generated_at"])
+    end = start if cutoff is None else min(cutoff, row["ended_at"] if row["ended_at"] is not None else source["generated_at"])
+    if end > start:
+        pending.append(_event(row, digest, "source_retention_gap", end,
+            start_at=_iso(start), end_at=_iso(end), reason="source_retention_before_initial_export" if old is None else "archive_outage_exceeded_raw_retention"))
+        missing = end
+    new_samples = []
+    for sample in samples:
+        event = _sample_event(row, sample, digest, source)
+        if cursor is not None and event["ts"] <= cursor:
+            if event["ts"] != cursor or event["source_sample_sha256"] != fingerprint:
+                raise ArchiveError("source_sample_regression")
+            continue
+        new_samples.append(event)
+        cursor, fingerprint = event["ts"], event["source_sample_sha256"]
+        count += 1
+    if ended is not None and row["last_seen"] >= ended:
+        reobserved = next((event["ts"] for event in new_samples if event["ts"] > ended), row["last_seen"])
+        pending.append(_event(row, digest, "session_reobserved", reobserved,
+            previous_ended_at=_iso(ended), observation_basis="first_retained_sample_after_absence"
+            if any(event["ts"] == reobserved for event in new_samples) else "latest_session_observation"))
+    pending.extend(new_samples)
+    if row["ended_at"] is not None and row["ended_at"] != ended:
+        pending.append(_event(row, digest, "session_ended", row["ended_at"],
+                              last_seen=_iso(row["last_seen"]), final_counters_sampled=False))
+    state = {"schema_version": 1, "identity": identity, "first_seen": first,
+             "source_generated_at": source["generated_at"], "last_sample_at": cursor,
+             "last_sample_sha256": fingerprint, "sample_count": count,
+             "ended_at": row["ended_at"], "missing_through": missing}
+    if old is not None and dict(state, source_generated_at=old["source_generated_at"]) == old:
+        state = old
+
+    days = {}
+
+    def day_events(ts):
+        day = _iso(ts)[:10]
+        if day not in days:
+            path = directory / "usage" / day / (digest + ".jsonl.gz")
+            events = _load_usage_file(path, digest, identity)
+            days[day] = (path, events, dict(events))
+        return days[day][2]
+
+    # Check the checkpoint's referenced records even after raw retention removes
+    # their source rows. A missing/corrupt tail is never silently skipped.
+    if old is not None:
+        required = [("session_started", first)]
+        if old["last_sample_at"] is not None:
+            required.append(("usage", old["last_sample_at"]))
+        if ended is not None:
+            required.append(("session_ended", ended))
+        if old["missing_through"] is not None:
+            required.append(("source_retention_gap", old["missing_through"]))
+        for kind, ts in required:
+            events = [event for event in day_events(ts).values() if event["type"] == kind and event["ts"] == ts]
+            if not events or (kind == "usage" and events[0]["source_sample_sha256"] != old["last_sample_sha256"]):
+                raise ArchiveError("usage_checkpoint_without_records")
+    added = 0
+    for event in pending:
+        events = day_events(event["ts"])
+        previous = events.get(event["event_id"])
+        if previous is not None:
+            # Metadata can change between an interrupted publication and retry;
+            # already published model labels keep their original export basis.
+            if {key: value for key, value in previous.items() if key != "model"} != {key: value for key, value in event.items() if key != "model"}:
+                raise ArchiveError("source_sample_regression")
+        else:
+            events[event["event_id"]] = event
+            added += 1
+    updates = []
+    for path, before, after in days.values():
+        if before != after:
+            raw = b"".join((_dumps(event) + "\n").encode() for event in sorted(after.values(), key=_event_sort))
+            if len(raw) > MAX_USAGE_BYTES:
+                raise ArchiveError("usage_read_limit")
+            updates.append((path, raw))
+    return state, updates, added, [item[0].parent for item in days.values()]
+
+
+def _atomic_gzip(directory, path, raw):
     fd, temporary = tempfile.mkstemp(prefix=".fleet-archive-", suffix=".tmp", dir=directory)
     try:
         with os.fdopen(fd, "wb") as stream:
             os.fchmod(stream.fileno(), 0o600)
             with gzip.GzipFile(filename="", fileobj=stream, mode="wb", mtime=0) as compressed:
-                compressed.write(_dumps(archive).encode())
+                compressed.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def _atomic_write(directory, path, archive):
+    _atomic_gzip(directory, path, _dumps(archive).encode())
+
+
+def _publish_usage(directory, digest, state, old, updates, touched):
+    if state == old and not updates:
+        # Complete directory barriers after a prior interrupted rename.
+        for path in touched:
+            _sync_directory(path)
+        if touched:
+            _sync_directory(directory / "usage")
+        if old is not None:
+            _sync_directory(directory / "usage-state")
+        return
+    _private_directory(directory / "usage", create=True)
+    for path, raw in updates:
+        _private_directory(path.parent, create=True)
+        _atomic_gzip(path.parent, path, raw)
+    for path in touched:
+        _sync_directory(path)
+    _sync_directory(directory / "usage")
+    _sync_directory(directory)
+    # The resume cursor advances only after every referenced daily file and
+    # directory is durable. Retries merge event IDs before advancing it again.
+    state_directory = directory / "usage-state"
+    _private_directory(state_directory, create=True)
+    _atomic_write(state_directory, state_directory / (digest + ".json.gz"), state)
+    _sync_directory(state_directory)
 
 
 def _sync_directory(directory):
@@ -379,17 +737,28 @@ def run_archive(config, dry_run=False):
     database, directory, days = _config(config)
     _source_preflight(database, dry_run)
     summary = {"ok": True, "dry_run": bool(dry_run), "instances": 0, "written": 0,
-               "would_write": 0, "unchanged": 0, "failed": 0, "errors": {}}
+               "would_write": 0, "unchanged": 0, "failed": 0, "errors": {},
+               "usage_files_written": 0, "usage_files_would_write": 0, "usage_records_added": 0}
 
     def run():
-        source, instances, hourly = _read_source(database, days, dry_run)
+        _private_directory(directory)
+        source, instances, hourly, samples, states, errors = _read_source(database, days, dry_run, directory)
         summary["instances"] = len(instances)
         for row in instances:
             try:
-                digest = hashlib.sha256(_dumps(_identity(row)).encode()).hexdigest()
+                digest = _session_id(_identity(row))
                 path = directory / (digest + ".json.gz")
                 old = _load_archive(path)
                 archive = _merge(row, hourly.get(row["id"], []), source, old)
+                if row["id"] in errors:
+                    raise ArchiveError(errors[row["id"]])
+                state, updates, added, touched = _merge_usage(directory, row, samples[row["id"]], source, states[row["id"]])
+                if dry_run:
+                    summary["usage_files_would_write"] += len(updates)
+                else:
+                    _publish_usage(directory, digest, state, states[row["id"]], updates, touched)
+                    summary["usage_files_written"] += len(updates)
+                summary["usage_records_added"] += added
                 if archive == old:
                     summary["unchanged"] += 1
                 elif dry_run:
