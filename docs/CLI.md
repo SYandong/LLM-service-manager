@@ -410,11 +410,12 @@ People; G returns to GPUs. Fleet refreshes every 15 seconds and on service chang
 
 | Control | Action |
 |---|---|
-| Up / Down | Select GPU |
+| Up / Down | Scroll contents by one row |
+| J / K | Select next / previous GPU or service |
 | Left / Right | Select allocation while keeping the viewport in place |
 | Wheel / trackpad | Scroll contents gently; the selected GPU follows the viewport |
 | Page Up / Page Down | Scroll by a page |
-| Drag, Ctrl+C | Select and copy text |
+| Drag, terminal copy shortcut | Select and copy text |
 | Enter | Open details and history |
 | Z | Expanded panels / compact six-GPU overview |
 | P / G | People / GPUs |
@@ -427,12 +428,15 @@ Durations use integer time units; input, output and total include `tokens`.
 VRAM displays up to two decimals without trailing zeros. `Running · inactive`
 replaces the `over_limit` display label; API enums remain compatible.
 Coverage is valid activity observation time divided by the eligible interval.
+Activity and tokens show increments during the observed window; counters from
+before collection began are excluded.
 
 Each model shows an API base address. Loopback listeners show `Local only`;
 verified wildcard listeners show the container or host address and `Shared`.
-Shared services have no idle-limit reminder. A selected text panel holds its
-content through refresh until the selection is cleared. Ctrl+C requests a copy
-through the terminal clipboard; Q quits.
+Shared services have no idle-limit reminder. Drag selection and copying use the
+terminal's native controls. In People, Tab focuses the service table or details;
+Up/Down scrolls the focused pane. In details and Help, Up/Down and Page Up/Page Down
+scroll the dialog contents. J/K selects a service in details; Q quits.
 
 声明入口按 API 的 `mine` 标记开放，先 dry-run 展示预览，再由明确提交动作写入。
 服务器仍核对实际连接归属；403 和不确定写入结果在界面显示，写入不自动重试。
