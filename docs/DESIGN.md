@@ -1078,7 +1078,7 @@ claims 开关同时开启及服务归属通过校验，不授予 unit、配置�
 
 字段、计数器复位与窗口边界细则见 [FLEET.md](FLEET.md)，随 #307 交付。
 
-### 10.2.1 Compressed process-session logs (#337)
+### 10.2.1 Compressed process-session logs (#337, #341)
 
 A separate archive worker reads a consistent snapshot of the fleet database and
 keeps one private gzip JSON file per process identity. Identity includes the
@@ -1101,6 +1101,24 @@ Collection starts after process launch and does not sample a final counter at
 exit. Logs therefore describe observed usage; hourly activity coverage does not
 certify token-counter completeness. The configured source retention policy and
 archive gaps identify history that may have expired before capture.
+
+The worker also exports each retained minute sample as a chronological JSONL
+event in private daily UTC files at `usage/YYYY-MM-DD/SESSION_ID.jsonl.gz`.
+Events carry ISO 8601 observation time, process session/model metadata, separate
+request/input/output/total/cached deltas and source interval, gap, reset and null
+semantics. An initial counter baseline has null deltas; a retained later sample
+keeps its valid deltas. Source rows do not retain historical model labels or
+per-counter reset details; labels explicitly use metadata at export and reset
+flags preserve the source's aggregate semantics. Start, observed absence,
+reappearance and possible raw-retention loss are separate events. No final-call
+usage or expired minute history is inferred from summary totals.
+
+Sample cursors live in separate private `usage-state` checkpoints, preserving
+the existing summary schema for binary rollback. Daily files merge stable event
+IDs and become durable before cursor advancement; retries do not duplicate
+published events. Indexed queries include the last endpoint and newer retained
+rows within shared row/byte/time limits. Already captured daily files survive
+source cleanup and have no automatic deletion policy.
 
 The timer runs every minute and is enabled at installation. A single writer
 lock covers capture and merge; the database read transaction ends before file
