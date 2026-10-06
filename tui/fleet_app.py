@@ -923,7 +923,7 @@ class FleetApp(App):
             for identity in ordered:
                 members = groups[identity]
                 name = owner_name(members[0])
-                key = "person:" + identity.removeprefix("container:")
+                key = "person:" + identity
                 over = sum(self.service_status(item) == "over_limit" for item in members)
                 values = [name + " · %dsvc" % len(members), "", gib(total_memory(members)),
                           "", "", "%d inactive" % over if over else ""] + ([] if narrow else ["", ""])
