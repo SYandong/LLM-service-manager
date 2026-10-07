@@ -128,6 +128,7 @@ M7 新 fleet TUI 接替默认入口；本节共享模型 TUI 第一阶段保留�
 - #341 Private gzip JSONL records for each observed minute of process-session usage.
 - #342 Anonymous owner labels by default, concise model/work labels and independent GPU keyboard navigation and scrolling.
 - #343 Standalone host fleet observer, read-only default command and central-service retirement.
+- #346 Configurable bounded host GPU-query budgets for slow NVIDIA observation calls.
 
 依赖：#303 → #304 → 现场 503 验收；#305 → #306 → #307 → #308/#309；
 503 blocker 的 fleet 占用者增强由 #313 在 #307 后接入。#310 汇总现场证据。

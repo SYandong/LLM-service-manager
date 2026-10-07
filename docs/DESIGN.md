@@ -1044,12 +1044,17 @@ fleet 观察自建推理服务及全部 GPU 占用，给服务主人提供占用
 宿主 PID 和进程启动 ticks；PID 复用产生新实例。没有推理服务祖先的 GPU
 进程只导出归属、显存、PID 和短 comm，不导出命令行。
 
-采集器仅进入目标网络命名空间，向已核实监听器发 GET，不进入 mount/pid/user
-命名空间，不执行目标进程的命令。每次抓取至多 2 秒/4 MiB，禁止重定向与
-环境代理，整轮预算 20 秒。抓取前后核对 PID/start、网络命名空间和监听器
-归属；进程变化或无法绑定端点时保持未知。vLLM 只保留指定计数器/gauge 和
-模型标签；ollama 只抓 `/api/ps`，没有 token 统计。其他引擎 v1 仅记录存在与
-显存，活动未知。原始命令行、指标和凭据不进入 journal 或公开 fixture。
+The scanner enters only the target network namespace and sends GET requests to
+verified listeners. Each metrics probe is bounded to 2 seconds / 4 MiB, without
+redirects or environment proxies. The default scan budget is 20 seconds;
+operators can configure up to 120 seconds and GPU queries up to 30 seconds
+when NVIDIA observation calls are slow (#346). The scanner service's finite
+start timeout must cover that budget and query cleanup. Listener, PID/start and
+network-namespace identities are checked before and after probing. Changed or
+unbound endpoints stay unknown. vLLM retains selected counters/gauges and model
+labels; Ollama uses `/api/ps`, with unknown token counts. Other engines retain
+existence/memory observations and unknown activity. Raw argv, metrics and
+credentials never enter journal or public fixtures.
 
 快照 `schema_version: 1` 原子写入现有宿主导出目录的 `fleet.json`，权限
 0644、大小上限 2 MiB。配置路径与规则可修改；复用现有只读目录挂载。快照

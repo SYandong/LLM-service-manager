@@ -110,10 +110,10 @@ class FakeRunner:
         self.calls.append((argv, timeout, max_output, pass_fds))
         assert max_output <= 4 * 1024 * 1024
         if argv[1].startswith("--query-gpu="):
-            assert 0 < timeout <= 10
+            assert 0 < timeout <= 30
             return b"0, GPU-one, 140000, 100000, 70\n1, GPU-two, 140000, 1000, 0\n"
         if argv[1].startswith("--query-compute-apps="):
-            assert 0 < timeout <= 10
+            assert 0 < timeout <= 30
             return self.apps
         assert 0 < timeout <= 2
         assert argv[1].startswith("--net=/proc/self/fd/")
@@ -646,7 +646,7 @@ def host_process(root, *, uid=1000, container=None, argv=None, port=None):
 
 
 def gpu_five_runner(argv, timeout, max_output, pass_fds=()):
-    assert 0 < timeout <= 10 and not pass_fds
+    assert 0 < timeout <= 30 and not pass_fds
     if argv[1].startswith("--query-gpu="):
         return b"5, GPU-five, 140000, 12000, 70\n"
     assert argv[1].startswith("--query-compute-apps=")
@@ -670,6 +670,44 @@ def test_slow_gpu_queries_use_five_seconds_while_http_keeps_target_cap(scanner, 
     assert all(call[1] <= 0.25 for call in fake.calls if call[3])
 
 
+@pytest.mark.parametrize("gpu_timeout, scan_budget, complete", [(5, 20, False), (30, 100, True)])
+def test_configured_bounds_support_long_gpu_queries_without_changing_http_cap(scanner, tmp_path,
+                                                                            gpu_timeout, scan_budget, complete):
+    root = fake_root(tmp_path)
+    make_process(root, 100, ["vllm", "serve", "demo"], port=8000)
+    config = fixture_config(scanner, root, tmp_path, gpu_query_timeout_seconds=gpu_timeout,
+                            scan_budget_seconds=scan_budget, target_timeout_seconds=0.25)
+    path = tmp_path / "configured.json"
+    path.write_text(json.dumps(config))
+    config = scanner.load_config(path)
+    fake = FakeRunner(b"100, GPU-one, 500\n")
+    ticks, timeouts = [0.0], []
+
+    def runner(argv, timeout, max_output, pass_fds=()):
+        if argv[1].startswith("--query-"):
+            latency = 15 if argv[1].startswith("--query-gpu=") else 22
+            timeouts.append(timeout)
+            ticks[0] += min(latency, timeout)
+            if latency > timeout:
+                raise scanner.ScanError("command_timeout")
+        return fake(argv, timeout, max_output, pass_fds)
+
+    result = scanner.scan(config, runner, clock=lambda: ticks[0])
+    assert timeouts == [gpu_timeout, gpu_timeout]
+    assert result["gpu_inventory_complete"] is complete
+    assert result["gpu_attribution_complete"] is complete
+    assert result["services"][0]["gpu_observation_complete"] is complete
+    assert result["services"][0]["scrape"]["ok"]
+    assert [call[1] for call in fake.calls if call[3]] == [0.25]
+    if complete:
+        assert result["host"]["gpu_count"] == 2
+        assert result["services"][0]["gpus"] == [{"index": 0, "used_mib": 500}]
+    else:
+        assert result["host"]["gpu_count"] is None and result["gpus"] == []
+        assert result["services"][0]["gpus"] == []
+        assert {"gpu_inventory_unavailable", "gpu_processes_unavailable"} <= set(result["errors"])
+
+
 def test_gpu_query_timeouts_share_the_remaining_global_budget(scanner, tmp_path):
     root = fake_root(tmp_path)
     config = fixture_config(scanner, root, tmp_path, scan_budget_seconds=6)
@@ -682,6 +720,26 @@ def test_gpu_query_timeouts_share_the_remaining_global_budget(scanner, tmp_path)
     gpus, apps, gpu_ok, apps_ok, errors = scanner.gpu_inventory(config, scanner.Budget(6, lambda: ticks[0]), runner)
     assert timeouts == pytest.approx([5, 3.7])
     assert gpu_ok and apps_ok and not errors and gpus[0]["index"] == 5 and apps[0][0] == 100
+
+
+def test_long_gpu_query_timeout_is_capped_by_remaining_budget_and_failure_stays_unknown(scanner, tmp_path):
+    config = fixture_config(scanner, fake_root(tmp_path), tmp_path,
+                            gpu_query_timeout_seconds=30, scan_budget_seconds=30)
+    ticks, timeouts = [0.0], []
+
+    def runner(argv, timeout, max_output, pass_fds=()):
+        latency = 22 if argv[1].startswith("--query-gpu=") else 15
+        timeouts.append(timeout)
+        assert timeout == pytest.approx(min(30, 30 - ticks[0] - 0.05))
+        ticks[0] += min(latency, timeout)
+        if latency > timeout:
+            raise scanner.ScanError("command_timeout")
+        return gpu_five_runner(argv, timeout, max_output, pass_fds)
+
+    gpus, apps, gpu_ok, apps_ok, errors = scanner.gpu_inventory(config, scanner.Budget(30, lambda: ticks[0]), runner)
+    assert timeouts == pytest.approx([29.95, 7.95])
+    assert gpu_ok and gpus[0]["index"] == 5
+    assert not apps_ok and apps == [] and errors == {"gpu_processes_unavailable"}
 
 
 def test_actual_delayed_synthetic_gpu_command_succeeds_above_two_seconds(scanner, tmp_path):
@@ -856,17 +914,33 @@ def test_host_service_uid_metadata_requires_the_same_positive_proof(scanner, tmp
     assert row["host"] is True and row.get("host_uid") is None and row.get("host_user") is None
 
 
-@pytest.mark.parametrize("value", [0, 0.009, 10.01, 11, True])
+@pytest.mark.parametrize("value", [0, 0.009, 30.01, 31, True])
 def test_gpu_query_timeout_config_rejects_out_of_bounds(scanner, tmp_path, value):
     path = tmp_path / "invalid.json"; path.write_text(json.dumps({"gpu_query_timeout_seconds": value}))
     with pytest.raises(scanner.ScanError, match="invalid_config_bound"): scanner.load_config(path)
 
 
-@pytest.mark.parametrize("value", [0.01, 5, 10])
+@pytest.mark.parametrize("value", [0.01, 5, 10, 30])
 def test_gpu_query_timeout_config_accepts_bounds_and_default(scanner, tmp_path, value):
     path = tmp_path / "valid.json"; path.write_text(json.dumps({"gpu_query_timeout_seconds": value}))
     assert scanner.load_config(path)["gpu_query_timeout_seconds"] == value
     assert scanner.load_config()["gpu_query_timeout_seconds"] == scanner.load_config(EXAMPLE)["gpu_query_timeout_seconds"] == 5
+
+
+@pytest.mark.parametrize("value", [0, 0.099, 120.01, 121, True])
+def test_scan_budget_config_rejects_out_of_bounds(scanner, tmp_path, value):
+    path = tmp_path / "invalid.json"
+    path.write_text(json.dumps({"scan_budget_seconds": value}))
+    with pytest.raises(scanner.ScanError, match="invalid_config_bound"):
+        scanner.load_config(path)
+
+
+@pytest.mark.parametrize("value", [0.1, 20, 100, 120])
+def test_scan_budget_config_accepts_bounds_and_preserves_default(scanner, tmp_path, value):
+    path = tmp_path / "valid.json"
+    path.write_text(json.dumps({"scan_budget_seconds": value}))
+    assert scanner.load_config(path)["scan_budget_seconds"] == value
+    assert scanner.load_config()["scan_budget_seconds"] == scanner.load_config(EXAMPLE)["scan_budget_seconds"] == 20
 
 
 @pytest.mark.parametrize("path", ["relative-passwd", "/tmp/../passwd", "/tmp/passwd\n"])
@@ -1053,7 +1127,7 @@ def test_config_is_valid_json_bounded_and_rules_configurable(scanner, tmp_path):
     assert scanner.load_config(EXAMPLE)["sample_interval_seconds"] == 60
     assert scanner.load_config(EXAMPLE)["max_services"] == 256
     assert scanner.load_config()["max_services"] == 256
-    for overrides in ({"scan_budget_seconds": 21}, {"target_timeout_seconds": 3}, {"max_response_bytes": 5 * 1024 * 1024}, {"output_path": "/tmp/../escape"}, {"match_rules": [{"engine": "vllm", "all": "bad"}]}, {"other": 1}):
+    for overrides in ({"scan_budget_seconds": 121}, {"target_timeout_seconds": 3}, {"max_response_bytes": 5 * 1024 * 1024}, {"output_path": "/tmp/../escape"}, {"match_rules": [{"engine": "vllm", "all": "bad"}]}, {"other": 1}):
         path = tmp_path / "bad.json"
         path.write_text(json.dumps(overrides))
         with pytest.raises(scanner.ScanError):
@@ -1118,6 +1192,45 @@ def test_command_runner_is_no_shell_bounds_output_and_timeout(scanner, monkeypat
     with pytest.raises(scanner.ScanError, match="command_timeout"):
         scanner.run_bounded([sys.executable, "-c", "import time; time.sleep(5)"], 0.05, 1000)
     assert time.monotonic() - started < 0.5
+
+
+@pytest.mark.parametrize("payload, error", [(b"", "command_timeout"), (b"x" * 101, "command_output_limit")])
+def test_unreaped_child_cleanup_is_bounded_and_preserves_unknown_observations(scanner, tmp_path, monkeypatch,
+                                                                           payload, error):
+    children = []
+
+    class Child:
+        def __init__(self, *args, **kwargs):
+            read_fd, write_fd = os.pipe()
+            os.write(write_fd, payload)
+            os.close(write_fd)
+            self.stdout = os.fdopen(read_fd, "rb", buffering=0)
+            self.kills, self.waits = 0, []
+            children.append(self)
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            self.kills += 1
+
+        def wait(self, timeout=None):
+            assert timeout is not None and timeout > 0
+            self.waits.append(timeout)
+            raise subprocess.TimeoutExpired("synthetic-observation", timeout)
+
+    monkeypatch.setattr(scanner.subprocess, "Popen", Child)
+    monkeypatch.setattr(scanner.os, "killpg", lambda *args: pytest.fail("cleanup must target only its own child"))
+    with pytest.raises(scanner.ScanError, match=error):
+        scanner.run_bounded(["synthetic-observation"], 0.01, 100)
+
+    config = fixture_config(scanner, fake_root(tmp_path), tmp_path,
+                            gpu_query_timeout_seconds=30, scan_budget_seconds=100, max_response_bytes=100)
+    gpus, apps, gpu_ok, apps_ok, errors = scanner.gpu_inventory(config, scanner.Budget(100), scanner.run_bounded)
+    assert gpus == apps == [] and not gpu_ok and not apps_ok
+    assert errors == {"gpu_inventory_unavailable", "gpu_processes_unavailable"}
+    assert len(children) == 3
+    assert all(child.kills == 1 and child.stdout.closed and child.waits[-1] == 0.25 for child in children)
 
 
 def test_http_helper_get_only_no_redirect_proxies_and_body_limit(scanner, monkeypatch):
