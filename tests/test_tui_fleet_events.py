@@ -2,6 +2,7 @@
 """Pilot exercises the existing event reader's real HTTP reconnect and cursor."""
 
 import asyncio
+import copy
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
@@ -12,7 +13,12 @@ import pytest
 pytest.importorskip("textual")
 
 from tui.fleet_app import FleetApp
-from test_tui_fleet import fleet_snapshot, make_app, ready
+from test_tui_fleet import FixtureEvents, fleet_snapshot as snapshot_fixture, make_app, ready
+
+
+@pytest.fixture
+def fleet_snapshot():
+    return snapshot_fixture.__wrapped__()
 
 
 def frame(ident):
@@ -20,6 +26,53 @@ def frame(ident):
             "detail": {"service_id": "quiet", "from": "idle", "to": "over_limit"}}
     return ("id: %s\nevent: fleet_status_changed\ndata: %s\n\n" %
             (ident, json.dumps(item))).encode()
+
+
+@pytest.mark.parametrize("change", ["discovery", "exit", "address", "gpu", "freshness"])
+def test_snapshot_event_refreshes_an_established_stream_without_status_changes(fleet_snapshot, change):
+    async def scenario():
+        reader = FixtureEvents()
+        app, client = make_app(fleet_snapshot, reader)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await ready(app, pilot)
+            app.select_gpu(2, service_id="busy")
+            await ready(app, pilot)
+            assert app.connection == "Live changes connected"
+            assert app.event_generation == reader.generation == 0 and app.event_cursor == 0
+            states = {item["id"]: item["status"] for item in client.snapshot["services"]}
+            if change == "discovery":
+                discovered = copy.deepcopy(client.snapshot["services"][0])
+                discovered["id"] = "discovered"
+                client.snapshot["services"].append(discovered)
+            elif change == "exit":
+                client.snapshot["services"] = [item for item in client.snapshot["services"] if item["id"] != "busy"]
+                for gpu in client.snapshot["gpus"]:
+                    gpu["occupants"] = [item for item in gpu["occupants"] if item.get("service_id") != "busy"]
+            elif change == "address":
+                client.snapshot["services"][0].update(api_address="http://192.0.2.22:8000", api_access="direct")
+            elif change == "gpu":
+                client.snapshot["gpus"][2]["used_gb"] += 1
+            else:
+                client.snapshot["stale"] = True
+            assert all(item["status"] == states.get(item["id"], item["status"])
+                       for item in client.snapshot["services"])
+            client.snapshot["generated_at"] += 1
+            reads = sum(path == "/v1/fleet" for _, path, _ in client.calls)
+            reader.events = [{"id": 1, "kind": "fleet_snapshot_changed",
+                              "detail": {"generated_at": client.snapshot["generated_at"]}}]
+            app.update_events()
+            await ready(app, pilot)
+            assert sum(path == "/v1/fleet" for _, path, _ in client.calls) == reads + 1
+            assert app.snapshot == client.snapshot
+            assert app.event_cursor == 1 and app.event_generation == reader.generation == 0
+            assert app.connection == "Live changes connected"
+            if change == "address":
+                assert "http://192.0.2.22:8000" in app._rendered["fleet-detail-text"]
+            reader.events = [{"id": 1, "kind": "fleet_snapshot_changed"}]
+            app.update_events()
+            await ready(app, pilot)
+            assert sum(path == "/v1/fleet" for _, path, _ in client.calls) == reads + 1
+    asyncio.run(scenario())
 
 
 def test_real_sse_reconnect_keeps_cursor_and_closes_reader(fleet_snapshot):

@@ -120,7 +120,7 @@ terminal's native controls, without Option. Ctrl+C copies the focused table row
 or an existing selection and keeps the TUI open. Copied text follows the current
 name display setting.
 
-The UI refreshes every 15 seconds and coalesces fleet status events. Ordinary
+The UI refreshes every 15 seconds and coalesces fleet snapshot/status events. Ordinary
 SSE reconnects preserve the cursor; observer incarnation changes and server
 cursor resets clear replay state and trigger a fresh snapshot. Timed polling
 continues through disconnects. Cached notices and read/history diagnostics

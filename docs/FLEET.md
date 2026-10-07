@@ -104,7 +104,9 @@ forwarded headers cannot supply or override this identity. V1 provides no
 administrator override.
 
 `/v1/events` emits `fleet_status_changed` when an observed service changes
-state. Its `detail` is `{service_id,from,to}`. Timer-driven freshness changes
+state. Its `detail` is `{service_id,from,to}`. `fleet_snapshot_changed` also
+refreshes discovery, exits, addresses, GPU readings and snapshot freshness,
+including updates that keep existing service states. Timer-driven freshness changes
 are checked on each ingestion tick, even when the export is unchanged.
 
 Each observer process has a 32-hex `observer_incarnation`, also exposed as

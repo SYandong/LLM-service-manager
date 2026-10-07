@@ -1109,7 +1109,7 @@ class FleetApp(App):
             if ident <= self.event_cursor:
                 continue
             self.event_cursor = ident
-            relevant |= item.get("kind") == "fleet_status_changed"
+            relevant |= item.get("kind") in ("fleet_status_changed", "fleet_snapshot_changed")
         if self.snapshot is not None and self.connection != old_connection:
             self.render_snapshot()
         if relevant or reset or missing or (connected and old_connection != self.connection and self.snapshot is not None):
