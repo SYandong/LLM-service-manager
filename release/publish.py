@@ -5,7 +5,6 @@
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import shutil
@@ -14,6 +13,7 @@ import tarfile
 import zipfile
 
 REPO = 'SYandong/LLM-service-manager'
+ACTIVE_CLI = Path('cli/fleet-llm')
 SHA = re.compile(r'[0-9a-f]{40}')
 # Alpha series (0.1.0aN -> v0.1.0-alpha.N) and stable releases (X.Y.Z -> vX.Y.Z).
 VERSION = re.compile(r'0\.1\.0a([1-9][0-9]*)|(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')
@@ -150,7 +150,7 @@ def guard(event):
     run('git', 'diff', '--exit-code', head, commit)
     version = re.search(r'^version = "([^"]+)"', Path('pyproject.toml').read_text(), re.M)[1]
     match = VERSION.fullmatch(version)
-    if not match or f'"{version}"' not in Path('llmsvc/__init__.py').read_text() or f'version="{version}"' not in Path('cli/llm').read_text():
+    if not match or f'"{version}"' not in Path('llmsvc/__init__.py').read_text() or f'version="{version}"' not in ACTIVE_CLI.read_text():
         raise ValueError('Version literals differ')
     tag = tag_for(version)
     if pr['title'] != 'chore(release): ' + tag:
@@ -207,7 +207,7 @@ def build(evidence, root):
     assert wheel_contents(wheel) == wheel_contents(next(rebuilt.glob('*.whl')))
     wheelhouse = root / 'wheelhouse'; wheelhouse.mkdir()
     run(sys.executable, '-m', 'pip', 'download', '--only-binary=:all:', '--dest', str(wheelhouse), str(wheel) + '[tui]')
-    shutil.copy2('cli/llm', artifacts / 'llm')
+    shutil.copy2(ACTIVE_CLI, artifacts / 'llm')
     run(sys.executable, '-m', 'pip', 'download', '--only-binary=:all:', '--no-deps', '--dest', str(wheelhouse), 'pip==26.2.1')
     bootstrap = next(wheelhouse.glob('pip-*.whl'))
     install_wheels = sorted(p for p in wheelhouse.glob('*.whl') if p != bootstrap)
@@ -221,10 +221,14 @@ def build(evidence, root):
         run(*pip, 'install', '--no-index', '--find-links', str(wheelhouse), package)
         run(*pip, 'check')
         for command in ((python, '-I', '-c', 'import llmsvc;print(llmsvc.__version__)'),
-                        (str(env / 'bin/llm'), '--version'), (str(env / 'bin/llmsvc-scheduler'), '--version')):
+                        (str(env / 'bin/llm'), '--version')):
             assert run(*command, cwd=root) == evidence['python_version']
-        code = ('from tui.fleet_app import FleetApp; from tui.app import SchedulerApp' if mode == 'tui'
-                else "import importlib.util;assert importlib.util.find_spec('textual') is None")
+        assert run(str(env / 'bin/llmsvc-fleet-observer'), '--version', cwd=root) == 'Fleet observer ' + evidence['python_version']
+        code = ('from llmsvc.fleet.client import build_parser; '
+                'from llmsvc.fleet.observer import FleetObserver; '
+                "import sys; assert 'llmsvc.scheduler' not in sys.modules; "
+                + ('from tui.fleet_app import FleetApp' if mode == 'tui'
+                   else "import importlib.util; assert importlib.util.find_spec('textual') is None"))
         run(python, '-I', '-c', code, cwd=root)
     assert run(sys.executable, '-I', '-S', str(artifacts / 'llm'), '--version') == evidence['python_version']
     deployment = {'schema_version': 1, 'tag': evidence['tag'], 'version': evidence['python_version'],

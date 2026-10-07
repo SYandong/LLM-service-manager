@@ -16,7 +16,7 @@ from tui.fleet_gpu import (account_gpu, allocation_legend, card_header, detail_l
 
 
 def test_anonymous_owner_labels_match_standalone_cli_and_keep_namespaces():
-    cli = runpy.run_path(str(Path(__file__).parents[1] / "cli/llm"))
+    cli = runpy.run_path(str(Path(__file__).parents[1] / "cli/fleet-llm"))
     owners = [{"container": "operator"},
               {"host": True, "host_uid": 1000, "host_user": "operator"},
               {"host": True, "host_uid": 1001, "host_user": "operator"}]
@@ -40,13 +40,13 @@ def test_anonymous_owner_labels_match_standalone_cli_and_keep_namespaces():
     ("/srv/models/gemma/", "gemma"), ("google/gemma", "google/gemma"),
 ])
 def test_model_paths_have_basename_labels_without_changing_repo_ids(model, expected):
-    cli = runpy.run_path(str(Path(__file__).parents[1] / "cli/llm"))
+    cli = runpy.run_path(str(Path(__file__).parents[1] / "cli/fleet-llm"))
     assert model_label(model) == cli["fleet_model_label"](model) == expected
 
 
 @pytest.mark.parametrize("name", ["User", "Work", "google"])
 def test_raw_text_projection_preserves_labels_and_model_ids(name):
-    cli = runpy.run_path(str(Path(__file__).parents[1] / "cli/llm"))
+    cli = runpy.run_path(str(Path(__file__).parents[1] / "cli/fleet-llm"))
     owner = {"container": name, "model": name + "/gemma"}
     label = owner_info(owner)[1]
     raw = "%s:42:55 · %s/gemma · %s" % (name, name, label)
@@ -59,7 +59,7 @@ def test_raw_text_projection_preserves_labels_and_model_ids(name):
                                         ("User", "/srv/models/User"),
                                         ("Work", "/srv/models/Work")])
 def test_model_tokens_do_not_protect_owner_id_prefixes(name, model):
-    cli = runpy.run_path(str(Path(__file__).parents[1] / "cli/llm"))
+    cli = runpy.run_path(str(Path(__file__).parents[1] / "cli/fleet-llm"))
     owner = {"container": name, "model": model, "id": name + ":42:55"}
     label = owner_info(owner)[1]
     assert display_text(owner["id"], [owner]) == label + ":42:55"
@@ -116,7 +116,7 @@ def test_total_tokens_requires_both_input_and_output(prompt, generated, expected
 
 @pytest.mark.parametrize("status, expected", [
     ("active", "Active"), ("idle", "Idle"), ("over_limit", "Running · inactive"),
-    ("claimed", "Claimed"), ("unknown", "Unknown"), ("unrecognized", "Unknown"),
+    ("claimed", "Unknown"), ("unknown", "Unknown"), ("unrecognized", "Unknown"),
 ])
 def test_status_labels_keep_machine_values_separate(status, expected):
     assert status_label(status) == expected

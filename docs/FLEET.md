@@ -1,21 +1,22 @@
-# Fleet observation and declarations (#307)
+# Standalone fleet observation (#343)
 
-Fleet reads the schema-1 host export and records observations about independent
-inference services. It never forwards requests, edits their configuration, or
-stops their processes. `fleet_enabled: false` is the default: no history
-database is opened or created and no fleet worker runs. The scheduler's
-`--dry-run`, `--once`, `--check-config` and sampling-only startup also start no
-fleet writer. Enabling fleet explicitly starts one ingestion worker; claims
-and ingestion share a serialized SQLite connection independent of the managed
-model intent store and its action lock.
+The fleet observer reads schema-1 host exports and records independent
+inference services, GPU allocation and observed activity. Each owner runs their
+own inference services. The standalone runtime provides reads and history;
+workload lifecycle decisions stay with owners and administrators.
 
-The example settings are in
-[scheduler.example.yaml](../deploy/scheduler.example.yaml). Snapshot reads have
-a 2 MiB limit and reject unsupported schemas, duplicate keys, non-finite
-numbers, unsafe file types, symlinks and group/world-writable exports. The
-configured export directory is supplied by the administrator as a read-only
-host mount. `fleet_ingest_interval_seconds` is the file read cadence; observed
-activity uses actual host sample intervals, normally 60 seconds.
+The observer reuses bounded ingestion, FleetStore, presentation policy, history
+and private usage archives. Its dedicated entrypoint does not construct the
+scheduler, shared collector, intent store or native model-action controllers.
+Configuration uses [fleet-observer.example.json](../deploy/fleet-observer/fleet-observer.example.json).
+It runs under a fixed nonlogin account with read access to host exports and
+write access only to its own state directory. Host scan and IP-export timers
+continue independently.
+
+Snapshot reads have a 2 MiB limit and reject unsupported schemas, duplicate
+keys, non-finite numbers, unsafe file types, symlinks and group/world-writable
+exports. The configured export directory is supplied by the administrator.
+Observed activity uses actual host sample intervals, normally 60 seconds.
 
 ## HTTP contract
 
@@ -25,8 +26,7 @@ activity uses actual host sample intervals, normally 60 seconds.
 | `GET /v1/fleet?mine=1` | The same shape, services/occupants filtered to the actual socket peer's mapped container; an unmapped peer returns 403 |
 | `GET /v1/fleet/history?service=ID&hours=24` | `resolution: minute`, `samples` containing `ts`, gauges, `d_requests`, `d_gen_tokens`, `d_prompt_tokens`, `active`, `scrape_ok`, `observed_seconds`, `active_minutes`, `gap`, `counter_reset` |
 | `GET /v1/fleet/history?service=ID&hours=168` | `resolution: hourly`, calendar-hour points covering the requested range, including partial boundaries, with `ts`/`hour_ts`, `requests`, `gen_tokens`, `prompt_tokens`, `active_minutes`, `observed_seconds`, `coverage_ratio`; unobserved buckets retain null activity/counters |
-| `POST /v1/fleet/claims` | `{service_id,until,reason}` where `until` is finite epoch seconds in the future, at most the configured 1–7 days, and `reason` is 1–200 characters |
-| `DELETE /v1/fleet/claims/ID` | Revoke a declaration owned by the mapped calling container; an already revoked declaration retains its original revocation time |
+| `GET /v1/events` | Bounded SSE fleet status events, heartbeat and replay cursor |
 
 Overview responses expose `pid` and display metadata but exclude the full
 command line and model path. History contains a `service` detail with only the
@@ -54,8 +54,8 @@ this setting requires no authentication. Missing owner identity displays
 `Unknown`.
 Container summaries separate host LLM users by UID and include `host`,
 `host_uid` and `host_user`, retaining a null container. These labels are
-observations, not caller authentication. Socket-peer ownership and claims keep
-their existing rules. GPU occupants contain no process command line or comm.
+observations, not caller authentication. Socket-peer filtering keeps its
+existing identity rules. GPU occupants contain no process command line or comm.
 
 Anonymous labels use SHA-256 of `container:<name>` or `host:uid:<uid>`, modulo
 1,000,000,000 with nine decimal digits. They stay stable across CLI/TUI views,
@@ -80,7 +80,7 @@ Services also expose `api_address` (HTTP base URI or null), `api_access`
 (`shared`, `local_only`, `direct`, `unknown`) and `idle_time_sensitive`.
 Loopback bindings are Local only. Fresh verified wildcard bindings are Shared
 and use a trusted advertised container/host IP with the observed port. Container
-IPs come from the fresh owner export; host IPs use configured `collectors.host_ips`.
+IPs come from the fresh owner export; host IPs use configured `host_ips`.
 A verified dual-stack IPv6 listener may use an IPv4 owner address. Specific
 nonloopback bindings expose their direct address. Missing or stale listener
 observations have unknown access. Address metadata adds no routing or process actions.
@@ -89,43 +89,37 @@ History includes `start_at` / `end_at` epoch bounds. Hourly output pads gaps
 and includes partial calendar-hour boundaries, so a 168-hour interval has up
 to 169 points; `partial` and observed coverage describe each boundary bucket.
 
-The writes return `{ok:true,dry_run:false,claim:{id,instance_id,service_id,container,model,
-until,reason,created_by_container,created_at,revoked_at}}`. Both accept
-`?dry_run=1`; POST previews have no allocated ID. DELETE previews include the
-existing ID and proposed revocation time. Previews do not open a new database,
-allocate an ID, change history, or emit scheduler events. They do write the
-structured `fleet_claim` / `fleet_unclaim` preview log. A new declaration
-replaces the previous effective declaration for that instance while preserving
-both records in history. A lost write response has unknown outcome; clients
-should refresh rather than automatically repeat it.
-`service_id` and `instance_id` name the same instance in every public claim.
-
-`fleet_claims_enabled` controls declarations independently of scheduler
-`read_only`; declarations can be used with a read-only managed-model
-scheduler and never enable model actions. Disabled fleet returns 503
-`fleet_disabled`; disabled claims return 405 `fleet_claims_disabled`. Invalid
-input is 400, an unknown service/claim is 404, foreign ownership is 403, an
-unobserved/ended/stale target is 409, and an unavailable history store is 503.
+The active server rejects all writes and exposes only the fleet, history and
+event reads. Schema 1 retains `claim: null`, `claims_enabled: false` and an empty
+shared-model summary. Historical claim rows remain inert. Invalid history
+queries return 400, an unknown service is 404, an unmapped mine request is 403,
+and an unavailable history store is 503.
 
 Ownership comes exclusively from the HTTP socket peer and a freshly read
-`collectors.ip_containers_path` host export. Its `generated_at` must be within
+`ip_containers_path` host export. Its `generated_at` must be within
 `fleet_stale_after_seconds`, with no future timestamp, malformed or conflicting
-canonical IP entries. Missing, stale or unmapped exports return 403 for claims
-and `mine=1`. Static collector labels, request body ownership fields and
+canonical IP entries. Missing, stale or unmapped exports return 403 for
+`mine=1`. Static collector labels, request body ownership fields and
 forwarded headers cannot supply or override this identity. V1 provides no
 administrator override.
 
-`/v1/events` emits `fleet_status_changed` when a previously observed service
-changes state. Its `detail` is `{service_id,from,to}`; events use the existing
-scheduler SSE history and cursor. Timer-driven freshness/expiry changes are
-checked on each ingestion tick, even when the host export is unchanged.
+`/v1/events` emits `fleet_status_changed` when an observed service changes
+state. Its `detail` is `{service_id,from,to}`. Timer-driven freshness changes
+are checked on each ingestion tick, even when the export is unchanged.
+
+Each observer process has a 32-hex `observer_incarnation`, also exposed as
+`X-Observer-Incarnation` on reads and in SSE events. Reconnects include the
+known incarnation with `since` / `Last-Event-ID`. A different incarnation,
+future cursor or expired replay window yields a zero-ID `cursor_reset` control
+event followed by current replay. Clients clear queued events and numeric
+cursor state, then refresh the fleet; ordinary reconnects preserve the cursor.
+Timed polling remains the fallback during event-stream outages.
 
 ## Observations, counters and coverage
 
-The presentation policy is pure. Priority is `unknown`, `claimed`, `active`,
-`over_limit`, `idle`. A stale/unreadable export, unsupported activity engine,
+The presentation policy is pure. Priority is `unknown`, `active`, `over_limit`, `idle`. A stale/unreadable export, unsupported activity engine,
 failed latest scrape, missing discovery, or an interval whose activity cannot
-be localized yields `unknown` even with a declaration. Three failed scrapes
+be localized yields `unknown`. Three failed scrapes
 also satisfy the unknown rule. The idle limit is an informational reminder,
 shown as `Running · inactive` in the TUI. Fresh verified wildcard services default
 to Shared and are exempt from this reminder.
@@ -191,24 +185,22 @@ directory before the first successful ingestion. Disabled fleet and modes that
 start no fleet worker perform no retention writes. Both retention tiers keep
 partial boundary hours. Hourly summaries are incrementally maintained exactly
 once; overview windows combine complete hourly buckets with raw boundary
-intervals, avoiding overlap and loading only aggregate rows. Claims and the
-successful counter baselines survive raw retention. History is bounded to
+intervals, avoiding overlap and loading only aggregate rows. Historical claim records and successful
+counter baselines survive raw retention; claims do not affect current status. History is bounded to
 24/168 hours; raw reads have a row limit.
 Boundary queries include the maximum accepted five-minute observation
 interval. Coverage is clipped to exact interval bounds; an hour-boundary
 counter belongs to the next bucket, while the requested final counter endpoint
 is included once.
 
-`tests/test_fleet.py` uses synthetic inputs and the host scanner's actual
-synthetic schema fixture. It covers state replays, counter and identity epochs,
-restart dedupe, out-of-order exports, gaps, failed/partial observations, safe
-reads, retention, claims, live loopback HTTP, no-database preview/default
-paths, worker shutdown and a 21k-row overview query budget of 100 ms. These
-tests establish code behavior, not a production shadow-run or live accuracy
-receipt.
+Historical ingestion tests in `tests/test_fleet.py` preserve counter, identity,
+gap, retention and restart behavior. Standalone observer and reader tests check
+the active GET-only surface, inert claims, replay resets and copied CLI behavior.
+Fleet Pilot tests cover read-only GPU/People details and navigation. These
+fixtures establish code behavior; migration acceptance also requires preserved
+database/archive identities and verified host process ownership.
 
 Process-session usage can be retained beyond database cleanup with
 [compressed session logs](FLEET_SESSION_LOGS.md).
 
 <!-- Generated-By: Codex / gpt-6.1-sol -->
-<!-- Generated-By: Codex / unknown model -->

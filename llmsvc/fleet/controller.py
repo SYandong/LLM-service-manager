@@ -8,20 +8,21 @@ import sqlite3
 import threading
 import uuid
 
-from llmsvc.config import canonical_ip
+from llmsvc.fleet.config import canonical_ip
 from llmsvc.fleet import FleetError
 from llmsvc.fleet.ingest import number, read_json, validate_snapshot
 from llmsvc.fleet.store import FleetStore
-from llmsvc.policy.fleet import container_summary, service_status
+from llmsvc.fleet.policy import container_summary, service_status
 
 LOG = logging.getLogger("llmsvc.fleet")
 
 
 class FleetController:
-    def __init__(self, config, *, clock, emit):
+    def __init__(self, config, *, clock, emit, observe_claims=True):
         self.config = config
         self.clock = clock
         self.emit = emit
+        self.observe_claims = observe_claims
         self.store = FleetStore(config.fleet_db_path)
         self.stopping = threading.Event()
         self.thread = None
@@ -119,7 +120,7 @@ class FleetController:
 
     def report(self, *, source_ip=None, mine=False, shared=None):
         now = self.clock()
-        owner = self.owner_for_ip(source_ip, required=mine) if source_ip is not None else None
+        owner = self.owner_for_ip(source_ip, required=mine) if source_ip is not None or mine else None
         owner_addresses = self._owner_addresses(now)
         try:
             with self.store.lock:
@@ -129,7 +130,7 @@ class FleetController:
                 age = None if generated is None else max(0, now - generated)
                 stale = generated is None or now < generated or age > self.config.fleet_stale_after_seconds or self.last_error is not None
                 instances = self.store.instances()
-                claims = self.store.claims(now)
+                claims = self.store.claims(now) if self.observe_claims else {}
                 windows = {"24h": self.store.window(now - 86400, now, include_end=True),
                            "7d": self.store.window(now - 604800, now, include_end=True)}
                 hour = math.floor(now / 3600) * 3600
@@ -146,7 +147,7 @@ class FleetController:
                     for instance in instances if not mine or instance["container"] == owner]
         except (sqlite3.Error, OSError, ValueError, TypeError, KeyError, OverflowError, RecursionError) as exc:
             raise FleetError(503, "fleet_store_unavailable") from exc
-        gpus = self._gpus(snapshot, services, mine=mine)
+        gpus = self._gpus(snapshot, services, mine=mine, owner=owner)
         errors = list(snapshot.get("errors", []))
         if self.last_error is not None:
             errors.append(self.last_error)
@@ -160,10 +161,10 @@ class FleetController:
                 "inventory_complete": snapshot.get("inventory_complete", False),
                 "gpu_inventory_complete": snapshot.get("gpu_inventory_complete", False),
                 "gpu_attribution_complete": snapshot.get("gpu_attribution_complete", False),
-                "claims_enabled": self.config.fleet_claims_enabled}
+                "claims_enabled": self.observe_claims and self.config.fleet_claims_enabled}
 
     @staticmethod
-    def _gpus(snapshot, services, *, mine):
+    def _gpus(snapshot, services, *, mine, owner=None):
         occupants = {}
         visible = {service["id"] for service in services}
         for service in snapshot.get("services", []):
@@ -174,6 +175,8 @@ class FleetController:
                     "used_gb": None if gpu.get("used_mib") is None else gpu["used_mib"] / 1024, "service_id": service["id"],
                     "host": service["host"], "host_uid": service.get("host_uid"), "host_user": service.get("host_user")})
         owners = {service["container"] for service in services}
+        if owner is not None:
+            owners.add(owner)
         for process in snapshot.get("other_gpu_processes", []):
             if mine and process["container"] not in owners:
                 continue
@@ -233,7 +236,7 @@ class FleetController:
                 "resolution": resolution, "samples": rows, "service": service}
 
     def write_claim(self, operation, payload, *, source_ip, dry_run=False):
-        if not self.config.fleet_claims_enabled:
+        if not self.observe_claims or not self.config.fleet_claims_enabled:
             raise FleetError(405, "fleet_claims_disabled")
         owner = self.owner_for_ip(source_ip)
         now = self.clock()

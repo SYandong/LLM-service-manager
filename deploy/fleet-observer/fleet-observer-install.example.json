@@ -1,0 +1,14 @@
+{
+  "_generated_by": "Codex / gpt-6.1-sol",
+  "_comments": "Stage an immutable root-owned source tree first. Precreate the fleet-observer account with a nonlogin shell and set uid to its actual UID; 990 is an example. The installer creates no accounts, migrates no data and changes only its three fixed units/configs. Rollback retains database, archives and receipts.",
+  "source_dir": "/opt/fleet-observer/source",
+  "python": "/usr/bin/python3",
+  "user": "fleet-observer",
+  "uid": 990,
+  "unit_dir": "/etc/systemd/system",
+  "config_path": "/etc/llmsvc/fleet-observer.json",
+  "archive_config_path": "/etc/llmsvc/fleet-observer-archive.json",
+  "state_dir": "/var/lib/fleet-observer",
+  "archive_dir": "/var/lib/fleet-observer-archive",
+  "receipt_dir": "/var/lib/fleet-observer-install"
+}

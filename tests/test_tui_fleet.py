@@ -1,5 +1,5 @@
 # Generated-By: Codex / gpt-6.1-sol
-"""Actual Pilot coverage of fleet layout, incremental views and claim intent."""
+"""Actual Pilot coverage of read-only fleet layout and incremental views."""
 
 import asyncio
 import copy
@@ -13,9 +13,9 @@ import pytest
 from rich.cells import cell_len
 
 pytest.importorskip("textual")
-from textual.widgets import Button, DataTable, Input, Sparkline, Static
+from textual.widgets import DataTable, Input, Sparkline
 from textual.containers import VerticalScroll
-from tui.fleet_app import ClaimDialog, FleetApp, GpuDetailDialog, GpuOverview
+from tui.fleet_app import FleetApp, GpuDetailDialog, GpuOverview
 
 
 @pytest.fixture
@@ -78,10 +78,10 @@ class FleetClient:
         self.snapshot = snapshot
         self.calls = []
         self.read_error = None
-        self.write_error = None
         self.history_error = None
 
     def request(self, method, path, payload=None):
+        assert method == "GET" and payload is None, "Fleet UI must perform only reads"
         self.calls.append((method, path, payload))
         if path == "/v1/fleet":
             if self.read_error:
@@ -96,32 +96,11 @@ class FleetClient:
                     "samples": [{"ts": 1899900000 + hour * 3600, "active_minutes": hour % 60,
                                  "gen_tokens": hour * 10} for hour in range(168)],
                     "service": {"id": ident, "argv_redacted": "vllm serve … --max-model-len 8192"}}
-        if self.write_error:
-            raise self.write_error
-        preview = "dry_run=1" in path
-        claim = {"id": "claim-own", "instance_id": "own", "service_id": "own", "container": "group-c",
-                 "reason": "Working session", "until": 1900086400}
-        if method == "POST":
-            claim.update(payload)
-            if preview:
-                claim.pop("id")
-            else:
-                next(item for item in self.snapshot["services"] if item["id"] == "own")["claim"] = claim
-            return {"ok": True, "dry_run": preview, "claim": claim}
-        if not preview:
-            next(item for item in self.snapshot["services"] if item["id"] == "own")["claim"] = None
-        claim["revoked_at"] = 1900000000
-        return {"ok": True, "dry_run": preview, "claim": claim}
+        pytest.fail("Fleet UI attempted an unsupported read: " + path)
 
 
 def make_app(snapshot, reader=None, *, show_names=False):
-    api = SimpleNamespace(**runpy.run_path(str(Path(__file__).parents[1] / "cli/llm")))
-    if not hasattr(api, "claim_until"):
-        def claim_until(value):
-            if value != "+1d":
-                raise api.ClientError("Enter a valid deadline.")
-            return 1900086400
-        api.claim_until = claim_until
+    api = SimpleNamespace(**runpy.run_path(str(Path(__file__).parents[1] / "cli/fleet-llm")))
     client = FleetClient(snapshot)
     return FleetApp(client, api, event_reader=reader or FixtureEvents(), show_names=show_names), client
 
@@ -261,7 +240,7 @@ def test_people_group_and_filter_proven_host_uids(fleet_snapshot, size):
             app.query_one("#fleet-filter", Input).value = "operator"
             await ready(app, pilot)
             assert set(app.row_services.values()) == {"busy", "quiet", "own"}
-            assert not app.claim_allowed("own", None)
+            assert not hasattr(app, "claim_allowed")
             fleet_snapshot["services"][0]["host_user"] = "operator-renamed"
             app.refresh_fleet()
             await ready(app, pilot)
@@ -361,77 +340,8 @@ def test_invalid_snapshot_retains_last_good_observations(fleet_snapshot):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("receipt_patch", [
-    {"instance_id": "another-service"}, {"until": 1900086401}, {"reason": "different"},
-    {"until": 1e300}, {"id": 123},
-])
-def test_malformed_submit_result_is_unknown_and_not_retried(fleet_snapshot, receipt_patch):
-    async def scenario():
-        app, client = make_app(fleet_snapshot)
-        original = client.request
-
-        def malformed(method, path, payload=None):
-            if method == "POST" and "dry_run" not in path:
-                result = copy.deepcopy(original(method, path, payload))
-                result["claim"].update(receipt_patch)
-                return result
-            return original(method, path, payload)
-
-        client.request = malformed
-        async with app.run_test(size=(80, 24)) as pilot:
-            await ready(app, pilot)
-            await select(app, pilot, "own")
-            await pilot.press("c")
-            dialog = app.screen
-            dialog.query_one("#claim-reason", Input).value = "Working session"
-            await pilot.click("#claim-preview")
-            await ready(app, pilot)
-            await pilot.click("#claim-submit")
-            await ready(app, pilot)
-            assert "Result unknown" in str(dialog.query_one("#claim-status").render())
-            assert "own" in app.uncertain_services
-            assert dialog.query_one("#claim-submit", Button).disabled
-            for _ in range(3):
-                await pilot.click("#claim-submit")
-            assert len([call for call in client.calls if call[0] == "POST" and "dry_run" not in call[1]]) == 1
-    asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("receipt_patch", [
-    {"revoked_at": None}, {"revoked_at": 0}, {"revoked_at": 1e300}, {"until": 1e300},
-])
-def test_invalid_revocation_receipt_is_unknown_and_not_retried(fleet_snapshot, receipt_patch):
-    async def scenario():
-        app, client = make_app(fleet_snapshot)
-        next(item for item in client.snapshot["services"] if item["id"] == "own")["claim"] = {
-            "id": "claim-own", "instance_id": "own", "service_id": "own", "container": "group-c",
-            "reason": "Working session", "until": 1900086400}
-        original = client.request
-
-        def malformed(method, path, payload=None):
-            result = copy.deepcopy(original(method, path, payload))
-            if method == "DELETE" and "dry_run" not in path:
-                result["claim"].update(receipt_patch)
-            return result
-
-        client.request = malformed
-        async with app.run_test(size=(80, 24)) as pilot:
-            await ready(app, pilot)
-            await select(app, pilot, "own")
-            await pilot.press("u")
-            dialog = app.screen
-            await pilot.click("#claim-preview")
-            await ready(app, pilot)
-            assert not dialog.query_one("#claim-submit", Button).disabled
-            await pilot.click("#claim-submit")
-            await ready(app, pilot)
-            assert "Result unknown" in str(dialog.query_one("#claim-status").render())
-            assert "own" in app.uncertain_services
-            assert dialog.query_one("#claim-submit", Button).disabled
-            for _ in range(3):
-                await pilot.click("#claim-submit")
-            assert len([call for call in client.calls if call[0] == "DELETE" and "dry_run" not in call[1]]) == 1
-    asyncio.run(scenario())
 
 
 def test_sort_filter_and_mine_keep_selection(fleet_snapshot):
@@ -508,76 +418,8 @@ def test_failure_banner_marks_unknown_without_replacing_data(fleet_snapshot, fai
     asyncio.run(scenario())
 
 
-def test_claim_preview_edit_submit_and_revoke(fleet_snapshot):
-    async def scenario():
-        app, client = make_app(fleet_snapshot)
-        async with app.run_test(size=(80, 24)) as pilot:
-            await ready(app, pilot)
-            await pilot.press("c")
-            assert app.screen is app.dashboard
-            assert "your container" in str(app.query_one("#fleet-notice").render())
-            await select(app, pilot, "own")
-            await pilot.press("c")
-            assert isinstance(app.screen, ClaimDialog)
-            dialog = app.screen
-            dialog.query_one("#claim-reason", Input).value = "Working session"
-            await pilot.click("#claim-preview")
-            await ready(app, pilot)
-            assert not dialog.query_one("#claim-submit", Button).disabled
-            assert len([call for call in client.calls if call[0] == "POST"]) == 1
-            assert client.calls[-1][1].endswith("dry_run=1")
-            assert next(item for item in client.snapshot["services"] if item["id"] == "own")["claim"] is None
-            dialog.query_one("#claim-reason", Input).value = "Updated session"
-            await pilot.pause()
-            assert dialog.query_one("#claim-submit", Button).disabled
-            await pilot.click("#claim-preview")
-            await ready(app, pilot)
-            await pilot.click("#claim-submit")
-            await ready(app, pilot)
-            assert dialog.submitted
-            assert dialog.query_one("#claim-submit", Button).disabled
-            assert len([call for call in client.calls if call[0] == "POST" and "dry_run" not in call[1]]) == 1
-            assert "saved" in str(dialog.query_one("#claim-status").render())
-            await pilot.click("#claim-close")
-            await pilot.press("u")
-            await pilot.click("#claim-preview")
-            await ready(app, pilot)
-            assert client.calls[-1][0] == "DELETE" and "dry_run=1" in client.calls[-1][1]
-            await pilot.click("#claim-submit")
-            await ready(app, pilot)
-            assert len([call for call in client.calls if call[0] == "DELETE" and "dry_run" not in call[1]]) == 1
-            assert "revoked" in str(app.screen.query_one("#claim-status").render())
-    asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("status", [403, None, 500, 503])
-def test_claim_failure_is_visible_and_never_retried(fleet_snapshot, status):
-    async def scenario():
-        app, client = make_app(fleet_snapshot)
-        async with app.run_test(size=(100, 30)) as pilot:
-            await ready(app, pilot)
-            await select(app, pilot, "own")
-            await pilot.press("c")
-            dialog = app.screen
-            dialog.query_one("#claim-reason", Input).value = "Working session"
-            await pilot.click("#claim-preview")
-            await ready(app, pilot)
-            client.write_error = app.api.ClientError("permission denied" if status == 403 else "response lost", status=status)
-            await pilot.click("#claim-submit")
-            await ready(app, pilot)
-            text = str(dialog.query_one("#claim-status").render())
-            assert ("403" if status == 403 else "Result unknown") in text
-            for _ in range(3):
-                await pilot.click("#claim-submit")
-                app.update_events()
-            await ready(app, pilot)
-            assert len([call for call in client.calls if call[0] == "POST" and "dry_run" not in call[1]]) == 1
-            if status != 403:
-                await pilot.click("#claim-close")
-                await pilot.press("c")
-                assert app.screen is app.dashboard
-                assert "unknown" in str(app.query_one("#fleet-notice").render())
-    asyncio.run(scenario())
 
 
 def test_events_coalesce_reads_and_exit_detaches_notifications(fleet_snapshot):

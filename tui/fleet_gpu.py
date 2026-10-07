@@ -23,7 +23,7 @@ RESIDUAL_KEY = ("system", "unattributed")
 FREE_KEY = ("system", "free")
 MEASURED_KEY = ("system", "measured")
 SERVICE_STYLES = {"active": "#71c695", "idle": "#c5ced8", "over_limit": "#e0b568",
-                  "claimed": "#80c1d7", "unknown": "#98a4b4"}
+                  "unknown": "#98a4b4"}
 
 
 def numeric(value):

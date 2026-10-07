@@ -1,4 +1,47 @@
-# DESIGN — llama-swap 之上的调度器与终端 UI
+# DESIGN — GPU fleet observer
+
+## Current architecture: standalone observation (#343)
+
+The approved deployment replaces central shared serving with owner-run inference
+services and a host fleet observer. Wildcard listeners allow direct sharing;
+local-only listeners remain within their network namespace. Administrators
+coordinate workload shutdown manually.
+
+The existing host scanner and IP exporter publish bounded atomic files. A
+nonlogin observer account reads those exports and writes a dedicated fleet
+SQLite database. Its standard-library entry is `llmsvc.fleet.observer`, using
+strict flat JSON configuration. It constructs no Scheduler, shared collector,
+intent store, native adapter or model-action controller.
+
+The active API exposes only GET fleet, history and bounded SSE events. Schema 1
+retains `claims_enabled: false`, `claim: null` and an empty shared-model list.
+Stored claims are ignored before status classification. Each process incarnation
+has a new event identity; clients reset replay cursors when it changes.
+
+The default `llm` entry loads `llmsvc.fleet.client` / `cli/fleet-llm`. The fleet
+TUI keeps anonymous names, service addresses, copying and all-GPU navigation.
+It exposes no claim, scheduling or shared-model controls. Historical scheduler
+modules and the previous CLI remain source references, outside the deployed
+entrypoints.
+
+Transfer uses SQLite backup and the complete private archive tree, including
+minute JSONL files and checkpoints. Pause both old writers before the final
+transfer; discard divergent preview data. Retention, service identities,
+watermark, counter baselines, hourly history and gzip contents are preserved.
+Rollback first stops the new writers, then transfers their latest data before
+resuming observation. The old central upgrader is not part of that path.
+
+Both new observation and archive units are enabled. Retire only inventoried
+central units and activation triggers after fresh identity and workload checks.
+Keep host collection timers and user jobs. The replacement must remain available
+after the central container stops. See [FLEET_OBSERVER](FLEET_OBSERVER.md) for
+runtime configuration and [host deployment](../deploy/fleet-observer/README.md)
+for install and rollback.
+
+## Historical control-plane design
+
+The following sections describe the previous scheduler and its retained source.
+Their control routes and deployment tools are not the standalone observer API.
 
 状态：v1.1 草案，2026-09-07（吸收 PR #29 第一轮 review：唯一写者与 TTL、放置租约、安静时刻协议、keep_value 统一、sleep 内存准入、TP=2 移出本版、dry_run、TUI 降级）。改动本文件前先开 `type:design` issue。
 
@@ -1313,4 +1356,6 @@ reconciliation before shared CLI activation, as recorded in #310.
 <!-- Generated-By: Codex / unknown model -->
 <!-- Generated-By: Claude Code / claude-opus-5-5 -->
 <!-- Generated-By: Codex / gpt-6.1-sol -->
+<!-- Generated-By: Codex / unknown model -->
+
 <!-- Generated-By: Codex / unknown model -->

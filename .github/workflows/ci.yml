@@ -16,9 +16,17 @@ jobs:
           python-version: "3.10"
       - run: python -m pip install ".[test,tui]"
       - run: python -m pytest -q tests
-      - run: python -m llmsvc --help
+      - run: python -m llmsvc.fleet.observer --help
       - run: llm --help
-      - run: llmsvc-scheduler --config tests/fixtures/core_scheduler.yaml --check-config
-      - name: Import installed optional TUI outside the checkout
+      - name: Validate the standalone observer configuration
+        run: |
+          fleet_config_path="$RUNNER_TEMP/fleet-observer-check.json"
+          install -m 0600 deploy/fleet-observer/fleet-observer.example.json "$fleet_config_path"
+          llmsvc-fleet-observer --config "$fleet_config_path" --check-config
+      - name: Import installed fleet reader, observer and optional TUI outside the checkout
         working-directory: ${{ runner.temp }}
-        run: python -c "from tui.fleet_app import FleetApp; from tui.app import SchedulerApp"
+        run: >-
+          python -c "from llmsvc.fleet.client import build_parser;
+          from llmsvc.fleet.observer import FleetObserver;
+          from tui.fleet_app import FleetApp;
+          import sys; assert 'llmsvc.scheduler' not in sys.modules"

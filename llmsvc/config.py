@@ -12,14 +12,7 @@ from typing import Any, Optional
 
 import yaml
 
-
-def canonical_ip(value: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError("IP address must be a string")
-    address = ipaddress.ip_address(value)
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-        address = address.ipv4_mapped
-    return str(address)
+from llmsvc.fleet.config import canonical_ip
 
 
 @dataclass(frozen=True)

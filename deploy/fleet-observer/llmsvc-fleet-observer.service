@@ -1,0 +1,29 @@
+# Generated-By: Codex / gpt-6.1-sol
+[Unit]
+Description=Read-only host fleet observation API and history
+After=network.target
+
+[Service]
+Type=simple
+User={user}
+Group={gid}
+WorkingDirectory={source_dir}
+ExecStart={python} -E -s -B -m llmsvc.fleet.observer --config {config_path}
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=30s
+KillMode=control-group
+UMask=0077
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ReadOnlyPaths={source_dir} {export_dirs}
+ReadWritePaths={state_dir}
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=llmsvc-fleet-observer
+
+[Install]
+WantedBy=multi-user.target

@@ -68,7 +68,7 @@ def test_real_sse_reconnect_keeps_cursor_and_closes_reader(fleet_snapshot):
         server.daemon_threads = True
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        client = api.SchedulerClient("http://localhost:%s" % server.server_port, timeout=.5)
+        client = api.FleetClient("http://localhost:%s" % server.server_port, timeout=.5)
         reader = api.EventReader(client, stream_timeout=.5, retry_delay=.03, max_retry_delay=.03)
         app = FleetApp(client, api, event_reader=reader)
         try:
