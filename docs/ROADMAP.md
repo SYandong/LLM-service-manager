@@ -2,6 +2,27 @@
 
 本文件是唯一的路线图。每个 milestone 对应 GitHub 上的同名 milestone，每一行对应一个 issue。改计划先改 issue，再同步这里。设计细节在 `DESIGN.md`。
 
+## Current direction (#343)
+
+The approved retirement replaces central llmsvc serving with a standalone host
+observer and read-only `llm`. Owners run their services; wildcard listeners are
+shared directly. Administrators coordinate capacity manually.
+
+- #343: dedicated observer/configuration/events, inert historical claims,
+  read-only CLI/TUI and host installer; migrate the latest database and complete
+  archives, promote the shared command and update server guidance.
+- #346: bounded site-configured GPU query budgets and cleanup of the scanner's
+  own timed-out observation commands.
+- #348: preserve fragmented terminal replies and UTF-8 input through startup
+  and resume negotiation.
+- Keep host scanning/IP export and private session/minute usage archives.
+- Retire inventoried central serving, scheduler and reaper triggers after
+  replacement validation; preserve user workloads and rollback data.
+- Record code review, local tests and live acceptance separately in the issue.
+
+Earlier milestones below remain historical delivery records. Their shared-model
+controls and legacy TUI are absent from the active standalone command.
+
 ## 一句话
 
 把 LLM-service-manager 做成 llama-swap 之上的控制面：**闲时多占显存、有压力就让、默认模型永远可用、用户能用 `free` / `pin` / `reserve` 说话，并有一个 Claude Code 风格的终端 UI**。
@@ -110,6 +131,8 @@ M7 新 fleet TUI 接替默认入口；本节共享模型 TUI 第一阶段保留�
 - #339 Separate GPU query timeouts and verified host-user ownership for inference and other GPU allocations.
 - #341 Private gzip JSONL records for each observed minute of process-session usage.
 - #342 Anonymous owner labels by default, concise model/work labels and independent GPU keyboard navigation and scrolling.
+- #343 Standalone host fleet observer, read-only default command and central-service retirement.
+- #346 Configurable bounded host GPU-query budgets for slow NVIDIA observation calls.
 
 依赖：#303 → #304 → 现场 503 验收；#305 → #306 → #307 → #308/#309；
 503 blocker 的 fleet 占用者增强由 #313 在 #307 后接入。#310 汇总现场证据。
@@ -227,4 +250,6 @@ GPU 空闲时的简短测试已获准，由 ops 独占调度并持有共享 `gpu
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->
 <!-- Generated-By: Codex / unknown model -->
 <!-- Generated-By: Codex / gpt-6.1-sol -->
+<!-- Generated-By: Codex / unknown model -->
+
 <!-- Generated-By: Codex / unknown model -->

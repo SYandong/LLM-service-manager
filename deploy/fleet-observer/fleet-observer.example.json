@@ -1,0 +1,12 @@
+{
+  "_generated_by": "Codex / gpt-6.1-sol",
+  "_comments": "Dedicated GET-only host observer. Use a specific private or loopback bind address. Exports remain read-only; the database must be inside the installer's private state_dir. Retention settings are preserved during data transfer.",
+  "listen_host": "127.0.0.1",
+  "listen_port": 8011,
+  "fleet_snapshot_path": "/var/lib/llmsvc-host/export/fleet.json",
+  "ip_containers_path": "/var/lib/llmsvc-host/export/ip-containers.json",
+  "fleet_db_path": "/var/lib/fleet-observer/fleet.sqlite",
+  "fleet_ingest_interval_seconds": 30,
+  "fleet_raw_retention_days": 14,
+  "fleet_hourly_retention_days": 180
+}

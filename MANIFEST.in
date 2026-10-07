@@ -1,6 +1,7 @@
 # Generated-By: Codex / gpt-6-astra
+# Generated-By: Codex / gpt-6.1-sol
 include AGENTS.md CHANGELOG.md README.md
-include cli/llm cli/llm.py
+include cli/fleet-llm cli/llm cli/llm.py
 graft docs
 graft deploy
 graft tests

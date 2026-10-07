@@ -100,15 +100,22 @@ through the rollback path when changing that value. Timing is nominal rather
 than a promise that every sample completes at exactly that interval.
 
 Discovery, proc reads, process-tree traversal, subprocess waits and parsing
-share a monotonic budget of at most 20 seconds. Each GPU inventory/compute query
+share `scan_budget_seconds`, default 20 seconds and configurable from 0.1
+through 120 seconds. Each GPU inventory/compute query
 uses `gpu_query_timeout_seconds`, default five seconds and configurable from
-0.01 through 10 seconds, capped by the remaining scan budget. Target HTTP and
+0.01 through 30 seconds, capped by the remaining scan budget. Target HTTP and
 listener commands retain the `target_timeout_seconds` maximum of two seconds.
+When raising the scan budget, set the scanner service's `TimeoutStartSec` above
+that budget with room for cleanup and publication; the supplied unit remains
+22 seconds for the default configuration. A failed command kills only the
+scanner's own query/helper child and waits at most 0.25 seconds for it to exit.
+An uninterruptible child can outlast that wait; its result remains unavailable,
+and it remains confined to the scanner service's cgroup for cleanup.
 Responses are limited to 4 MiB;
 the final JSON is limited to 2 MiB. Limits also cover processes, socket FDs,
 services, GPU rows, proc bytes and metric line/label lengths. Remaining targets
 are marked `scrape_skipped`. Discovery accepts up to 256 KiB and 4096 arguments
-per command line, within the global 64 MiB proc-byte and 20-second scan budgets.
+per command line, within the global 64 MiB proc-byte and configured scan budgets.
 Exceeding either command-line limit leaves inventory incomplete; exported
 `argv_redacted` remains limited to 1024 characters. `max_services` accepts
 1 through 256 and defaults to 256. Exceeding this cap adds `service_limit` and sets

@@ -1,6 +1,6 @@
 # Generated-By: Codex / gpt-6.1-sol
 # Generated-By: Codex / unknown model
-"""Synthetic accounting, visible GPU selection, detail, and claim contracts."""
+"""Synthetic accounting, visible GPU selection, detail, and read-only contracts."""
 
 import asyncio
 import copy
@@ -11,16 +11,16 @@ import pytest
 from rich.console import Console
 
 pytest.importorskip("textual")
-from textual.widgets import Button, DataTable, Input
+from textual.widgets import DataTable, Input
 from textual.containers import VerticalScroll
 
-from tui.fleet_app import ClaimDialog, FleetHelpDialog, GpuDetailDialog, GpuOverview
+from tui.fleet_app import FleetHelpDialog, GpuDetailDialog, GpuOverview
 from tui.fleet_format import owner_info
-from tui.fleet_gpu import (FREE_KEY, MEASURED_KEY, RESIDUAL_KEY, account_gpu,
+from tui.fleet_gpu import (FREE_KEY, MEASURED_KEY, account_gpu,
                            allocation_legend, card_header, compact_gib, detail_lines,
                            drawing_segments, expanded_header, gib, owner_color,
                            proportional_cells, render_bar, render_expanded, render_overview, service_lines)
-from test_tui_fleet import fleet_snapshot, make_app, ready
+from test_tui_fleet import make_app, ready
 
 
 @pytest.fixture
@@ -446,8 +446,7 @@ def test_mouse_targets_gpu_headers_and_owner_segments(gpu_snapshot):
             assert isinstance(app.screen, GpuDetailDialog)
             assert " · Work · 12 GiB" in str(app.screen.query_one("#gpu-allocation-text").render())
             assert app.screen.query_one("#gpu-detail-services", DataTable).row_count == 0
-            assert app.screen.query_one("#gpu-detail-claim", Button).disabled
-            assert app.screen.query_one("#gpu-detail-revoke", Button).disabled
+            assert not app.screen.query("#gpu-detail-claim, #gpu-detail-revoke")
     asyncio.run(scenario())
 
 
@@ -621,7 +620,7 @@ def test_stale_and_conflict_are_visible_in_the_compact_overview(gpu_snapshot):
             await pilot.press("right", "enter")
             await ready(app, pilot)
             assert " · LLM · 74 GiB" in str(app.screen.query_one("#gpu-allocation-text").render())
-            assert app.screen.query_one("#gpu-detail-claim", Button).disabled
+            assert not app.screen.query("#gpu-detail-claim, #gpu-detail-revoke")
             assert app.selected_service()["status"] == "idle"
             assert "Unknown" in str(app.screen.query_one("#gpu-service-details").render())
     asyncio.run(scenario())
@@ -652,35 +651,4 @@ def test_six_gpu_headers_scroll_with_filter_and_failure_banner(gpu_snapshot, siz
             assert overview.region.y + len(overview.render().plain.splitlines()) <= overview.region.bottom
             assert app.query_one("#fleet-gpu-scroll", VerticalScroll).max_scroll_y > 0
             assert app.query_one("#fleet-footer").region.bottom <= size[1]
-    asyncio.run(scenario())
-
-
-def test_claim_preview_submit_and_revoke_from_gpu_details(fleet_snapshot):
-    async def scenario():
-        app, client = make_app(fleet_snapshot)
-        async with app.run_test(size=(80, 24)) as pilot:
-            await ready(app, pilot)
-            await pilot.press("j", "j", "j", "right", "enter")
-            await ready(app, pilot)
-            assert app.view == "gpu" and app.selected_service_id() == "own"
-            await pilot.click("#gpu-detail-claim")
-            assert isinstance(app.screen, ClaimDialog)
-            app.screen.query_one("#claim-reason", Input).value = "Working session"
-            await pilot.click("#claim-preview")
-            await ready(app, pilot)
-            assert not app.screen.query_one("#claim-submit", Button).disabled
-            assert not next(service for service in client.snapshot["services"] if service["id"] == "own")["claim"]
-            await pilot.click("#claim-submit")
-            await ready(app, pilot)
-            assert next(service for service in client.snapshot["services"] if service["id"] == "own")["claim"]
-            await pilot.click("#claim-close")
-            assert isinstance(app.screen, GpuDetailDialog)
-            assert not app.screen.query_one("#gpu-detail-revoke", Button).disabled
-            await pilot.click("#gpu-detail-revoke")
-            await pilot.click("#claim-preview")
-            await ready(app, pilot)
-            await pilot.click("#claim-submit")
-            await ready(app, pilot)
-            assert len([call for call in client.calls if call[0] == "POST" and "dry_run" not in call[1]]) == 1
-            assert len([call for call in client.calls if call[0] == "DELETE" and "dry_run" not in call[1]]) == 1
     asyncio.run(scenario())

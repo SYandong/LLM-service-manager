@@ -8,13 +8,13 @@ import math
 import sys
 import threading
 from types import SimpleNamespace
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 
 from rich.text import Text
 from textual import work
 from textual.app import App
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Sparkline, Static
@@ -26,9 +26,8 @@ from .fleet_gpu import (MEASURED_KEY, account_gpu, compact_gib, detail_lines, ex
 from .fleet_selection import SelectableStatic
 
 
-STATUS_STYLE = {"active": "green", "idle": "", "over_limit": "bold yellow",
-                "claimed": "cyan", "unknown": "dim"}
-HINT = "↑↓ scroll  J/K service  N names  S sort  M mine  C claim  U revoke  G GPU  ? help Q quit"
+STATUS_STYLE = {"active": "green", "idle": "", "over_limit": "bold yellow", "unknown": "dim"}
+HINT = "↑↓ scroll  J/K service  N names  S sort  M mine  G GPU  ? help Q quit"
 GPU_HINT = "↑↓ GPU  ←→ owner  Enter details  Z compact  N names  P people  ? help Q quit"
 
 
@@ -120,8 +119,7 @@ class FleetHelpDialog(ModalScreen):
                     "Drag to select; copy with your terminal\n"
                     "Tab / Shift+Tab  Focus controls     Escape  Close     Q  Quit\n\n"
                     "/  Search     M  Mine     R  Refresh\n"
-                    "S  Sort: State, Idle time, Memory, Output tokens\n"
-                    "C  Claim service     U  Revoke claim\n\n"
+                    "S  Sort: State, Idle time, Memory, Output tokens\n\n"
                     "LLM: inference models, solid fill\n"
                     "Work: other GPU jobs, dotted fill\n"
                     "Unattributed: used VRAM with no matched workload\n"
@@ -251,8 +249,7 @@ class GpuDetailDialog(ModalScreen):
     #gpu-service-details { height: auto; }
     #gpu-service-history, #gpu-service-history-bars { height: auto; }
     #gpu-active-chart, #gpu-token-chart { height: 1; }
-    #gpu-detail-buttons { height: 3; }
-    #gpu-detail-buttons Button { width: 1fr; min-width: 0; }
+    #gpu-detail-close { height: 3; width: 100%; }
     """
     BINDINGS = [("escape", "close", "Close"), ("q", "app.quit", "Quit"),
                 Binding("up", "scroll_contents(-1)", show=False, priority=True),
@@ -277,10 +274,7 @@ class GpuDetailDialog(ModalScreen):
                 yield SelectableStatic("", id="gpu-service-history-bars", markup=False)
                 yield Sparkline([], id="gpu-active-chart")
                 yield Sparkline([], id="gpu-token-chart")
-            with Horizontal(id="gpu-detail-buttons"):
-                yield Button("Claim", id="gpu-detail-claim")
-                yield Button("Revoke", id="gpu-detail-revoke")
-                yield Button("Close", id="gpu-detail-close")
+            yield Button("Close", id="gpu-detail-close")
 
     def on_mount(self):
         self.owner.gpu_detail = self
@@ -342,10 +336,6 @@ class GpuDetailDialog(ModalScreen):
             chart.display = original.display
             if list(chart.data or []) != list(original.data or []):
                 chart.data = list(original.data or [])
-        service = self.owner.selected_service()
-        allowed = bool(service and self.owner.claim_allowed(service["id"], service.get("container")))
-        self.query_one("#gpu-detail-claim", Button).disabled = not allowed
-        self.query_one("#gpu-detail-revoke", Button).disabled = not allowed or not (service.get("claim") or {}).get("id")
 
     def on_data_table_row_highlighted(self, event):
         if event.data_table.id == "gpu-detail-services":
@@ -359,11 +349,7 @@ class GpuDetailDialog(ModalScreen):
 
     def on_button_pressed(self, event):
         event.stop()
-        if event.button.id == "gpu-detail-close":
-            self.action_close()
-        else:
-            self.owner.clear_text_selections()
-            self.owner.action_claim(revoke=event.button.id == "gpu-detail-revoke")
+        self.action_close()
 
     def on_key(self, event):
         key = event.key.lower()
@@ -379,11 +365,6 @@ class GpuDetailDialog(ModalScreen):
             event.stop()
             event.prevent_default()
             self.owner.action_toggle_names()
-        elif key in ("c", "u"):
-            event.stop()
-            event.prevent_default()
-            self.owner.clear_text_selections()
-            self.owner.action_claim(revoke=key == "u")
 
     def action_scroll_contents(self, direction, page=False):
         self.owner.clear_text_selections()
@@ -392,180 +373,10 @@ class GpuDetailDialog(ModalScreen):
                             animate=False)
 
 
-class ClaimDialog(ModalScreen):
-    DEFAULT_CSS = """
-    ClaimDialog { align: center middle; }
-    #claim-dialog { width: 76; max-width: 96%; height: auto; max-height: 96%;
-                    background: #232323; border: round #ad8c63; padding: 0 1; }
-    #claim-title, #claim-until-label, #claim-reason-label { height: auto; }
-    #claim-status { height: auto; min-height: 3; max-height: 8; }
-    #claim-buttons { height: 3; }
-    #claim-buttons Button { width: 1fr; min-width: 0; }
-    """
-    BINDINGS = [("escape", "close", "Close"), ("q", "app.quit", "Quit")]
-
-    def __init__(self, owner, service, revoke=False):
-        super().__init__()
-        self.owner = owner
-        self.service_id = service["id"]
-        self.container = service.get("container")
-        self.model = model_label(service.get("model"))
-        self.revoke = revoke
-        self.claim = dict(service.get("claim") or {})
-        self.busy = False
-        self.submitted = False
-        self.preview_payload = None
-
-    def compose(self):
-        with Vertical(id="claim-dialog"):
-            yield SelectableStatic(("Revoke claim" if self.revoke else "Claim service") + " · " +
-                         self.owner.clean(self.model), id="claim-title", markup=False)
-            if not self.revoke:
-                yield SelectableStatic("Until (+3d or YYYY-MM-DDTHH:MM):", id="claim-until-label")
-                yield Input(value="+1d", id="claim-until")
-                yield SelectableStatic("Reason (1–200 characters):", id="claim-reason-label")
-                yield Input(placeholder="Why this service is needed", max_length=200,
-                            id="claim-reason")
-            else:
-                yield SelectableStatic("Until %s · %s" % (timestamp(self.claim.get("until")),
-                             self.owner.private_text(self.claim.get("reason", ""))), markup=False)
-            yield SelectableStatic("Preview first. A preview does not save or revoke a claim.",
-                         id="claim-status", markup=False)
-            with Horizontal(id="claim-buttons"):
-                yield Button("Preview", id="claim-preview")
-                yield Button("Revoke" if self.revoke else "Submit", id="claim-submit",
-                             disabled=True, variant="warning" if self.revoke else "primary")
-                yield Button("Close", id="claim-close")
-
-    def say(self, message):
-        if self.owner.alive() and self.is_attached:
-            self.query_one("#claim-status", Static).update(self.owner.private_text(message))
-
-    def on_input_changed(self, event):
-        self.preview_payload = None
-        if self.is_mounted:
-            self.query_one("#claim-submit", Button).disabled = True
-
-    def action_close(self):
-        if self.busy:
-            self.say("Request pending; wait for its result.")
-        else:
-            self.owner.clear_text_selections()
-            self.dismiss()
-
-    def on_button_pressed(self, event):
-        event.stop()
-        if event.button.id == "claim-close":
-            self.action_close()
-            return
-        if self.busy or self.submitted:
-            return
-        preview = event.button.id == "claim-preview"
-        if not preview and self.preview_payload is None:
-            return
-        if not self.owner.claim_allowed(self.service_id, self.container, self.revoke,
-                                        self.claim.get("id")):
-            self.say("Refresh and select your current service before making a claim.")
-            self.query_one("#claim-submit", Button).disabled = True
-            return
-        try:
-            if self.revoke:
-                payload = None
-            elif preview:
-                reason = self.query_one("#claim-reason", Input).value.strip()
-                if not 1 <= len(reason) <= 200:
-                    raise ValueError("Enter a reason of 1–200 characters.")
-                payload = {"service_id": self.service_id, "reason": reason,
-                           "until": self.owner.api.claim_until(
-                               self.query_one("#claim-until", Input).value.strip())}
-            else:
-                payload = dict(self.preview_payload)
-        except Exception as exc:
-            self.say(str(exc))
-            return
-        # Set synchronously so two key presses cannot dispatch two writes.
-        self.busy = True
-        self.submitted = not preview
-        for button in self.query(Button):
-            button.disabled = True
-        for field in self.query(Input):
-            field.disabled = True
-        self.say("Checking preview…" if preview else "Request submitted; waiting for its result…")
-        self.send_request(preview, payload)
-
-    @work
-    async def send_request(self, preview, payload):
-        method = "DELETE" if self.revoke else "POST"
-        path = ("/v1/fleet/claims/" + quote(str(self.claim["id"]), safe="")
-                if self.revoke else "/v1/fleet/claims")
-        if preview:
-            path += "?dry_run=1"
-        success = False
-        try:
-            result = await asyncio.to_thread(self.owner.client.request, method, path, payload)
-            if not self.owner.alive():
-                return
-            if not isinstance(result, dict) or result.get("ok") is not True:
-                raise ValueError("The service returned an unrecognized claim result.")
-            if result.get("dry_run", False) is not preview:
-                raise ValueError("The service did not confirm the requested preview or submission.")
-            claim = result.get("claim")
-            if not isinstance(claim, dict) or claim.get("instance_id") != self.service_id:
-                raise ValueError("The claim result does not identify this service.")
-            if claim.get("service_id", self.service_id) != self.service_id:
-                raise ValueError("The claim result identifies a different service.")
-            if (not numeric(claim.get("until")) or claim["until"] <= 0
-                    or timestamp(claim["until"]) == "?"):
-                raise ValueError("The claim result does not provide a valid deadline.")
-            if self.revoke:
-                if (not isinstance(claim.get("id"), str) or not claim["id"]
-                        or claim["id"] != self.claim.get("id")
-                        or not numeric(claim.get("revoked_at")) or claim["revoked_at"] <= 0
-                        or timestamp(claim["revoked_at"]) == "?"):
-                    raise ValueError("The service did not confirm this claim's revocation.")
-            elif (claim.get("until") != payload["until"] or claim.get("reason") != payload["reason"]
-                  or (not preview and (not isinstance(claim.get("id"), str) or not claim["id"]))
-                  or (preview and "id" in claim)):
-                raise ValueError("The service did not confirm the submitted claim.")
-            if preview:
-                self.preview_payload = {} if self.revoke else dict(payload)
-                message = ("Preview: revoke this claim. Select Revoke to confirm." if self.revoke else
-                           "Preview: until %s\nReason: %s\nSelect Submit to save this claim." %
-                           (timestamp(payload["until"]), payload["reason"]))
-            else:
-                success = True
-                message = "Claim revoked." if self.revoke else "Claim saved."
-                self.owner.notice(message)
-                self.owner.refresh_fleet()
-        except Exception as exc:
-            status = getattr(exc, "status", None)
-            if status == 403:
-                message = "403: Only your own container's services can be claimed or revoked."
-            elif preview:
-                message = "Preview failed; no claim submitted: " + str(exc)
-            elif status is not None and 400 <= status < 500:
-                message = "Request rejected: " + str(exc)
-            else:
-                self.owner.uncertain_services.add(self.service_id)
-                message = "Result unknown. Read the current claim state before further action; this request will not be retried. " + str(exc)
-            if not preview:
-                self.owner.notice(message)
-                self.owner.refresh_fleet()
-        finally:
-            self.busy = False
-            if self.owner.alive() and self.is_attached:
-                self.say(message)
-                self.query_one("#claim-close", Button).disabled = False
-                self.query_one("#claim-preview", Button).disabled = self.submitted
-                self.query_one("#claim-submit", Button).disabled = self.submitted or self.preview_payload is None
-                for field in self.query(Input):
-                    field.disabled = self.submitted
-                if success:
-                    self.query_one("#claim-close", Button).focus()
 
 
 class FleetApp(App):
-    """GPU/People views with bounded reads and explicit self-service claims."""
+    """Read-only GPU/People views with bounded observations and history."""
     CSS = """
     Screen { background: #181818; color: #d4d4d4; }
     #fleet-title { height: 1; color: #eaf1f7; text-style: bold; }
@@ -617,7 +428,6 @@ class FleetApp(App):
         self.sort_mode = "priority"
         self.filter_text = ""
         self.mine_only = False
-        self.uncertain_services = set()
         self._rendered = {}
         self._rows = {}
         self.row_keys = []
@@ -885,7 +695,7 @@ class FleetApp(App):
                         or not isinstance(service.get("gpus", []), list)
                         or not isinstance(service.get("hourly_active_24h") or [], list)
                         or any(not isinstance(service.get(name) or {}, dict)
-                               for name in ("window_24h", "window_7d", "claim"))):
+                               for name in ("window_24h", "window_7d"))):
                     raise ValueError("Fleet service observations have an unsupported format.")
                 ids.add(service["id"])
             for gpu in snapshot["gpus"]:
@@ -896,6 +706,9 @@ class FleetApp(App):
                 account_gpu(gpu, snapshot["services"])
             if not self.alive():
                 return
+            observe = getattr(self.event_reader, "observe_incarnation", None)
+            if observe is not None:
+                observe(snapshot.get("observer_incarnation"))
             self.snapshot, self.read_error, self._read_exception = snapshot, None, None
             self._read_context = ()
             self.render_snapshot()
@@ -1192,9 +1005,7 @@ class FleetApp(App):
                           "—" if not numeric(ratio) else "%d%%" % (ratio * 100), count(window.get("requests")),
                           count(window.get("prompt_tokens")), count(window.get("gen_tokens")), count(total_tokens(window)),
                           "?" if not numeric(coverage) else "%d%%" % (coverage * 100)))
-        claim = service.get("claim")
-        lines.append("Started %s · claim %s" % (timestamp(service.get("started_at")),
-                     ("until %s: %s" % (timestamp(claim.get("until")), self.private_text(claim.get("reason", "")))) if claim else "none"))
+        lines.append("Started " + timestamp(service.get("started_at")))
         self.update_static("fleet-detail-text", "\n".join(lines))
         signature = service["id"], (self.snapshot or {}).get("generated_at")
         if signature != self._history_signature:
@@ -1298,31 +1109,13 @@ class FleetApp(App):
             if ident <= self.event_cursor:
                 continue
             self.event_cursor = ident
-            relevant |= item.get("kind") == "fleet_status_changed"
+            relevant |= item.get("kind") in ("fleet_status_changed", "fleet_snapshot_changed")
         if self.snapshot is not None and self.connection != old_connection:
             self.render_snapshot()
         if relevant or reset or missing or (connected and old_connection != self.connection and self.snapshot is not None):
             self.refresh_fleet()
 
-    def claim_allowed(self, ident, container, revoke=False, claim_id=None):
-        service = next((item for item in (self.snapshot or {}).get("services", []) if item["id"] == ident), None)
-        return bool(service and service.get("mine") is True and service.get("container") == container
-                    and not self.unreliable() and ident not in self.uncertain_services
-                    and (not revoke or (service.get("claim") or {}).get("id") == claim_id))
 
-    def action_claim(self, revoke=False):
-        service = self.selected_service()
-        if service and service["id"] in self.uncertain_services:
-            self.notice("An earlier claim result is unknown; this session will not repeat it. Read the current claim state.")
-        elif service is None or service.get("mine") is not True:
-            self.notice("Select a service owned by your container to claim it.")
-        elif self.unreliable():
-            self.notice("Refresh observations before changing a claim.")
-        elif revoke and not (service.get("claim") or {}).get("id"):
-            self.notice("This service has no claim to revoke.")
-        else:
-            self.clear_text_selections()
-            self.push_screen(ClaimDialog(self, service, revoke=revoke))
 
     def on_key(self, event):
         if self.screen is not self.dashboard or isinstance(self.focused, Input):
@@ -1353,7 +1146,7 @@ class FleetApp(App):
                                     self._table.cursor_row + (-1 if key == "k" else 1))), animate=False)
             return
         gpu_key = self.view == "gpu" and key in ("j", "k", "left", "right", "enter")
-        if not gpu_key and key not in ("p", "g", "z", "n", "s", "m", "c", "u", "r", "q", "slash", "question_mark"):
+        if not gpu_key and key not in ("p", "g", "z", "n", "s", "m", "r", "q", "slash", "question_mark"):
             return
         event.stop()
         event.prevent_default()
@@ -1385,8 +1178,6 @@ class FleetApp(App):
         elif key == "m":
             self.mine_only = not self.mine_only
             self.render_snapshot()
-        elif key in ("c", "u"):
-            self.action_claim(revoke=key == "u")
         elif key == "r":
             self.refresh_fleet()
         elif key == "q":

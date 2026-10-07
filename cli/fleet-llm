@@ -1,0 +1,853 @@
+#!/usr/bin/env python3
+# Generated-By: Codex / gpt-6.1-sol
+"""Standalone read-only fleet client, reusable by the optional fleet TUI."""
+
+import argparse
+from collections import deque
+import configparser
+from datetime import datetime, timezone
+import hashlib
+from http.client import HTTPException
+import importlib
+import ipaddress
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shutil
+import socket
+import sys
+import threading
+from types import SimpleNamespace
+import unicodedata
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+FLEET_ERROR_CODES = frozenset(("fleet_disabled", "fleet_store_unavailable", "fleet_stopping",
+    "unmapped_container", "invalid_fleet_history_query", "service_not_found",
+    "invalid_request", "request_too_large", "not_found"))
+
+
+class ClientError(Exception):
+    """An actionable configuration, connection or protocol error."""
+
+    def __init__(self, message, *, status=None, payload=None):
+        super().__init__(message)
+        self.status = status
+        self.payload = payload
+
+
+def clean_text(value):
+    """Keep untrusted model names/errors from controlling the user's terminal."""
+    return "".join(
+        ch if not unicodedata.category(ch).startswith("C") else " "
+        for ch in str(value)
+    )
+
+
+def validate_url(value, label="Fleet observer"):
+    try:
+        parsed = urlsplit(value)
+        valid = (
+            parsed.scheme in ("http", "https") and parsed.hostname
+            and not parsed.username and not parsed.password
+            and not parsed.query and not parsed.fragment
+            and not any(ch.isspace() or ord(ch) < 32 for ch in value)
+        )
+        parsed.port
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ClientError("%s URL must be an http(s) URL without credentials, query or fragment" % label)
+    return value.rstrip("/")
+
+
+def positive_timeout(value):
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        raise ClientError("Timeout must be a positive finite number") from None
+    if not math.isfinite(result) or result <= 0:
+        raise ClientError("Timeout must be a positive finite number")
+    return result
+
+
+def load_config(environ=None, path=None, url=None, timeout=None):
+    environ = os.environ if environ is None else environ
+    path = Path(path or environ.get("LLM_CONFIG", "~/.config/llm/config")).expanduser()
+    values = {}
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        content = ""
+    except (OSError, UnicodeError) as exc:
+        raise ClientError("Cannot read config: " + str(exc)) from None
+    if content.strip():
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            if not any(line.lstrip().startswith("[") for line in content.splitlines()):
+                content = "[llm]\n" + content
+            parser.read_string(content)
+            values = dict(parser["llm"])
+            unknown = set(values) - {"url", "timeout", "api_url"}
+            if unknown or parser.sections() != ["llm"]:
+                raise ValueError("Only [llm] keys url, timeout and api_url are supported")
+        except (configparser.Error, KeyError, ValueError) as exc:
+            raise ClientError("Invalid config: " + str(exc)) from None
+    address = url or environ.get("LLM_URL") or values.get("url")
+    if not address:
+        raise ClientError("Set LLM_URL or url in ~/.config/llm/config to the fleet observer address")
+    wait = timeout if timeout is not None else environ.get("LLM_TIMEOUT", values.get("timeout", "10"))
+    config = {"url": validate_url(address), "timeout": positive_timeout(wait)}
+    # Accept the former api_url config key for endpoint-file compatibility.
+    return config
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def invalid_constant(value):
+    raise ClientError("Fleet observer returned an invalid JSON response: " + value)
+
+
+class FleetClient:
+    def __init__(self, url, timeout=10, opener=None):
+        self.url = validate_url(url)
+        self.timeout = positive_timeout(timeout)
+        self.opener = opener or build_opener(NoRedirect()).open
+
+    def request(self, method, path, payload=None, *, timeout=None):
+        parsed = urlsplit(path)
+        if (method != "GET" or payload is not None or parsed.scheme or parsed.netloc
+                or parsed.fragment or parsed.path not in ("/v1/fleet", "/v1/fleet/history")):
+            raise ClientError("Fleet client supports only GET fleet and history reads")
+        request = Request(self.url + path, method="GET", headers={"Accept": "application/json"})
+        try:
+            with self.opener(request, timeout=self.timeout if timeout is None else positive_timeout(timeout)) as response:
+                raw = response.read(4 * 1024 * 1024 + 1)
+            if len(raw) > 4 * 1024 * 1024:
+                raise ClientError("Fleet observer response is too large")
+            result = json.loads(raw.decode("utf-8"), parse_constant=invalid_constant)
+            if not isinstance(result, dict):
+                raise ClientError("Fleet observer response must be a JSON object")
+            return result
+        except HTTPError as exc:
+            with exc:
+                detail = exc.read(8192).decode("utf-8", errors="replace")
+            payload = None
+            try:
+                parsed = json.loads(detail)
+                payload = parsed if isinstance(parsed, dict) else None
+                detail = parsed.get("error", parsed) if isinstance(parsed, dict) else parsed
+            except ValueError:
+                pass
+            raise ClientError("HTTP %s: %s" % (exc.code, clean_text(detail)),
+                              status=exc.code, payload=payload) from None
+        except (URLError, OSError, HTTPException) as exc:
+            raise ClientError("Cannot reach fleet observer: " + clean_text(getattr(exc, "reason", exc))) from None
+        except (ValueError, UnicodeError):
+            raise ClientError("Fleet observer returned an invalid JSON response") from None
+
+
+def event_lines(response):
+    """Read available bytes without waiting for a full buffer; accept LF/CRLF/CR."""
+    line, after_cr = bytearray(), False
+    while True:
+        chunk = response.read1(4096)
+        if not chunk:
+            return  # An incomplete line/event at EOF is replayed after reconnect.
+        for value in chunk:
+            if after_cr:
+                after_cr = False
+                if value == 10:
+                    continue
+            if value in (10, 13):
+                yield bytes(line)
+                line.clear()
+                after_cr = value == 13
+            else:
+                line.append(value)
+                if len(line) > 65536:
+                    raise ClientError("Fleet observer SSE line exceeds 64 KiB")
+
+
+def iter_events(response):
+    """Decode bounded fleet observer SSE frames; heartbeats never advance the cursor."""
+    data, event_id, size = [], None, 0
+    first = True
+    for raw in event_lines(response):
+        size += len(raw) + 1
+        if size > 262144:
+            raise ClientError("Fleet observer SSE frame exceeds 256 KiB")
+        try:
+            line = raw.decode("utf-8")
+        except UnicodeError:
+            raise ClientError("Fleet observer SSE contains invalid UTF-8") from None
+        if first:
+            line = line.removeprefix("\ufeff")
+            first = False
+        if not line:
+            if data:
+                try:
+                    item = json.loads("\n".join(data), parse_constant=invalid_constant)
+                    valid = (
+                        event_id is not None and isinstance(item, dict)
+                        and type(item.get("id")) is int and item["id"] == event_id
+                        and isinstance(item.get("kind"), str)
+                        and type(item.get("timestamp")) in (int, float)
+                        and math.isfinite(item["timestamp"])
+                    )
+                except (ValueError, OverflowError):
+                    valid = False
+                if not valid:
+                    raise ClientError("Fleet observer SSE contains an invalid event record")
+                yield item
+            data, event_id, size = [], None, 0
+            continue
+        if line.startswith(":"):
+            continue
+        field, _, value = line.partition(":")
+        value = value.removeprefix(" ")
+        if field == "data":
+            data.append(value)
+        elif field == "id":
+            if not value.isascii() or not value.isdigit():
+                raise ClientError("Fleet observer SSE contains an invalid event ID")
+            try:
+                event_id = int(value)
+            except ValueError:
+                raise ClientError("Fleet observer SSE contains an invalid event ID") from None
+
+
+class EventReader:
+    """One background subscription to fleet observer SSE with a bounded delivery queue."""
+
+    def __init__(self, client, *, stream_timeout=30, retry_delay=1, max_retry_delay=30, queue_size=256):
+        self.client = client
+        self.stream_timeout = positive_timeout(stream_timeout)
+        self.retry_delay = positive_timeout(retry_delay)
+        self.max_retry_delay = max(self.retry_delay, positive_timeout(max_retry_delay))
+        if not isinstance(queue_size, int) or queue_size < 1:
+            raise ClientError("Event queue size must be positive")
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._queue = deque(maxlen=queue_size)
+        self._cursor = 0
+        self._incarnation = None
+        self._generation = 0
+        self._dropped = 0
+        self._missed = 0
+        self._status = "SSE connecting"
+        self._socket = None
+        self.thread = None
+        self._notify_callback = None
+
+    def set_notify(self, callback):
+        """Optional thread-safe UI wake-up; callbacks must not touch widgets."""
+        self._notify_callback = callback
+
+    def _notify(self):
+        callback = self._notify_callback
+        if callback is not None:
+            callback()
+
+    def start(self):
+        if self.thread is not None:
+            raise ClientError("Event reader is already started")
+        self.thread = threading.Thread(target=self._run, name="llm-fleet-events", daemon=True)
+        self.thread.start()
+
+    def drain(self):
+        with self._lock:
+            result = {"generation": self._generation, "events": list(self._queue),
+                      "status": self._status, "dropped": self._dropped,
+                      "missed": self._missed, "cursor": self._cursor}
+            self._queue.clear()
+            return result
+
+    def _interrupt(self):
+        with self._lock:
+            connection = self._socket
+        if connection is not None:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def _reset_cursor_locked(self):
+        self._generation += 1
+        self._cursor = 0
+        self._queue.clear()
+        self._dropped = 0
+        self._missed = 0
+        self._status = "SSE cursor reset"
+
+    def reset_cursor(self):
+        """Reset replay after a confirmed restart, preserving ordinary reconnects."""
+        with self._lock:
+            self._reset_cursor_locked()
+        self._wake.set()
+        self._interrupt()
+        self._notify()
+
+    def observe_incarnation(self, value):
+        if value is None:
+            return
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{32}", value):
+            raise ClientError("Invalid fleet observer incarnation")
+        with self._lock:
+            changed = self._incarnation is not None and self._incarnation != value
+            self._incarnation = value
+        if changed:
+            self.reset_cursor()
+
+    def close(self, timeout=None):
+        self._stop.set()
+        self._wake.set()
+        self._interrupt()
+        if self.thread is not None:
+            wait = self.client.timeout + self.stream_timeout + 1 if timeout is None else positive_timeout(timeout)
+            self.thread.join(timeout=wait)
+            return not self.thread.is_alive()
+        return True
+
+    def _run(self):
+        delay = self.retry_delay
+        while not self._stop.is_set():
+            with self._lock:
+                cursor, generation, incarnation = self._cursor, self._generation, self._incarnation
+            response = None
+            try:
+                query = {"since": cursor}
+                if incarnation is not None:
+                    query["incarnation"] = incarnation
+                request = Request(self.client.url + "/v1/events?" + urlencode(query),
+                                  headers={"Accept": "text/event-stream", "Last-Event-ID": str(cursor)})
+                response = self.client.opener(request, timeout=self.client.timeout)
+                if response.headers.get_content_type() != "text/event-stream":
+                    raise ClientError("Fleet observer SSE response has an invalid content type")
+                # urllib returns an HTTPResponse; shutting down its transport unblocks
+                # reads before closing the buffered stream, including TLS sockets.
+                connection = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+                if connection is not None:
+                    connection.settimeout(self.stream_timeout)
+                incarnation = response.headers.get("X-Observer-Incarnation")
+                if incarnation is not None and not re.fullmatch(r"[0-9a-f]{32}", incarnation):
+                    raise ClientError("Invalid fleet observer incarnation")
+                with self._lock:
+                    if generation != self._generation or self._stop.is_set():
+                        continue
+                    if incarnation is not None:
+                        if self._incarnation is not None and self._incarnation != incarnation:
+                            self._reset_cursor_locked()
+                            generation = self._generation
+                        self._incarnation = incarnation
+                    self._socket = connection
+                    self._status = "SSE connected"
+                self._notify()
+                for item in iter_events(response):
+                    with self._lock:
+                        if generation != self._generation or self._stop.is_set():
+                            break
+                        observed = item.get("observer_incarnation")
+                        if observed is not None:
+                            if not isinstance(observed, str) or not re.fullmatch(r"[0-9a-f]{32}", observed):
+                                raise ClientError("Invalid fleet observer incarnation")
+                            if self._incarnation is not None and self._incarnation != observed:
+                                self._reset_cursor_locked()
+                                generation = self._generation
+                            self._incarnation = observed
+                        if item["kind"] == "cursor_reset":
+                            self._reset_cursor_locked()
+                            generation = self._generation
+                            # A zero-ID control event signals a fresh poll; it
+                            # never consumes a replayed service event's cursor.
+                        else:
+                            if item["id"] <= self._cursor:
+                                continue
+                            self._missed += item["id"] - self._cursor - 1
+                            if len(self._queue) == self._queue.maxlen:
+                                self._dropped += 1
+                            self._queue.append(item)
+                            self._cursor = item["id"]
+                            delay = self.retry_delay
+                        self._status = "SSE connected"
+                    self._notify()
+                with self._lock:
+                    if generation == self._generation:
+                        self._status = "SSE disconnected; reconnecting"
+            except (ClientError, HTTPError, URLError, OSError, HTTPException, ValueError) as exc:
+                if isinstance(exc, HTTPError):
+                    exc.close()
+                with self._lock:
+                    if generation == self._generation:
+                        self._status = "SSE reconnecting: " + clean_text(exc)
+            finally:
+                with self._lock:
+                    self._socket = None
+                if response is not None:
+                    response.close()
+            self._notify()
+            self._wake.wait(delay)
+            self._wake.clear()
+            delay = min(self.max_retry_delay, delay * 2)
+
+
+def cell_width(text):
+    return sum(0 if unicodedata.combining(ch) else 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def number(value):
+    return "?" if value is None else format(value, ".1f").rstrip("0").rstrip(".")
+
+
+def wrap_line(line, width):
+    """Wrap even long identifiers without exceeding terminal display cells."""
+    lines, current = [], ""
+    for ch in clean_text(line):
+        if cell_width(ch) > width:
+            ch = "?"
+        if current and cell_width(current + ch) > width:
+            lines.append(current.rstrip())
+            current = ""
+        current += ch
+    lines.append(current.rstrip())
+    return lines
+
+
+def fleet_number(value):
+    if value is None:
+        return "—"
+    for scale, suffix in ((1000000000, "b"), (1000000, "m"), (1000, "k")):
+        if value >= scale:
+            return number(value / scale) + suffix
+    return number(value)
+
+
+def fleet_tokens(value):
+    return (format(int(value), ",") if value is not None else "—") + " tokens"
+
+
+def fleet_total_tokens(window):
+    prompt, generated = window.get("prompt_tokens"), window.get("gen_tokens")
+    if prompt is None or generated is None:
+        return None
+    total = prompt + generated
+    return total if math.isfinite(total) else None
+
+
+def fleet_age(seconds):
+    if seconds is None:
+        return "—"
+    minutes = int(max(0, seconds) // 60)
+    if minutes >= 1440:
+        return number(seconds / 86400) + "d"
+    if minutes >= 60:
+        return "%dh%02dm" % divmod(minutes, 60)
+    return "%dm" % minutes if minutes else "%ds" % int(max(0, seconds))
+
+
+def fleet_activity_bar(values):
+    """One cell per hour; missing activity is visible rather than zero-filled."""
+    return "".join("·" if value is None else "▁▂▃▄▅▆▇█"[min(7, int(value * 7 / 60))]
+                   for value in values)
+
+
+def validate_fleet(result):
+    if not isinstance(result, dict):
+        raise ClientError("Invalid fleet response; check the server API version")
+    def amount(value):
+        return value is None or (type(value) in (int, float) and math.isfinite(value) and value >= 0)
+
+    def host_fields(item):
+        return ((item.get("host") is None or type(item["host"]) is bool)
+                and (item.get("host_uid") is None or (type(item["host_uid"]) is int and item["host_uid"] >= 0))
+                and (item.get("host_user") is None or isinstance(item["host_user"], str)))
+
+    def api_address(value):
+        if value is None:
+            return True
+        if not isinstance(value, str) or len(value) > 512 or any(c.isspace() or ord(c) < 32 for c in value):
+            return False
+        try:
+            parsed = urlsplit(value)
+            return (parsed.scheme == "http" and parsed.username is None and parsed.password is None
+                    and parsed.path in ("", "/") and not parsed.query and not parsed.fragment
+                    and parsed.port is not None and 1 <= parsed.port <= 65535
+                    and "%" not in parsed.hostname and bool(ipaddress.ip_address(parsed.hostname)))
+        except (ValueError, TypeError):
+            return False
+
+    valid = (
+        type(result.get("schema_version")) is int and result["schema_version"] == 1
+        and isinstance(result.get("services"), list) and isinstance(result.get("gpus"), list)
+        and type(result.get("stale")) is bool and amount(result.get("generated_at"))
+        and amount(result.get("snapshot_age_seconds")) and isinstance(result.get("config"), dict)
+        and amount(result["config"].get("idle_limit_hours"))
+        and isinstance(result.get("errors", []), list)
+    )
+    ids = set()
+    for item in result.get("services", []) if valid else []:
+        valid = (
+            isinstance(item, dict)
+            and all(isinstance(item.get(key), str) and item[key] for key in ("id", "engine"))
+            and (isinstance(item.get("model"), str) or item.get("model") is None)
+            and ((isinstance(item.get("container"), str) and bool(item["container"]))
+                 or (item.get("container") is None and item.get("host") is True))
+            and host_fields(item)
+            and item["id"] not in ids
+            and item.get("status") in ("active", "idle", "over_limit", "unknown")
+            and isinstance(item.get("gpus"), list)
+            and all(type(gpu) is int and gpu >= 0 for gpu in item["gpus"])
+            and all(amount(item.get(key)) for key in ("gpu_gb", "idle_seconds", "uptime_seconds"))
+            and isinstance(item.get("window_24h", {}), dict)
+            and isinstance(item.get("hourly_active_24h"), list) and len(item["hourly_active_24h"]) == 24
+            and all(amount(value) and (value is None or value <= 60) for value in item["hourly_active_24h"])
+            and (item.get("claim") is None or isinstance(item["claim"], dict))
+            and ("api_address" not in item or api_address(item["api_address"]))
+            and ("api_access" not in item or item["api_access"] in ("shared", "local_only", "direct", "unknown"))
+            and ("idle_time_sensitive" not in item or type(item["idle_time_sensitive"]) is bool)
+        )
+        if not valid:
+            break
+        window = item.get("window_24h", {})
+        valid = all(amount(window.get(key)) for key in (
+            "active_minutes", "active_ratio", "observed_active_ratio", "gen_tokens", "prompt_tokens", "requests", "coverage_ratio"))
+        if not valid:
+            break
+        ids.add(item["id"])
+    for gpu in result.get("gpus", []) if valid else []:
+        valid = (
+            isinstance(gpu, dict) and type(gpu.get("index")) is int and gpu["index"] >= 0
+            and all(amount(gpu.get(key)) for key in ("used_gb", "total_gb", "util_percent"))
+            and isinstance(gpu.get("occupants", []), list)
+            and all(isinstance(item, dict) and amount(item.get("used_gb")) and host_fields(item)
+                    for item in gpu.get("occupants", []))
+        )
+        if not valid:
+            break
+    if not valid:
+        raise ClientError("Invalid fleet response; check the server API version")
+    return result
+
+
+def fleet_owner(item, show_names=False):
+    """Keep canonical owner keys separate from their optional visible names."""
+    container = item.get("container")
+    if isinstance(container, str) and container:
+        identity, name = "container:" + container, clean_text(container)
+    elif item.get("host") is True:
+        uid = item.get("host_uid")
+        if type(uid) is not int or uid < 0:
+            return "host", "Unknown"
+        user = item.get("host_user")
+        user = clean_text(user).strip() if isinstance(user, str) else ""
+        identity, name = "host:uid:" + str(uid), user or "UID " + str(uid)
+    else:
+        return "unknown", "Unknown"
+    if not show_names:
+        digest = hashlib.sha256(identity.encode("utf-8")).digest()
+        name = "User %09d" % (int.from_bytes(digest, "big") % 1000000000)
+    return identity, name
+
+
+def fleet_model_label(value):
+    """Shorten absolute model filesystem paths, preserving repository IDs."""
+    value = str(value or "unknown")
+    return value.rstrip("/").rsplit("/", 1)[-1] if value.startswith("/") and value.strip("/") else value
+
+
+def fleet_display_text(value, items=(), show_names=False, *, preserve_models=True):
+    """Apply the same presentation rules to IDs, parameters and diagnostics."""
+    text, names, models = clean_text(value), {}, set()
+    for item in items:
+        model = item.get("model")
+        if isinstance(model, str) and model.startswith("/"):
+            text = text.replace(model, fleet_model_label(model))
+        if preserve_models and isinstance(model, str) and model:
+            models.add(fleet_model_label(model))
+        if show_names:
+            continue
+        identity, label = fleet_owner(item)
+        if identity in ("host", "unknown"):
+            continue
+        names.setdefault(identity, label)
+        raw_name = item.get("container") if identity.startswith("container:") else item.get("host_user")
+        if isinstance(raw_name, str) and raw_name:
+            names.setdefault(raw_name, label)
+    if names:
+        keep = r"User [0-9]{9}(?!\d)"
+        if models:
+            keep += r"|(?<![\w./-])(?:" + "|".join(
+                re.escape(model) for model in sorted(models, key=len, reverse=True)) + r")(?![\w./:-])"
+        pattern = r"(?P<keep>" + keep + r")|(?<![\w.-])(?:" + "|".join(
+            re.escape(name) for name in sorted(names, key=len, reverse=True)) + r")(?![\w.-])"
+        text = re.sub(pattern, lambda match: match.group() if match.group("keep") else names[match.group()], text)
+    return text
+
+
+def fleet_display_items(result):
+    return (list(result.get("services", [])) + list(result.get("containers", [])) +
+            [item for gpu in result.get("gpus", []) for item in gpu.get("occupants", [])])
+
+
+def format_fleet(result, width=100, *, by="person", sort=None, color=False, show_names=False):
+    width, lines = max(1, width), []
+    colors = {"active": "32", "over_limit": "31", "unknown": "90"}
+
+    def add(line, status=None):
+        parts = wrap_line(line, width)
+        if color and status in colors:
+            parts = ["\033[%sm%s\033[0m" % (colors[status], part) for part in parts]
+        lines.extend(parts)
+
+    add("GPU inference services · snapshot %s ago · idle limit %sh" % (
+        fleet_age(result.get("snapshot_age_seconds")), number(result.get("config", {}).get("idle_limit_hours"))))
+    if result.get("stale"):
+        add("WARNING stale fleet snapshot; activity is unknown")
+    for error in result.get("errors", []):
+        add("WARNING " + fleet_display_text(error, fleet_display_items(result), show_names))
+    services = result.get("services", [])
+
+    def owner(item):
+        return fleet_owner(item, show_names)[1]
+
+    def order(item):
+        value = item.get("idle_seconds") if sort == "idle" else (
+            item.get("window_24h", {}).get("gen_tokens") if sort == "tokens" else item.get("gpu_gb"))
+        prefix = () if sort else (item.get("status") != "over_limit",)
+        return prefix + (value is None, -(value or 0), item.get("model") or "", item["id"])
+
+    def service(item, gpu=None, memory=None):
+        status = "unknown" if result.get("stale") else item["status"]
+        label = "Running · inactive" if status == "over_limit" else status
+        access = None if result.get("stale") else item.get("api_access")
+        address = None if result.get("stale") else item.get("api_address")
+        endpoint = "Local only" if access == "local_only" else address or "Unknown"
+        if access == "shared":
+            endpoint += " · Shared"
+        observed_gpus = item["gpus"] if gpu is None else [gpu]
+        memory = item.get("gpu_gb") if gpu is None else memory
+        suffix = "  %s  %s  %sG  %s" % (
+            item["engine"], ",".join("GPU%s" % index for index in observed_gpus) or "GPU—",
+            number(memory), label)
+        add("  " + fleet_model_label(item.get("model")) + suffix, status)
+        add("    API: " + endpoint)
+        window = item.get("window_24h", {})
+        ratio = window.get("active_ratio")
+        active = window.get("active_minutes")
+        add("    24h %s  active %s(%s)" % (
+            fleet_activity_bar(item["hourly_active_24h"]), fleet_age(None if active is None else active * 60),
+            "—" if ratio is None else "%s%%" % number(ratio * 100)))
+        add("    input %s · output %s · total %s" % (
+            fleet_tokens(window.get("prompt_tokens")), fleet_tokens(window.get("gen_tokens")),
+            fleet_tokens(fleet_total_tokens(window))))
+        add("    idle %s · uptime %s · id %s" % (
+            "—" if status == "unknown" else fleet_age(item.get("idle_seconds")),
+            fleet_age(item.get("uptime_seconds")), fleet_display_text(
+                item["id"], [item], show_names, preserve_models=False)))
+        coverage = window.get("coverage_ratio")
+        if coverage is not None and coverage < 1:
+            observed = window.get("observed_active_ratio")
+            add("    observed coverage %s%% (24h)%s" % (number(coverage * 100),
+                " · observed active %s%%" % number(observed * 100) if observed is not None else ""))
+
+    if by == "gpu":
+        observed = {item["index"]: item for item in result.get("gpus", [])}
+        indexes = set(observed) | {index for item in services for index in item["gpus"]}
+        for index in sorted(indexes):
+            gpu = observed.get(index, {"index": index})
+            add("GPU%s · %s/%sG · utilization %s%%" % (
+                gpu["index"], number(gpu.get("used_gb")), number(gpu.get("total_gb")), number(gpu.get("util_percent"))))
+            for occupant in gpu.get("occupants", []):
+                if not occupant.get("service_id"):
+                    add("  %s (%s) %sG" % (owner(occupant),
+                        "Work" if occupant.get("kind") in (None, "other") else occupant["kind"], number(occupant.get("used_gb"))))
+            for item in sorted((item for item in services if gpu["index"] in item["gpus"]), key=order):
+                add("  owner " + owner(item))
+                amounts = [occupant.get("used_gb") for occupant in gpu.get("occupants", [])
+                           if occupant.get("service_id") == item["id"]]
+                memory = sum(amounts) if amounts and all(value is not None for value in amounts) else None
+                service(item, gpu=gpu["index"], memory=memory)
+        for item in sorted((item for item in services if not item["gpus"]), key=order):
+            add("No observed GPU · " + owner(item))
+            service(item)
+    else:
+        groups = {}
+        for item in services:
+            groups.setdefault(fleet_owner(item)[0], []).append(item)
+        for identity in sorted(groups, key=lambda identity: (owner(groups[identity][0]), identity)):
+            items = groups[identity]
+            label = owner(items[0])
+            memory = None if any(item.get("gpu_gb") is None for item in items) else sum(item["gpu_gb"] for item in items)
+            over = sum(item["status"] == "over_limit" for item in items) if not result.get("stale") else 0
+            add("%s · %s services · %sG%s" % (label, len(items), number(memory), " · %s running inactive" % over if over else ""))
+            for item in sorted(items, key=order):
+                service(item)
+    if not services:
+        add("No inference services observed")
+    return "\n".join(lines)
+
+
+def validate_fleet_history(args, result):
+    if not isinstance(result, dict):
+        raise ClientError("Invalid fleet history response; check the server API version")
+    valid = (
+        type(result.get("schema_version")) is int and result["schema_version"] == 1
+        and result.get("service_id") == args.service and result.get("hours") == args.hours
+        and result.get("resolution") == ("hourly" if args.hours == 168 else "minute")
+        and isinstance(result.get("samples"), list) and isinstance(result.get("service", {}), dict)
+    )
+    for item in result.get("samples", []) if valid else []:
+        timestamp = item.get("ts", item.get("hour_ts")) if isinstance(item, dict) else None
+        valid = type(timestamp) in (int, float) and math.isfinite(timestamp) and timestamp >= 0
+        active = item.get("active") if isinstance(item, dict) else None
+        valid = valid and (active is None or (type(active) in (bool, int) and active in (0, 1)))
+        if not valid:
+            break
+        for key in ("running", "waiting", "d_requests", "d_gen_tokens", "d_prompt_tokens", "active_minutes", "requests", "gen_tokens", "prompt_tokens"):
+            value = item.get(key)
+            if value is not None and not (type(value) in (int, float) and math.isfinite(value) and value >= 0):
+                valid = False
+                break
+        if not valid:
+            break
+    if not valid:
+        raise ClientError("Invalid fleet history response; check the server API version")
+    return result
+
+
+def format_fleet_history(result, width=100, *, show_names=False):
+    service = result.get("service", {})
+    lines = ["Fleet history · %s · last %sh · %s (UTC)" % (
+        fleet_display_text(result["service_id"], [service], show_names, preserve_models=False),
+        result["hours"], result["resolution"])]
+    if service.get("model") or service.get("host") is True or service.get("container"):
+        lines.append("%s · %s · %s" % (fleet_model_label(service.get("model")),
+                     service.get("engine", "—"), fleet_owner(service, show_names)[1]))
+    if service.get("argv_redacted"):
+        lines.append("Parameters: " + fleet_display_text(service["argv_redacted"], [service], show_names))
+    hourly = result["resolution"] == "hourly"
+    lines.append("UTC time             Active   Requests  Output  Input" if hourly else
+                 "UTC time             Active   Running  Waiting  Requests  Output  Input")
+    for item in result["samples"]:
+        timestamp = item.get("ts", item.get("hour_ts"))
+        stamp = datetime.fromtimestamp(timestamp, timezone.utc).strftime("%m-%d %H:%MZ")
+        if hourly:
+            active = "—" if item.get("active_minutes") is None else number(item["active_minutes"]) + "m"
+            values = [active] + [fleet_number(item.get(key)) for key in ("requests", "gen_tokens", "prompt_tokens")]
+        else:
+            active = "—" if item.get("active") is None else "yes" if item["active"] else "no"
+            values = [active] + [fleet_number(item.get(key)) for key in ("running", "waiting", "d_requests", "d_gen_tokens", "d_prompt_tokens")]
+        lines.append(stamp + "  " + "  ".join(values))
+    if not result["samples"]:
+        lines.append("No recorded samples in this window")
+    return "\n".join(part for line in lines for part in wrap_line(line, max(1, width)))
+
+
+def service_id(value):
+    if not value.strip() or any(unicodedata.category(ch).startswith("C") for ch in value):
+        raise argparse.ArgumentTypeError("Service ID must be nonempty and contain no control characters")
+    return value
+
+
+def build_parser(parser_class=argparse.ArgumentParser):
+    parser = parser_class(prog="llm", description="Inspect observed GPU services and activity")
+    parser.add_argument("--version", action="version", version="1.10.0")
+    parser.add_argument("--url", help="Fleet observer URL (overrides LLM_URL and config)")
+    parser.add_argument("--config", help="Config file (default: ~/.config/llm/config)")
+    parser.add_argument("--timeout", help="HTTP timeout in seconds")
+    parser.add_argument("--show-names", action="store_true", help="Reveal anonymous owner names")
+    commands = parser.add_subparsers(dest="command")
+    for command in ("status", "fleet"):
+        fleet = commands.add_parser(command, help="Show observed inference services")
+        fleet.add_argument("--by", choices=("person", "gpu"), default="person")
+        fleet.add_argument("--sort", choices=("idle", "mem", "tokens"),
+                           help="Sort descending (default: inactive, then memory)")
+        fleet.add_argument("--mine", action="store_true", help="Filter by the real socket peer's container")
+        fleet.add_argument("--json", action="store_true", help="Print the complete JSON snapshot")
+        fleet.add_argument("--plain", action="store_true", help="Print text without terminal colors")
+        fleet.add_argument("--show-names", action="store_true", default=argparse.SUPPRESS)
+    top = commands.add_parser("top", help="Open the optional fleet TUI (text fallback outside a terminal)")
+    top.add_argument("--show-names", action="store_true", default=argparse.SUPPRESS)
+    history = commands.add_parser("history", help="Read a service's recorded activity")
+    history.add_argument("service", type=service_id)
+    history.add_argument("--hours", type=int, choices=(24, 168), default=24)
+    history.add_argument("--json", action="store_true")
+    history.add_argument("--show-names", action="store_true", default=argparse.SUPPRESS)
+    return parser
+
+
+def app_version(parser_class=argparse.ArgumentParser):
+    return next(str(action.version) for action in build_parser(parser_class)._actions
+                if action.dest == "version")
+
+
+def execute_command(args, client):
+    if args.command in (None, "top", "fleet", "status"):
+        result = validate_fleet(client.request("GET", "/v1/fleet" +
+                                ("?mine=1" if getattr(args, "mine", False) else "")))
+        args._fleet_display_items = fleet_display_items(result)
+        return result
+    if args.command == "history":
+        path = "/v1/fleet/history?" + urlencode({"service": args.service, "hours": args.hours})
+        result = validate_fleet_history(args, client.request("GET", path))
+        args._fleet_display_items = [result.get("service", {})]
+        return result
+    raise ClientError("Unsupported fleet read command")
+
+
+def format_result(args, result, width=100, *, color=False):
+    if getattr(args, "json", False):
+        return json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False)
+    if args.command == "history":
+        return format_fleet_history(result, width=width, show_names=args.show_names)
+    return format_fleet(result, width=width, by=getattr(args, "by", "person"),
+                        sort=getattr(args, "sort", None),
+                        color=color and not getattr(args, "plain", False), show_names=args.show_names)
+
+
+def fleet_tui_app():
+    try:
+        return importlib.import_module("tui.fleet_app").FleetApp
+    except ImportError:
+        return None
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        client = FleetClient(**load_config(path=args.config, url=args.url, timeout=args.timeout))
+        if args.command in (None, "top") and sys.stdout.isatty():
+            app = fleet_tui_app()
+            if app is not None:
+                app(client=client, api=SimpleNamespace(**globals()), show_names=args.show_names).run()
+                return 0
+        result = execute_command(args, client)
+        print(format_result(args, result, width=shutil.get_terminal_size((100, 30)).columns,
+                            color=sys.stdout.isatty() and "NO_COLOR" not in os.environ))
+        if args.command in (None, "top"):
+            print("TUI: install with pip install 'llmsvc[tui]' and run llm in a terminal.")
+        return 0
+    except ClientError as exc:
+        message = fleet_display_text(exc, getattr(args, "_fleet_display_items", ()), args.show_names)
+        if exc.status is not None and not args.show_names:
+            code = exc.payload.get("error") if isinstance(exc.payload, dict) else None
+            code = code if isinstance(code, str) and code in FLEET_ERROR_CODES else "Fleet request failed"
+            message = "HTTP %s: %s" % (exc.status, code)
+        print("llm: " + message, file=sys.stderr)
+        return 1
+    except (KeyError, TypeError, ValueError, OverflowError):
+        print("llm: Invalid fleet response; check the server API version", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

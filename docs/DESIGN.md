@@ -1,4 +1,47 @@
-# DESIGN — llama-swap 之上的调度器与终端 UI
+# DESIGN — GPU fleet observer
+
+## Current architecture: standalone observation (#343)
+
+The approved deployment replaces central shared serving with owner-run inference
+services and a host fleet observer. Wildcard listeners allow direct sharing;
+local-only listeners remain within their network namespace. Administrators
+coordinate workload shutdown manually.
+
+The existing host scanner and IP exporter publish bounded atomic files. A
+nonlogin observer account reads those exports and writes a dedicated fleet
+SQLite database. Its standard-library entry is `llmsvc.fleet.observer`, using
+strict flat JSON configuration. It constructs no Scheduler, shared collector,
+intent store, native adapter or model-action controller.
+
+The active API exposes only GET fleet, history and bounded SSE events. Schema 1
+retains `claims_enabled: false`, `claim: null` and an empty shared-model list.
+Stored claims are ignored before status classification. Each process incarnation
+has a new event identity; clients reset replay cursors when it changes.
+
+The default `llm` entry loads `llmsvc.fleet.client` / `cli/fleet-llm`. The fleet
+TUI keeps anonymous names, service addresses, copying and all-GPU navigation.
+It exposes no claim, scheduling or shared-model controls. Historical scheduler
+modules and the previous CLI remain source references, outside the deployed
+entrypoints.
+
+Transfer uses SQLite backup and the complete private archive tree, including
+minute JSONL files and checkpoints. Pause both old writers before the final
+transfer; discard divergent preview data. Retention, service identities,
+watermark, counter baselines, hourly history and gzip contents are preserved.
+Rollback first stops the new writers, then transfers their latest data before
+resuming observation. The old central upgrader is not part of that path.
+
+Both new observation and archive units are enabled. Retire only inventoried
+central units and activation triggers after fresh identity and workload checks.
+Keep host collection timers and user jobs. The replacement must remain available
+after the central container stops. See [FLEET_OBSERVER](FLEET_OBSERVER.md) for
+runtime configuration and [host deployment](../deploy/fleet-observer/README.md)
+for install and rollback.
+
+## Historical control-plane design
+
+The following sections describe the previous scheduler and its retained source.
+Their control routes and deployment tools are not the standalone observer API.
 
 状态：v1.1 草案，2026-09-07（吸收 PR #29 第一轮 review：唯一写者与 TTL、放置租约、安静时刻协议、keep_value 统一、sleep 内存准入、TP=2 移出本版、dry_run、TUI 降级）。改动本文件前先开 `type:design` issue。
 
@@ -1001,12 +1044,17 @@ fleet 观察自建推理服务及全部 GPU 占用，给服务主人提供占用
 宿主 PID 和进程启动 ticks；PID 复用产生新实例。没有推理服务祖先的 GPU
 进程只导出归属、显存、PID 和短 comm，不导出命令行。
 
-采集器仅进入目标网络命名空间，向已核实监听器发 GET，不进入 mount/pid/user
-命名空间，不执行目标进程的命令。每次抓取至多 2 秒/4 MiB，禁止重定向与
-环境代理，整轮预算 20 秒。抓取前后核对 PID/start、网络命名空间和监听器
-归属；进程变化或无法绑定端点时保持未知。vLLM 只保留指定计数器/gauge 和
-模型标签；ollama 只抓 `/api/ps`，没有 token 统计。其他引擎 v1 仅记录存在与
-显存，活动未知。原始命令行、指标和凭据不进入 journal 或公开 fixture。
+The scanner enters only the target network namespace and sends GET requests to
+verified listeners. Each metrics probe is bounded to 2 seconds / 4 MiB, without
+redirects or environment proxies. The default scan budget is 20 seconds;
+operators can configure up to 120 seconds and GPU queries up to 30 seconds
+when NVIDIA observation calls are slow (#346). The scanner service's finite
+start timeout must cover that budget and query cleanup. Listener, PID/start and
+network-namespace identities are checked before and after probing. Changed or
+unbound endpoints stay unknown. vLLM retains selected counters/gauges and model
+labels; Ollama uses `/api/ps`, with unknown token counts. Other engines retain
+existence/memory observations and unknown activity. Raw argv, metrics and
+credentials never enter journal or public fixtures.
 
 快照 `schema_version: 1` 原子写入现有宿主导出目录的 `fleet.json`，权限
 0644、大小上限 2 MiB。配置路径与规则可修改；复用现有只读目录挂载。快照
@@ -1313,4 +1361,6 @@ reconciliation before shared CLI activation, as recorded in #310.
 <!-- Generated-By: Codex / unknown model -->
 <!-- Generated-By: Claude Code / claude-opus-5-5 -->
 <!-- Generated-By: Codex / gpt-6.1-sol -->
+<!-- Generated-By: Codex / unknown model -->
+
 <!-- Generated-By: Codex / unknown model -->

@@ -1,3 +1,4 @@
+# Generated-By: Codex / gpt-6.1-sol
 # Generated-By: Claude Code / claude-fable-5-1
 """Stable (non-alpha) tags through the same trusted publisher."""
 
@@ -5,7 +6,9 @@ import json
 
 import pytest
 
-from test_release_publish import COMMIT, event, pub, release_gate  # noqa: F401  (fixture re-exported)
+from test_release_publish import COMMIT, event, pub, release_gate as release_gate_fixture
+
+release_gate = release_gate_fixture
 
 
 @pytest.mark.parametrize('version,tag,prerelease', [
@@ -31,7 +34,7 @@ def test_every_alpha_orders_before_every_stable_release():
 def stable_files(tmp_path):
     (tmp_path / 'pyproject.toml').write_text('version = "1.0.0"\n')
     (tmp_path / 'llmsvc/__init__.py').write_text('__version__ = "1.0.0"')
-    (tmp_path / 'cli/llm').write_text('version="1.0.0"')
+    (tmp_path / 'cli/fleet-llm').write_text('version="1.0.0"')
     (tmp_path / 'CHANGELOG.md').write_text('# Changelog\n\n## 1.0.0 — 2026-09-15\nNotes')
 
 

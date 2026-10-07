@@ -1,9 +1,14 @@
+# Generated-By: Codex / gpt-6.1-sol
 # Generated-By: Codex / gpt-6-astra
 # Generated-By: OpenCode / deepseek-v4.1-flash
 import importlib.util
 import json
 from pathlib import Path
 import shutil
+import subprocess
+import sys
+import tarfile
+import zipfile
 
 import pytest
 
@@ -117,7 +122,7 @@ def release_gate(tmp_path, monkeypatch):
     (tmp_path / 'llmsvc').mkdir(); (tmp_path / 'cli').mkdir()
     (tmp_path / 'pyproject.toml').write_text('version = "0.1.0a9"\n')
     (tmp_path / 'llmsvc/__init__.py').write_text('__version__ = "0.1.0a9"')
-    (tmp_path / 'cli/llm').write_text('version="0.1.0a9"')
+    (tmp_path / 'cli/fleet-llm').write_text('version="0.1.0a9"')
     (tmp_path / 'CHANGELOG.md').write_text('# Changelog\n\n## 0.1.0-alpha.9 — 2026-09-10\nNotes')
     pr = {'number': 169, 'merged_at': 'now', 'merge_commit_sha': COMMIT,
           'base': {'ref': 'main', 'repo': {'full_name': pub.REPO}},
@@ -169,3 +174,80 @@ def test_reviewed_explicit_exception_is_recorded(release_gate):
     release_gate['log'] = 'Deploy pipeline (#169)'
     release_gate['pr']['body'] = 'Release-Exception: #169 — Verify the user-authorized delivery pipeline now.'
     assert pub.guard(event())['cadence_exception'].startswith('Release-Exception: #169')
+
+
+def test_version_gate_checks_only_the_active_fleet_reader(release_gate, tmp_path):
+    (tmp_path / 'cli/llm').write_text('version="historical-copy"')
+    assert pub.guard(event())['python_version'] == '0.1.0a9'
+    (tmp_path / 'cli/fleet-llm').write_text('version="different"')
+    with pytest.raises(ValueError, match='Version literals differ'):
+        pub.guard(event())
+
+
+def test_build_copies_read_only_fleet_reader_as_the_single_file_llm(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / 'cli').mkdir()
+    active = tmp_path / 'cli/fleet-llm'
+    active.write_text('read-only fleet artifact')
+    (tmp_path / 'cli/llm').write_text('retired scheduler artifact')
+    root = tmp_path / 'build'
+    root.mkdir()
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'pyproject.toml').write_text('name = "fixture"')
+    monkeypatch.setattr(sys, 'version_info', (3, 10, 0))
+    monkeypatch.setattr(sys, 'platform', 'linux')
+    monkeypatch.setattr('platform.machine', lambda: 'x86_64')
+
+    def fake_run(*args, **kwargs):
+        # Local synthetic archives reach the actual artifact-copy step without
+        # building packages, opening network connections or installing anything.
+        if 'build_sdist,build_wheel' in args[-1]:
+            with tarfile.open(root / 'artifacts/fixture.tar.gz', 'w:gz') as archive:
+                archive.add(source, arcname='fixture')
+            destination = root / 'artifacts/fixture.whl'
+        elif 'from setuptools.build_meta import build_wheel' in args[-1]:
+            destination = root / 'rebuilt/fixture.whl'
+        else:
+            return ''
+        with zipfile.ZipFile(destination, 'w') as wheel:
+            wheel.writestr('fixture.py', 'identical payload')
+        return ''
+
+    class ArtifactCopied(Exception):
+        pass
+
+    copy_file = shutil.copy2
+    copied = []
+
+    def copy_then_stop(source, destination):
+        copied.append(Path(source))
+        copy_file(source, destination)
+        raise ArtifactCopied
+
+    monkeypatch.setattr(pub, 'run', fake_run)
+    monkeypatch.setattr(pub.shutil, 'copy2', copy_then_stop)
+    with pytest.raises(ArtifactCopied):
+        pub.build({'python_version': '1.10.0'}, root)
+    assert copied == [Path('cli/fleet-llm')]
+    assert (root / 'artifacts/llm').read_bytes() == active.read_bytes()
+
+
+def test_source_distribution_retains_the_exact_active_cli(tmp_path):
+    pytest.importorskip('setuptools', minversion='61')
+    repository = Path(__file__).resolve().parents[1]
+    checkout = tmp_path / 'checkout'
+    checkout.mkdir()
+    for name in ('AGENTS.md', 'CHANGELOG.md', 'README.md', 'pyproject.toml', 'MANIFEST.in'):
+        shutil.copy2(repository / name, checkout / name)
+    for name in ('cli', 'llmsvc', 'tui', 'docs', 'deploy', 'tests', 'release'):
+        shutil.copytree(repository / name, checkout / name, symlinks=True,
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    artifacts = tmp_path / 'artifacts'
+    artifacts.mkdir()
+    subprocess.run([sys.executable, '-c',
+                    'from setuptools.build_meta import build_sdist; build_sdist(%r)' % str(artifacts)],
+                   cwd=checkout, check=True, capture_output=True, text=True, timeout=30)
+    with tarfile.open(next(artifacts.glob('*.tar.gz'))) as archive:
+        active = next(member for member in archive.getmembers() if member.name.endswith('/cli/fleet-llm'))
+        assert archive.extractfile(active).read() == (repository / 'cli/fleet-llm').read_bytes()

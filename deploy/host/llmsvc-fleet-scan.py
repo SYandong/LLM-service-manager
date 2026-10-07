@@ -13,7 +13,6 @@ import math
 import os
 import re
 import selectors
-import signal
 import socket
 import stat
 import struct
@@ -36,6 +35,7 @@ MAX_CMDLINE_BYTES = 256 * 1024
 MAX_ARGC = 4096
 MAX_PASSWD_BYTES = 64 * 1024
 MAX_UID = 2 ** 32 - 1
+COMMAND_CLEANUP_SECONDS = 0.25
 DEFAULT_RULES = [
     {"engine": "vllm", "all": ["vllm", "serve"]},
     {"engine": "vllm", "all": ["vllm.entrypoints.openai.api_server"]},
@@ -177,9 +177,9 @@ def load_config(path=None):
         if not isinstance(value, str) or not value.startswith("/") or CONTROL.search(value) or ".." in Path(value).parts:
             raise ScanError("invalid_config_path")
     bounds = {
-        "sample_interval_seconds": (30, 300), "scan_budget_seconds": (0.1, 20),
+        "sample_interval_seconds": (30, 300), "scan_budget_seconds": (0.1, 120),
         "target_timeout_seconds": (0.01, 2), "max_response_bytes": (1, MAX_RESPONSE),
-        "gpu_query_timeout_seconds": (0.01, 10),
+        "gpu_query_timeout_seconds": (0.01, 30),
         "max_snapshot_bytes": (1, MAX_SNAPSHOT), "max_processes": (1, 65536),
         "max_services": (1, 256), "max_gpu_processes": (1, 4096),
         "max_proc_bytes": (1024, 64 * MIB),
@@ -449,10 +449,15 @@ def run_bounded(argv, timeout, max_output, pass_fds=()):
     finally:
         if child.poll() is None:
             try:
-                os.killpg(child.pid, signal.SIGKILL)
+                child.kill()
             except ProcessLookupError:
                 pass
-            child.wait()
+            try:
+                child.wait(timeout=COMMAND_CLEANUP_SECONDS)
+            except subprocess.TimeoutExpired:
+                # A killed query can remain in an uninterruptible kernel wait.
+                # Keep the original failure; it provides no usable observation.
+                pass
         child.stdout.close()
 
 

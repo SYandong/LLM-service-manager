@@ -8,10 +8,9 @@ import unicodedata
 
 
 STATUS_LABELS = {"active": "Active", "idle": "Idle", "over_limit": "Running · inactive",
-                 "claimed": "Claimed", "unknown": "Unknown"}
-FLEET_ERROR_CODES = frozenset(("fleet_disabled", "fleet_claims_disabled", "fleet_store_unavailable",
-    "fleet_stopping", "unmapped_container", "invalid_fleet_history_query", "service_not_found",
-    "claim_not_found", "forbidden_container", "service_observation_unknown", "invalid_claim",
+                 "unknown": "Unknown"}
+FLEET_ERROR_CODES = frozenset(("fleet_disabled", "fleet_store_unavailable", "fleet_stopping",
+    "unmapped_container", "invalid_fleet_history_query", "service_not_found",
     "invalid_request", "request_too_large", "not_found"))
 DURATION_UNITS = ((365 * 86400, "y"), (30 * 86400, "mo"), (86400, "d"),
                   (3600, "h"), (60, "m"), (1, "s"))

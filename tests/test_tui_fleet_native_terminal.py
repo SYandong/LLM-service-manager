@@ -176,7 +176,11 @@ def test_completed_reply_introducers_survive_delayed_headers(monkeypatch, frame,
     (b"\x1b[A", 2),
     (b"\x1b[?2026;1$y", 2),
     (b"\x1b[200~pasted \x1bP>|iTerm2 3.7.3\x1b\\\x1b[?31u\x1b[201~", 2),
-], ids=["unrelated-dcs", "unrelated-dcs-header", "physical-arrow", "unrelated-mode", "paste"])
+    (b"\x1bP\x1b[A", 3),
+    (b"\x1bP>\x1b[?2026;1$y", 4),
+    (b"\x1bP\x1b[200~pasted \x1b[?31u\x1b[201~", 3),
+], ids=["unrelated-dcs", "unrelated-dcs-header", "physical-arrow", "unrelated-mode", "paste",
+        "interleaved-arrow", "interleaved-unrelated-mode", "interleaved-paste"])
 def test_delayed_control_headers_preserve_unrelated_controls_and_paste(monkeypatch, packet, prefix_length):
     from tui import fleet_terminal
 
@@ -207,6 +211,18 @@ def test_reply_filter_bounds_malformed_frames_and_resynchronizes():
     assert len(replies.pending) <= 1
     assert replies.feed(b"uc\x1bP>|broken\x1b[Bd") == b"c\x1b[Bd"
     assert not replies.pending
+
+
+@pytest.mark.parametrize("prefix, final", [(b"\x1b[?", b"u"), (b"\x1b[?1007;", b"$y")])
+def test_interleaved_malformed_reply_stays_bounded_without_losing_dcs_or_utf8(prefix, final):
+    from codecs import getincrementaldecoder
+
+    replies = FleetReplyFilter()
+    decoder = getincrementaldecoder("utf-8")()
+    assert decoder.decode(replies.feed(b"i\xc3\x1bP" + prefix + b"9" * 10000)) == "i"
+    assert len(replies.pending) <= replies.MAX_REPLY_BYTES
+    assert decoder.decode(replies.feed(final + b">|iTerm2 3.7.3\x1b\\\xa9w")) == "éw"
+    assert not replies.pending and not replies._interleaved_header
 
 
 def test_reply_filter_releases_a_real_escape_with_normal_timeout(monkeypatch):
@@ -525,7 +541,13 @@ async def operate(pilot):
         if "late_reply" in scenario:
             await wait_for_late_reply(pilot, 2)
         else:
-            await pilot.pause(.1)
+            # Both negotiation rounds inject an ordinary key. Await dispatch
+            # before exiting rather than racing the resumed input thread.
+            deadline = time.monotonic() + 3
+            while app.observed_keys.count("i") < 4 and time.monotonic() < deadline:
+                await pilot.pause(.02)
+            assert observations.get("input_error") is None, observations.get("input_error")
+            assert app.observed_keys.count("i") == 4, "resumed query input was not processed"
     observations["view"] = app.view
     if scenario == "app_error":
         app.call_later(fail)
@@ -1047,6 +1069,51 @@ def test_resume_query_includes_retained_partial_paste_prefix(monkeypatch):
     assert driver._reply_filter.feed(b"\x1b[20") == b""
     assert driver._query_terminal_state(("kitty",)) == {"kitty": 1}
     assert driver._reply_filter.feed(driver._pending_input) == b"\x1b[200~\x1b[?31u\x1b[201~"
+
+
+@pytest.mark.parametrize("resuming", [False, True], ids=["startup", "resume"])
+@pytest.mark.parametrize("identity_prefix_bytes", [2, 3], ids=["dcs-introducer", "dcs-header"])
+@pytest.mark.parametrize("csi_prefix_bytes", [1, 2, 3, 4, 5])
+def test_query_timeout_preserves_interleaved_reply_headers_and_split_utf8(
+        monkeypatch, resuming, identity_prefix_bytes, csi_prefix_bytes):
+    from codecs import getincrementaldecoder
+    from threading import Event
+
+    identity = b"\x1bP>|iTerm2 3.7.3\x1b\\"
+    kitty = b"\x1b[?16u"
+    prefix = b"i\xc3" + identity[:identity_prefix_bytes]
+    incoming_prefix = kitty[:csi_prefix_bytes] if resuming else prefix + kitty[:csi_prefix_bytes]
+    driver, _, _, _, _, _, incoming = query_driver(monkeypatch, [incoming_prefix])
+    driver._pending_input.clear()
+    driver._debug = False
+    driver._wheel_keys_enabled = False
+    driver._input_decoder = getincrementaldecoder("utf-8")()
+    driver.exit_event = Event()
+    messages = []
+
+    def process(message):
+        messages.append(message)
+        if message.key == "w":
+            driver.exit_event.set()
+
+    driver.process_message = process
+    if resuming:
+        driver._pending_input.extend(prefix)
+        # The suspended input thread retains both UTF-8 and reply prefixes.
+        def stop_before_suspend(message):
+            messages.append(message)
+            driver.exit_event.set()
+
+        driver.process_message = stop_before_suspend
+        driver.run_input_thread()
+        driver.process_message = process
+        driver.exit_event.clear()
+    assert driver._query_terminal_state((1, 1007, "kitty", "identity")) == {}
+    incoming.append(kitty[csi_prefix_bytes:] + b"\x1b[?1007;2$y\x1b[?1;2$y"
+                    + identity[identity_prefix_bytes:] + b"\xa9w")
+    driver.run_input_thread()
+    assert [message.key for message in messages] == ["i", "é", "w"]
+    assert not driver._input_decoder.getstate()[0] and not driver._reply_filter.pending
 
 
 def test_query_byte_budget_bounds_reads_without_losing_consumed_input(monkeypatch):

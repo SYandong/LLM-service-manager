@@ -10,7 +10,7 @@ import pytest
 pytest.importorskip("textual")
 from textual import events
 from textual.containers import VerticalScroll
-from textual.widgets import DataTable, Input
+from textual.widgets import DataTable
 
 from tui.fleet_app import GpuOverview
 from tui.fleet_format import owner_info
@@ -260,29 +260,32 @@ def test_expand_then_arrow_in_one_batch_finishes_alignment_after_layout(fleet_sn
     asyncio.run(scenario())
 
 
-def test_claim_failure_notice_retains_original_owner_for_names_toggle(fleet_snapshot):
+@pytest.mark.parametrize("size", [(100, 30), (80, 24)])
+def test_fleet_ui_has_only_read_controls_and_ignores_historical_claims(fleet_snapshot, size):
     async def scenario():
-        service = fleet_snapshot["services"][2]
-        service["container"] = "private-owner"
+        for service in fleet_snapshot["services"]:
+            service["claim"] = {"id": "retired-claim", "reason": "retired-reason", "until": 2000000000}
+        before = copy.deepcopy(fleet_snapshot)
         app, client = make_app(fleet_snapshot)
-        async with app.run_test(size=(100, 30)) as pilot:
+        async with app.run_test(size=size) as pilot:
             await ready(app, pilot)
-            app.select_gpu(3, service_id=service["id"])
-            app.action_claim()
-            await pilot.pause()
-            app.screen.query_one("#claim-reason", Input).value = "Working session"
-            await pilot.click("#claim-preview")
+            app.select_gpu(3, service_id="own")
             await ready(app, pilot)
-            client.write_error = OSError("private-owner write failed")
-            await pilot.click("#claim-submit")
+            assert not hasattr(app, "action_claim") and not hasattr(app, "claim_allowed")
+            assert app.service_status({"status": "claimed"}) == "unknown"
+            await pilot.press("c", "u")
+            assert app.screen is app.dashboard
+            assert "claim" not in app._rendered["fleet-detail-text"].lower()
+            await pilot.press("enter")
             await ready(app, pilot)
-            await pilot.click("#claim-close")
-            label = owner_info(service)[1]
-            assert label in app._rendered["fleet-notice"]
-            assert "private-owner" in app._notice_raw
-            await pilot.press("n")
-            assert "private-owner" in app._rendered["fleet-notice"]
-            await pilot.press("n")
-            assert label in app._rendered["fleet-notice"] and "private-owner" not in app._rendered["fleet-notice"]
-            assert len([call for call in client.calls if call[0] == "POST" and "dry_run" not in call[1]]) == 1
+            assert not app.screen.query("#gpu-detail-claim, #gpu-detail-revoke")
+            assert "claim" not in app.screen.query_one("#gpu-service-details").render().plain.lower()
+            await pilot.press("c", "u")
+            assert app.screen.query_one("#gpu-detail-close")
+            await pilot.press("escape", "p", "c", "u")
+            assert app.screen is app.dashboard
+            await pilot.press("question_mark")
+            assert "claim" not in app.screen.query_one("#fleet-help-text").render().plain.lower()
+            assert all(method == "GET" and payload is None for method, _, payload in client.calls)
+            assert client.snapshot == before
     asyncio.run(scenario())

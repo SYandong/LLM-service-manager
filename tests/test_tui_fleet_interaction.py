@@ -16,7 +16,7 @@ from textual.containers import VerticalScroll
 from textual.widgets import DataTable
 from rich.text import Text
 
-from tui.fleet_app import ClaimDialog, FleetHelpDialog, GpuDetailDialog, GpuOverview
+from tui.fleet_app import FleetHelpDialog, GpuDetailDialog, GpuOverview
 from tui.fleet_selection import SelectableStatic
 from test_tui_fleet import make_app, ready
 
@@ -451,7 +451,7 @@ def test_people_and_modal_show_literal_api_friendly_state_and_token_units(intera
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("view", ["gpu", "help", "gpu_details", "claim"])
+@pytest.mark.parametrize("view", ["gpu", "help", "gpu_details"])
 def test_control_c_without_a_selection_does_not_quit_and_q_does(interaction_snapshot, view):
     async def scenario():
         app, _ = make_app(interaction_snapshot)
@@ -463,10 +463,6 @@ def test_control_c_without_a_selection_does_not_quit_and_q_does(interaction_snap
             elif view == "gpu_details":
                 await pilot.press("enter")
                 app.screen.query_one("#gpu-allocation-text").focus(scroll_visible=False)
-            elif view == "claim":
-                app.push_screen(ClaimDialog(app, app.selected_service()))
-                await pilot.pause()
-                app.screen.query_one("#claim-title").focus(scroll_visible=False)
             with patch.object(app, "copy_to_clipboard") as copy:
                 await pilot.press("ctrl+c")
                 assert app.is_running
