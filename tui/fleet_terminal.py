@@ -31,13 +31,26 @@ class FleetReplyFilter:
         self.in_paste = False
         self.discard_dcs = False
         self.discard_csi = False
+        self._interleaved_header = b""
         self._prefix_since = None
+
+    @classmethod
+    def _reply_prefix(cls, data):
+        return (data == b"\x1b[" or cls.DCS_PREFIX.startswith(data)
+                or data.startswith(cls.DCS_PREFIX)
+                or re.fullmatch(rb"\x1b\[\?[0-9]*", data) is not None
+                or re.match(rb"\x1b\[\?(?:[0-9]+u|(?:1|1007);)", data) is not None)
+
+    def _restore_interleaved_header(self):
+        if self._interleaved_header:
+            self.pending[:0] = self._interleaved_header
+            self._interleaved_header = b""
 
     def _known_reply(self):
         data = bytes(self.pending)
         # Keep completed introducers until the header distinguishes a reply
         # from an ordinary control sequence. A bare Escape still times out.
-        return (self.discard_dcs or self.discard_csi or data.startswith(self.DCS_PREFIX)
+        return (bool(self._interleaved_header) or self.discard_dcs or self.discard_csi or data.startswith(self.DCS_PREFIX)
                 or data in (b"\x1bP", b"\x1bP>", b"\x1b[")
                 or data.startswith(b"\x1b[?"))
 
@@ -48,6 +61,19 @@ class FleetReplyFilter:
         output = bytearray()
         while self.pending:
             buffer = bytes(self.pending)
+            if not self.in_paste and not self.discard_dcs and not self.discard_csi:
+                if self._interleaved_header and not self._reply_prefix(buffer):
+                    self._restore_interleaved_header()
+                    continue
+                if not self._interleaved_header:
+                    header = next((header for header in (b"\x1bP>", b"\x1bP")
+                                   if buffer.startswith(header + b"\x1b")), None)
+                    if header is not None and self._reply_prefix(buffer[len(header):]):
+                        # A query timeout can hand off a DCS introducer followed
+                        # by another fragmented reply. Keep its bytes in order.
+                        self._interleaved_header = header
+                        del self.pending[:len(header)]
+                        continue
             if self.discard_dcs:
                 escape = buffer.find(b"\x1b")
                 if escape < 0:
@@ -59,6 +85,7 @@ class FleetReplyFilter:
                 # ST closes the discarded frame. A new escape resynchronizes.
                 del self.pending[:escape + 2 if buffer[escape + 1] == 92 else escape]
                 self.discard_dcs = False
+                self._restore_interleaved_header()
                 continue
             if self.discard_csi:
                 final = next((index for index, byte in enumerate(buffer)
@@ -68,6 +95,7 @@ class FleetReplyFilter:
                     break
                 del self.pending[:final + (buffer[final] != 27)]
                 self.discard_csi = False
+                self._restore_interleaved_header()
                 continue
             if self.in_paste:
                 end = buffer.find(self.PASTE_END)
@@ -100,6 +128,7 @@ class FleetReplyFilter:
                 escape = buffer.find(b"\x1b", len(self.DCS_PREFIX))
                 if escape >= 0 and escape + 1 < len(buffer):
                     del self.pending[:escape + 2 if buffer[escape + 1] == 92 else escape]
+                    self._restore_interleaved_header()
                     continue
                 if len(buffer) > self.MAX_REPLY_BYTES:
                     self.discard_dcs = True
@@ -108,10 +137,12 @@ class FleetReplyFilter:
             reply = next((reply for reply in self.MODE_REPLIES if buffer.startswith(reply)), None)
             if reply is not None:
                 del self.pending[:len(reply)]
+                self._restore_interleaved_header()
                 continue
             kitty = re.match(rb"\x1b\[\?[0-9]{1,10}u", buffer)
             if kitty is not None:
                 del self.pending[:kitty.end()]
+                self._restore_interleaved_header()
                 continue
             overlong_flags = re.match(rb"\x1b\[\?[0-9]{11,}", buffer)
             if overlong_flags is not None:
@@ -124,6 +155,7 @@ class FleetReplyFilter:
                               if 64 <= buffer[index] <= 126 or buffer[index] == 27), None)
                 if final is not None:
                     del self.pending[:final + (buffer[final] != 27)]
+                    self._restore_interleaved_header()
                     continue
                 if len(buffer) > self.MAX_REPLY_BYTES:
                     self.discard_csi = True

@@ -11,6 +11,10 @@ shared directly. Administrators coordinate capacity manually.
 - #343: dedicated observer/configuration/events, inert historical claims,
   read-only CLI/TUI and host installer; migrate the latest database and complete
   archives, promote the shared command and update server guidance.
+- #346: bounded site-configured GPU query budgets and cleanup of the scanner's
+  own timed-out observation commands.
+- #348: preserve fragmented terminal replies and UTF-8 input through startup
+  and resume negotiation.
 - Keep host scanning/IP export and private session/minute usage archives.
 - Retire inventoried central serving, scheduler and reaper triggers after
   replacement validation; preserve user workloads and rollback data.
