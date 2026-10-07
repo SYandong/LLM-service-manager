@@ -6,6 +6,7 @@
 import argparse
 import csv
 import datetime
+import errno
 import hashlib
 import ipaddress
 import json
@@ -256,6 +257,20 @@ class ProcReader:
         self.budget.check()
         return identities
 
+    def pid_absent(self, pid, root_identity):
+        self.budget.check()
+        try:
+            os.stat(self.root / str(pid))
+        except OSError as exc:
+            self.budget.check()
+            if exc.errno not in {errno.ENOENT, errno.ESRCH}:
+                return False
+            current = os.stat(self.root)
+            self.budget.check()
+            return stat.S_ISDIR(current.st_mode) and (current.st_dev, current.st_ino) == root_identity
+        self.budget.check()
+        return False
+
     def host_user(self, uid):
         if self.host_users is None:
             self.host_users = {}
@@ -321,6 +336,8 @@ def discover(reader, config):
     processes = {}
     complete = True
     errors = set()
+    root_info = os.stat(reader.root)
+    root_identity = (root_info.st_dev, root_info.st_ino)
     with os.scandir(reader.root) as entries:
         for entry in entries:
             try:
@@ -349,8 +366,19 @@ def discover(reader, config):
                 errors.add(str(exc))
                 if isinstance(exc, BudgetExceeded) or str(exc) in {"proc_byte_limit", "proc_file_limit", "proc_process_limit"}:
                     break
-            except (OSError, ValueError, IndexError):
-                # An inaccessible/racing PID prevents proof of complete discovery.
+            except (OSError, ValueError, IndexError) as exc:
+                if isinstance(exc, OSError) and exc.errno in {errno.ENOENT, errno.ESRCH}:
+                    try:
+                        if reader.pid_absent(pid, root_identity):
+                            # A confirmed exit is no longer part of the live inventory.
+                            continue
+                    except BudgetExceeded as probe_error:
+                        complete = False
+                        errors.add(str(probe_error))
+                        break
+                    except OSError:
+                        pass
+                # A live or unresolved PID keeps discovery incomplete.
                 complete = False
                 errors.add("proc_process_unavailable")
     return processes, complete, errors

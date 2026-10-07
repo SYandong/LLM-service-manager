@@ -15,6 +15,8 @@ shared directly. Administrators coordinate capacity manually.
   own timed-out observation commands.
 - #348: preserve fragmented terminal replies and UTF-8 input through startup
   and resume negotiation.
+- #349: skip confirmed discovery-time process exits while preserving unknown
+  outcomes for live read failures and unresolved GPU ownership.
 - Keep host scanning/IP export and private session/minute usage archives.
 - Retire inventoried central serving, scheduler and reaper triggers after
   replacement validation; preserve user workloads and rollback data.
