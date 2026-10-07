@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tarfile
 import zipfile
@@ -230,3 +231,23 @@ def test_build_copies_read_only_fleet_reader_as_the_single_file_llm(tmp_path, mo
         pub.build({'python_version': '1.10.0'}, root)
     assert copied == [Path('cli/fleet-llm')]
     assert (root / 'artifacts/llm').read_bytes() == active.read_bytes()
+
+
+def test_source_distribution_retains_the_exact_active_cli(tmp_path):
+    pytest.importorskip('setuptools', minversion='61')
+    repository = Path(__file__).resolve().parents[1]
+    checkout = tmp_path / 'checkout'
+    checkout.mkdir()
+    for name in ('AGENTS.md', 'CHANGELOG.md', 'README.md', 'pyproject.toml', 'MANIFEST.in'):
+        shutil.copy2(repository / name, checkout / name)
+    for name in ('cli', 'llmsvc', 'tui', 'docs', 'deploy', 'tests', 'release'):
+        shutil.copytree(repository / name, checkout / name, symlinks=True,
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    artifacts = tmp_path / 'artifacts'
+    artifacts.mkdir()
+    subprocess.run([sys.executable, '-c',
+                    'from setuptools.build_meta import build_sdist; build_sdist(%r)' % str(artifacts)],
+                   cwd=checkout, check=True, capture_output=True, text=True, timeout=30)
+    with tarfile.open(next(artifacts.glob('*.tar.gz'))) as archive:
+        active = next(member for member in archive.getmembers() if member.name.endswith('/cli/fleet-llm'))
+        assert archive.extractfile(active).read() == (repository / 'cli/fleet-llm').read_bytes()

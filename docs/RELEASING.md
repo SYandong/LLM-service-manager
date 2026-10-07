@@ -47,7 +47,7 @@ stability. Existing correctness, CI and relevant operational gates remain.
 Integration owns subsequent release coordination. A single release owner
 prepares the version bump, changelog and artifacts in an isolated worktree.
 Other implementation lanes continue their own files; coordinate the three
-version literals in `pyproject.toml`, `llmsvc/__init__.py` and `cli/llm`.
+version literals in `pyproject.toml`, `llmsvc/__init__.py` and `cli/fleet-llm`.
 The release PR also updates README release-page links, wheel filenames and
 command availability to match the included code, coordinating these narrow
 changes with the README owner. Do not describe an unmerged API as released.
@@ -74,9 +74,10 @@ Root owns the initial #76 release. Use a `chore/<issue>-release-...` branch and 
 4. Pin the merged release commit. Build wheel and sdist from a clean checkout
    of that commit using the project's setuptools build backend. Verify the
    wheel installs and reports the same version through `llmsvc`,
-   `llmsvc-scheduler --version` and `llm --version`; import the installed optional
-   TUI outside the checkout. Rebuild the wheel from the sdist and verify its
-   installed entry points too.
+   `llmsvc-fleet-observer --version` and `llm --version`; import the installed
+   FleetApp outside the checkout. Verify the sdist contains the exact
+   `cli/fleet-llm` bytes used for the standalone `llm` asset. Rebuild the wheel
+   from the sdist and verify its installed entry points too.
 5. Create an annotated tag pointing at that exact reviewed commit, not whatever
    `main` points to later. Publish the GitHub release (not a prerelease for a
    stable tag) with the wheel, sdist, standalone `llm` script, `SHA256SUMS` and a
@@ -168,3 +169,4 @@ itself changes no site settings or production processes.
 
 <!-- Generated-By: Codex / gpt-6-astra -->
 <!-- Generated-By: OpenCode / deepseek-v4.1-flash -->
+<!-- Generated-By: Codex / gpt-6.1-sol -->
