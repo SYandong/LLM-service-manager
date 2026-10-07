@@ -171,6 +171,11 @@ It performs no NSS lookup. Missing, invalid or ambiguous passwd entries retain
 the verified numeric UID with a null username. A raced or inaccessible compute
 PID retains known GPU memory as an unknown occupant and marks attribution
 incomplete. Missing model/version values remain null.
+
+A short-lived process that exits during discovery is skipped once its PID
+directory is confirmed absent from the same accessible proc root. Live,
+unreadable or identity-changing PIDs keep inventory incomplete. A disappeared
+PID still listed by NVIDIA retains its measured memory with unknown ownership.
 The export uses counters from the metric whitelist, sums counter series, takes
 the latest `*_created` timestamp to detect worker resets, and averages bounded
 KV-cache usage gauges. Conflicting sleep-state gauges remain unknown. It does

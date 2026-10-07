@@ -4,6 +4,7 @@ import importlib.util
 import errno
 import json
 import os
+import shutil
 import socket
 import struct
 import subprocess
@@ -136,6 +137,153 @@ def fixture_config(scanner, root, tmp_path, **overrides):
     config.update(proc_root=str(root), output_path=str(tmp_path / "fleet.json"), host_passwd_path=str(passwd))
     config.update(overrides)
     return config
+
+
+@pytest.mark.parametrize("stage", ["stat", "status", "cmdline", "cgroup", "comm", "final_stat"])
+def test_exited_ordinary_process_preserves_live_gpu_attribution(scanner, tmp_path, monkeypatch, stage):
+    root = fake_root(tmp_path)
+    ordinary = make_process(root, 100, ["python", "ordinary-task"], container="team-b")
+    make_process(root, 200, ["vllm", "serve", "demo"], port=8000)
+    original = scanner.ProcReader.read
+    stat_reads = []
+
+    def read(reader, relative, *args, **kwargs):
+        if relative == "100/stat":
+            stat_reads.append(relative)
+        target = "100/stat" if stage == "final_stat" else "100/" + stage
+        if relative == target and (stage != "final_stat" or len(stat_reads) == 2):
+            shutil.rmtree(ordinary)
+        return original(reader, relative, *args, **kwargs)
+
+    monkeypatch.setattr(scanner.ProcReader, "read", read)
+    result = scanner.scan(fixture_config(scanner, root, tmp_path), FakeRunner(b"200, GPU-one, 1024\n"))
+    assert result["inventory_complete"] and result["gpu_attribution_complete"]
+    assert result["errors"] == []
+    assert len(result["services"]) == 1 and result["services"][0]["pid"] == 200
+    assert result["services"][0]["gpu_observation_complete"]
+    assert result["services"][0]["gpus"] == [{"index": 0, "used_mib": 1024}]
+
+
+@pytest.mark.parametrize("failure", ["missing_leaf", "permission", "io", "malformed", "recycled_pid"])
+def test_live_process_read_failure_keeps_discovery_incomplete(scanner, tmp_path, monkeypatch, failure):
+    root = fake_root(tmp_path)
+    ordinary = make_process(root, 100, ["python", "ordinary-task"], container="team-b")
+    make_process(root, 200, ["vllm", "serve", "demo"], port=8000)
+    original = scanner.ProcReader.read
+    stat_reads = []
+
+    def read(reader, relative, *args, **kwargs):
+        if relative == "100/stat":
+            stat_reads.append(relative)
+            if failure == "malformed":
+                (ordinary / "stat").write_text("invalid identity\n")
+            elif failure == "recycled_pid" and len(stat_reads) == 2:
+                (ordinary / "stat").write_text(proc_stat(100, 1, 101))
+        if relative == "100/status":
+            if failure == "missing_leaf":
+                (ordinary / "status").unlink()
+            elif failure == "permission":
+                raise PermissionError(errno.EACCES, "permission denied")
+            elif failure == "io":
+                raise OSError(errno.EIO, "read failed")
+        return original(reader, relative, *args, **kwargs)
+
+    monkeypatch.setattr(scanner.ProcReader, "read", read)
+    result = scanner.scan(fixture_config(scanner, root, tmp_path), FakeRunner(b"200, GPU-one, 1024\n"))
+    assert not result["inventory_complete"] and not result["gpu_attribution_complete"]
+    assert ordinary.is_dir()
+    expected = "proc_identity_changed" if failure == "recycled_pid" else "proc_process_unavailable"
+    assert expected in result["errors"] and "gpu_attribution_incomplete" in result["errors"]
+    assert not result["services"][0]["gpu_observation_complete"]
+
+
+def test_exited_process_in_gpu_query_keeps_unknown_memory(scanner, tmp_path, monkeypatch):
+    root = fake_root(tmp_path)
+    ordinary = make_process(root, 100, ["python", "ordinary-task"], container="team-b")
+    make_process(root, 200, ["vllm", "serve", "demo"], port=8000)
+    original = scanner.ProcReader.read
+
+    def read(reader, relative, *args, **kwargs):
+        if relative == "100/status":
+            shutil.rmtree(ordinary)
+        return original(reader, relative, *args, **kwargs)
+
+    monkeypatch.setattr(scanner.ProcReader, "read", read)
+    result = scanner.scan(fixture_config(scanner, root, tmp_path),
+                          FakeRunner(b"100, GPU-one, 700\n200, GPU-one, 1024\n"))
+    assert result["inventory_complete"] and not result["gpu_attribution_complete"]
+    assert "proc_process_unavailable" not in result["errors"]
+    assert result["errors"] == ["gpu_attribution_incomplete"]
+    assert result["other_gpu_processes"] == [{"container": None, "pid": 100, "gpu": 0,
+        "used_mib": 700, "comm": "unknown", "host": None, "host_uid": None, "host_user": None}]
+
+
+@pytest.mark.parametrize("failure", ["permission", "root_missing", "root_replaced", "pid_reused"])
+def test_unconfirmed_pid_absence_keeps_discovery_incomplete(scanner, tmp_path, monkeypatch, failure):
+    root = fake_root(tmp_path)
+    ordinary = make_process(root, 100, ["python", "ordinary-task"], container="team-b")
+    make_process(root, 200, ["vllm", "serve", "demo"], port=8000)
+    original_read = scanner.ProcReader.read
+    original_stat = scanner.os.stat
+    missing = []
+
+    def read(reader, relative, *args, **kwargs):
+        if relative == "100/status":
+            shutil.rmtree(ordinary)
+            missing.append(True)
+            if failure in {"root_missing", "root_replaced"}:
+                root.rename(root.with_name("previous-proc"))
+                if failure == "root_replaced":
+                    root.mkdir()
+            elif failure == "pid_reused":
+                make_process(root, 100, ["python", "replacement-task"], start=101, container="team-b")
+            raise FileNotFoundError(errno.ENOENT, "process read disappeared")
+        return original_read(reader, relative, *args, **kwargs)
+
+    def stat(path, *args, **kwargs):
+        if failure == "permission" and missing and Path(path) == ordinary:
+            raise PermissionError(errno.EACCES, "absence unavailable")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(scanner.ProcReader, "read", read)
+    monkeypatch.setattr(scanner.os, "stat", stat)
+    result = scanner.scan(fixture_config(scanner, root, tmp_path), FakeRunner(b"200, GPU-one, 1024\n"))
+    assert missing and not result["inventory_complete"] and not result["gpu_attribution_complete"]
+    assert "proc_process_unavailable" in result["errors"]
+
+
+@pytest.mark.parametrize("deadline_at", ["before_probe", "after_pid_probe", "after_root_probe"])
+def test_pid_absence_confirmation_obeys_scan_deadline(scanner, tmp_path, monkeypatch, deadline_at):
+    root = fake_root(tmp_path)
+    ordinary = make_process(root, 100, ["python", "ordinary-task"], container="team-b")
+    make_process(root, 200, ["vllm", "serve", "demo"], port=8000)
+    original_read = scanner.ProcReader.read
+    original_stat = scanner.os.stat
+    ticks = [0.0]
+    missing = []
+
+    def read(reader, relative, *args, **kwargs):
+        if relative == "100/status":
+            shutil.rmtree(ordinary)
+            missing.append(True)
+            if deadline_at == "before_probe":
+                ticks[0] = 20
+            raise FileNotFoundError(errno.ENOENT, "process read disappeared")
+        return original_read(reader, relative, *args, **kwargs)
+
+    def stat(path, *args, **kwargs):
+        if missing and Path(path) == ordinary and deadline_at == "after_pid_probe":
+            ticks[0] = 20
+        result = original_stat(path, *args, **kwargs)
+        if missing and Path(path) == root and deadline_at == "after_root_probe":
+            ticks[0] = 20
+        return result
+
+    monkeypatch.setattr(scanner.ProcReader, "read", read)
+    monkeypatch.setattr(scanner.os, "stat", stat)
+    result = scanner.scan(fixture_config(scanner, root, tmp_path), FakeRunner(), clock=lambda: ticks[0])
+    assert missing and not result["inventory_complete"] and not result["gpu_attribution_complete"]
+    assert "scan_budget_exceeded" in result["errors"]
 
 
 def diag_response(*, port=11434, inode=5100, ipv6_only=False, family=socket.AF_INET6, state=10,
